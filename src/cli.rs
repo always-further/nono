@@ -20,19 +20,38 @@ use std::path::PathBuf;
 
     # With network access enabled
     nono --allow . --net-allow -- claude
+
+    # Allow specific files (not directories)
+    nono --allow . --write-file ~/.claude.json -- claude
 ")]
 pub struct Args {
-    /// Paths to allow read+write access (can be specified multiple times)
-    #[arg(long, short = 'a', value_name = "PATH")]
+    // === Directory permissions (recursive) ===
+
+    /// Directories to allow read+write access (recursive)
+    #[arg(long, short = 'a', value_name = "DIR")]
     pub allow: Vec<PathBuf>,
 
-    /// Paths to allow read-only access (can be specified multiple times)
-    #[arg(long, short = 'r', value_name = "PATH")]
+    /// Directories to allow read-only access (recursive)
+    #[arg(long, short = 'r', value_name = "DIR")]
     pub read: Vec<PathBuf>,
 
-    /// Paths to allow write-only access (can be specified multiple times)
-    #[arg(long, short = 'w', value_name = "PATH")]
+    /// Directories to allow write-only access (recursive)
+    #[arg(long, short = 'w', value_name = "DIR")]
     pub write: Vec<PathBuf>,
+
+    // === Single file permissions ===
+
+    /// Single files to allow read+write access
+    #[arg(long, value_name = "FILE")]
+    pub allow_file: Vec<PathBuf>,
+
+    /// Single files to allow read-only access
+    #[arg(long, value_name = "FILE")]
+    pub read_file: Vec<PathBuf>,
+
+    /// Single files to allow write-only access
+    #[arg(long, value_name = "FILE")]
+    pub write_file: Vec<PathBuf>,
 
     /// Enable network access (binary: all outbound allowed when flag is present)
     /// Note: Per-host filtering not supported by OS sandbox; this is on/off only
@@ -59,7 +78,12 @@ pub struct Args {
 impl Args {
     /// Check if any filesystem capabilities are specified
     pub fn has_fs_caps(&self) -> bool {
-        !self.allow.is_empty() || !self.read.is_empty() || !self.write.is_empty()
+        !self.allow.is_empty()
+            || !self.read.is_empty()
+            || !self.write.is_empty()
+            || !self.allow_file.is_empty()
+            || !self.read_file.is_empty()
+            || !self.write_file.is_empty()
     }
 
     /// Check if network access is enabled

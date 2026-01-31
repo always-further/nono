@@ -7,6 +7,12 @@ pub enum NonoError {
     #[error("Path does not exist: {0}")]
     PathNotFound(PathBuf),
 
+    #[error("Expected a directory but got a file: {0}")]
+    ExpectedDirectory(PathBuf),
+
+    #[error("Expected a file but got a directory: {0}")]
+    ExpectedFile(PathBuf),
+
     #[error("Failed to canonicalize path {path}: {source}")]
     PathCanonicalization {
         path: PathBuf,

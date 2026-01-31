@@ -33,14 +33,21 @@ pub struct FsCapability {
     pub resolved: PathBuf,
     /// The access mode granted
     pub access: FsAccess,
+    /// True if this is a single file, false if directory (recursive)
+    pub is_file: bool,
 }
 
 impl FsCapability {
-    /// Create a new filesystem capability, canonicalizing the path
-    pub fn new(path: PathBuf, access: FsAccess) -> Result<Self> {
+    /// Create a new directory capability, canonicalizing the path
+    pub fn new_dir(path: PathBuf, access: FsAccess) -> Result<Self> {
         // Check path exists
         if !path.exists() {
             return Err(NonoError::PathNotFound(path));
+        }
+
+        // Verify it's a directory
+        if !path.is_dir() {
+            return Err(NonoError::ExpectedDirectory(path));
         }
 
         // Canonicalize to absolute path, resolving symlinks
@@ -53,6 +60,33 @@ impl FsCapability {
             original: path,
             resolved,
             access,
+            is_file: false,
+        })
+    }
+
+    /// Create a new single file capability, canonicalizing the path
+    pub fn new_file(path: PathBuf, access: FsAccess) -> Result<Self> {
+        // Check path exists
+        if !path.exists() {
+            return Err(NonoError::PathNotFound(path));
+        }
+
+        // Verify it's a file
+        if !path.is_file() {
+            return Err(NonoError::ExpectedFile(path));
+        }
+
+        // Canonicalize to absolute path, resolving symlinks
+        let resolved = path.canonicalize().map_err(|e| NonoError::PathCanonicalization {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        Ok(Self {
+            original: path,
+            resolved,
+            access,
+            is_file: true,
         })
     }
 }
@@ -93,21 +127,35 @@ impl CapabilitySet {
     pub fn from_args(args: &Args) -> Result<Self> {
         let mut caps = Self::new();
 
-        // Process --allow paths (read+write)
+        // Process directory permissions
         for path in &args.allow {
-            let cap = FsCapability::new(path.clone(), FsAccess::ReadWrite)?;
+            let cap = FsCapability::new_dir(path.clone(), FsAccess::ReadWrite)?;
             caps.add_fs(cap);
         }
 
-        // Process --read paths
         for path in &args.read {
-            let cap = FsCapability::new(path.clone(), FsAccess::Read)?;
+            let cap = FsCapability::new_dir(path.clone(), FsAccess::Read)?;
             caps.add_fs(cap);
         }
 
-        // Process --write paths
         for path in &args.write {
-            let cap = FsCapability::new(path.clone(), FsAccess::Write)?;
+            let cap = FsCapability::new_dir(path.clone(), FsAccess::Write)?;
+            caps.add_fs(cap);
+        }
+
+        // Process file permissions
+        for path in &args.allow_file {
+            let cap = FsCapability::new_file(path.clone(), FsAccess::ReadWrite)?;
+            caps.add_fs(cap);
+        }
+
+        for path in &args.read_file {
+            let cap = FsCapability::new_file(path.clone(), FsAccess::Read)?;
+            caps.add_fs(cap);
+        }
+
+        for path in &args.write_file {
+            let cap = FsCapability::new_file(path.clone(), FsAccess::Write)?;
             caps.add_fs(cap);
         }
 
@@ -124,7 +172,13 @@ impl CapabilitySet {
         if !self.fs.is_empty() {
             lines.push("Filesystem:".to_string());
             for cap in &self.fs {
-                lines.push(format!("  {} [{}]", cap.resolved.display(), cap.access));
+                let kind = if cap.is_file { "file" } else { "dir" };
+                lines.push(format!(
+                    "  {} [{}] ({})",
+                    cap.resolved.display(),
+                    cap.access,
+                    kind
+                ));
             }
         }
 
@@ -150,19 +204,51 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_fs_capability_new() {
+    fn test_fs_capability_new_dir() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
 
-        let cap = FsCapability::new(path.clone(), FsAccess::Read).unwrap();
+        let cap = FsCapability::new_dir(path.clone(), FsAccess::Read).unwrap();
         assert_eq!(cap.access, FsAccess::Read);
         assert!(cap.resolved.is_absolute());
+        assert!(!cap.is_file);
+    }
+
+    #[test]
+    fn test_fs_capability_new_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "test").unwrap();
+
+        let cap = FsCapability::new_file(file_path.clone(), FsAccess::Read).unwrap();
+        assert_eq!(cap.access, FsAccess::Read);
+        assert!(cap.resolved.is_absolute());
+        assert!(cap.is_file);
     }
 
     #[test]
     fn test_fs_capability_nonexistent() {
-        let result = FsCapability::new("/nonexistent/path/12345".into(), FsAccess::Read);
+        let result = FsCapability::new_dir("/nonexistent/path/12345".into(), FsAccess::Read);
         assert!(matches!(result, Err(NonoError::PathNotFound(_))));
+    }
+
+    #[test]
+    fn test_fs_capability_file_as_dir_error() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "test").unwrap();
+
+        let result = FsCapability::new_dir(file_path, FsAccess::Read);
+        assert!(matches!(result, Err(NonoError::ExpectedDirectory(_))));
+    }
+
+    #[test]
+    fn test_fs_capability_dir_as_file_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+
+        let result = FsCapability::new_file(path, FsAccess::Read);
+        assert!(matches!(result, Err(NonoError::ExpectedFile(_))));
     }
 
     #[test]
@@ -178,7 +264,7 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let cap = FsCapability::new(symlink, FsAccess::Read).unwrap();
+            let cap = FsCapability::new_dir(symlink, FsAccess::Read).unwrap();
             // Symlink should be resolved to real path
             assert_eq!(cap.resolved, real_dir.canonicalize().unwrap());
         }
@@ -193,6 +279,9 @@ mod tests {
             allow: vec![path.clone()],
             read: vec![],
             write: vec![],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![],
             net_allow: true,
             config: None,
             verbose: 0,
@@ -202,7 +291,36 @@ mod tests {
 
         let caps = CapabilitySet::from_args(&args).unwrap();
         assert_eq!(caps.fs.len(), 1);
+        assert!(!caps.fs[0].is_file);
         assert!(caps.net_allow);
+    }
+
+    #[test]
+    fn test_capability_set_with_files() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "test").unwrap();
+
+        let args = Args {
+            allow: vec![dir.path().to_path_buf()],
+            read: vec![],
+            write: vec![],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![file_path],
+            net_allow: false,
+            config: None,
+            verbose: 0,
+            dry_run: false,
+            command: vec!["echo".to_string()],
+        };
+
+        let caps = CapabilitySet::from_args(&args).unwrap();
+        assert_eq!(caps.fs.len(), 2);
+        // First is directory
+        assert!(!caps.fs[0].is_file);
+        // Second is file
+        assert!(caps.fs[1].is_file);
     }
 
     #[test]
@@ -214,6 +332,9 @@ mod tests {
             allow: vec![path.clone()],
             read: vec![],
             write: vec![],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![],
             net_allow: false,
             config: None,
             verbose: 0,

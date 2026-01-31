@@ -74,6 +74,26 @@ fn get_sensitive_paths() -> Vec<String> {
         "~/.vault-token".to_string(),
         // macOS Keychain (extra protection layer)
         "~/Library/Keychains".to_string(),
+        // Shell configuration files (often contain API keys, tokens, secrets)
+        "~/.zshrc".to_string(),
+        "~/.zprofile".to_string(),
+        "~/.zshenv".to_string(),
+        "~/.zlogin".to_string(),
+        "~/.zlogout".to_string(),
+        "~/.bashrc".to_string(),
+        "~/.bash_profile".to_string(),
+        "~/.bash_login".to_string(),
+        "~/.bash_logout".to_string(),
+        "~/.profile".to_string(),
+        // Shell history files (may contain sensitive commands)
+        "~/.zsh_history".to_string(),
+        "~/.bash_history".to_string(),
+        "~/.history".to_string(),
+        // Fish shell
+        "~/.config/fish".to_string(),
+        // Environment files
+        "~/.env".to_string(),
+        "~/.envrc".to_string(),
     ];
 
     // Expand ~ to actual home directory
@@ -146,23 +166,30 @@ fn generate_profile(caps: &CapabilitySet) -> String {
         // Escape any special characters in path
         let escaped_path = path.replace('\\', "\\\\").replace('"', "\\\"");
 
+        // Use "literal" for files, "subpath" for directories
+        let path_filter = if cap.is_file {
+            format!("literal \"{}\"", escaped_path)
+        } else {
+            format!("subpath \"{}\"", escaped_path)
+        };
+
         match cap.access {
             FsAccess::Read => {
                 profile.push_str(&format!(
-                    "(allow file-read* (subpath \"{}\"))\n",
-                    escaped_path
+                    "(allow file-read* ({}))\n",
+                    path_filter
                 ));
             }
             FsAccess::Write => {
                 profile.push_str(&format!(
-                    "(allow file-write* (subpath \"{}\"))\n",
-                    escaped_path
+                    "(allow file-write* ({}))\n",
+                    path_filter
                 ));
             }
             FsAccess::ReadWrite => {
                 profile.push_str(&format!(
-                    "(allow file-read* file-write* (subpath \"{}\"))\n",
-                    escaped_path
+                    "(allow file-read* file-write* ({}))\n",
+                    path_filter
                 ));
             }
         }
@@ -259,18 +286,35 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_profile_with_paths() {
+    fn test_generate_profile_with_dir() {
         let mut caps = CapabilitySet::default();
         caps.fs.push(FsCapability {
             original: PathBuf::from("/test"),
             resolved: PathBuf::from("/test"),
             access: FsAccess::ReadWrite,
+            is_file: false,
         });
 
         let profile = generate_profile(&caps);
 
         assert!(profile.contains("file-read* file-write*"));
-        assert!(profile.contains("/test"));
+        assert!(profile.contains("subpath \"/test\""));
+    }
+
+    #[test]
+    fn test_generate_profile_with_file() {
+        let mut caps = CapabilitySet::default();
+        caps.fs.push(FsCapability {
+            original: PathBuf::from("/test.txt"),
+            resolved: PathBuf::from("/test.txt"),
+            access: FsAccess::Write,
+            is_file: true,
+        });
+
+        let profile = generate_profile(&caps);
+
+        assert!(profile.contains("file-write*"));
+        assert!(profile.contains("literal \"/test.txt\""));
     }
 
     #[test]
@@ -320,8 +364,8 @@ mod tests {
     fn test_get_sensitive_paths() {
         let paths = get_sensitive_paths();
 
-        // Should have multiple sensitive paths
-        assert!(paths.len() > 10);
+        // Should have multiple sensitive paths (credentials, shell configs, etc.)
+        assert!(paths.len() > 25);
 
         // Paths should be expanded (not contain ~)
         for path in &paths {
