@@ -209,14 +209,50 @@ impl CapabilitySet {
         }
 
         // Process profile directory permissions
-        process_profile_paths(&mut caps, &profile.filesystem.allow, workdir, FsAccess::ReadWrite, false)?;
-        process_profile_paths(&mut caps, &profile.filesystem.read, workdir, FsAccess::Read, false)?;
-        process_profile_paths(&mut caps, &profile.filesystem.write, workdir, FsAccess::Write, false)?;
+        process_profile_paths(
+            &mut caps,
+            &profile.filesystem.allow,
+            workdir,
+            FsAccess::ReadWrite,
+            false,
+        )?;
+        process_profile_paths(
+            &mut caps,
+            &profile.filesystem.read,
+            workdir,
+            FsAccess::Read,
+            false,
+        )?;
+        process_profile_paths(
+            &mut caps,
+            &profile.filesystem.write,
+            workdir,
+            FsAccess::Write,
+            false,
+        )?;
 
         // Process profile file permissions
-        process_profile_paths(&mut caps, &profile.filesystem.allow_file, workdir, FsAccess::ReadWrite, true)?;
-        process_profile_paths(&mut caps, &profile.filesystem.read_file, workdir, FsAccess::Read, true)?;
-        process_profile_paths(&mut caps, &profile.filesystem.write_file, workdir, FsAccess::Write, true)?;
+        process_profile_paths(
+            &mut caps,
+            &profile.filesystem.allow_file,
+            workdir,
+            FsAccess::ReadWrite,
+            true,
+        )?;
+        process_profile_paths(
+            &mut caps,
+            &profile.filesystem.read_file,
+            workdir,
+            FsAccess::Read,
+            true,
+        )?;
+        process_profile_paths(
+            &mut caps,
+            &profile.filesystem.write_file,
+            workdir,
+            FsAccess::Write,
+            true,
+        )?;
 
         // Merge CLI overrides (extend the profile)
         for path in &args.allow {

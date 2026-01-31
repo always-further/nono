@@ -131,5 +131,4 @@ mod tests {
         assert_eq!(args.allow.len(), 2);
         assert_eq!(args.read.len(), 1);
     }
-
 }

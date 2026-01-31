@@ -163,16 +163,19 @@ fn is_valid_profile_name(name: &str) -> bool {
 /// If $HOME cannot be determined and the path uses $HOME, $XDG_CONFIG_HOME, or $XDG_DATA_HOME,
 /// the unexpanded variable is left in place (which will cause the path to not exist).
 pub fn expand_vars(path: &str, workdir: &Path) -> PathBuf {
-    let home = xdg_home::home_dir()
-        .map(|p| p.to_string_lossy().to_string());
+    let home = xdg_home::home_dir().map(|p| p.to_string_lossy().to_string());
 
     let expanded = path.replace("$WORKDIR", &workdir.to_string_lossy());
 
     let expanded = if let Some(ref h) = home {
         let xdg_config = std::env::var("XDG_CONFIG_HOME")
             .unwrap_or_else(|_| format!("{}", PathBuf::from(h).join(".config").display()));
-        let xdg_data = std::env::var("XDG_DATA_HOME")
-            .unwrap_or_else(|_| format!("{}", PathBuf::from(h).join(".local").join("share").display()));
+        let xdg_data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+            format!(
+                "{}",
+                PathBuf::from(h).join(".local").join("share").display()
+            )
+        });
 
         expanded
             .replace("$HOME", h)
