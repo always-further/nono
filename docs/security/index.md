@@ -1,0 +1,141 @@
+# Security Model
+
+nono implements a capability-based security model using kernel-level enforcement. This page explains the security guarantees, assumptions, and limitations.
+
+## Core Principle
+
+**Deny by default, allow explicitly.**
+
+When you run a command through nono, it can only access what you explicitly grant. Everything else is blocked at the kernel level.
+
+## Trust Boundaries
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        TRUSTED                              │
+│  - Your operating system kernel                             │
+│  - nono binary (applies sandbox before exec)                │
+│  - Paths you explicitly grant access to                     │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                    Kernel Sandbox Boundary
+                              │
+┌─────────────────────────────────────────────────────────────┐
+│                       UNTRUSTED                             │
+│  - The command/agent being executed                         │
+│  - Any child processes it spawns                            │
+│  - Any libraries it loads                                   │
+│  - Any network connections it makes (if allowed)            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## What nono Protects Against
+
+### Path Traversal Attacks
+
+An agent cannot use `../` sequences to escape allowed directories:
+
+```bash
+# Agent tries: cat ../../etc/passwd
+# Result: Permission denied (kernel blocks it)
+```
+
+### Symlink Escapes
+
+Paths are canonicalized at grant time. An agent cannot create a symlink pointing outside the sandbox:
+
+```bash
+# Agent tries: ln -s /etc/passwd ./escape && cat ./escape
+# Result: Permission denied (symlink target is outside allowed paths)
+```
+
+### Credential Theft
+
+Sensitive paths are blocked by default, even if a parent directory is allowed:
+
+- `~/.ssh/` - SSH keys
+- `~/.aws/` - AWS credentials
+- `~/.gnupg/` - GPG keys
+- `~/.kube/` - Kubernetes config
+- Shell history and config files
+- And more...
+
+### Network Exfiltration
+
+Network is blocked by default. An agent cannot phone home unless you explicitly grant network access with `--net-allow`.
+
+### Privilege Escalation
+
+The sandbox is applied before exec(). There is no window where the agent runs with elevated privileges.
+
+### Child Process Escape
+
+All child processes inherit the sandbox. An agent cannot spawn an unrestricted subprocess.
+
+## What nono Does NOT Protect Against
+
+### Kernel Exploits
+
+If the kernel itself has a vulnerability, an attacker with code execution could potentially escape the sandbox. This is true of any sandboxing solution.
+
+### Covert Channels
+
+An agent could potentially leak small amounts of information through timing side channels, CPU usage patterns, etc. nono does not attempt to prevent covert channels.
+
+### Resource Exhaustion
+
+nono does not limit CPU, memory, or disk usage. A malicious agent could attempt denial-of-service through resource exhaustion.
+
+### Data Within Allowed Paths
+
+If you grant access to a directory, the agent can read/write anything in that directory. nono cannot protect files within allowed paths.
+
+### TOCTOU Races
+
+There is a small window between path canonicalization and sandbox application where a time-of-check-time-of-use race could theoretically occur. This window is minimized but not eliminated.
+
+## Sensitive Path Protection
+
+nono blocks access to sensitive paths by default, even if a parent directory is explicitly allowed:
+
+| Path | Contains |
+|------|----------|
+| `~/.ssh/` | SSH private keys |
+| `~/.aws/` | AWS credentials |
+| `~/.gnupg/` | GPG private keys |
+| `~/.kube/` | Kubernetes credentials |
+| `~/.docker/` | Docker credentials |
+| `~/.npmrc` | npm auth tokens |
+| `~/.netrc` | Network credentials |
+| `~/.gitcredentials` | Git credentials |
+| `~/.bash_history` | Command history |
+| `~/.zsh_history` | Command history |
+| `~/.bashrc`, `~/.zshrc` | Shell configs (may contain secrets) |
+
+## Security Properties
+
+### Irreversibility
+
+Once the sandbox is applied, there is no API to expand or remove it. Not even nono itself can undo the restrictions.
+
+### Fail-Closed
+
+If sandbox initialization fails, nono exits with an error rather than running the command unrestricted.
+
+### Minimal Attack Surface
+
+nono applies the sandbox and immediately exec()s into the target command. It does not remain running as a supervisor (in Phase 1).
+
+## Best Practices
+
+1. **Grant minimal access** - Only allow what the command actually needs
+2. **Use read-only where possible** - Use `--read` instead of `--allow` for source directories
+3. **Avoid network when not needed** - Don't use `--net-allow` unless required
+4. **Test with dry-run** - Use `--dry-run` to preview capabilities before execution
+5. **Review agent output** - Even sandboxed agents can produce malicious output files
+
+## Next Steps
+
+- [macOS Seatbelt](seatbelt.md) - How nono uses Seatbelt on macOS
+- [Linux Landlock](landlock.md) - How nono uses Landlock on Linux
+- [Why OS-Level Controls](vs-application.md) - Why kernel enforcement beats application-level controls

@@ -1,0 +1,63 @@
+site_name: nono
+site_description: Capability-based shell for untrusted AI agents
+site_url: https://lukehinds.github.io/nono
+repo_url: https://github.com/lukehinds/nono
+repo_name: lukehinds/nono
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Usage:
+    - Overview: usage/index.md
+    - CLI Reference: usage/flags.md
+    - Examples: usage/examples.md
+  - Profiles:
+    - Overview: profiles/index.md
+    - Built-in Profiles: profiles/built-in.md
+  - Security:
+    - Overview: security/index.md
+    - macOS Seatbelt: security/seatbelt.md
+    - Linux Landlock: security/landlock.md
+    - Why OS-Level Controls: security/vs-application.md
+  - Troubleshooting: troubleshooting.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/lukehinds/nono

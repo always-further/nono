@@ -1,0 +1,194 @@
+# Linux Landlock
+
+nono uses Landlock LSM (Linux Security Module) on Linux to enforce capability restrictions at the kernel level.
+
+## What is Landlock?
+
+Landlock is a Linux security module that allows unprivileged processes to sandbox themselves. Unlike traditional LSMs (SELinux, AppArmor) that require root configuration, Landlock can be used by any process to restrict its own capabilities.
+
+Landlock was merged into Linux kernel 5.13 (2021) and has been enhanced in subsequent releases.
+
+## How nono Uses Landlock
+
+nono uses the `landlock` Rust crate to:
+
+1. Detect the available Landlock ABI version
+2. Create a ruleset with the allowed operations
+3. Add path rules for each granted capability
+4. Apply the ruleset to the current process
+
+```rust
+// Simplified: what nono does internally
+let ruleset = Ruleset::new()
+    .handle_access(AccessFs::from_all(abi))?
+    .create()?;
+
+ruleset.add_rule(PathBeneath::new(PathFd::new(path)?, access))?;
+// ... add more rules ...
+
+ruleset.restrict_self()?;
+// After this call, restrictions are permanent
+```
+
+## ABI Versions
+
+Landlock capabilities have evolved across kernel versions:
+
+| Kernel | ABI | New Capabilities |
+|--------|-----|------------------|
+| 5.13+ | v1 | Basic filesystem access control |
+| 5.19+ | v2 | `REFER` - rename/link across directories |
+| 6.2+ | v3 | `TRUNCATE` - file truncation |
+| 6.7+ | v4 | TCP `bind` and `connect` filtering |
+| 6.10+ | v5 | `IOCTL_DEV`, signal/socket scoping |
+
+nono automatically detects the highest available ABI and uses it. On older kernels, some features are unavailable but core filesystem sandboxing still works.
+
+## Access Rights Mapping
+
+nono maps its capability flags to Landlock access rights:
+
+### Read Access (`--read`)
+
+```rust
+AccessFs::ReadFile
+AccessFs::ReadDir
+AccessFs::Execute
+```
+
+### Write Access (`--write`)
+
+```rust
+AccessFs::WriteFile
+AccessFs::RemoveFile
+AccessFs::RemoveDir
+AccessFs::MakeChar
+AccessFs::MakeDir
+AccessFs::MakeReg
+AccessFs::MakeSock
+AccessFs::MakeFifo
+AccessFs::MakeBlock
+AccessFs::MakeSym
+AccessFs::Truncate  // ABI v3+
+```
+
+### Full Access (`--allow`)
+
+Both read and write access rights combined.
+
+## Network Filtering
+
+Landlock ABI v4 (kernel 6.7+) added TCP network filtering:
+
+```rust
+AccessNet::BindTcp   // Control which ports can be bound
+AccessNet::ConnectTcp // Control outbound connections
+```
+
+!!! warning "Kernel Requirement"
+    Network filtering requires kernel 6.7+. On older kernels, nono cannot enforce network restrictions via Landlock and will warn you.
+
+### Fallback for Older Kernels
+
+On kernels without Landlock network support, nono can use seccomp as a fallback to block network syscalls entirely. This is planned for Phase 2.
+
+## Enforcement Status
+
+nono reports the enforcement status after applying the sandbox:
+
+| Status | Meaning |
+|--------|---------|
+| `FullyEnforced` | All requested restrictions are active |
+| `PartiallyEnforced` | Some restrictions active, others unavailable (older kernel) |
+| `NotEnforced` | Landlock not available on this system |
+
+Use `-v` to see the enforcement status:
+
+```bash
+nono -v --allow . -- command
+# Output includes: Sandbox status: FullyEnforced
+```
+
+## Checking Landlock Availability
+
+```bash
+# Check if Landlock is in the LSM list
+cat /sys/kernel/security/lsm
+# Should include "landlock"
+
+# Check kernel version
+uname -r
+# 5.13+ required, 6.7+ for network filtering
+```
+
+### Enabling Landlock
+
+If Landlock is not listed in `/sys/kernel/security/lsm`, you may need to:
+
+1. **Check kernel config**: Ensure `CONFIG_SECURITY_LANDLOCK=y`
+2. **Add to boot params**: Add `lsm=landlock,lockdown,yama,integrity,apparmor,bpf` to kernel boot parameters
+3. **Reboot**
+
+Most modern distributions (Ubuntu 22.04+, Fedora 35+, Debian 12+) have Landlock enabled by default.
+
+## Irreversibility
+
+Once `restrict_self()` is called:
+
+- The ruleset is permanently applied
+- No API exists to add more permissions
+- Child processes inherit the restrictions
+- The only escape is a kernel exploit
+
+This is enforced by the kernel - nono cannot undo it even if it wanted to.
+
+## Debugging
+
+If a command fails with permission errors:
+
+1. **Run with dry-run**: See what capabilities would be granted
+   ```bash
+   nono --allow . --dry-run -- command
+   ```
+
+2. **Check verbose output**:
+   ```bash
+   nono -vvv --allow . -- command
+   ```
+
+3. **Check dmesg for Landlock denials**:
+   ```bash
+   dmesg | grep -i landlock
+   ```
+
+4. **Use strace**: See which syscalls are being denied
+   ```bash
+   strace -f nono --allow . -- command 2>&1 | grep EACCES
+   ```
+
+## Limitations
+
+### Kernel Version Requirements
+
+- Basic sandboxing requires kernel 5.13+
+- Full filesystem control requires kernel 6.2+
+- Network filtering requires kernel 6.7+
+
+### No Network Filtering on Older Kernels
+
+Without ABI v4, Landlock cannot filter network access. nono will warn if you use `--net-allow` or expect network blocking on an older kernel.
+
+### Bind Mounts
+
+Landlock follows bind mounts. If `/home` is bind-mounted to `/mnt/home`, access to one affects the other. This is usually not a concern but can be surprising in complex mount configurations.
+
+### Special Filesystems
+
+Landlock may behave differently with special filesystems (procfs, sysfs, etc.). nono does not grant access to these by default.
+
+## References
+
+- [Landlock documentation](https://landlock.io/)
+- [Kernel documentation](https://docs.kernel.org/userspace-api/landlock.html)
+- [landlock-rs crate](https://docs.rs/landlock/latest/landlock/)
+- [LWN article on Landlock](https://lwn.net/Articles/859908/)
