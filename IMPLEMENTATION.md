@@ -739,12 +739,12 @@ Claude> I need to read ../other-project/README.md
 
 ## Timeline Estimate
 
-| Phase | Scope |
-|-------|-------|
-| Phase 1 | MVP filesystem sandbox |
-| Phase 2 | Network isolation |
-| Phase 3 | Runtime expansion |
-| Phase 4 | Polish and release |
+| Phase | Scope | Status |
+|-------|-------|--------|
+| Phase 1 | MVP filesystem sandbox | Complete |
+| Phase 2 | Network isolation | Complete (TCP blocking on Linux 6.7+, full on macOS) |
+| Phase 3 | Runtime expansion | Not started |
+| Phase 4 | Polish and release | Not started |
 
 ---
 

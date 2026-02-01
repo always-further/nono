@@ -176,7 +176,9 @@ If a command fails with permission errors:
 
 ### No Network Filtering on Older Kernels
 
-Without ABI v4, Landlock cannot filter network access. nono will warn if you use `--net-block` on an older kernel, as network blocking cannot be enforced without Landlock ABI v4 or higher.
+Without ABI v4 (kernel 6.7+), Landlock cannot filter TCP connections. nono will warn if you use `--net-block` on an older kernel. On kernels 6.7+, nono uses Landlock's `AccessNet::BindTcp` and `AccessNet::ConnectTcp` to block TCP traffic.
+
+Note: DNS resolution (UDP) is not blocked by Landlock, only TCP connections.
 
 ### Bind Mounts
 

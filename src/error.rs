@@ -39,10 +39,6 @@ pub enum NonoError {
     #[error("Landlock path error: {0}")]
     LandlockPath(#[from] landlock::PathFdError),
 
-    #[cfg(target_os = "linux")]
-    #[error("Landlock create error: {0}")]
-    LandlockCreate(#[from] landlock::CreateRulesetError),
-
     #[error("Profile not found: {0}")]
     ProfileNotFound(String),
 

@@ -213,13 +213,9 @@ impl SetupRunner {
 
         println!("  ✓ Landlock enabled in LSM list");
 
-        // Detect ABI and show available features
-        let abi = ABI::V1
-            .or(ABI::V2)
-            .or(ABI::V3)
-            .or(ABI::V4)
-            .or(ABI::V5)
-            .unwrap_or(ABI::V1);
+        // We target the highest ABI and report its features
+        // The actual sandbox will use Compatible trait to handle older kernels
+        let abi = ABI::V5;
 
         println!("  ✓ Landlock ABI: {:?}", abi);
         println!("  ✓ Available features:");

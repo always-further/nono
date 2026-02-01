@@ -37,10 +37,13 @@
 cargo build --release
 
 # Run a command with filesystem access only to current directory
-nono --allow . -- your-command
+nono run --allow . -- your-command
 
 # Example: Run Claude Code with restricted access
-nono --allow ./my-project -- claude
+nono run --allow ./my-project -- claude
+
+# Block network access (air-gapped mode)
+nono run --allow . --net-block -- your-command
 ```
 
 ## Features
@@ -54,16 +57,22 @@ nono --allow ./my-project -- claude
 
 ```bash
 # Allow read+write to current directory
-nono --allow . -- command
+nono run --allow . -- command
 
 # Separate read and write permissions
-nono --read ./src --write ./output -- cargo build
+nono run --read ./src --write ./output -- cargo build
 
 # Multiple paths
-nono --allow ./project-a --allow ./project-b -- command
+nono run --allow ./project-a --allow ./project-b -- command
+
+# Block network access
+nono run --allow . --net-block -- command
 
 # Dry run (show what would be sandboxed)
-nono --allow . --dry-run -- command
+nono run --allow . --dry-run -- command
+
+# Check why a path would be blocked
+nono why ~/.ssh/id_rsa
 ```
 
 ## How It Works
@@ -72,7 +81,7 @@ nono --allow . --dry-run -- command
 ┌─────────────────────────────────────────────────┐
 │  Terminal                                       │
 │                                                 │
-│  $ nono --allow ./project -- claude             │
+│  $ nono run --allow ./project -- claude         │
 │                                                 │
 │  ┌───────────────────────────────────────────┐  │
 │  │  nono (applies sandbox, then exec)        │  │
@@ -80,8 +89,8 @@ nono --allow . --dry-run -- command
 │  │  ┌─────────────────────────────────────┐  │  │
 │  │  │  Claude Code (sandboxed)            │  │  │
 │  │  │  - Can read/write ./project         │  │  │
-│  │  │  - Cannot access other dirs         │  │  │
-│  │  │  - Network blocked                  │  │  │
+│  │  │  - Cannot access ~/.ssh, ~/.aws...  │  │  │
+│  │  │  - Network: allowed (or blocked)    │  │  │
 │  │  └─────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────┘
@@ -89,16 +98,17 @@ nono --allow . --dry-run -- command
 
 ## Platform Support
 
-| Platform | Mechanism | Status |
-|----------|-----------|--------|
-| macOS | Seatbelt | Phase 1 complete |
-| Linux | Landlock | Phase 1 complete (untested) |
-| Windows | - | Not yet supported |
+| Platform | Mechanism | Kernel | Status |
+|----------|-----------|--------|--------|
+| macOS | Seatbelt | 10.5+ | Filesystem + Network |
+| Linux | Landlock | 5.13+ | Filesystem |
+| Linux | Landlock | 6.7+ | Filesystem + Network (TCP) |
+| Windows | - | - | Not yet supported |
 
 ## Roadmap
 
 - [x] **Phase 1**: Filesystem sandbox (MVP)
-- [ ] **Phase 2**: Network isolation
+- [x] **Phase 2**: Network isolation (TCP blocking on Linux 6.7+, full on macOS)
 - [ ] **Phase 3**: Runtime capability expansion
 - [ ] **Phase 4**: Polish and release
 
