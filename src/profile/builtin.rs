@@ -2,7 +2,7 @@
 //!
 //! These profiles are trusted by default and don't require --trust-unsigned.
 
-use super::{FilesystemConfig, NetworkConfig, Profile, ProfileMeta};
+use super::{FilesystemConfig, NetworkConfig, Profile, ProfileMeta, SecretsConfig};
 
 /// Get a built-in profile by name
 pub fn get_builtin(name: &str) -> Option<Profile> {
@@ -48,6 +48,7 @@ fn claude_code() -> Profile {
             write_file: vec![],
         },
         network: NetworkConfig { block: false },
+        secrets: SecretsConfig::default(),
     }
 }
 
@@ -73,6 +74,7 @@ fn openclaw() -> Profile {
             write_file: vec![],
         },
         network: NetworkConfig { block: false },
+        secrets: SecretsConfig::default(),
     }
 }
 
@@ -95,6 +97,7 @@ fn opencode() -> Profile {
             write_file: vec![],
         },
         network: NetworkConfig { block: false },
+        secrets: SecretsConfig::default(),
     }
 }
 
@@ -117,6 +120,7 @@ fn cargo_build() -> Profile {
             write_file: vec![],
         },
         network: NetworkConfig { block: true },
+        secrets: SecretsConfig::default(),
     }
 }
 

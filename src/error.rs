@@ -59,6 +59,12 @@ pub enum NonoError {
 
     #[error("Setup error: {0}")]
     Setup(String),
+
+    #[error("Failed to access system keystore: {0}")]
+    KeystoreAccess(String),
+
+    #[error("Secret not found in keystore: {0}")]
+    SecretNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, NonoError>;

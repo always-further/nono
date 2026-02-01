@@ -114,6 +114,22 @@ When running inside nono, these environment variables are set:
 
 These help sandboxed applications (especially AI agents) provide better error messages when access is denied.
 
+## Secrets Management
+
+nono can securely load API keys from the system keystore (macOS Keychain / Linux Secret Service) and inject them as environment variables:
+
+```bash
+# Store a secret in the keystore
+security add-generic-password -s "nono" -a "openai_api_key" -w "sk-..."
+
+# Use the secret in a sandboxed command
+nono run --allow . --secrets openai_api_key -- my-agent
+```
+
+Secrets are loaded **before** the sandbox is applied, so the sandboxed process cannot access the keystore directly - only the specific secrets you authorize.
+
+See [Secrets Management](secrets.md) for full documentation.
+
 ## Sensitive Paths
 
 The following paths are always blocked by default to protect credentials:
@@ -130,4 +146,5 @@ Use `nono why <path>` to check if a specific path is blocked and why.
 ## Next Steps
 
 - [CLI Reference](flags.md) - Complete flag documentation
+- [Secrets Management](secrets.md) - Secure API key loading from system keystore
 - [Examples](examples.md) - Common usage patterns

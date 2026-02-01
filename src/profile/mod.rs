@@ -8,6 +8,7 @@ mod builtin;
 
 use crate::error::{NonoError, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +60,19 @@ pub struct NetworkConfig {
     // Future: dns_only, proxy_allow
 }
 
+/// Secrets configuration in a profile
+///
+/// Maps keystore account names to environment variable names.
+/// Secrets are loaded from the system keystore (macOS Keychain / Linux Secret Service)
+/// under the service name "nono".
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SecretsConfig {
+    /// Map of keystore account name -> environment variable name
+    /// Example: { "openai_api_key" = "OPENAI_API_KEY" }
+    #[serde(flatten)]
+    pub mappings: HashMap<String, String>,
+}
+
 /// A complete profile definition
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Profile {
@@ -68,6 +82,8 @@ pub struct Profile {
     pub filesystem: FilesystemConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub secrets: SecretsConfig,
 }
 
 impl Profile {
@@ -266,5 +282,39 @@ mod tests {
         assert!(profiles.contains(&"claude-code".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
         assert!(profiles.contains(&"opencode".to_string()));
+    }
+
+    #[test]
+    fn test_secrets_config_parsing() {
+        let toml_str = r#"
+            [meta]
+            name = "test-profile"
+
+            [secrets]
+            openai_api_key = "OPENAI_API_KEY"
+            anthropic_api_key = "ANTHROPIC_API_KEY"
+        "#;
+
+        let profile: Profile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.secrets.mappings.len(), 2);
+        assert_eq!(
+            profile.secrets.mappings.get("openai_api_key"),
+            Some(&"OPENAI_API_KEY".to_string())
+        );
+        assert_eq!(
+            profile.secrets.mappings.get("anthropic_api_key"),
+            Some(&"ANTHROPIC_API_KEY".to_string())
+        );
+    }
+
+    #[test]
+    fn test_empty_secrets_config() {
+        let toml_str = r#"
+            [meta]
+            name = "test-profile"
+        "#;
+
+        let profile: Profile = toml::from_str(toml_str).unwrap();
+        assert!(profile.secrets.mappings.is_empty());
     }
 }

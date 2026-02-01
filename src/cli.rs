@@ -45,6 +45,12 @@ pub enum Commands {
 
     # Allow specific files (not directories)
     nono run --allow . --write-file ~/.claude.json claude
+
+    # Load secrets from system keystore (profile defines which secrets)
+    nono run --profile claude-code --secrets claude
+
+    # Load specific secrets from keystore (comma-separated)
+    nono run --allow . --secrets openai_api_key,anthropic_api_key -- claude
 ")]
     Run(Box<RunArgs>),
 
@@ -107,6 +113,14 @@ pub struct RunArgs {
     /// Note: Per-host filtering not supported by OS sandbox; this is on/off only
     #[arg(long)]
     pub net_block: bool,
+
+    // === Secrets options ===
+    /// Load secrets from system keystore and inject as environment variables.
+    /// Use with --profile to load secrets defined in the profile's [secrets] section,
+    /// or specify comma-separated account names to load from the 'nono' service.
+    /// Secrets are loaded before sandbox is applied and zeroized from memory after exec.
+    #[arg(long, value_name = "ACCOUNTS")]
+    pub secrets: Option<String>,
 
     // === Profile options ===
     /// Use a named profile (built-in or from ~/.config/nono/profiles/)
@@ -237,6 +251,50 @@ mod tests {
                 assert_eq!(args.path, PathBuf::from("/tmp/foo"));
             }
             _ => panic!("Expected Why command"),
+        }
+    }
+
+    #[test]
+    fn test_run_with_secrets() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--secrets",
+            "openai_api_key,anthropic_api_key",
+            "claude",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(
+                    args.secrets,
+                    Some("openai_api_key,anthropic_api_key".to_string())
+                );
+                assert_eq!(args.command, vec!["claude"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_with_profile_and_secrets() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--profile",
+            "claude-code",
+            "--secrets",
+            "openai_api_key",
+            "claude",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.profile, Some("claude-code".to_string()));
+                assert_eq!(args.secrets, Some("openai_api_key".to_string()));
+                assert_eq!(args.command, vec!["claude"]);
+            }
+            _ => panic!("Expected Run command"),
         }
     }
 }

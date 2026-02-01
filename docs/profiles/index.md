@@ -1,8 +1,5 @@
 # Profiles
 
-!!! info "Coming Soon"
-    The profile system is planned for Phase 2. This page documents the planned functionality.
-
 Profiles are pre-configured capability sets for common tools and agents. Instead of specifying flags manually, you can use a profile that defines sensible defaults.
 
 ## Why Profiles?
@@ -54,7 +51,27 @@ write = []
 
 [network]
 block = false  # Network allowed by default; set to true to block
+
+# See "Secrets Section" below for configuring secrets
 ```
+
+### Secrets Section
+
+The `[secrets]` section maps keystore account names to environment variable names. Secrets are loaded from the system keystore (macOS Keychain / Linux Secret Service) before the sandbox is applied, then injected as environment variables.
+
+```toml
+[secrets]
+openai_api_key = "OPENAI_API_KEY"
+database_url = "DATABASE_URL"
+```
+
+To use secrets from a profile, add the `--secrets` flag:
+
+```bash
+nono run --profile my-agent --secrets -- my-command
+```
+
+See [Secrets Management](../usage/secrets.md) for details on storing secrets in the keystore.
 
 ## Environment Variables
 

@@ -1,7 +1,6 @@
 <div align="center" markdown>
   <img alt="nono mascot" src="assets/nono-mascot.png" style="width:50%;max-width:400px;height:auto;" />
   <h1>nono</h1>
-  <p><strong>Don't YOLO! When you can nono!</strong></p>
   <p>A capability-based shell for running untrusted AI agents with OS-enforced isolation.</p>
 </div>
 

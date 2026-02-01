@@ -125,6 +125,28 @@ nono run --allow . --net-block -- cargo build
 
     Granular network filtering (e.g., allowing only specific domains like `api.anthropic.com`) is a desired feature but not yet supported. Apple Seatbelt has technical limitations that make per-host filtering challenging and would require significant experimentation to implement correctly. This feature may be added in a future release.
 
+### Secrets Options
+
+#### `--secrets`
+
+Load secrets from the system keystore (macOS Keychain / Linux Secret Service) and inject them as environment variables.
+
+```bash
+# Load specific secrets by account name
+nono run --allow . --secrets openai_api_key,anthropic_api_key -- my-agent
+
+# Use with profile (loads secrets defined in profile's [secrets] section)
+nono run --profile claude-code --secrets -- claude
+```
+
+Secrets are:
+
+- Loaded **before** the sandbox is applied (keystore access blocked after)
+- Auto-named by uppercasing: `openai_api_key` becomes `$OPENAI_API_KEY`
+- Zeroized from memory after `exec()`
+
+See [Secrets Management](secrets.md) for full documentation on storing and using secrets.
+
 ### Profile Options
 
 #### `--profile`, `-p`
