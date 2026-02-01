@@ -53,23 +53,7 @@ nono why ~/.ssh/id_rsa
 
 ## How It Works
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     nono process                        │
-│  1. Parse capabilities from CLI                         │
-│  2. Apply kernel sandbox (irreversible)                 │
-│  3. exec() into target command                          │
-└─────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────┐
-│                   Sandboxed Agent                       │
-│  - Can only access explicitly granted paths             │
-│  - Network allowed by default (use --net-block)         │
-│  - All child processes inherit restrictions             │
-│  - No way to escape or expand permissions               │
-└─────────────────────────────────────────────────────────┘
-```
+![nono flow diagram](./assets/nono-flow.png)
 
 ## Next Steps
 
