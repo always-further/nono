@@ -472,14 +472,14 @@ mod tests {
 
     #[test]
     fn test_sensitive_paths_defined() {
-        assert!(!SENSITIVE_PATHS.is_empty());
+        // Verify expected sensitive paths are included
         assert!(SENSITIVE_PATHS.contains(&"~/.ssh"));
         assert!(SENSITIVE_PATHS.contains(&"~/.aws"));
     }
 
     #[test]
     fn test_dangerous_commands_defined() {
-        assert!(!DANGEROUS_COMMANDS.is_empty());
+        // Verify expected dangerous commands are included
         assert!(DANGEROUS_COMMANDS.contains(&"rm"));
         assert!(DANGEROUS_COMMANDS.contains(&"dd"));
         assert!(DANGEROUS_COMMANDS.contains(&"chmod"));

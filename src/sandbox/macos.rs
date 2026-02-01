@@ -315,8 +315,10 @@ mod tests {
 
     #[test]
     fn test_generate_profile_network_allowed() {
-        let mut caps = CapabilitySet::default();
-        caps.net_block = false; // network allowed (default)
+        let caps = CapabilitySet {
+            net_block: false, // network allowed (default)
+            ..Default::default()
+        };
 
         let profile = generate_profile(&caps);
 
@@ -330,8 +332,10 @@ mod tests {
 
     #[test]
     fn test_generate_profile_network_blocked() {
-        let mut caps = CapabilitySet::default();
-        caps.net_block = true;
+        let caps = CapabilitySet {
+            net_block: true,
+            ..Default::default()
+        };
 
         let profile = generate_profile(&caps);
 

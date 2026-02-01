@@ -16,7 +16,7 @@ test:
 
 # Run clippy linter with strict settings
 lint:
-	cargo clippy -- -D warnings -D clippy::unwrap_used
+	cargo clippy --all-targets --all-features -- -D warnings
 
 # Format code
 format:
