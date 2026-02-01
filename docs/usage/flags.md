@@ -2,6 +2,19 @@
 
 Complete reference for all nono command-line flags.
 
+## Global Options
+
+These options work with all commands.
+
+### `--silent`, `-s`
+
+Suppress all nono output (banner, summary, status messages). Only the executed command's output will be shown.
+
+```bash
+nono -s run --allow . -- my-agent
+nono --silent why ~/.ssh/id_rsa
+```
+
 ## Commands
 
 ### `nono run`
@@ -18,6 +31,14 @@ Check why a path would be blocked or allowed.
 
 ```bash
 nono why [OPTIONS] <PATH>
+```
+
+### `nono setup`
+
+Set up nono on this system. Verifies installation, tests sandbox support, and optionally generates example profiles.
+
+```bash
+nono setup [OPTIONS]
 ```
 
 ## `nono run` Options
@@ -188,13 +209,47 @@ nono why ~/.ssh/id_rsa
 nono why ./my-project
 ```
 
-### `--suggest`, `-s`
+### `--suggest`
 
 Show what flags would grant access to this path.
 
 ```bash
-nono why -s ~/.aws
+nono why --suggest ~/.aws
 # Output includes suggested nono run flags
+```
+
+## `nono setup` Options
+
+### `--check-only`
+
+Only verify installation and sandbox support, don't create any files.
+
+```bash
+nono setup --check-only
+```
+
+### `--profiles`
+
+Generate example user profiles in `~/.config/nono/profiles/`.
+
+```bash
+nono setup --profiles
+```
+
+### `--shell-integration`
+
+Show shell integration instructions (aliases, etc.).
+
+```bash
+nono setup --shell-integration
+```
+
+### `--verbose`, `-v`
+
+Show detailed information during setup. Can be specified multiple times.
+
+```bash
+nono setup -v --profiles
 ```
 
 ## Exit Codes
