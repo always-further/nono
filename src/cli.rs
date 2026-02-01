@@ -114,6 +114,16 @@ pub struct RunArgs {
     #[arg(long)]
     pub net_block: bool,
 
+    // === Command blocking ===
+    /// Allow a normally-blocked dangerous command (use with caution).
+    /// By default, destructive commands like rm, dd, chmod are blocked.
+    #[arg(long, value_name = "CMD")]
+    pub allow_command: Vec<String>,
+
+    /// Block an additional command beyond the default blocklist
+    #[arg(long, value_name = "CMD")]
+    pub block_command: Vec<String>,
+
     // === Secrets options ===
     /// Load secrets from system keystore and inject as environment variables.
     /// Use with --profile to load secrets defined in the profile's [secrets] section,

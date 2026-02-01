@@ -97,30 +97,30 @@ pub fn support_info() -> String {
 }
 
 /// Convert FsAccess to Landlock AccessFs flags
-fn access_to_landlock(access: FsAccess, abi: ABI) -> BitFlags<AccessFs> {
+/// Note: RemoveFile, RemoveDir, and Truncate are intentionally excluded
+/// to prevent destructive operations even in allowed directories.
+/// This is a defense-in-depth measure against accidental or malicious deletion.
+fn access_to_landlock(access: FsAccess, _abi: ABI) -> BitFlags<AccessFs> {
     match access {
         FsAccess::Read => AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
         FsAccess::Write => {
-            let mut flags = AccessFs::WriteFile
-                | AccessFs::RemoveFile
-                | AccessFs::RemoveDir
+            // Write access allows creating and modifying files, but NOT deleting or truncating.
+            // This prevents destructive operations like `rm -rf` or truncating files to zero bytes.
+            // Excluded operations:
+            //   - RemoveFile: unlink syscall (file deletion)
+            //   - RemoveDir: rmdir syscall (directory deletion)
+            //   - Truncate: truncate/ftruncate syscalls (can zero out files)
+            AccessFs::WriteFile
                 | AccessFs::MakeChar
                 | AccessFs::MakeDir
                 | AccessFs::MakeReg
                 | AccessFs::MakeSock
                 | AccessFs::MakeFifo
                 | AccessFs::MakeBlock
-                | AccessFs::MakeSym;
-
-            // Add truncate if available (ABI v3+)
-            if abi >= ABI::V3 {
-                flags |= AccessFs::Truncate;
-            }
-
-            flags
+                | AccessFs::MakeSym
         }
         FsAccess::ReadWrite => {
-            access_to_landlock(FsAccess::Read, abi) | access_to_landlock(FsAccess::Write, abi)
+            access_to_landlock(FsAccess::Read, _abi) | access_to_landlock(FsAccess::Write, _abi)
         }
     }
 }
@@ -245,9 +245,15 @@ mod tests {
         let write = access_to_landlock(FsAccess::Write, abi);
         assert!(write.contains(AccessFs::WriteFile));
         assert!(!write.contains(AccessFs::ReadFile));
+        // Verify destructive operations are NOT included
+        assert!(!write.contains(AccessFs::RemoveFile));
+        assert!(!write.contains(AccessFs::RemoveDir));
 
         let rw = access_to_landlock(FsAccess::ReadWrite, abi);
         assert!(rw.contains(AccessFs::ReadFile));
         assert!(rw.contains(AccessFs::WriteFile));
+        // Verify destructive operations are NOT included in ReadWrite either
+        assert!(!rw.contains(AccessFs::RemoveFile));
+        assert!(!rw.contains(AccessFs::RemoveDir));
     }
 }

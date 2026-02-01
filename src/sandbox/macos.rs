@@ -200,6 +200,14 @@ fn generate_profile(caps: &CapabilitySet) -> String {
         ));
     }
 
+    // Block destructive file operations globally
+    // These deny rules prevent file deletion and truncation as defense-in-depth
+    // against destructive commands like `rm -rf` or accidental data loss.
+    // Note: These use file-write-unlink for file deletion.
+    // Seatbelt doesn't have separate truncate operation, but file-write-mode
+    // controls the ability to modify file contents (including truncation via open with O_TRUNC).
+    profile.push_str("(deny file-write-unlink)\n");
+
     // Network rules
     // Note: macOS Seatbelt supports some filtering (tcp/udp, local/remote, ports)
     // but not per-host filtering. For that, a proxy-based approach is needed.
@@ -361,5 +369,17 @@ mod tests {
         for path in &paths {
             assert!(!path.contains('~'), "Path should be expanded: {}", path);
         }
+    }
+
+    #[test]
+    fn test_destructive_operations_blocked() {
+        let caps = CapabilitySet::default();
+        let profile = generate_profile(&caps);
+
+        // Should deny file deletion (unlink) to prevent rm -rf style attacks
+        assert!(
+            profile.contains("(deny file-write-unlink)"),
+            "Profile should block file deletion"
+        );
     }
 }

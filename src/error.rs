@@ -65,6 +65,9 @@ pub enum NonoError {
 
     #[error("Secret not found in keystore: {0}")]
     SecretNotFound(String),
+
+    #[error("Command '{command}' is blocked: {reason}")]
+    BlockedCommand { command: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, NonoError>;

@@ -109,6 +109,10 @@ pub struct CapabilitySet {
     pub fs: Vec<FsCapability>,
     /// Network access blocked (network allowed by default; true = blocked)
     pub net_block: bool,
+    /// Commands explicitly allowed (overrides default blocklist)
+    pub allowed_commands: Vec<String>,
+    /// Additional commands to block (extends default blocklist)
+    pub blocked_commands: Vec<String>,
 }
 
 impl CapabilitySet {
@@ -165,6 +169,10 @@ impl CapabilitySet {
 
         // Process --net-block flag
         caps.net_block = args.net_block;
+
+        // Process command allow/block lists
+        caps.allowed_commands = args.allow_command.clone();
+        caps.blocked_commands = args.block_command.clone();
 
         Ok(caps)
     }
@@ -288,6 +296,11 @@ impl CapabilitySet {
         // Network: profile OR CLI flag can block network (network allowed by default)
         caps.net_block = profile.network.block || args.net_block;
 
+        // Process command allow/block lists from CLI
+        // Profile support for commands will be added later
+        caps.allowed_commands = args.allow_command.clone();
+        caps.blocked_commands = args.block_command.clone();
+
         Ok(caps)
     }
 
@@ -410,6 +423,8 @@ mod tests {
             read_file: vec![],
             write_file: vec![],
             net_block: false,
+            allow_command: vec![],
+            block_command: vec![],
             secrets: None,
             profile: None,
             workdir: None,
@@ -440,6 +455,8 @@ mod tests {
             read_file: vec![],
             write_file: vec![file_path],
             net_block: false,
+            allow_command: vec![],
+            block_command: vec![],
             secrets: None,
             profile: None,
             workdir: None,
@@ -471,6 +488,8 @@ mod tests {
             read_file: vec![],
             write_file: vec![],
             net_block: true,
+            allow_command: vec![],
+            block_command: vec![],
             secrets: None,
             profile: None,
             workdir: None,

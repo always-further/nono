@@ -1,13 +1,18 @@
 [package]
-name = "nono"
+name = "nono-rs"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.74"
 authors = ["Luke Hinds"]
 description = "The opposite of YOLO - a capability shell for AI agents"
 license = "Apache-2.0"
 repository = "https://github.com/lukehinds/nono"
-keywords = ["sandbox", "security", "capability", "agent", "ai", "sandbox"]
+homepage = "https://github.com/lukehinds/nono"
+documentation = "https://docs.rs/nono-rs"
+readme = "README.md"
+keywords = ["sandbox", "security", "capability", "agent", "landlock"]
 categories = ["command-line-utilities", "development-tools"]
+include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md", "CHANGELOG.md"]
 
 [dependencies]
 # CLI
@@ -50,3 +55,10 @@ tempfile = "3"
 [[bin]]
 name = "nono"
 path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 1
+panic = "abort"

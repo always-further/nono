@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 (glibc)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: nono
+
+          # Linux x86_64 (musl - static)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: nono
+
+          # Linux aarch64 (glibc)
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: nono
+            cross: true
+
+          # macOS x86_64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact: nono
+
+          # macOS aarch64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact: nono
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czvf ../../../nono-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nono-${{ matrix.target }}
+          path: nono-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -name "*.tar.gz" -exec mv {} . \;
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew-nono
+        uses: actions/checkout@v4
+        with:
+          repository: lukehinds/homebrew-nono
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-nono
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nono-*-apple-darwin
+          path: artifacts
+
+      - name: Update formula
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+
+          # Calculate SHA256 for both architectures
+          ARM64_SHA=$(sha256sum artifacts/nono-aarch64-apple-darwin/nono-*-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
+          X64_SHA=$(sha256sum artifacts/nono-x86_64-apple-darwin/nono-*-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+
+          # Update formula version and checksums
+          cd homebrew-nono
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/nono.rb
+          sed -i "s|releases/download/v[^/]*/|releases/download/v${VERSION}/|g" Formula/nono.rb
+          # Update ARM64 SHA (first sha256 in on_arm block)
+          sed -i "/on_arm/,/end/{s/sha256 \"[a-f0-9]*\"/sha256 \"${ARM64_SHA}\"/}" Formula/nono.rb
+          # Update x64 SHA (sha256 in on_intel block)
+          sed -i "/on_intel/,/end/{s/sha256 \"[a-f0-9]*\"/sha256 \"${X64_SHA}\"/}" Formula/nono.rb
+
+      - name: Commit and push
+        run: |
+          cd homebrew-nono
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/nono.rb
+          git diff --staged --quiet || git commit -m "Update nono to ${{ github.ref_name }}"
+          git push
