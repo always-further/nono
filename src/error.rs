@@ -96,32 +96,6 @@ pub enum NonoError {
         current: u64,
         attempted: u64,
     },
-
-    // Trace errors (for future trace feature)
-    #[allow(dead_code)]
-    #[error("Trace failed: {0}")]
-    TraceFailed(String),
-
-    #[allow(dead_code)]
-    #[cfg(target_os = "linux")]
-    #[error("strace not found. Install with: {0}")]
-    StraceNotFound(String),
-
-    #[allow(dead_code)]
-    #[error("Failed to parse trace output: {0}")]
-    TraceParseError(String),
-
-    #[allow(dead_code)]
-    #[cfg(target_os = "linux")]
-    #[error("Cannot trace: ptrace blocked by Yama. Run: echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope")]
-    PtraceBlocked,
-
-    #[allow(dead_code)]
-    #[error("Failed to write profile to {path}: {source}")]
-    ProfileWriteFailed {
-        path: PathBuf,
-        source: std::io::Error,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, NonoError>;
