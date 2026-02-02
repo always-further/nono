@@ -41,7 +41,7 @@ The secret key (`release-key.key`) must be:
 - Access-controlled to release managers only
 
 Recommended storage:
-- Hardware security module (HSM)
+- Hardware security module (HSM/YubiKey)
 - macOS Keychain (encrypted)
 - 1Password / other password manager
 - Encrypted USB drive in secure storage
