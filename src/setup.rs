@@ -288,9 +288,10 @@ impl SetupRunner {
             dangerous_commands.len()
         );
 
-        // Show a sample of blocked commands (sorted for consistency)
-        let mut sample: Vec<_> = dangerous_commands.iter().take(8).cloned().collect();
-        sample.sort();
+        // Show a sample of blocked commands (sort first for deterministic output)
+        let mut all_commands: Vec<_> = dangerous_commands.iter().cloned().collect();
+        all_commands.sort();
+        let sample: Vec<_> = all_commands.into_iter().take(8).collect();
         println!("      {}, ...", sample.join(", "));
 
         println!("  ✓ Network access: allowed by default (use --net-block to disable)");
@@ -304,17 +305,22 @@ impl SetupRunner {
 
         for name in &profiles {
             // Load profile to get description
-            if let Ok(p) = profile::load_profile(name, true) {
-                let desc = p
-                    .meta
-                    .description
-                    .unwrap_or_else(|| "No description".to_string());
-                let net_status = if p.network.block {
-                    "network blocked"
-                } else {
-                    "network allowed"
-                };
-                println!("  • {} - {} ({})", name, desc, net_status);
+            match profile::load_profile(name, true) {
+                Ok(p) => {
+                    let desc = p
+                        .meta
+                        .description
+                        .unwrap_or_else(|| "No description".to_string());
+                    let net_status = if p.network.block {
+                        "network blocked"
+                    } else {
+                        "network allowed"
+                    };
+                    println!("  * {} - {} ({})", name, desc, net_status);
+                }
+                Err(e) => {
+                    println!("  * {} - <warning: failed to load: {}>", name, e);
+                }
             }
         }
 
