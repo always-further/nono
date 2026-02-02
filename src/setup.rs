@@ -1,5 +1,7 @@
 use crate::cli::SetupArgs;
+use crate::config;
 use crate::error::{NonoError, Result};
+use crate::profile;
 use std::fs;
 use std::path::Path;
 
@@ -34,19 +36,25 @@ impl SetupRunner {
         // Phase 2: Sandbox support testing
         self.test_sandbox_support()?;
 
+        // Phase 3: Show what nono protects
+        self.show_protection_summary();
+
+        // Phase 4: Show built-in profiles
+        self.show_builtin_profiles();
+
         if !self.check_only {
-            // Phase 3: Directory setup
+            // Phase 5: Directory setup
             if self.generate_profiles {
                 self.setup_profiles()?;
             }
 
-            // Phase 4: Shell integration
+            // Phase 6: Shell integration
             if self.show_shell_integration {
                 self.show_shell_help();
             }
         }
 
-        // Phase 5: Summary
+        // Final: Summary
         self.show_summary();
 
         Ok(())
@@ -261,8 +269,68 @@ impl SetupRunner {
         Ok(())
     }
 
+    fn show_protection_summary(&self) {
+        println!("[3/{}] Default protections...", self.total_phases());
+
+        // Get sensitive paths from config
+        let sensitive_paths = config::get_sensitive_paths();
+        let dangerous_commands = config::get_dangerous_commands();
+
+        println!(
+            "  ✓ {} sensitive paths blocked by default:",
+            sensitive_paths.len()
+        );
+        println!("      SSH keys, AWS/GCP/Azure credentials, Kubernetes config,");
+        println!("      Docker config, GPG keys, password managers, shell configs");
+
+        println!(
+            "  ✓ {} dangerous commands blocked by default:",
+            dangerous_commands.len()
+        );
+
+        // Show a sample of blocked commands (sort first for deterministic output)
+        let mut all_commands: Vec<_> = dangerous_commands.iter().cloned().collect();
+        all_commands.sort();
+        let sample: Vec<_> = all_commands.into_iter().take(8).collect();
+        println!("      {}, ...", sample.join(", "));
+
+        println!("  ✓ Network access: allowed by default (use --net-block to disable)");
+        println!();
+    }
+
+    fn show_builtin_profiles(&self) {
+        println!("[4/{}] Built-in profiles...", self.total_phases());
+
+        let profiles = profile::list_profiles();
+
+        for name in &profiles {
+            // Load profile to get description
+            match profile::load_profile(name, true) {
+                Ok(p) => {
+                    let desc = p
+                        .meta
+                        .description
+                        .unwrap_or_else(|| "No description".to_string());
+                    let net_status = if p.network.block {
+                        "network blocked"
+                    } else {
+                        "network allowed"
+                    };
+                    println!("  * {} - {} ({})", name, desc, net_status);
+                }
+                Err(e) => {
+                    println!("  * {} - <warning: failed to load: {}>", name, e);
+                }
+            }
+        }
+
+        println!();
+        println!("  Use with: nono run --profile <name> -- <command>");
+        println!();
+    }
+
     fn setup_profiles(&self) -> Result<()> {
-        println!("[3/{}] Setting up profiles...", self.total_phases());
+        println!("[5/{}] Setting up example profiles...", self.total_phases());
 
         // Create profile directory
         let profile_dir = dirs::config_dir()
@@ -302,7 +370,7 @@ impl SetupRunner {
     }
 
     fn show_shell_help(&self) {
-        println!("[4/{}] Shell integration...", self.total_phases());
+        println!("[6/{}] Shell integration...", self.total_phases());
 
         // Detect shell
         let shell = std::env::var("SHELL")
@@ -329,41 +397,45 @@ impl SetupRunner {
         println!();
 
         if self.check_only {
-            println!("Installation verified! ✓");
+            println!("Installation verified!");
             println!();
             println!("Your system is ready to use nono. Run 'nono run --help' to get started.");
         } else {
-            println!("Setup complete! 🎉");
+            println!("Setup complete!");
             println!();
-            println!("Next steps:");
-            println!("  1. Try running a sandboxed command:");
-            println!("       nono run --allow . -- echo \"Hello from sandbox\"");
+            println!("Quick start examples:");
             println!();
-            println!("  2. Check why a path would be blocked:");
-            println!("       nono why ~/.ssh/id_rsa");
+            println!("  # Run Claude Code with built-in profile (recommended)");
+            println!("  nono run --profile claude-code -- claude");
+            println!();
+            println!("  # Run any command with current directory access");
+            println!("  nono run --allow . -- <command>");
+            println!();
+            println!("  # Run cargo build with no network (reproducible builds)");
+            println!("  nono run --profile cargo-build -- cargo build");
+            println!();
+            println!("  # Check why a sensitive path is blocked");
+            println!("  nono why ~/.ssh/id_rsa");
             println!();
 
             if self.generate_profiles {
-                println!("  3. Customize profiles:");
+                println!("Custom profiles:");
                 let profile_dir = dirs::config_dir()
                     .map(|p| p.join("nono").join("profiles"))
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "~/.config/nono/profiles".to_string());
-                println!("       Edit {}/example-agent.toml", profile_dir);
+                println!("  Edit example profiles in: {}", profile_dir);
                 println!();
-                println!("  4. Read the documentation:");
-            } else {
-                println!("  3. Read the documentation:");
             }
 
-            println!("       https://github.com/lukehinds/nono/docs");
+            println!("Documentation: https://github.com/lukehinds/nono#readme");
             println!();
             println!("Run 'nono run --help' to see all options.");
         }
     }
 
     fn total_phases(&self) -> usize {
-        let mut count = 2; // Installation check + sandbox test
+        let mut count = 4; // Installation check + sandbox test + protection summary + profiles
 
         if !self.check_only {
             if self.generate_profiles {
