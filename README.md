@@ -23,7 +23,7 @@
 </div>
 
 > [!WARNING]
-> This is an early release that has not undergone comprehensive security auditing or peer review. Although care and attention has been made and the author has a long background in security, there are no guarantees regarding maturity or stability. Not recommended for production environments.
+> This is an early alpha release that has not undergone comprehensive security auditing or peer review. Some of the core policy files are still undergoing changes. Although care and attention has been made and the author has a long background in security, there are no guarantees regarding maturity or stability. Not recommended for production environments. Please do raise bugs, if you see something wrong, you're probably right. 
 
 **nono** is a secure, kernel-enforced capability shell for running untrusted AI agents and processes. Unlike policy-based sandboxes that intercept and filter operations, nono leverages OS security primitives (Landlock on Linux, Seatbelt on macOS) to create an environment where unauthorized operations are structurally impossible.
 
