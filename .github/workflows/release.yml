@@ -4,12 +4,19 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.2.3)'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -36,6 +43,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -53,14 +62,14 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          tar czvf ../../../nono-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+          tar czvf ../../../nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
           cd ../../..
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: nono-${{ matrix.target }}
-          path: nono-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          path: nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz
 
   release:
     name: Create Release
@@ -68,6 +77,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v7
@@ -96,6 +107,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
@@ -128,7 +141,7 @@ jobs:
 
       - name: Update formula
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${{ env.RELEASE_TAG }}"
           VERSION="${VERSION#v}"
 
           # Calculate SHA256 for both architectures
@@ -151,5 +164,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/nono.rb
-          git diff --staged --quiet || git commit -m "Update nono to ${{ github.ref_name }}"
+          git diff --staged --quiet || git commit -m "Update nono to ${{ env.RELEASE_TAG }}"
           git push
