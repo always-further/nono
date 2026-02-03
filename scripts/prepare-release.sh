@@ -34,6 +34,10 @@ echo "Updating Cargo.toml..."
 sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" Cargo.toml
 rm Cargo.toml.bak
 
+# Update Cargo.lock to reflect the new version
+echo "Updating Cargo.lock..."
+cargo check --quiet
+
 # Generate changelog (git cliff expects the tag WITH 'v' prefix)
 echo "Generating CHANGELOG.md..."
 git cliff --unreleased --tag "${NEXT_VERSION_WITH_V}" --prepend CHANGELOG.md
@@ -44,6 +48,6 @@ echo ""
 echo "Next steps:"
 echo "1. Review the changes in CHANGELOG.md"
 echo "2. Sign security lists (if changed): minisign -Sm data/security-lists.toml -s /path/to/release-key.key"
-echo "3. Commit: git add Cargo.toml CHANGELOG.md && git commit -m 'Release v${NEXT_VERSION}'"
+echo "3. Commit: git add Cargo.toml Cargo.lock CHANGELOG.md && git commit -m 'Release v${NEXT_VERSION}'"
 echo "4. Tag: git tag v${NEXT_VERSION}"
 echo "5. Push: git push -u origin main && git push origin v${NEXT_VERSION}"
