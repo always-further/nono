@@ -225,8 +225,12 @@ fn generate_profile(caps: &CapabilitySet) -> String {
         // This prevents granting ~ or ~/Library from disabling protection for ~/.ssh or ~/Library/Keychains.
         // User must explicitly grant --read ~/.ssh to access SSH keys.
         let user_granted = caps.fs.iter().any(|cap| {
-            let cap_path = cap.resolved.display().to_string();
-            cap_path.starts_with(&path)
+            let sensitive_path = std::path::Path::new(&path);
+            // `Path::starts_with` performs a component-wise check, which is safer
+            // and more idiomatic than string manipulation for path comparisons.
+            // It correctly handles cases like `/a/b` vs `/a` and prevents
+            // bypasses like `/a-b` matching `/a`.
+            cap.resolved.starts_with(sensitive_path)
         });
 
         if !user_granted {
@@ -634,6 +638,169 @@ mod tests {
         assert!(
             profile.contains("(allow process-fork)\n"),
             "Profile should allow process forking"
+        );
+    }
+
+    // =========================================================================
+    // Security regression tests for path comparison bypass (CVE-like)
+    // These tests ensure the fix for string-based starts_with() is preserved.
+    // =========================================================================
+
+    #[test]
+    fn test_path_collision_bypass_blocked() {
+        // Attack: Create ~/.sshfoo to bypass ~/.ssh protection
+        // The vulnerable code would match "/Users/test/.sshfoo".starts_with("/Users/test/.ssh")
+        // Fixed code requires exact match OR path separator after the sensitive path
+        std::env::set_var("HOME", "/Users/test");
+
+        let mut caps = CapabilitySet::default();
+        caps.fs.push(FsCapability {
+            original: PathBuf::from("/Users/test/.sshfoo"),
+            resolved: PathBuf::from("/Users/test/.sshfoo"),
+            access: FsAccess::Read,
+            is_file: false,
+        });
+
+        let profile = generate_profile(&caps);
+
+        // ~/.ssh should STILL be denied (the bypass attempt should fail)
+        assert!(
+            profile.contains("(deny file-read-data (subpath \"/Users/test/.ssh\"))"),
+            "Path collision bypass: ~/.sshfoo grant must NOT disable ~/.ssh protection"
+        );
+    }
+
+    #[test]
+    fn test_exact_sensitive_path_grant_allows_access() {
+        // Legitimate use: explicitly granting ~/.ssh should disable protection for it
+        std::env::set_var("HOME", "/Users/test");
+
+        let mut caps = CapabilitySet::default();
+        caps.fs.push(FsCapability {
+            original: PathBuf::from("/Users/test/.ssh"),
+            resolved: PathBuf::from("/Users/test/.ssh"),
+            access: FsAccess::Read,
+            is_file: false,
+        });
+
+        let profile = generate_profile(&caps);
+
+        // ~/.ssh should NOT be denied when explicitly granted
+        assert!(
+            !profile.contains("(deny file-read-data (subpath \"/Users/test/.ssh\"))"),
+            "Exact grant of ~/.ssh should disable its protection"
+        );
+        // But should still allow reading it
+        assert!(
+            profile.contains("(allow file-read* (subpath \"/Users/test/.ssh\"))"),
+            "Exact grant of ~/.ssh should allow reading"
+        );
+    }
+
+    #[test]
+    fn test_child_path_grant_allows_access() {
+        // Granting ~/.ssh/keys (a child of sensitive ~/.ssh) should disable protection
+        std::env::set_var("HOME", "/Users/test");
+
+        let mut caps = CapabilitySet::default();
+        caps.fs.push(FsCapability {
+            original: PathBuf::from("/Users/test/.ssh/keys"),
+            resolved: PathBuf::from("/Users/test/.ssh/keys"),
+            access: FsAccess::Read,
+            is_file: false,
+        });
+
+        let profile = generate_profile(&caps);
+
+        // ~/.ssh should NOT be denied when a child path is granted
+        // (user explicitly acknowledged they want access to something under ~/.ssh)
+        assert!(
+            !profile.contains("(deny file-read-data (subpath \"/Users/test/.ssh\"))"),
+            "Grant of ~/.ssh/keys should disable ~/.ssh protection"
+        );
+    }
+
+    #[test]
+    fn test_unrelated_path_does_not_affect_sensitive() {
+        // Granting an unrelated path should not affect sensitive path protection
+        std::env::set_var("HOME", "/Users/test");
+
+        let mut caps = CapabilitySet::default();
+        caps.fs.push(FsCapability {
+            original: PathBuf::from("/Users/test/projects"),
+            resolved: PathBuf::from("/Users/test/projects"),
+            access: FsAccess::Read,
+            is_file: false,
+        });
+
+        let profile = generate_profile(&caps);
+
+        // ~/.ssh should still be denied
+        assert!(
+            profile.contains("(deny file-read-data (subpath \"/Users/test/.ssh\"))"),
+            "Unrelated path grant must not affect ~/.ssh protection"
+        );
+        // ~/.aws should still be denied
+        assert!(
+            profile.contains("(deny file-read-data (subpath \"/Users/test/.aws\"))"),
+            "Unrelated path grant must not affect ~/.aws protection"
+        );
+    }
+
+    #[test]
+    fn test_multiple_collision_attempts_blocked() {
+        // Test multiple collision patterns
+        std::env::set_var("HOME", "/Users/test");
+
+        let mut caps = CapabilitySet::default();
+        // Try to bypass ~/.aws with ~/.awsbackup
+        caps.fs.push(FsCapability {
+            original: PathBuf::from("/Users/test/.awsbackup"),
+            resolved: PathBuf::from("/Users/test/.awsbackup"),
+            access: FsAccess::Read,
+            is_file: false,
+        });
+        // Try to bypass ~/.gnupg with ~/.gnupg2
+        caps.fs.push(FsCapability {
+            original: PathBuf::from("/Users/test/.gnupg2"),
+            resolved: PathBuf::from("/Users/test/.gnupg2"),
+            access: FsAccess::Read,
+            is_file: false,
+        });
+
+        let profile = generate_profile(&caps);
+
+        // Both sensitive paths should STILL be protected
+        assert!(
+            profile.contains("(deny file-read-data (subpath \"/Users/test/.aws\"))"),
+            "~/.awsbackup must NOT bypass ~/.aws protection"
+        );
+        assert!(
+            profile.contains("(deny file-read-data (subpath \"/Users/test/.gnupg\"))"),
+            "~/.gnupg2 must NOT bypass ~/.gnupg protection"
+        );
+    }
+
+    #[test]
+    fn test_trailing_slash_normalization() {
+        // Paths with trailing slashes should be normalized for comparison
+        std::env::set_var("HOME", "/Users/test");
+
+        let mut caps = CapabilitySet::default();
+        // Grant path WITH trailing slash
+        caps.fs.push(FsCapability {
+            original: PathBuf::from("/Users/test/.ssh/"),
+            resolved: PathBuf::from("/Users/test/.ssh/"),
+            access: FsAccess::Read,
+            is_file: false,
+        });
+
+        let profile = generate_profile(&caps);
+
+        // ~/.ssh should NOT be denied (trailing slash should be normalized)
+        assert!(
+            !profile.contains("(deny file-read-data (subpath \"/Users/test/.ssh\"))"),
+            "Grant with trailing slash should still disable protection"
         );
     }
 }

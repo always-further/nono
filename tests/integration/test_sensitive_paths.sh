@@ -250,6 +250,59 @@ else
 fi
 
 # =============================================================================
+# Path Collision Bypass Prevention (Security Regression Tests)
+# =============================================================================
+
+echo ""
+echo "--- Path Collision Bypass Prevention ---"
+echo "(These tests verify the fix for string-based starts_with vulnerability)"
+echo ""
+
+# Create collision directories that could bypass sensitive path protection
+# if the comparison used string starts_with() instead of path component comparison.
+COLLISION_DIR_SSH="$TMPDIR/.sshfoo"
+COLLISION_DIR_AWS="$TMPDIR/.awsbackup"
+mkdir -p "$COLLISION_DIR_SSH" "$COLLISION_DIR_AWS"
+echo "not-a-key" > "$COLLISION_DIR_SSH/fake"
+echo "not-creds" > "$COLLISION_DIR_AWS/fake"
+
+# Test 1: Granting ~/.sshfoo must NOT bypass ~/.ssh protection
+# The vulnerable code would match "/home/user/.sshfoo".starts_with("/home/user/.ssh")
+if [[ -d ~/.ssh ]]; then
+    expect_failure "~/.sshfoo grant does NOT bypass ~/.ssh protection" \
+        "$NONO_BIN" run --read "$COLLISION_DIR_SSH" --allow "$TMPDIR" -- ls ~/.ssh/
+
+    if [[ -f ~/.ssh/id_rsa ]] || [[ -f ~/.ssh/id_ed25519 ]]; then
+        if [[ -f ~/.ssh/id_rsa ]]; then
+            KEY_FILE=~/.ssh/id_rsa
+        else
+            KEY_FILE=~/.ssh/id_ed25519
+        fi
+        expect_failure "~/.sshfoo grant does NOT allow reading SSH keys" \
+            "$NONO_BIN" run --read "$COLLISION_DIR_SSH" --allow "$TMPDIR" -- cat "$KEY_FILE"
+    fi
+else
+    skip_test "SSH collision bypass test" "~/.ssh not found"
+fi
+
+# Test 2: Granting ~/.awsbackup must NOT bypass ~/.aws protection
+if [[ -d ~/.aws ]]; then
+    expect_failure "~/.awsbackup grant does NOT bypass ~/.aws protection" \
+        "$NONO_BIN" run --read "$COLLISION_DIR_AWS" --allow "$TMPDIR" -- ls ~/.aws/
+
+    if [[ -f ~/.aws/credentials ]]; then
+        expect_failure "~/.awsbackup grant does NOT allow reading AWS creds" \
+            "$NONO_BIN" run --read "$COLLISION_DIR_AWS" --allow "$TMPDIR" -- cat ~/.aws/credentials
+    fi
+else
+    skip_test "AWS collision bypass test" "~/.aws not found"
+fi
+
+# Test 3: Verify the collision directories themselves ARE accessible (grants work)
+expect_success "collision directory itself is readable when granted" \
+    "$NONO_BIN" run --read "$COLLISION_DIR_SSH" --allow "$TMPDIR" -- cat "$COLLISION_DIR_SSH/fake"
+
+# =============================================================================
 # Summary
 # =============================================================================
 
