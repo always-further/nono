@@ -187,68 +187,7 @@ fn run_sandbox(args: SandboxArgs, command: Vec<String>, silent: bool) -> Result<
     }
 
     let (caps, loaded_secrets) = prepare_sandbox(&args, silent)?;
-
-    // Check if command is blocked using config module
-    let program = &command[0];
-    if let Some(blocked) =
-        config::check_blocked_command(program, &caps.allowed_commands, &caps.blocked_commands)
-    {
-        return Err(NonoError::BlockedCommand {
-            command: blocked,
-            reason: "This command is blocked by default due to destructive potential. \
-                     Use --allow-command to override if you understand the risks."
-                .to_string(),
-        });
-    }
-
-    // Dry run mode - just show what would happen
-    if args.dry_run {
-        if !loaded_secrets.is_empty() && !silent {
-            eprintln!(
-                "  Would inject {} secret(s) as environment variables",
-                loaded_secrets.len()
-            );
-        }
-        output::print_dry_run(&command, silent);
-        return Ok(());
-    }
-
-    // Apply the sandbox
-    output::print_applying_sandbox(silent);
-    sandbox::apply(&caps)?;
-    output::print_sandbox_active(silent);
-    if !silent {
-        eprintln!(
-            "{}",
-            "Exit the shell with Ctrl-D or 'exit'.".truecolor(150, 150, 150)
-        );
-        eprintln!();
-    }
-
-    // Execute the command
-    let program = &command[0];
-    let cmd_args = &command[1..];
-
-    info!("Executing: {} {:?}", program, cmd_args);
-
-    let cap_file = write_capability_state_file(&caps, silent);
-
-    let mut cmd = Command::new(program);
-    cmd.args(cmd_args);
-    apply_nono_env(&mut cmd, &caps, cap_file.as_deref());
-
-    // Inject secrets as environment variables
-    // These were loaded from the keystore before sandbox was applied
-    for secret in &loaded_secrets {
-        info!("Injecting secret as ${}", secret.env_var);
-        cmd.env(&secret.env_var, secret.value.as_str());
-    }
-
-    let err = cmd.exec();
-
-    // exec() only returns if there's an error
-    // Note: loaded_secrets will be dropped here, zeroizing the secret values
-    Err(NonoError::CommandExecution(err))
+    execute_sandboxed(command, &args, caps, loaded_secrets, silent, false)
 }
 
 /// Run an interactive shell inside the sandbox
@@ -284,14 +223,64 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         return Ok(());
     }
 
+    execute_sandboxed(vec![shell_str], &args.sandbox, caps, loaded_secrets, silent, true)
+}
+
+fn execute_sandboxed(
+    command: Vec<String>,
+    sandbox_args: &SandboxArgs,
+    caps: CapabilitySet,
+    loaded_secrets: Vec<keystore::LoadedSecret>,
+    silent: bool,
+    is_interactive_shell: bool,
+) -> Result<()> {
+    // Check if command is blocked using config module
+    let program = &command[0];
+    if let Some(blocked) =
+        config::check_blocked_command(program, &caps.allowed_commands, &caps.blocked_commands)
+    {
+        return Err(NonoError::BlockedCommand {
+            command: blocked,
+            reason: "This command is blocked by default due to destructive potential. \
+                     Use --allow-command to override if you understand the risks."
+                .to_string(),
+        });
+    }
+
+    // Dry run mode - just show what would happen
+    if sandbox_args.dry_run {
+        if !loaded_secrets.is_empty() && !silent {
+            eprintln!(
+                "  Would inject {} secret(s) as environment variables",
+                loaded_secrets.len()
+            );
+        }
+        output::print_dry_run(&command, silent);
+        return Ok(());
+    }
+
     // Apply the sandbox
     output::print_applying_sandbox(silent);
     sandbox::apply(&caps)?;
     output::print_sandbox_active(silent);
+    if is_interactive_shell && !silent {
+        eprintln!(
+            "{}",
+            "Exit the shell with Ctrl-D or 'exit'.".truecolor(150, 150, 150)
+        );
+        eprintln!();
+    }
+
+    // Execute the command
+    let program = &command[0];
+    let cmd_args = &command[1..];
+
+    info!("Executing: {} {:?}", program, cmd_args);
 
     let cap_file = write_capability_state_file(&caps, silent);
 
-    let mut cmd = Command::new(shell_path);
+    let mut cmd = Command::new(program);
+    cmd.args(cmd_args);
     apply_nono_env(&mut cmd, &caps, cap_file.as_deref());
 
     // Inject secrets as environment variables
@@ -302,6 +291,9 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
     }
 
     let err = cmd.exec();
+
+    // exec() only returns if there's an error
+    // Note: loaded_secrets will be dropped here, zeroizing the secret values
     Err(NonoError::CommandExecution(err))
 }
 
