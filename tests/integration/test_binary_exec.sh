@@ -148,16 +148,16 @@ echo "--- Language Runtimes ---"
 # Helper to check if a runtime can actually execute in the sandbox
 # Uses actual code execution, not just --version
 can_python_run() {
-    "$NONO_BIN" run --allow "$TMPDIR" -- python3 -c "print('test')" >/dev/null 2>&1
+    "$NONO_BIN" run --allow "$TMPDIR" -- python3 -c "print('test')" </dev/null >/dev/null 2>&1
 }
 
 can_node_run() {
     # Node requires cwd access, so test with actual code execution
-    "$NONO_BIN" run --allow "$TMPDIR" -- node -e "process.exit(0)" >/dev/null 2>&1
+    "$NONO_BIN" run --allow "$TMPDIR" -- node -e "process.exit(0)" </dev/null >/dev/null 2>&1
 }
 
 can_ruby_run() {
-    "$NONO_BIN" run --allow "$TMPDIR" -- ruby -e "exit 0" >/dev/null 2>&1
+    "$NONO_BIN" run --allow "$TMPDIR" -- ruby -e "exit 0" </dev/null >/dev/null 2>&1
 }
 
 # Python3 - may be installed via Homebrew or system
@@ -215,7 +215,7 @@ fi
 
 # Go tools
 can_gofmt_run() {
-    "$NONO_BIN" run --allow "$TMPDIR" -- gofmt -h >/dev/null 2>&1
+    "$NONO_BIN" run --allow "$TMPDIR" -- gofmt -h </dev/null >/dev/null 2>&1
 }
 
 if command_exists go && command_exists gofmt; then
