@@ -145,6 +145,7 @@ echo "--- Language Runtimes ---"
 # Also, some runtimes like Node.js require cwd access which the sandbox may block.
 # We check if each runtime can actually execute code (not just --version) before testing.
 
+<<<<<<< Updated upstream
 # Helper to check if a runtime can actually execute in the sandbox
 # Uses actual code execution, not just --version
 can_python_run() {
@@ -158,11 +159,17 @@ can_node_run() {
 
 can_ruby_run() {
     "$NONO_BIN" run --allow "$TMPDIR" -- ruby -e "exit 0" </dev/null >/dev/null 2>&1
+=======
+# Helper to check if a command can execute in the sandbox
+# Redirects stdin from /dev/null to avoid blocking on the CWD prompt
+can_run_in_sandbox() {
+    "$NONO_BIN" run --allow "$TMPDIR" -- "$@" </dev/null >/dev/null 2>&1
+>>>>>>> Stashed changes
 }
 
 # Python3 - may be installed via Homebrew or system
 if command_exists python3; then
-    if can_python_run; then
+    if can_run_in_sandbox python3 -c "print('test')"; then
         expect_success "python3 executes" \
             "$NONO_BIN" run --allow "$TMPDIR" -- python3 -c "print('hello from python')"
 
@@ -179,7 +186,7 @@ fi
 # Node.js - often installed via Homebrew or nvm
 # Node requires cwd access which the sandbox may restrict
 if command_exists node; then
-    if can_node_run; then
+    if can_run_in_sandbox node -e "process.exit(0)"; then
         expect_success "node executes" \
             "$NONO_BIN" run --allow "$TMPDIR" -- node -e "console.log('hello from node')"
 
@@ -195,7 +202,7 @@ fi
 
 # Ruby - may be system or Homebrew
 if command_exists ruby; then
-    if can_ruby_run; then
+    if can_run_in_sandbox ruby -e "exit 0"; then
         expect_success "ruby executes" \
             "$NONO_BIN" run --allow "$TMPDIR" -- ruby -e "puts 'hello from ruby'"
     else
@@ -214,12 +221,15 @@ else
 fi
 
 # Go tools
+<<<<<<< Updated upstream
 can_gofmt_run() {
     "$NONO_BIN" run --allow "$TMPDIR" -- gofmt -h </dev/null >/dev/null 2>&1
 }
 
+=======
+>>>>>>> Stashed changes
 if command_exists go && command_exists gofmt; then
-    if can_gofmt_run; then
+    if can_run_in_sandbox gofmt -h; then
         expect_success "gofmt executes" \
             "$NONO_BIN" run --allow "$TMPDIR" -- gofmt -h 2>&1 >/dev/null
     else
