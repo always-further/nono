@@ -7,7 +7,11 @@ description: Sandboxing Anthropic Claude Code with nono
 
 ## Why Sandbox Claude Code?
 
-Claude Code operates directly on your filesystem and can execute arbitrary shell commands. Without isolation:
+Claude Code operates includes its own sandbox mechanism, but the Agent is able to override the sandbox by calling `dangerouslyOverrideSandbox: true` and access any file and perform any operation on the system.
+
+![Claude Code using dangerouslyOverrideSandbox](/assets/claude-code-overrides-the-sandbox-without-permission.webp)
+
+This creates several risks:
 
 - It could read sensitive files outside your project (SSH keys, cloud credentials)
 - A prompt injection in a dependency could trigger unintended file access
@@ -26,6 +30,8 @@ The built-in profile provides:
 - **Read+write access** to `~/.claude` (agent state, debug logs, project config)
 - **Read+write access** to `~/.claude.json` (settings file)
 - **Network access** enabled (required for Anthropic API)
+- **Interactive mode** enabled (preserves TTY for Claude's terminal UI)
+- **Automatic hook installation** for sandbox-aware error handling
 
 ## Custom Profile
 
@@ -121,3 +127,46 @@ nono run --profile claude-code --net-block -- claude
 ```
 
 See [Security Profiles](/security/profiles) for details on profile format and precedence rules.
+
+## Automatic Hook Integration
+
+When you first run `nono run --profile claude-code`, nono automatically installs a hook that helps Claude understand sandbox restrictions. You'll see:
+
+```
+Installing claude-code hook to ~/.claude/hooks/nono-hook.sh
+```
+
+This hook:
+1. **Detects sandbox errors** - When Claude's file operations fail due to sandbox restrictions
+2. **Injects context** - Tells Claude exactly which paths are allowed and blocked
+3. **Provides guidance** - Instructs Claude to suggest restarting with `--allow` flags instead of attempting workarounds
+
+nono also adds a section to `~/.claude/CLAUDE.md` with upfront sandbox instructions, so Claude understands the security boundaries before encountering errors.
+
+<Note>
+The hook installation is idempotent - it only installs once and updates automatically when nono is upgraded. The hook only activates when running inside a nono sandbox (detected via `$NONO_CAP_FILE`).
+</Note>
+
+### What Claude Sees on Errors
+
+When Claude attempts to access a blocked path, instead of just seeing "Operation not permitted", the hook injects:
+
+```
+[NONO SANDBOX - PERMISSION DENIED]
+
+STOP. Do not try alternative approaches. This is a hard security boundary.
+
+You are running inside the nono security sandbox. The operation you just
+attempted is PERMANENTLY BLOCKED for this session.
+
+ALLOWED PATHS (everything else is blocked):
+  /Users/you/project (readwrite)
+  /Users/you/.claude (readwrite)
+Network: allowed
+
+REQUIRED ACTION:
+Tell the user they must EXIT this Claude session and restart with:
+  nono run --allow /path/to/needed -- claude
+```
+
+This prevents Claude from wasting time on workarounds that cannot succeed.

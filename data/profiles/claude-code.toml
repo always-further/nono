@@ -11,6 +11,9 @@ min_nono_version = "0.2.0"
 # Agent needs full read+write access to the working directory
 access = "readwrite"
 
+# Claude Code has interactive TUI that needs TTY preserved
+interactive = true
+
 [filesystem]
 # ~/.claude: agent state, debug logs, projects, etc.
 allow = ["$HOME/.claude"]
@@ -31,3 +34,10 @@ block = []
 [secrets]
 # Map keystore account names to environment variables
 # anthropic_api_key = "ANTHROPIC_API_KEY"
+
+[hooks.claude-code]
+# Hook to inject nono sandbox diagnostics on tool failures
+# nono will automatically install this to ~/.claude/hooks/
+event = "PostToolUseFailure"
+matcher = "Read|Write|Edit|Bash"
+script = "nono-hook.sh"

@@ -195,6 +195,17 @@ pub struct RunArgs {
     #[command(flatten)]
     pub sandbox: SandboxArgs,
 
+    /// Suppress diagnostic footer on command failure.
+    /// By default, nono prints a helpful summary when commands exit non-zero.
+    /// Use this flag for scripts that parse stderr.
+    #[arg(long)]
+    pub no_diagnostics: bool,
+
+    /// Preserve TTY for interactive apps (e.g., Claude Code, vim, htop).
+    /// Without this flag, nono monitors output which can break interactive UIs.
+    #[arg(long = "exec")]
+    pub direct_exec: bool,
+
     /// Command to run inside the sandbox
     #[arg(required = true)]
     pub command: Vec<String>,

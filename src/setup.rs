@@ -30,25 +30,25 @@ impl SetupRunner {
         // Print ASCII art banner with random quote
         self.print_banner();
 
-        // Phase 1: Installation verification
+        // Installation verification
         self.check_installation()?;
 
-        // Phase 2: Sandbox support testing
+        // Sandbox support testing
         self.test_sandbox_support()?;
 
-        // Phase 3: Show what nono protects
+        // Show what nono protects
         self.show_protection_summary();
 
-        // Phase 4: Show built-in profiles
+        // Show built-in profiles
         self.show_builtin_profiles();
 
         if !self.check_only {
-            // Phase 5: Directory setup
+            // Directory setup
             if self.generate_profiles {
                 self.setup_profiles()?;
             }
 
-            // Phase 6: Shell integration
+            // Shell integration
             if self.show_shell_integration {
                 self.show_shell_help();
             }

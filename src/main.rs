@@ -1,7 +1,10 @@
 mod capability;
 mod cli;
 mod config;
+mod diagnostic;
 mod error;
+mod exec_strategy;
+mod hooks;
 mod keystore;
 mod output;
 mod profile;
@@ -17,8 +20,6 @@ use colored::Colorize;
 use error::{NonoError, Result};
 use profile::WorkdirAccess;
 use std::ffi::OsString;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -195,14 +196,32 @@ fn run_sandbox(args: SandboxArgs, command: Vec<String>, silent: bool) -> Result<
     );
     let cmd_args: Vec<OsString> = command_iter.map(OsString::from).collect();
 
-    let (caps, loaded_secrets) = prepare_sandbox(&args, silent)?;
-    execute_sandboxed(program, cmd_args, &args, caps, loaded_secrets, silent)
+    // Dry run mode - just show what would happen
+    if args.dry_run {
+        let prepared = prepare_sandbox(&args, silent)?;
+        if !prepared.secrets.is_empty() && !silent {
+            eprintln!(
+                "  Would inject {} secret(s) as environment variables",
+                prepared.secrets.len()
+            );
+        }
+        output::print_dry_run(&program, &cmd_args, silent);
+        return Ok(());
+    }
+
+    let prepared = prepare_sandbox(&args, silent)?;
+    execute_sandboxed(
+        program,
+        cmd_args,
+        &prepared.caps,
+        prepared.secrets,
+        prepared.interactive,
+        silent,
+    )
 }
 
 /// Run an interactive shell inside the sandbox
 fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
-    let (caps, loaded_secrets) = prepare_sandbox(&args.sandbox, silent)?;
-
     let shell_path = args
         .shell
         .or_else(|| {
@@ -213,6 +232,21 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         })
         .unwrap_or_else(|| std::path::PathBuf::from("/bin/sh"));
 
+    // Dry run mode - just show what would happen
+    if args.sandbox.dry_run {
+        let prepared = prepare_sandbox(&args.sandbox, silent)?;
+        if !prepared.secrets.is_empty() && !silent {
+            eprintln!(
+                "  Would inject {} secret(s) as environment variables",
+                prepared.secrets.len()
+            );
+        }
+        output::print_dry_run(shell_path.as_os_str(), &[], silent);
+        return Ok(());
+    }
+
+    let prepared = prepare_sandbox(&args.sandbox, silent)?;
+
     if !silent {
         eprintln!(
             "{}",
@@ -221,12 +255,13 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         eprintln!();
     }
 
+    // Shell is always interactive - needs TTY preservation
     execute_sandboxed(
         shell_path.into_os_string(),
         vec![],
-        &args.sandbox,
-        caps,
-        loaded_secrets,
+        &prepared.caps,
+        prepared.secrets,
+        true, // Force interactive for shell
         silent,
     )
 }
@@ -234,9 +269,9 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
 fn execute_sandboxed(
     program: OsString,
     cmd_args: Vec<OsString>,
-    sandbox_args: &SandboxArgs,
-    caps: CapabilitySet,
+    caps: &CapabilitySet,
     loaded_secrets: Vec<keystore::LoadedSecret>,
+    interactive: bool,
     silent: bool,
 ) -> Result<()> {
     // Check if command is blocked using config module
@@ -251,52 +286,102 @@ fn execute_sandboxed(
         });
     }
 
+    // Convert OsString command to String for exec_strategy
+    // (lossy conversion is acceptable - non-UTF8 commands are rare)
+    let command: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
+        .chain(cmd_args.iter().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+
     // Dry run mode - just show what would happen
-    if sandbox_args.dry_run {
-        if !loaded_secrets.is_empty() && !silent {
-            eprintln!(
-                "  Would inject {} secret(s) as environment variables",
-                loaded_secrets.len()
-            );
-        }
-        output::print_dry_run(&program, &cmd_args, silent);
-        return Ok(());
+    if command.is_empty() {
+        return Err(NonoError::NoCommand);
     }
+
+    // Resolve the program path BEFORE applying the sandbox.
+    // This ensures the program can be found even if its directory
+    // is not in the sandbox's allowed paths.
+    let resolved_program = exec_strategy::resolve_program(&command[0])?;
 
     // Apply the sandbox
     output::print_applying_sandbox(silent);
-    sandbox::apply(&caps)?;
+    sandbox::apply(caps)?;
     output::print_sandbox_active(silent);
 
-    // Execute the command
-    info!("Executing: {:?} {:?}", program, cmd_args);
+    // Write capability state file for `nono why --self`
+    let cap_file = write_capability_state_file(caps, silent);
+    let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
-    let cap_file = write_capability_state_file(&caps, silent);
+    // Build environment variables for the command
+    let env_vars: Vec<(&str, &str)> = loaded_secrets
+        .iter()
+        .map(|s| (s.env_var.as_str(), s.value.as_str()))
+        .collect();
 
-    let mut cmd = Command::new(&program);
-    cmd.args(&cmd_args);
-    if let Some(cap_file) = cap_file.as_deref() {
-        cmd.env("NONO_CAP_FILE", cap_file);
+    // Determine execution strategy
+    // Interactive mode (shell, TUI apps): use Direct exec for TTY preservation
+    // Non-interactive: use Monitor mode for diagnostic output on failure
+    let strategy = if interactive {
+        exec_strategy::ExecStrategy::Direct
+    } else {
+        exec_strategy::ExecStrategy::Monitor
+    };
+
+    // Determine threading context for fork safety
+    // If secrets were loaded, keyring may have spawned threads
+    let threading = if !loaded_secrets.is_empty() {
+        exec_strategy::ThreadingContext::KeyringExpected
+    } else {
+        exec_strategy::ThreadingContext::Strict
+    };
+
+    info!(
+        "Executing with strategy: {:?}, threading: {:?}",
+        strategy, threading
+    );
+
+    // Create execution config
+    let config = exec_strategy::ExecConfig {
+        command: &command,
+        resolved_program: &resolved_program,
+        caps,
+        env_vars,
+        cap_file: &cap_file_path,
+        no_diagnostics: silent,
+        threading,
+    };
+
+    // Execute based on strategy
+    match strategy {
+        exec_strategy::ExecStrategy::Direct => {
+            // Direct exec: nono disappears after exec
+            exec_strategy::execute_direct(&config)?;
+            // Note: loaded_secrets will be dropped here, zeroizing the secret values
+            unreachable!("execute_direct only returns on error");
+        }
+        exec_strategy::ExecStrategy::Monitor => {
+            // Monitor mode: fork+wait with diagnostic on failure
+            let exit_code = exec_strategy::execute_monitor(&config)?;
+            // Note: loaded_secrets will be dropped here, zeroizing the secret values
+            std::process::exit(exit_code);
+        }
+        exec_strategy::ExecStrategy::Supervised => {
+            // Not yet implemented
+            Err(NonoError::SandboxInit(
+                "Supervised mode not yet implemented".to_string(),
+            ))
+        }
     }
-
-    // Inject secrets as environment variables
-    // These were loaded from the keystore before sandbox was applied
-    for secret in &loaded_secrets {
-        info!("Injecting secret as ${}", secret.env_var);
-        cmd.env(&secret.env_var, secret.value.as_str());
-    }
-
-    let err = cmd.exec();
-
-    // exec() only returns if there's an error
-    // Note: loaded_secrets will be dropped here, zeroizing the secret values
-    Err(NonoError::CommandExecution(err))
 }
 
-fn prepare_sandbox(
-    args: &SandboxArgs,
-    silent: bool,
-) -> Result<(CapabilitySet, Vec<keystore::LoadedSecret>)> {
+/// Result of sandbox preparation
+struct PreparedSandbox {
+    caps: CapabilitySet,
+    secrets: Vec<keystore::LoadedSecret>,
+    /// Whether the profile indicates interactive mode (needs TTY)
+    interactive: bool,
+}
+
+fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
     // Set log level based on verbosity
     if args.verbose > 0 {
         match args.verbose {
@@ -311,7 +396,45 @@ fn prepare_sandbox(
     sandbox_state::cleanup_stale_state_files();
     // Load profile once if specified (used for both capabilities and secrets)
     let loaded_profile = if let Some(ref profile_name) = args.profile {
-        Some(profile::load_profile(profile_name, args.trust_unsigned)?)
+        let prof = profile::load_profile(profile_name, args.trust_unsigned)?;
+
+        // Install hooks defined in the profile (idempotent - only installs if needed)
+        if !prof.hooks.hooks.is_empty() {
+            match hooks::install_profile_hooks(&prof.hooks.hooks) {
+                Ok(results) => {
+                    for (target, result) in results {
+                        match result {
+                            hooks::HookInstallResult::Installed => {
+                                if !silent {
+                                    eprintln!(
+                                        "  Installing {} hook to ~/.claude/hooks/nono-hook.sh",
+                                        target
+                                    );
+                                }
+                            }
+                            hooks::HookInstallResult::Updated => {
+                                if !silent {
+                                    eprintln!("  Updating {} hook (new version available)", target);
+                                }
+                            }
+                            hooks::HookInstallResult::AlreadyInstalled
+                            | hooks::HookInstallResult::Skipped => {
+                                // Silent - hook already set up
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Hook installation failure is non-fatal - warn and continue
+                    tracing::warn!("Failed to install profile hooks: {}", e);
+                    if !silent {
+                        eprintln!("  Warning: Failed to install hooks: {}", e);
+                    }
+                }
+            }
+        }
+
+        Some(prof)
     } else {
         None
     };
@@ -323,8 +446,12 @@ fn prepare_sandbox(
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    // Extract workdir access config before profile is consumed for secrets
+    // Extract config before profile is consumed for secrets
     let profile_workdir_access = loaded_profile.as_ref().map(|p| p.workdir.access.clone());
+    let profile_interactive = loaded_profile
+        .as_ref()
+        .map(|p| p.interactive)
+        .unwrap_or(false);
 
     // Build capabilities from profile or arguments
     let mut caps = if let Some(ref prof) = loaded_profile {
@@ -423,7 +550,11 @@ fn prepare_sandbox(
 
     info!("{}", sandbox::support_info());
 
-    Ok((caps, loaded_secrets))
+    Ok(PreparedSandbox {
+        caps,
+        secrets: loaded_secrets,
+        interactive: profile_interactive,
+    })
 }
 
 fn write_capability_state_file(caps: &CapabilitySet, silent: bool) -> Option<std::path::PathBuf> {

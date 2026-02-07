@@ -49,6 +49,9 @@ colored = "2"
 rand = "0.8"
 nix = "0.29"
 
+# Path resolution (for async-signal-safe exec)
+which = "7"
+
 # Platform-specific
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"

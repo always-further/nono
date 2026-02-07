@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use tracing::warn;
 
 // ============================================================================
-// Phase 4 infrastructure: Override system (implemented, not yet integrated)
+// Override system (implemented, not yet integrated)
 // These types and functions are used for the full override system which
 // will be integrated in a future PR. For now, allow dead_code.
 // ============================================================================

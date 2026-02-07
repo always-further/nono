@@ -3,9 +3,10 @@
 //! These profiles are trusted by default and don't require --trust-unsigned.
 
 use super::{
-    FilesystemConfig, NetworkConfig, Profile, ProfileMeta, SecretsConfig, WorkdirAccess,
-    WorkdirConfig,
+    FilesystemConfig, HookConfig, HooksConfig, NetworkConfig, Profile, ProfileMeta, SecretsConfig,
+    WorkdirAccess, WorkdirConfig,
 };
+use std::collections::HashMap;
 
 /// Get a built-in profile by name
 pub fn get_builtin(name: &str) -> Option<Profile> {
@@ -29,6 +30,16 @@ pub fn list_builtin() -> Vec<String> {
 
 /// Anthropic Claude Code CLI agent
 fn claude_code() -> Profile {
+    let mut hooks = HashMap::new();
+    hooks.insert(
+        "claude-code".to_string(),
+        HookConfig {
+            event: "PostToolUseFailure".to_string(),
+            matcher: "Read|Write|Edit|Bash".to_string(),
+            script: "nono-hook.sh".to_string(),
+        },
+    );
+
     Profile {
         meta: ProfileMeta {
             name: "claude-code".to_string(),
@@ -52,6 +63,8 @@ fn claude_code() -> Profile {
         workdir: WorkdirConfig {
             access: WorkdirAccess::ReadWrite,
         },
+        hooks: HooksConfig { hooks },
+        interactive: true, // Claude Code has interactive TUI
     }
 }
 
@@ -83,6 +96,8 @@ fn openclaw() -> Profile {
         workdir: WorkdirConfig {
             access: WorkdirAccess::Read,
         },
+        hooks: HooksConfig::default(),
+        interactive: false,
     }
 }
 
@@ -113,6 +128,8 @@ fn opencode() -> Profile {
         workdir: WorkdirConfig {
             access: WorkdirAccess::ReadWrite,
         },
+        hooks: HooksConfig::default(),
+        interactive: false,
     }
 }
 

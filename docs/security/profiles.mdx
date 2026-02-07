@@ -47,6 +47,9 @@ description = "Profile for my custom agent"
 # Controls automatic CWD sharing: "none", "read", "write", or "readwrite"
 access = "readwrite"
 
+# Set to true for apps with interactive TUI (preserves TTY)
+interactive = false
+
 [filesystem]
 # Directory permissions (recursive)
 allow = ["$HOME/.config/my-agent"]
@@ -62,6 +65,7 @@ write_file = []
 block = false  # Network allowed by default; set to true to block
 
 # See "Secrets Section" below for configuring secrets
+# See "Hooks Section" below for auto-installing agent hooks
 ```
 
 ### Working Directory Section
@@ -94,6 +98,32 @@ nono run --profile my-agent --secrets -- my-command
 ```
 
 See [Secrets Management](/usage/secrets) for details on storing secrets in the keystore.
+
+### Hooks Section
+
+The `[hooks.<target>]` section defines hooks that nono will automatically install for specific applications. This enables sandbox-aware error handling without manual setup.
+
+```toml
+[hooks.claude-code]
+event = "PostToolUseFailure"      # When to trigger
+matcher = "Read|Write|Edit|Bash"  # Which tools to match
+script = "nono-hook.sh"           # Script from nono's embedded hooks
+```
+
+Currently supported targets:
+- `claude-code` - Installs to `~/.claude/hooks/` and updates `~/.claude/settings.json`
+
+Hook installation is idempotent - nono only installs or updates when needed.
+
+### Interactive Mode
+
+The `interactive` field (default: `false`) indicates whether the application has an interactive terminal UI that requires TTY preservation:
+
+```toml
+interactive = true
+```
+
+When `true`, nono uses direct exec mode (equivalent to `--exec` flag), which preserves the terminal for apps like Claude Code, vim, or htop.
 
 ## Environment Variables
 
@@ -163,17 +193,30 @@ description = "Anthropic Claude Code CLI agent"
 [workdir]
 access = "readwrite"
 
-[filesystem]
-allow = ["$HOME/.claude"]
+# Preserve TTY for interactive terminal UI
+interactive = true
 
 [filesystem]
+allow = ["$HOME/.claude"]
 allow_file = ["$HOME/.claude.json"]
 
 [network]
 block = false
+
+[hooks.claude-code]
+# Auto-installed hook for sandbox-aware error handling
+event = "PostToolUseFailure"
+matcher = "Read|Write|Edit|Bash"
+script = "nono-hook.sh"
 ```
 
 **Grants:** Read+write to working directory (via `[workdir]`) and `~/.claude`, read+write to `~/.claude.json`, full network access.
+
+**Special features:**
+- `interactive = true` preserves TTY for Claude's terminal UI
+- Hooks auto-install to `~/.claude/hooks/` for sandbox-aware error handling
+
+See [Claude Code client guide](/clients/claude-code) for full details.
 
 ---
 

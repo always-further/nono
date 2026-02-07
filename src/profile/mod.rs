@@ -23,7 +23,7 @@ pub struct ProfileMeta {
     pub description: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
-    /// Minisign signature (Phase 2)
+    ///  signature support
     #[serde(default)]
     pub signature: Option<String>,
 }
@@ -73,6 +73,31 @@ pub struct SecretsConfig {
     pub mappings: HashMap<String, String>,
 }
 
+/// Hook configuration for an agent
+///
+/// Defines hooks that nono will install for the target application.
+/// For example, Claude Code hooks are installed to ~/.claude/hooks/
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HookConfig {
+    /// Event that triggers the hook (e.g., "PostToolUseFailure")
+    pub event: String,
+    /// Regex pattern to match tool names (e.g., "Read|Write|Edit|Bash")
+    pub matcher: String,
+    /// Script filename from data/hooks/ to install
+    pub script: String,
+}
+
+/// Hooks configuration in a profile
+///
+/// Maps target application names to their hook configurations.
+/// Example: [hooks.claude-code] for Claude Code hooks
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HooksConfig {
+    /// Map of target application -> hook configuration
+    #[serde(flatten)]
+    pub hooks: HashMap<String, HookConfig>,
+}
+
 /// Working directory access level for profiles
 ///
 /// Controls whether and how the current working directory is automatically
@@ -113,6 +138,11 @@ pub struct Profile {
     pub secrets: SecretsConfig,
     #[serde(default)]
     pub workdir: WorkdirConfig,
+    #[serde(default)]
+    pub hooks: HooksConfig,
+    /// App has interactive UI that needs TTY preserved (implies --exec mode)
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 impl Profile {
@@ -128,7 +158,7 @@ impl Profile {
 /// 1. User profiles from ~/.config/nono/profiles/<name>.toml (allows customization)
 /// 2. Built-in profiles (compiled into binary, fallback)
 ///
-/// User profiles require --trust-unsigned unless signed (Phase 2).
+/// User profiles require --trust-unsigned unntil signed (planned feature)
 pub fn load_profile(name: &str, trust_unsigned: bool) -> Result<Profile> {
     // Validate profile name (alphanumeric + hyphen only)
     if !is_valid_profile_name(name) {

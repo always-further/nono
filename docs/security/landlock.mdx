@@ -94,10 +94,6 @@ AccessNet::ConnectTcp // Control outbound connections
   Network filtering requires kernel 6.7+. On older kernels, nono cannot enforce network restrictions via Landlock and will warn you.
 </Warning>
 
-### Fallback for Older Kernels
-
-On kernels without Landlock network support, nono can use seccomp as a fallback to block network syscalls entirely. This is planned for Phase 2.
-
 ## Enforcement Status
 
 nono reports the enforcement status after applying the sandbox:

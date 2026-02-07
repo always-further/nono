@@ -253,6 +253,7 @@ fn generate_profile(caps: &CapabilitySet) -> String {
     profile.push_str("    (subpath \"/private/tmp\")\n");
     profile.push_str("    (subpath \"/tmp\")\n");
     profile.push_str("    (subpath \"/private/var/folders\")\n");
+    profile.push_str("    (subpath \"/var/folders\")\n");
     profile.push_str(")\n");
 
     // Allow TMPDIR for writes too

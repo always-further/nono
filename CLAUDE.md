@@ -54,8 +54,6 @@ cargo fmt -- --check
 
 2. **exec() model**: After applying the sandbox, nono uses `exec()` to replace itself with the target command. This means the command inherits all restrictions.
 
-3. **Phase 1 read permissions**: Currently allows all file reads on macOS to ensure executables work. Write restrictions are enforced. This will be tightened in Phase 2.
-
 4. **Capability resolution**: All paths are canonicalized at grant time to prevent symlink escapes.
 
 ## Platform-Specific Notes
@@ -70,14 +68,7 @@ cargo fmt -- --check
 - Uses landlock crate for safe Rust bindings
 - Detects highest available ABI (v1-v5)
 - ABI v4+ includes TCP network filtering
-- Older kernels need seccomp fallback for network (Phase 2)
-
-## Implementation Status
-
-- [x] Phase 1: Filesystem sandbox (MVP)
-- [ ] Phase 2: Network isolation (per-host filtering)
-- [ ] Phase 3: Runtime capability expansion (supervisor model)
-- [ ] Phase 4: Polish and release
+- Older kernels need seccomp fallback for network
 
 ## Adding New Capabilities
 

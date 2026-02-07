@@ -1,8 +1,8 @@
-//! Sandbox state persistence for `nono query --self`
+//! Sandbox state persistence for `nono why --self`
 //!
 //! When nono runs a command, it writes the capability state to a temp file
 //! and passes the path via NONO_CAP_FILE. This allows sandboxed processes
-//! to query their own capabilities using `nono query --self`.
+//! to query their own capabilities using `nono why --self`.
 
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -16,7 +16,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use crate::capability::{CapabilitySet, FsAccess, FsCapability};
 use crate::error::{NonoError, Result};
 
-/// Sandbox state stored for `nono query --self`
+/// Sandbox state stored for `nono why --self`
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SandboxState {
     /// Filesystem capabilities

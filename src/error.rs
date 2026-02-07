@@ -109,6 +109,9 @@ pub enum NonoError {
 
     #[error("Capability state file too large: {size} bytes (max: {max} bytes)")]
     CapFileTooLarge { size: u64, max: u64 },
+
+    #[error("Hook installation failed: {0}")]
+    HookInstall(String),
 }
 
 pub type Result<T> = std::result::Result<T, NonoError>;
