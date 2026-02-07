@@ -10,6 +10,11 @@ if [ -z "$NONO_CAP_FILE" ] || [ ! -f "$NONO_CAP_FILE" ]; then
     exit 0
 fi
 
+# Check if jq is available (required for JSON parsing)
+if ! command -v jq &> /dev/null; then
+    exit 0
+fi
+
 # Read capabilities from the cap file
 CAPS=$(jq -r '.fs[] | "  " + .path + " (" + .access + ")"' "$NONO_CAP_FILE" 2>/dev/null)
 NET=$(jq -r 'if .net_blocked then "blocked" else "allowed" end' "$NONO_CAP_FILE" 2>/dev/null)

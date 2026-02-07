@@ -503,6 +503,18 @@ fn execute_parent_monitor(
         }
     };
 
+    // Print diagnostic footer on non-zero exit if not already injected
+    if exit_code != 0
+        && !config.no_diagnostics
+        && diagnostic_injected
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        let formatter = DiagnosticFormatter::new(config.caps);
+        let footer = formatter.format_footer(exit_code);
+        eprintln!("\n{}", footer);
+    }
+
     Ok(exit_code)
 }
 
