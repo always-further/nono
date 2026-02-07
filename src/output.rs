@@ -4,6 +4,7 @@ use crate::capability::{CapabilitySet, FsAccess};
 use crate::error::{NonoError, Result};
 use colored::Colorize;
 use rand::seq::SliceRandom;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 
@@ -107,10 +108,18 @@ pub fn print_sandbox_active(silent: bool) {
 }
 
 /// Print dry run message
-pub fn print_dry_run(command: &[String], silent: bool) {
+pub fn print_dry_run(program: &OsStr, cmd_args: &[OsString], silent: bool) {
     if silent {
         return;
     }
+    let mut command = Vec::with_capacity(1 + cmd_args.len());
+    command.push(program.to_string_lossy().into_owned());
+    command.extend(
+        cmd_args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+
     eprintln!(
         "{}",
         "Dry run mode - sandbox would be applied with above capabilities".yellow()

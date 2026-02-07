@@ -16,6 +16,7 @@ use cli::{Cli, Commands, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
 use colored::Colorize;
 use error::{NonoError, Result};
 use profile::WorkdirAccess;
+use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use tracing::{error, info};
@@ -186,8 +187,24 @@ fn run_sandbox(args: SandboxArgs, command: Vec<String>, silent: bool) -> Result<
         return Err(NonoError::NoCommand);
     }
 
+    let mut command_iter = command.into_iter();
+    let program = OsString::from(
+        command_iter
+            .next()
+            .expect("command was validated non-empty above"),
+    );
+    let cmd_args: Vec<OsString> = command_iter.map(OsString::from).collect();
+
     let (caps, loaded_secrets) = prepare_sandbox(&args, silent)?;
-    execute_sandboxed(command, &args, caps, loaded_secrets, silent, false)
+    execute_sandboxed(
+        program,
+        cmd_args,
+        &args,
+        caps,
+        loaded_secrets,
+        silent,
+        false,
+    )
 }
 
 /// Run an interactive shell inside the sandbox
@@ -199,13 +216,20 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         .or_else(|| std::env::var("SHELL").ok().map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("/bin/sh"));
 
-    let shell_str = shell_path.to_string_lossy().to_string();
-
-    execute_sandboxed(vec![shell_str], &args.sandbox, caps, loaded_secrets, silent, true)
+    execute_sandboxed(
+        shell_path.into_os_string(),
+        vec![],
+        &args.sandbox,
+        caps,
+        loaded_secrets,
+        silent,
+        true,
+    )
 }
 
 fn execute_sandboxed(
-    command: Vec<String>,
+    program: OsString,
+    cmd_args: Vec<OsString>,
     sandbox_args: &SandboxArgs,
     caps: CapabilitySet,
     loaded_secrets: Vec<keystore::LoadedSecret>,
@@ -213,9 +237,8 @@ fn execute_sandboxed(
     is_interactive_shell: bool,
 ) -> Result<()> {
     // Check if command is blocked using config module
-    let program = &command[0];
     if let Some(blocked) =
-        config::check_blocked_command(program, &caps.allowed_commands, &caps.blocked_commands)
+        config::check_blocked_command(&program, &caps.allowed_commands, &caps.blocked_commands)
     {
         return Err(NonoError::BlockedCommand {
             command: blocked,
@@ -233,7 +256,7 @@ fn execute_sandboxed(
                 loaded_secrets.len()
             );
         }
-        output::print_dry_run(&command, silent);
+        output::print_dry_run(&program, &cmd_args, silent);
         return Ok(());
     }
 
@@ -250,15 +273,12 @@ fn execute_sandboxed(
     }
 
     // Execute the command
-    let program = &command[0];
-    let cmd_args = &command[1..];
-
-    info!("Executing: {} {:?}", program, cmd_args);
+    info!("Executing: {:?} {:?}", program, cmd_args);
 
     let cap_file = write_capability_state_file(&caps, silent);
 
-    let mut cmd = Command::new(program);
-    cmd.args(cmd_args);
+    let mut cmd = Command::new(&program);
+    cmd.args(&cmd_args);
     apply_nono_env(&mut cmd, &caps, cap_file.as_deref());
 
     // Inject secrets as environment variables
@@ -275,7 +295,10 @@ fn execute_sandboxed(
     Err(NonoError::CommandExecution(err))
 }
 
-fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<(CapabilitySet, Vec<keystore::LoadedSecret>)> {
+fn prepare_sandbox(
+    args: &SandboxArgs,
+    silent: bool,
+) -> Result<(CapabilitySet, Vec<keystore::LoadedSecret>)> {
     // Set log level based on verbosity
     if args.verbose > 0 {
         match args.verbose {
@@ -428,11 +451,7 @@ fn write_capability_state_file(caps: &CapabilitySet, silent: bool) -> Option<std
     }
 }
 
-fn apply_nono_env(
-    cmd: &mut Command,
-    caps: &CapabilitySet,
-    cap_file: Option<&std::path::Path>,
-) {
+fn apply_nono_env(cmd: &mut Command, caps: &CapabilitySet, cap_file: Option<&std::path::Path>) {
     // Build environment variables for agent awareness
     let allowed_paths = if caps.fs.is_empty() {
         "(none)".to_string()

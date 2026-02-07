@@ -253,17 +253,17 @@ pub fn get_system_read_paths() -> Vec<String> {
 /// Check if a command is blocked by the default dangerous commands list
 /// Returns Some(command_name) if blocked, None if allowed
 pub fn check_blocked_command(
-    cmd: &str,
+    cmd: impl AsRef<std::ffi::OsStr>,
     allowed_commands: &[String],
     extra_blocked: &[String],
 ) -> Option<String> {
     use std::ffi::OsStr;
     use std::path::Path;
 
+    let cmd = cmd.as_ref();
+
     // Extract just the binary name (handle paths like /bin/rm)
-    let binary_os = Path::new(cmd)
-        .file_name()
-        .unwrap_or_else(|| OsStr::new(cmd));
+    let binary_os = Path::new(cmd).file_name().unwrap_or(cmd);
 
     // Check if explicitly allowed (overrides default blocklist)
     if allowed_commands.iter().any(|a| OsStr::new(a) == binary_os) {
