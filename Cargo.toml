@@ -45,7 +45,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Output styling
-colored = "2"
+colored = "3"
 rand = "0.8"
 nix = "0.29"
 
