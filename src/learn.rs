@@ -326,14 +326,94 @@ fn extract_path_from_syscall(line: &str, syscall: &str) -> Option<String> {
     let end_quote = remaining[1..].find('"')?;
     let path = &remaining[1..end_quote + 1];
 
-    // Unescape common escapes
-    let path = path
-        .replace("\\n", "\n")
-        .replace("\\t", "\t")
-        .replace("\\\"", "\"")
-        .replace("\\\\", "\\");
+    // Unescape C-style escapes from strace output
+    let path = unescape_strace_string(path);
 
     Some(path)
+}
+
+/// Unescape C-style escape sequences from strace output.
+/// Handles: \n \t \r \\ \" \0 \xNN (hex) \NNN (octal)
+#[cfg(target_os = "linux")]
+fn unescape_strace_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('n') => {
+                    chars.next();
+                    result.push('\n');
+                }
+                Some('t') => {
+                    chars.next();
+                    result.push('\t');
+                }
+                Some('r') => {
+                    chars.next();
+                    result.push('\r');
+                }
+                Some('\\') => {
+                    chars.next();
+                    result.push('\\');
+                }
+                Some('"') => {
+                    chars.next();
+                    result.push('"');
+                }
+                Some('0') => {
+                    chars.next();
+                    // Could be \0 (null) or start of octal \0NN
+                    if chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                        // Octal escape starting with 0
+                        let mut octal = String::from("0");
+                        while octal.len() < 3 && chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                            octal.push(chars.next().unwrap_or('0'));
+                        }
+                        if let Ok(val) = u8::from_str_radix(&octal, 8) {
+                            result.push(val as char);
+                        }
+                    } else {
+                        result.push('\0');
+                    }
+                }
+                Some('x') => {
+                    chars.next();
+                    // Hex escape \xNN
+                    let mut hex = String::new();
+                    for _ in 0..2 {
+                        if chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                            hex.push(chars.next().unwrap_or('0'));
+                        }
+                    }
+                    if hex.len() == 2 {
+                        if let Ok(val) = u8::from_str_radix(&hex, 16) {
+                            result.push(val as char);
+                        }
+                    }
+                }
+                Some(c) if c.is_ascii_digit() => {
+                    // Octal escape \NNN (1-3 digits)
+                    let mut octal = String::new();
+                    while octal.len() < 3 && chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                        octal.push(chars.next().unwrap_or('0'));
+                    }
+                    if let Ok(val) = u8::from_str_radix(&octal, 8) {
+                        result.push(val as char);
+                    }
+                }
+                _ => {
+                    // Unknown escape, keep as-is
+                    result.push('\\');
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 /// Determine if a syscall represents a write access
@@ -579,5 +659,39 @@ mod tests {
         assert!(toml.contains("[filesystem]"));
         assert!(toml.contains("/some/read/path"));
         assert!(toml.contains("/some/write/path"));
+    }
+
+    #[test]
+    fn test_unescape_simple() {
+        assert_eq!(unescape_strace_string(r#"hello"#), "hello");
+        assert_eq!(unescape_strace_string(r#"hello\nworld"#), "hello\nworld");
+        assert_eq!(unescape_strace_string(r#"hello\tworld"#), "hello\tworld");
+        assert_eq!(unescape_strace_string(r#"hello\\world"#), "hello\\world");
+        assert_eq!(unescape_strace_string(r#"hello\"world"#), "hello\"world");
+    }
+
+    #[test]
+    fn test_unescape_hex() {
+        // \x41 = 'A'
+        assert_eq!(unescape_strace_string(r#"\x41"#), "A");
+        // \x2f = '/'
+        assert_eq!(
+            unescape_strace_string(r#"/path\x2fwith\x2fslash"#),
+            "/path/with/slash"
+        );
+    }
+
+    #[test]
+    fn test_unescape_octal() {
+        // \101 = 'A' (octal 101 = 65 decimal)
+        assert_eq!(unescape_strace_string(r#"\101"#), "A");
+        // \040 = ' ' (space)
+        assert_eq!(unescape_strace_string(r#"hello\040world"#), "hello world");
+    }
+
+    #[test]
+    fn test_unescape_null() {
+        // \0 alone is null
+        assert_eq!(unescape_strace_string(r#"hello\0world"#), "hello\0world");
     }
 }
