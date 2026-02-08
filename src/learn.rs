@@ -472,12 +472,12 @@ fn is_covered_by_profile(path: &Path, profile_paths: &HashSet<String>) -> bool {
 #[cfg(target_os = "linux")]
 fn expand_home(path: &str) -> String {
     if path.starts_with('~') {
-        if let Some(home) = std::env::var("HOME").ok() {
+        if let Ok(home) = std::env::var("HOME") {
             return path.replacen('~', &home, 1);
         }
     }
     if path.starts_with("$HOME") {
-        if let Some(home) = std::env::var("HOME").ok() {
+        if let Ok(home) = std::env::var("HOME") {
             return path.replacen("$HOME", &home, 1);
         }
     }
