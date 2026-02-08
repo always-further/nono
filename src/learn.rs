@@ -365,23 +365,15 @@ fn unescape_strace_string(s: &str) -> String {
                     chars.next();
                     result.push('"');
                 }
-                Some('0') => {
-                    chars.next(); // consume '0'
-                                  // Could be \0 (null) or start of octal \0NN
-                    if chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
-                        // Octal escape starting with 0
-                        let mut octal = String::from("0");
-                        while octal.len() < 3
-                            && chars.peek().is_some_and(|c| ('0'..='7').contains(c))
-                        {
-                            octal.push(chars.next().unwrap());
-                        }
-                        // from_str_radix is safe here since we validated digits are 0-7
-                        let val = u8::from_str_radix(&octal, 8).unwrap();
-                        result.push(val as char);
-                    } else {
-                        result.push('\0');
+                Some(c) if ('0'..='7').contains(c) => {
+                    // Octal escape \NNN (1-3 digits, including \0 for null)
+                    let mut octal = String::new();
+                    while octal.len() < 3 && chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
+                        octal.push(chars.next().unwrap());
                     }
+                    // from_str_radix is safe here since we validated digits are 0-7
+                    let val = u8::from_str_radix(&octal, 8).unwrap();
+                    result.push(val as char);
                 }
                 Some('x') => {
                     chars.next(); // consume 'x'
@@ -404,16 +396,6 @@ fn unescape_strace_string(s: &str) -> String {
                         result.push('x');
                         result.push_str(&hex);
                     }
-                }
-                Some(c) if ('1'..='7').contains(c) => {
-                    // Octal escape \NNN (1-3 digits, starting with 1-7)
-                    let mut octal = String::new();
-                    while octal.len() < 3 && chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
-                        octal.push(chars.next().unwrap());
-                    }
-                    // from_str_radix is safe here since we validated digits are 0-7
-                    let val = u8::from_str_radix(&octal, 8).unwrap();
-                    result.push(val as char);
                 }
                 _ => {
                     // Unknown escape, keep as-is
