@@ -326,14 +326,88 @@ fn extract_path_from_syscall(line: &str, syscall: &str) -> Option<String> {
     let end_quote = remaining[1..].find('"')?;
     let path = &remaining[1..end_quote + 1];
 
-    // Unescape common escapes
-    let path = path
-        .replace("\\n", "\n")
-        .replace("\\t", "\t")
-        .replace("\\\"", "\"")
-        .replace("\\\\", "\\");
+    // Unescape C-style escapes from strace output
+    let path = unescape_strace_string(path);
 
     Some(path)
+}
+
+/// Unescape C-style escape sequences from strace output.
+/// Handles: \n \t \r \\ \" \0 \xNN (hex) \NNN (octal)
+///
+/// Invalid or incomplete escape sequences are passed through literally
+/// to avoid data loss.
+#[cfg(target_os = "linux")]
+fn unescape_strace_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('n') => {
+                    chars.next();
+                    result.push('\n');
+                }
+                Some('t') => {
+                    chars.next();
+                    result.push('\t');
+                }
+                Some('r') => {
+                    chars.next();
+                    result.push('\r');
+                }
+                Some('\\') => {
+                    chars.next();
+                    result.push('\\');
+                }
+                Some('"') => {
+                    chars.next();
+                    result.push('"');
+                }
+                Some(c) if ('0'..='7').contains(c) => {
+                    // Octal escape \NNN (1-3 digits, including \0 for null)
+                    let mut octal = String::new();
+                    while octal.len() < 3 && chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
+                        octal.push(chars.next().unwrap());
+                    }
+                    // from_str_radix is safe here since we validated digits are 0-7
+                    let val = u8::from_str_radix(&octal, 8).unwrap();
+                    result.push(val as char);
+                }
+                Some('x') => {
+                    chars.next(); // consume 'x'
+                                  // Hex escape \xNN - must have exactly 2 hex digits
+                    let mut hex = String::new();
+                    for _ in 0..2 {
+                        if chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                            hex.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                    if hex.len() == 2 {
+                        // from_str_radix is safe here since we validated hex digits
+                        let val = u8::from_str_radix(&hex, 16).unwrap();
+                        result.push(val as char);
+                    } else {
+                        // Invalid/incomplete hex escape - pass through literally
+                        result.push('\\');
+                        result.push('x');
+                        result.push_str(&hex);
+                    }
+                }
+                _ => {
+                    // Unknown escape, keep as-is
+                    result.push('\\');
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 /// Determine if a syscall represents a write access
@@ -579,5 +653,69 @@ mod tests {
         assert!(toml.contains("[filesystem]"));
         assert!(toml.contains("/some/read/path"));
         assert!(toml.contains("/some/write/path"));
+    }
+
+    #[test]
+    fn test_unescape_simple() {
+        assert_eq!(unescape_strace_string(r#"hello"#), "hello");
+        assert_eq!(unescape_strace_string(r#"hello\nworld"#), "hello\nworld");
+        assert_eq!(unescape_strace_string(r#"hello\tworld"#), "hello\tworld");
+        assert_eq!(unescape_strace_string(r#"hello\\world"#), "hello\\world");
+        assert_eq!(unescape_strace_string(r#"hello\"world"#), "hello\"world");
+    }
+
+    #[test]
+    fn test_unescape_hex() {
+        // \x41 = 'A'
+        assert_eq!(unescape_strace_string(r#"\x41"#), "A");
+        // \x2f = '/'
+        assert_eq!(
+            unescape_strace_string(r#"/path\x2fwith\x2fslash"#),
+            "/path/with/slash"
+        );
+    }
+
+    #[test]
+    fn test_unescape_octal() {
+        // \101 = 'A' (octal 101 = 65 decimal)
+        assert_eq!(unescape_strace_string(r#"\101"#), "A");
+        // \040 = ' ' (space)
+        assert_eq!(unescape_strace_string(r#"hello\040world"#), "hello world");
+    }
+
+    #[test]
+    fn test_unescape_null() {
+        // \0 alone is null
+        assert_eq!(unescape_strace_string(r#"hello\0world"#), "hello\0world");
+    }
+
+    #[test]
+    fn test_unescape_incomplete_hex() {
+        // Incomplete hex escape should be passed through literally
+        assert_eq!(unescape_strace_string(r#"\x1"#), r#"\x1"#);
+        // Note: \x1e would be valid (1e are both hex digits), so use \x1g instead
+        assert_eq!(unescape_strace_string(r#"path\x1gnd"#), r#"path\x1gnd"#);
+    }
+
+    #[test]
+    fn test_unescape_invalid_hex() {
+        // Invalid hex digits should be passed through literally
+        assert_eq!(unescape_strace_string(r#"\xZZ"#), r#"\xZZ"#);
+        assert_eq!(unescape_strace_string(r#"\xGH"#), r#"\xGH"#);
+    }
+
+    #[test]
+    fn test_unescape_invalid_octal() {
+        // 8 and 9 are not valid octal digits
+        // \18 should parse \1 as octal (= 0x01) and leave '8' as literal
+        assert_eq!(unescape_strace_string(r#"\18"#), "\x018");
+        // \19 should parse \1 as octal (= 0x01) and leave '9' as literal
+        assert_eq!(unescape_strace_string(r#"\19"#), "\x019");
+    }
+
+    #[test]
+    fn test_unescape_trailing_backslash() {
+        // Trailing backslash should be passed through
+        assert_eq!(unescape_strace_string(r#"hello\"#), r#"hello\"#);
     }
 }
