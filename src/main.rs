@@ -6,6 +6,7 @@ mod error;
 mod exec_strategy;
 mod hooks;
 mod keystore;
+mod learn;
 mod output;
 mod profile;
 mod query;
@@ -15,7 +16,7 @@ mod setup;
 
 use capability::{CapabilitySet, FsAccess, FsCapability};
 use clap::Parser;
-use cli::{Cli, Commands, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
+use cli::{Cli, Commands, LearnArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
 use colored::Colorize;
 use error::{NonoError, Result};
 use profile::WorkdirAccess;
@@ -43,6 +44,10 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Learn(args) => {
+            // Learn prints its own output
+            run_learn(*args, cli.silent)
+        }
         Commands::Run(args) => {
             // Print banner for run command (unless silent)
             output::print_banner(cli.silent);
@@ -68,6 +73,53 @@ fn run() -> Result<()> {
 fn run_setup(args: SetupArgs) -> Result<()> {
     let runner = setup::SetupRunner::new(&args);
     runner.run()
+}
+
+/// Learn mode: trace file accesses to discover required paths
+fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
+    // Warn user that the command runs unrestricted
+    if !silent {
+        eprintln!(
+            "{}",
+            "WARNING: nono learn runs the command WITHOUT any sandbox restrictions.".yellow()
+        );
+        eprintln!(
+            "{}",
+            "The command will have full access to your system to discover required paths.".yellow()
+        );
+        eprintln!();
+        eprint!("Continue? [y/N] ");
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| NonoError::LearnError(format!("Failed to read input: {}", e)))?;
+
+        let input = input.trim().to_lowercase();
+        if input != "y" && input != "yes" {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
+        eprintln!();
+    }
+
+    eprintln!("nono learn - Tracing file accesses...\n");
+
+    let result = learn::run_learn(&args)?;
+
+    if args.toml {
+        println!("{}", result.to_toml());
+    } else {
+        println!("{}", result.to_summary());
+    }
+
+    if result.has_paths() {
+        eprintln!(
+            "\nTo use these paths, add them to your profile or use --read/--write/--allow flags."
+        );
+    }
+
+    Ok(())
 }
 
 /// Check why a path or network operation would be allowed or denied
@@ -302,14 +354,15 @@ fn execute_sandboxed(
     // is not in the sandbox's allowed paths.
     let resolved_program = exec_strategy::resolve_program(&command[0])?;
 
+    // Write capability state file BEFORE applying sandbox.
+    // This file goes to /tmp which may not be in the sandbox's allowed paths.
+    let cap_file = write_capability_state_file(caps, silent);
+    let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+
     // Apply the sandbox
     output::print_applying_sandbox(silent);
     sandbox::apply(caps)?;
     output::print_sandbox_active(silent);
-
-    // Write capability state file for `nono why --self`
-    let cap_file = write_capability_state_file(caps, silent);
-    let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
     // Build environment variables for the command
     let env_vars: Vec<(&str, &str)> = loaded_secrets

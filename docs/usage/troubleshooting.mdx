@@ -306,6 +306,49 @@ uname -r
 
 ---
 
+## Using `nono learn` to Discover Required Paths
+
+If you're getting permission errors and aren't sure which paths your application needs, use `nono learn` to trace file accesses:
+
+```bash
+# Discover all paths accessed by your app
+nono learn -- my-app
+
+# Compare against an existing profile to see what's missing
+nono learn --profile my-profile -- my-app
+
+# Output as TOML for easy profile creation
+nono learn --toml -- my-app
+```
+
+<Note>
+  `nono learn` is only available on Linux (requires strace). The command runs WITHOUT sandbox restrictions to accurately trace file accesses.
+</Note>
+
+### Example Workflow
+
+1. Run learn mode to discover paths:
+   ```bash
+   nono learn -- opencode
+   ```
+
+2. Review the output to see which paths are needed:
+   ```
+   Read paths needed:
+     /usr/share/locale-langpack
+     /home/user/.config/opencode
+
+   Write paths needed:
+     /home/user/.cache/opencode
+   ```
+
+3. Add the paths to your nono command or profile:
+   ```bash
+   nono run --read /usr/share/locale-langpack --allow ~/.config/opencode -- opencode
+   ```
+
+---
+
 ## Getting Help
 
 If you're still stuck:

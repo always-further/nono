@@ -1,6 +1,17 @@
 # nono Security Lists
 #
 # This file contains the security-critical blocklists for nono sandbox.
+#
+# POLICY REFERENCE:
+# =================
+# [sensitive_paths]    -> DENY content read, ALLOW metadata (stat/exists)
+#                         Enforced in: src/sandbox/macos.rs, src/sandbox/linux.rs
+#
+# [dangerous_commands] -> BLOCK execution (command refused before running)
+#                         Enforced in: src/config/mod.rs::is_command_blocked()
+#
+# [system_read_paths]  -> ALLOW read access (required for executables to run)
+#                         Enforced in: src/sandbox/macos.rs, src/sandbox/linux.rs
 
 [meta]
 version = 1
@@ -8,6 +19,9 @@ schema_version = "0.2.0"
 # updated field set during signing
 
 [sensitive_paths]
+# POLICY: DENY content read (metadata allowed)
+
+# POLICY: DENY
 # Credentials and secrets
 ssh = ["~/.ssh"]
 aws = ["~/.aws"]
@@ -17,11 +31,13 @@ kubernetes = ["~/.kube"]
 docker = ["~/.docker"]
 gnupg = ["~/.gnupg"]
 
+# POLICY: DENY
 # Password managers and keystores
 keychain = ["~/Library/Keychains"]
 password_store = ["~/.password-store"]
 onepassword = ["~/.1password"]
 
+# POLICY: DENY
 # macOS-specific sensitive data
 macos_private = [
     "~/Library/Messages",
@@ -32,6 +48,7 @@ macos_private = [
     "~/Library/Application Support/MobileSync",
 ]
 
+# POLICY: DENY
 # Browser profiles (cookies, saved passwords, sessions)
 browser_data = [
     "~/Library/Application Support/Google/Chrome",
@@ -41,6 +58,7 @@ browser_data = [
     "~/Library/Application Support/Brave Browser",
 ]
 
+# POLICY: DENY
 # Credential files
 credential_files = [
     "~/.git-credentials",
@@ -49,6 +67,7 @@ credential_files = [
     "~/.vault-token",
 ]
 
+# POLICY: DENY
 # Directories that may contain secrets
 secrets_dirs = [
     "~/.credentials",
@@ -58,6 +77,7 @@ secrets_dirs = [
     "~/.terraform.d",
 ]
 
+# POLICY: DENY
 # Shell configurations (often embed secrets/tokens)
 shell_configs = [
     # Zsh
@@ -79,6 +99,7 @@ shell_configs = [
     "~/.envrc",
 ]
 
+# POLICY: DENY
 # Command history (may contain sensitive commands)
 history_files = [
     "~/.bash_history",
@@ -87,8 +108,13 @@ history_files = [
 ]
 
 [dangerous_commands]
+# POLICY: BLOCK execution
+
+# POLICY: BLOCK
 # Commands blocked by default due to destructive potential
 file_destruction = ["rm", "rmdir", "shred", "srm"]
+
+# POLICY: BLOCK
 disk_destruction = [
     "dd",
     "mkfs",
@@ -101,18 +127,34 @@ disk_destruction = [
     "gdisk",
     "wipefs",
 ]
+
+# POLICY: BLOCK
 permission_chaos = ["chmod", "chown", "chgrp", "chattr"]
+
+# POLICY: BLOCK
 system_modification = ["init", "shutdown", "reboot", "halt", "poweroff", "systemctl"]
+
+# POLICY: BLOCK
 package_managers = ["apt", "apt-get", "dpkg", "yum", "dnf", "pacman", "brew", "pip"]
+
+# POLICY: BLOCK
 dangerous_file_ops = ["mv", "cp", "truncate"]
+
+# POLICY: BLOCK
 network_exfiltration = ["scp", "rsync", "sftp", "ftp"]
+
+# POLICY: BLOCK
 arbitrary_execution = ["xargs"]
+
+# POLICY: BLOCK
 privilege_escalation = ["sudo", "su", "doas", "pkexec"]
 
 [system_read_paths]
+# POLICY: ALLOW read access
 # System paths needed for executables to run
 # Platform-specific paths are in separate sections
 
+# POLICY: ALLOW read
 # Common to both platforms
 common = [
     "/bin",
@@ -123,6 +165,7 @@ common = [
 ]
 
 [system_read_paths.linux]
+# POLICY: ALLOW read access
 # Shared libraries (including multiarch paths for Debian/Ubuntu)
 libraries = [
     "/lib",
@@ -137,6 +180,7 @@ libraries = [
     "/usr/local/lib64",
 ]
 
+# POLICY: ALLOW read
 # Dynamic linker configuration
 linker = [
     "/etc/ld.so.cache",
@@ -144,6 +188,7 @@ linker = [
     "/etc/ld.so.conf.d",
 ]
 
+# POLICY: ALLOW read
 # System configuration commonly needed by programs
 config = [
     "/etc/passwd",
@@ -155,14 +200,17 @@ config = [
     "/etc/machine-id",
 ]
 
+# POLICY: ALLOW read
 # Locale and timezone data
 locale = [
     "/usr/share/locale",
+    "/usr/share/locale-langpack",
     "/usr/share/zoneinfo",
     "/etc/localtime",
     "/etc/timezone",
 ]
 
+# POLICY: ALLOW read
 # SSL certificates
 ssl = [
     "/etc/ssl",
@@ -170,6 +218,7 @@ ssl = [
     "/usr/share/ca-certificates",
 ]
 
+# POLICY: ALLOW read
 # Terminfo for terminal apps
 terminfo = [
     "/usr/share/terminfo",
@@ -177,6 +226,7 @@ terminfo = [
     "/etc/terminfo",
 ]
 
+# POLICY: ALLOW read
 # Device files - only safe, commonly needed devices
 # (NOT /dev as a whole, which would expose /dev/sda, /dev/mem, etc.)
 devices = [
@@ -194,6 +244,7 @@ devices = [
     "/dev/pts",
 ]
 
+# POLICY: ALLOW read
 # Proc and sys filesystems
 proc = [
     "/proc",
@@ -202,6 +253,7 @@ proc = [
     "/var/run",
 ]
 
+# POLICY: ALLOW read
 # NixOS / Nix package manager
 # All Nix-managed binaries and libraries live in /nix/store
 nix = [
@@ -209,6 +261,7 @@ nix = [
 ]
 
 [system_read_paths.macos]
+# POLICY: ALLOW read access (except 'writable' which is ALLOW write)
 # macOS executables and libraries
 executables = [
     "/System/Library",
@@ -217,15 +270,18 @@ executables = [
     "/usr/local/lib",
 ]
 
+# POLICY: ALLOW read
 # macOS allows broader dev access (sandboxed differently)
 devices = ["/dev"]
 
+# POLICY: ALLOW read
 # Frameworks
 frameworks = [
     "/System/Library/Frameworks",
     "/Library/Frameworks",
 ]
 
+# POLICY: ALLOW read
 # Dynamic linker cache (critical for dyld)
 dyld = [
     "/private/var/db/dyld",
@@ -233,6 +289,7 @@ dyld = [
     "/var/db",
 ]
 
+# POLICY: ALLOW read
 # SSL certificates and system config
 ssl = [
     "/private/etc/ssl",
@@ -241,6 +298,7 @@ ssl = [
     "/private/etc",
 ]
 
+# POLICY: ALLOW read
 # Locale and timezone data, plus shared data
 locale = [
     "/usr/share/zoneinfo",
@@ -249,11 +307,13 @@ locale = [
     "/usr/share",
 ]
 
+# POLICY: ALLOW read
 # Terminfo for terminal apps
 terminfo = [
     "/usr/share/terminfo",
 ]
 
+# POLICY: ALLOW read
 # System paths and their symlink targets
 # macOS uses /private for actual paths with symlinks from root
 # Also need /System/Volumes for modern macOS (10.15+) which uses APFS volumes
@@ -270,6 +330,7 @@ system = [
     "/Volumes",
 ]
 
+# POLICY: ALLOW read
 # User library paths (need ~ expansion at runtime)
 # Only specific subdirectories, not all of ~/Library
 user_library = [
@@ -278,6 +339,7 @@ user_library = [
     "~/Library/Preferences",
 ]
 
+# POLICY: ALLOW read
 # User-local executables and version managers
 # These paths contain user-installed tools and version managers
 user_local = [
@@ -290,6 +352,7 @@ user_local = [
     "~/.fnm",
 ]
 
+# POLICY: ALLOW write access
 # macOS writable system paths (needed for many tools)
 writable = [
     "/private/tmp",

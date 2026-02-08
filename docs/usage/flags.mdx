@@ -46,12 +46,74 @@ nono why --host <HOST> [--port <PORT>] [OPTIONS]
 nono why --self --path <PATH> --op <OP> [OPTIONS]  # Inside sandbox
 ```
 
+### `nono learn`
+
+Trace a command to discover required filesystem paths. Uses strace to monitor file accesses and outputs paths that would need to be allowed in a nono profile. (Linux only)
+
+```bash
+nono learn [OPTIONS] -- <COMMAND> [ARGS...]
+```
+
 ### `nono setup`
 
 Set up nono on this system. Verifies installation, tests sandbox support, and optionally generates example profiles.
 
 ```bash
 nono setup [OPTIONS]
+```
+
+## `nono learn` Options
+
+<Note>
+  `nono learn` is only available on Linux as it requires strace. The command runs WITHOUT sandbox restrictions to discover what paths your application needs.
+</Note>
+
+### `--profile`, `-p`
+
+Compare against an existing profile to show only missing paths.
+
+```bash
+nono learn --profile opencode -- opencode
+```
+
+### `--toml`
+
+Output discovered paths as a TOML fragment suitable for a profile.
+
+```bash
+nono learn --toml -- my-app > paths.toml
+```
+
+### `--timeout`
+
+Limit trace duration in seconds.
+
+```bash
+nono learn --timeout 30 -- my-long-running-app
+```
+
+### `--all`
+
+Show all accessed paths, not just those that would be blocked by the sandbox.
+
+```bash
+nono learn --all -- my-app
+```
+
+### `--trust-unsigned`
+
+Trust unsigned user profiles when using `--profile`.
+
+```bash
+nono learn --profile my-custom-profile --trust-unsigned -- my-app
+```
+
+### `--verbose`, `-v`
+
+Enable verbose output. Can be specified multiple times.
+
+```bash
+nono learn -vv -- my-app
 ```
 
 ## `nono run` Options

@@ -116,8 +116,16 @@ fn opencode() -> Profile {
                 "$HOME/.config/opencode".to_string(),
                 "$HOME/.cache/opencode".to_string(),
                 "$HOME/.local/share/opencode".to_string(),
+                "$HOME/.local/state/opencode".to_string(),
+                "$HOME/.opencode".to_string(),
+                "$HOME/.npm".to_string(),
+                "$HOME/.nvm".to_string(),
+                // /tmp required: opencode writes directly to $TMPDIR with dynamic
+                // filenames (e.g., {timestamp}.md, opencode-clipboard.png) rather
+                // than using a subdirectory. Cannot grant specific paths.
+                "/tmp".to_string(),
             ],
-            read: vec![],
+            read: vec!["$HOME/.config/git".to_string()],
             write: vec![],
             allow_file: vec![],
             read_file: vec![],
@@ -129,7 +137,7 @@ fn opencode() -> Profile {
             access: WorkdirAccess::ReadWrite,
         },
         hooks: HooksConfig::default(),
-        interactive: false,
+        interactive: true,
     }
 }
 

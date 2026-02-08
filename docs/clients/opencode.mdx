@@ -26,7 +26,12 @@ The built-in profile provides:
 - **Read+write access** to `~/.config/opencode` (configuration)
 - **Read+write access** to `~/.cache/opencode` (cache)
 - **Read+write access** to `~/.local/share/opencode` (data)
+- **Read+write access** to `/tmp` (temp files)
 - **Network access** enabled (required for AI provider API calls)
+
+<Note>
+  The profile grants access to `/tmp` because opencode writes temp files directly to `$TMPDIR` with dynamic filenames (e.g., `{timestamp}.md` for editor buffers, `opencode-clipboard.png` for clipboard images). Landlock cannot grant access to files with unpredictable names without granting the parent directory.
+</Note>
 
 ## Custom Profile
 

@@ -95,6 +95,7 @@ nono --allow . -- curl https://example.com
 ## Coding Standards
 - Error Handling: Use NonoError for all errors; propagation via ? only.
 - Unwrap Policy: Strictly forbid .unwrap() and .expect(); use clippy::unwrap_used to enforce.
+- Use proper error propagation and handling with Result<T, E> and Option<T> for expected and recoverable errors
 - Unsafe Code: Restrict unsafe to FFI; must be wrapped in safe APIs with // SAFETY: docs.
 - Path Security: Validate and canonicalize all paths before applying capabilities.
 - Arithmetic: Use checked_, saturating_, or overflowing_ methods for security-critical math.
@@ -102,6 +103,7 @@ nono --allow . -- curl https://example.com
 - Dependencies: Mandatory cargo-audit and cargo-deny checks in CI.
 - Testing: Write unit tests for all new capability types and sandbox logic.
 - Attributes: Apply #[must_use] to all functions returning critical Results.
+- Avoid blanket permissions on entire directories; be specific about which paths are allowed and which operations (read/write) are permitted.
 
 ## Security Considerations
 

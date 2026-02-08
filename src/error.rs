@@ -112,6 +112,9 @@ pub enum NonoError {
 
     #[error("Hook installation failed: {0}")]
     HookInstall(String),
+
+    #[error("Learn mode error: {0}")]
+    LearnError(String),
 }
 
 pub type Result<T> = std::result::Result<T, NonoError>;

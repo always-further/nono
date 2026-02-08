@@ -19,6 +19,23 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Trace a command to discover required filesystem paths (Linux only)
+    #[command(trailing_var_arg = true)]
+    #[command(after_help = "EXAMPLES:
+    # Discover paths needed by a command
+    nono learn -- my-app
+
+    # With an existing profile to see what's missing
+    nono learn --profile my-profile -- my-app
+
+    # Output as TOML for profile
+    nono learn --toml -- node server.js
+
+    # Limit trace duration
+    nono learn --timeout 30 -- my-app
+")]
+    Learn(Box<LearnArgs>),
+
     /// Run a command inside the sandbox
     #[command(trailing_var_arg = true)]
     #[command(after_help = "EXAMPLES:
@@ -306,6 +323,37 @@ pub struct WhyArgs {
     /// Trust unsigned user profiles
     #[arg(long)]
     pub trust_unsigned: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct LearnArgs {
+    /// Use a named profile to compare against (shows only missing paths)
+    #[arg(long, short = 'p', value_name = "NAME")]
+    pub profile: Option<String>,
+
+    /// Output discovered paths as TOML fragment for profile
+    #[arg(long)]
+    pub toml: bool,
+
+    /// Timeout in seconds (default: run until command exits)
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<u64>,
+
+    /// Show all accessed paths, not just those that would be blocked
+    #[arg(long)]
+    pub all: bool,
+
+    /// Trust unsigned user profiles
+    #[arg(long)]
+    pub trust_unsigned: bool,
+
+    /// Enable verbose output
+    #[arg(long, short = 'v', action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Command to trace
+    #[arg(required = true)]
+    pub command: Vec<String>,
 }
 
 /// Operation type for why command

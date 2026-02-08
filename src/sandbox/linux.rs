@@ -115,22 +115,6 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
     let read_access = access_to_landlock(FsAccess::Read, TARGET_ABI);
     let system_paths = config::get_system_read_paths();
     for path_str in &system_paths {
-        // Skip virtual filesystems that often fail with EBADFD in containers.
-        // These filesystems (procfs, sysfs, devtmpfs, tmpfs) don't reliably support
-        // Landlock path-based rules, especially in namespaced/containerized environments.
-        // Programs still get access through normal kernel mechanisms.
-        if path_str.starts_with("/dev")
-            || path_str.starts_with("/proc")
-            || path_str.starts_with("/sys")
-            || path_str.starts_with("/run")
-        {
-            debug!(
-                "Skipping virtual filesystem {} (may not support Landlock path rules)",
-                path_str
-            );
-            continue;
-        }
-
         let path = Path::new(path_str);
         if !path.exists() {
             debug!("Skipping system path {} (does not exist)", path_str);
