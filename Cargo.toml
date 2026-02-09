@@ -1,6 +1,6 @@
 [package]
 name = "nono-rs"
-version = "0.2.7"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.74"
 authors = ["Luke Hinds"]

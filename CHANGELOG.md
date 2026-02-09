@@ -5,6 +5,176 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-02-09
+
+### Added
+
+- Add shell command
+- Add execution strategy with fork+wait diagnostics and Claude Code hooks
+
+### Changed
+
+- Dedupe logic
+- Dedupe logic
+- Print interactive exit hint in run_shell and drop execute_sandboxed flag
+- Merge pull request #46 from jaydenfyi/feature/shell-command
+
+feat: Add `shell` command
+- Bump dirs from 5.0.1 to 6.0.0
+
+Bumps [dirs](https://github.com/soc/dirs-rs) from 5.0.1 to 6.0.0.
+- [Commits](https://github.com/soc/dirs-rs/commits)
+
+---
+updated-dependencies:
+- dependency-name: dirs
+  dependency-version: 6.0.0
+  dependency-type: direct:production
+  update-type: version-update:semver-major
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+- Merge pull request #38 from lukehinds/dependabot/cargo/dirs-6.0.0
+
+Bump dirs from 5.0.1 to 6.0.0
+- Make fork+exec async-signal-safe for keyring compatibility
+
+When secrets are loaded from the system keystore, the keyring crate
+spawns background threads for D-Bus/Security.framework communication.
+These threads caused execute_monitor() to fail the single-thread check
+before fork().
+
+The previous child process implementation used Command::new() after
+fork, which allocates memory. If a keyring thread holds the allocator
+lock at fork time, the child deadlocks waiting for a lock that will
+never be released.
+
+This refactor ensures async-signal-safety after fork:
+
+Parent (safe to allocate):
+- Resolve program path using `which` crate
+- Convert all strings to CString for execve
+- Build complete environment as CString array
+- Validate threading context before fork
+
+Child (no allocations allowed):
+- Close inherited FDs from keyring/other sources
+- Redirect stdout/stderr with dup2
+- Call libc::execve with pre-prepared pointers
+- Exit with libc::_exit(127) on failure
+
+Threading model:
+- Add ThreadingContext enum (Strict/KeyringExpected)
+- Allow up to 4 threads when secrets loaded (keyring expected)
+- Strict mode still enforces single-threaded for other cases
+
+Also fixes:
+- shell --dry-run now correctly shows dry-run message
+- Doc comment about diagnostic output (stdout only, not both)
+- Add Linux test script
+- Fix CI
+- Merge pull request #63 from lukehinds/exec-strat
+
+Execution strategy with fork+wait diagnostics
+- Bump colored from 2.2.0 to 3.1.1
+
+Bumps [colored](https://github.com/mackwic/colored) from 2.2.0 to 3.1.1.
+- [Release notes](https://github.com/mackwic/colored/releases)
+- [Changelog](https://github.com/colored-rs/colored/blob/master/CHANGELOG.md)
+- [Commits](https://github.com/mackwic/colored/compare/v2.2.0...v3.1.1)
+
+---
+updated-dependencies:
+- dependency-name: colored
+  dependency-version: 3.1.1
+  dependency-type: direct:production
+  update-type: version-update:semver-major
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+- Merge pull request #40 from lukehinds/dependabot/cargo/colored-3.1.1
+
+Bump colored from 2.2.0 to 3.1.1
+- Revise alpha release warning in README
+
+Updated warning section to clarify alpha release status and ongoing changes.
+- Revise README to enhance project description
+
+Updated project description to clarify functionality and added information about protections and future features.
+- Add nono learn command and fix opencode profile for Linux
+
+- Add Linux locale-langpack path to system read paths for TUI apps.
+- Add $HOME read access to opencode profile for Landlock path traversal.
+
+Document nono learn command in CLI reference and troubleshooting guide.
+- Fix formatting
+- Merge pull request #67 from lukehinds/devrandom
+
+Add nono learn command and fix opencode profile for Linux
+- Use c-style unescape for strace and learn mode
+
+Learn mode improvements:
+- Add comprehensive C-style unescape for strace output
+  (handles \xNN hex, \NNN octal, \0 null, \n \t \r \\ \")
+- Add tests for unescape function
+- Ensure correct validation and handling in strace
+- Process 2-digit hex escape in tests
+- Reduce DRY in learn parsing
+- Merge pull request #68 from lukehinds/strace-match
+
+Use c-style unescape for strace and learn mode
+- Bump toml from 0.8.23 to 0.9.11+spec-1.1.0
+
+Bumps [toml](https://github.com/toml-rs/toml) from 0.8.23 to 0.9.11+spec-1.1.0.
+- [Commits](https://github.com/toml-rs/toml/compare/toml-v0.8.23...toml-v0.9.11)
+
+---
+updated-dependencies:
+- dependency-name: toml
+  dependency-version: 0.9.11+spec-1.1.0
+  dependency-type: direct:production
+  update-type: version-update:semver-minor
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
+- Merge pull request #41 from lukehinds/dependabot/cargo/toml-0.9.11spec-1.1.0
+
+Bump toml from 0.8.23 to 0.9.11+spec-1.1.0
+- Rem mistaken commit
+- Enable for semver in cliff
+- Address cliff semver confusion
+- Use bump_rules instead of features_always_bump_minor
+- Merge pull request #69 from lukehinds/cliff-amendment
+
+Enable for semver in cliff
+- Merge pull request #65 from boegel/fix_link_dev_guide
+
+fix link to development guide in Installation docs page
+- Remove platform specific nix
+
+When Dependabot updates nix, it's likely only updating ONE of these entries (probably just the general one to 0.31.1), leaving the platform-specific entries at 0.29. This causes two different versions of nix to be compiled.
+- Merge pull request #70 from lukehinds/nix-pkg
+
+Remove platform specific nix
+
+### Fixed
+
+- Pass shell path as OsString and remove lossy UTF-8 conversion
+- Restore NONO_CAP_FILE-only env contract and harden SHELL fallback
+- Delete old home.mdx page
+- Add missing --dry-run handling for shell subcommand
+- Address Gemini code review feedback for PR #63
+- Fix link to development guide in Installation docs page
+- Fix path to development guide (use absolute path)
+
+### Miscellaneous
+
+- Wrap ShellArgs in Box
+
+### Testing
+
+- Add integration coverage for --dry-run, --net-block, and invalid --shell path
+
 ## [Unreleased]
 
 ### Added
