@@ -3,8 +3,13 @@
 
 [bump]
 # Configures automatic version bumping based on conventional commits
-features_always_bump_minor = true
+# Using bump_rules to explicitly map commit types to version bumps
+# (aligns with RELEASING.md which specifies both feat: and add: as minor bumps)
 breaking_always_bump_major = true
+bump_rules = [
+    { commit_type = "feat", bump = "minor" },
+    { commit_type = "add", bump = "minor" },
+]
 
 [changelog]
 # changelog header
