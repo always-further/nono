@@ -54,11 +54,11 @@ which = "7"
 # Platform-specific
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
-nix = { version = "0.29", features = ["process", "signal", "fs", "user"] }
+nix = { version = "0.31", features = ["process", "signal", "fs", "user"] }
 keyring = { version = "3", features = ["sync-secret-service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nix = { version = "0.29", features = ["process", "signal", "fs", "user"] }
+nix = { version = "0.31", features = ["process", "signal", "fs", "user"] }
 keyring = { version = "3", features = ["apple-native"] }
 
 [dev-dependencies]
