@@ -1,6 +1,6 @@
 <div align="center">
 
-# nono
+<img src="assets/nono-logo.png" alt="nono logo" width="400"/>
 
 **A secure, kernel-enforced capability sandbox for AI agents**
 
@@ -29,6 +29,9 @@
 **nono** is a secure, kernel-enforced capability shell for running AI agents and any unit process. Unlike policy-based sandboxes that intercept and filter operations, nono leverages OS security primitives (Landlock on Linux, Seatbelt on macOS) to create an environment where unauthorized operations are structurally impossible.
 
 **nono** also provides protections against destructive commands (rm -rf ..) and provides a way to securely store API keys, tokens, secrets that are injected securely into the process at run time.
+
+> [!NOTE]
+> NEWS! Work is underway to seperate the core functionality into a library with C bindings, which will allow other projects to integrate nono's security primitives directly without shelling out to the CLI. This will also allow us to expand support to other platforms like Windows. Initial languages will be Python, Typescript, and of course Rust. Following up with Go, Java, and C# bindings.
 
 Many more features are planned, see the Roadmap below. 
 
@@ -154,7 +157,7 @@ nono why --path ~/.ssh/id_rsa --op read
 
 ## Command Blocking
 
-nono blocks dangerous commands by default to prevent AI agents from accidentally (or maliciously) causing harm. This provides defense-in-depth beyond filesystem restrictions.
+nono blocks what might be considered dangerous commands by default to prevent AI agents from accidentally (or maliciously) causing harm. This provides defense-in-depth beyond filesystem restrictions.
 
 ### Blocked Commands
 
@@ -223,7 +226,6 @@ rm: /etc/hosts: Operation not permitted
 |----------|-----------|--------|--------|
 | macOS | Seatbelt | 10.5+ | Filesystem + Network |
 | Linux | Landlock | 5.13+ | Filesystem |
-| Linux | Landlock | 6.7+ | Filesystem + Network (TCP) |
 | Windows | - | - | Not yet supported |
 
 ## Roadmap
@@ -232,12 +234,12 @@ rm: /etc/hosts: Operation not permitted
 
 | Feature | Description |
 |---------|-------------|
-| **Advisory API** | Allow agents to preemptively check permissions before attempting operations, avoiding trial-and-error failures |
+| ~~**Advisory API**~~ | ~~Allow agents to preemptively check permissions before attempting operations, avoiding trial-and-error failures~~ |
 | **Signed Policy Files** | Policy files signed and attestable via [Sigstore Rekor](https://rekor.sigstore.dev/), with embedded DSSE signed payloads. Users can craft and sign their own default policies |
 | **Interactive Permission Mode** | `nono run --interactive` spawns a supervisor that prompts when blocked operations are attempted |
 | **Network Filtering** | Fine-grained network controls (e.g. allowlist/denylist hosts, ports, protocols) |
 | **Time-Limited Permissions** | `nono run --allow /tmp:5m -- agent` grants temporary access that expires automatically |
-| **Learning Mode** | `nono learn -- command` traces syscalls and generates a minimal capability profile |
+| ~~**Learning Mode**~~ | ~~`nono learn -- command` traces syscalls and generates a minimal capability profile~~ |
 | **Ephemeral Mode** | `nono run --ephemeral` creates a copy-on-write overlay filesystem where writes are isolated, enabling full undo |
 | **Audit Logging** | `nono run --audit-log ./session.jsonl -- command` logs all sandbox-relevant operations for post-hoc analysis and replay |
 | **Extend Secrets Manager Support** | Support for popular secrets managers: Bitwarden/1Password/KeePass  |
@@ -254,16 +256,8 @@ nono follows a capability-based security model with defense-in-depth:
 3. **Kernel enforcement** - Directory deletion blocked everywhere; file deletion blocked outside granted write paths
 4. **Command executed** - The command runs with only granted capabilities
 5. **All children inherit** - Subprocesses also run under restrictions
+6. **Key isolation** - Secrets are injected securely and cannot be accessed outside the sandbox
 
-### Defense Layers
-
-| Layer | Protection | Bypass |
-|-------|------------|--------|
-| Command blocklist | Blocks known-dangerous binaries | `--allow-command` |
-| Kernel (dir delete) | Blocks directory deletion (rmdir) everywhere | None |
-| Kernel (file delete) | Blocks file deletion outside granted write paths | Explicit `--allow` / `--write` |
-| Filesystem sandbox | Restricts path access | Explicit `--allow` |
-| Network sandbox | Blocks network access | Remove `--net-block` |
 
 ## License
 
