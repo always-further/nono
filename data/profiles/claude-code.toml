@@ -1,5 +1,8 @@
 # Anthropic Claude Code CLI agent
 
+# Claude Code has interactive TUI that needs TTY preserved
+interactive = true
+
 [meta]
 name = "claude-code"
 version = "1.0.0"
@@ -11,9 +14,6 @@ min_nono_version = "0.2.0"
 # Agent needs full read+write access to the working directory
 access = "readwrite"
 
-# Claude Code has interactive TUI that needs TTY preserved
-interactive = true
-
 [filesystem]
 # ~/.claude: agent state, debug logs, projects, etc.
 allow = ["$HOME/.claude"]
@@ -21,7 +21,8 @@ read = []
 write = []
 # ~/.claude.json: agent writes settings/state here
 allow_file = ["$HOME/.claude.json"]
-read_file = []
+# macOS Keychain: OAuth token read for authentication
+read_file = ["$HOME/Library/Keychains/login.keychain-db"]
 write_file = []
 
 [network]

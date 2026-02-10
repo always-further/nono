@@ -55,7 +55,8 @@ fn claude_code() -> Profile {
             write: vec![],
             // ~/.claude.json: agent writes settings/state here
             allow_file: vec!["$HOME/.claude.json".to_string()],
-            read_file: vec![],
+            // macOS Keychain: OAuth token read for authentication
+            read_file: vec!["$HOME/Library/Keychains/login.keychain-db".to_string()],
             write_file: vec![],
         },
         network: NetworkConfig { block: false },
