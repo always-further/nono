@@ -54,6 +54,10 @@ We are in the process of packaging nono for popular Linux distributions. In the 
 
 See the [Development Guide](https://docs.nono.sh/development) for instructions on building nono from source.
 
+### Use of AI for Development
+
+We encourage using AI tools to contribute to nono! However, you must understand and carefully review any AI-generated code before submitting. AI is a part of the life of software development now, but its use can unwittingly introduce security vulnerabilities — and the security of nono is paramount. Always review and test your code thoroughly, especially around core sandboxing functionality. Being able to explain your changes in your own words also helps reviewers. If you don't understand how a change works, please ask for help in the Discord before submitting a PR.
+
 ## Supported Clients
 
 nono ships with built-in profiles for popular AI coding agents. Each profile defines audited, minimal permissions so you can get started with a single command.
