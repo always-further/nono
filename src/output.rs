@@ -3,7 +3,7 @@
 use crate::capability::{CapabilitySet, FsAccess};
 use crate::error::{NonoError, Result};
 use colored::Colorize;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
@@ -26,7 +26,7 @@ pub fn print_banner(silent: bool) {
     }
 
     let quote = QUOTES
-        .choose(&mut rand::thread_rng())
+        .choose(&mut rand::rng())
         .unwrap_or(&"The opposite of yolo");
 
     let version = env!("CARGO_PKG_VERSION");
