@@ -48,7 +48,7 @@ pub fn print_capabilities(caps: &CapabilitySet, silent: bool) {
     if !caps.fs.is_empty() {
         eprintln!("  {}", "Filesystem:".white());
         for cap in &caps.fs {
-            let kind = if cap.is_file { "file" } else { "dir" };
+            let kind = cap.kind_label();
             let access_str = format!("{}", cap.access);
             let access_colored = match cap.access {
                 crate::capability::FsAccess::Read => access_str.green(),

@@ -79,7 +79,7 @@ impl<'a> DiagnosticFormatter<'a> {
                     FsAccess::Write => "write",
                     FsAccess::ReadWrite => "read+write",
                 };
-                let kind = if cap.is_file { "file" } else { "dir" };
+                let kind = cap.kind_label();
                 lines.push(format!(
                     "[nono]     {} ({}, {})",
                     cap.resolved.display(),

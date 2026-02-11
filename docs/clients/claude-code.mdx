@@ -162,6 +162,29 @@ Claude Code installs a VS Code extension on startup. The built-in profile alread
 
 Claude Code reads git configuration for repository operations. The built-in profile already grants read access to `~/.gitconfig` and `~/.gitignore_global`. No additional flags are needed for git operations.
 
+## Secretive (SSH Keys in Secure Enclave)
+
+If you use [Secretive](https://github.com/maxgoedjen/secretive) to store SSH keys in the macOS Secure Enclave, git commit signing (`git commit -S`) needs access to the Secretive agent socket. A community profile is provided at `data/profiles/claude-code-secretive.toml`.
+
+**Install the profile:**
+```bash
+mkdir -p ~/.config/nono/profiles
+cp data/profiles/claude-code-secretive.toml ~/.config/nono/profiles/
+```
+
+**Usage:**
+```bash
+nono run --profile claude-code-secretive --trust-unsigned --allow-cwd -- claude
+```
+
+The profile extends the standard Claude Code profile with:
+- **Read access** to `~/.gitconfig` and `~/.ssh/config` (git signing configuration)
+- **Read access** to the Secretive agent socket (`~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh`)
+- **Read+write access** to `~/.ssh/known_hosts` (SSH may append new host keys)
+
+<Note>
+The Secretive socket is a Unix domain socket, not a regular file. nono v0.4+ supports granting capabilities on sockets directly, so only the socket itself is exposed — not the entire container directory.
+</Note>
 ## Overriding Profile Settings
 
 CLI flags always take precedence over profile settings:

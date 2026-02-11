@@ -67,15 +67,20 @@ impl FsCapability {
         })
     }
 
-    /// Create a new single file capability, canonicalizing the path
+    /// Create a new single file capability, canonicalizing the path.
+    ///
+    /// Accepts any non-directory filesystem entry: regular files, Unix domain
+    /// sockets, FIFOs, and device files. The file-vs-directory distinction is
+    /// what matters for sandbox rule generation (`literal` vs `subpath`), not
+    /// the specific file type.
     pub fn new_file(path: PathBuf, access: FsAccess) -> Result<Self> {
         // Check path exists
         if !path.exists() {
             return Err(NonoError::PathNotFound(path));
         }
 
-        // Verify it's a file
-        if !path.is_file() {
+        // Reject directories — they need recursive subpath rules (use new_dir)
+        if path.is_dir() {
             return Err(NonoError::ExpectedFile(path));
         }
 
@@ -93,6 +98,35 @@ impl FsCapability {
             access,
             is_file: true,
         })
+    }
+}
+
+impl FsCapability {
+    /// Human-readable label for the filesystem entry type.
+    ///
+    /// Inspects the resolved path to distinguish regular files, sockets,
+    /// FIFOs, etc. Falls back to "file" if the type cannot be determined.
+    pub fn kind_label(&self) -> &'static str {
+        if !self.is_file {
+            return "dir";
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if let Ok(meta) = std::fs::metadata(&self.resolved) {
+                let ft = meta.file_type();
+                if ft.is_socket() {
+                    return "socket";
+                }
+                if ft.is_fifo() {
+                    return "fifo";
+                }
+                if ft.is_block_device() || ft.is_char_device() {
+                    return "device";
+                }
+            }
+        }
+        "file"
     }
 }
 
@@ -238,11 +272,11 @@ impl CapabilitySet {
             for path_str in paths {
                 let path = profile::expand_vars(path_str, workdir);
                 if is_file {
-                    if path.exists() && path.is_file() {
+                    if path.exists() && !path.is_dir() {
                         caps.add_fs(FsCapability::new_file(path, access)?);
                     } else if path.exists() {
                         tracing::warn!(
-                            "Profile path '{}' exists but is not a file, skipping",
+                            "Profile path '{}' exists but is a directory, skipping (use allow/read/write for directories)",
                             path.display()
                         );
                     } else {
@@ -436,6 +470,27 @@ mod tests {
 
         let result = FsCapability::new_file(path, FsAccess::Read);
         assert!(matches!(result, Err(NonoError::ExpectedFile(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fs_capability_unix_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+
+        // Create a Unix domain socket
+        let _listener = UnixListener::bind(&socket_path).unwrap();
+
+        // Sockets are not regular files but new_file should accept them
+        assert!(!socket_path.is_file(), "socket should not be is_file()");
+        assert!(socket_path.exists(), "socket should exist");
+
+        let cap = FsCapability::new_file(socket_path.clone(), FsAccess::Read).unwrap();
+        assert!(cap.is_file); // generates literal rule, not subpath
+        assert!(cap.resolved.is_absolute());
+        assert_eq!(cap.access, FsAccess::Read);
     }
 
     #[test]
