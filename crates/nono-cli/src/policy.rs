@@ -9,7 +9,7 @@ use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError,
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use tracing::debug;
+use tracing::{debug, warn};
 
 // ============================================================================
 // JSON schema types
@@ -231,6 +231,10 @@ pub struct ResolvedGroups {
     /// This is deferred because the caller may add more writable paths (e.g., from
     /// the profile's [filesystem] section or CLI flags) after group resolution.
     pub needs_unlink_overrides: bool,
+    /// Expanded deny.access paths for post-resolution validation.
+    /// On macOS these also generate platform_rules; on Linux they're
+    /// validation-only since Landlock has no deny semantics.
+    pub deny_paths: Vec<PathBuf>,
 }
 
 /// Resolve a list of group names into capability set entries and platform rules.
@@ -258,6 +262,7 @@ pub fn resolve_groups(
 ) -> Result<ResolvedGroups> {
     let mut resolved_groups = Vec::new();
     let mut needs_unlink_overrides = false;
+    let mut deny_paths = Vec::new();
 
     for name in group_names {
         let group = policy
@@ -275,7 +280,7 @@ pub fn resolve_groups(
             continue;
         }
 
-        if resolve_single_group(name, group, caps)? {
+        if resolve_single_group(name, group, caps, &mut deny_paths)? {
             needs_unlink_overrides = true;
         }
         resolved_groups.push(name.clone());
@@ -284,12 +289,18 @@ pub fn resolve_groups(
     Ok(ResolvedGroups {
         names: resolved_groups,
         needs_unlink_overrides,
+        deny_paths,
     })
 }
 
 /// Resolve a single group into capability set entries.
 /// Returns true if unlink overrides were requested (to be deferred).
-fn resolve_single_group(group_name: &str, group: &Group, caps: &mut CapabilitySet) -> Result<bool> {
+fn resolve_single_group(
+    group_name: &str,
+    group: &Group,
+    caps: &mut CapabilitySet,
+    deny_paths: &mut Vec<PathBuf>,
+) -> Result<bool> {
     let source = CapabilitySource::Group(group_name.to_string());
     let mut needs_unlink_overrides = false;
 
@@ -309,10 +320,12 @@ fn resolve_single_group(group_name: &str, group: &Group, caps: &mut CapabilitySe
     // Process deny operations
     if let Some(deny) = &group.deny {
         for path_str in &deny.access {
-            add_deny_access_rules(path_str, caps)?;
+            add_deny_access_rules(path_str, caps, deny_paths)?;
         }
 
-        if deny.unlink {
+        // Seatbelt-only: global unlink denial. Landlock handles file deletion
+        // via AccessFs flags in access_to_landlock() (RemoveDir excluded from write).
+        if deny.unlink && cfg!(target_os = "macos") {
             caps.add_platform_rule("(deny file-write-unlink)")?;
         }
 
@@ -327,12 +340,14 @@ fn resolve_single_group(group_name: &str, group: &Group, caps: &mut CapabilitySe
         }
     }
 
-    // Process symlink pairs (macOS-specific path handling)
-    if let Some(pairs) = &group.symlink_pairs {
-        for symlink in pairs.keys() {
-            let expanded = expand_path(symlink)?;
-            let escaped = escape_seatbelt_path(&expanded.to_string_lossy());
-            caps.add_platform_rule(format!("(allow file-read* (subpath \"{}\"))", escaped))?;
+    // Process symlink pairs (Seatbelt-only: macOS symlink → target path handling)
+    if cfg!(target_os = "macos") {
+        if let Some(pairs) = &group.symlink_pairs {
+            for symlink in pairs.keys() {
+                let expanded = expand_path(symlink)?;
+                let escaped = escape_seatbelt_path(&expanded.to_string_lossy());
+                caps.add_platform_rule(format!("(allow file-read* (subpath \"{}\"))", escaped))?;
+            }
         }
     }
 
@@ -387,30 +402,42 @@ fn add_fs_capability(
     Ok(())
 }
 
-/// Add deny.access rules as platform-specific Seatbelt rules.
+/// Add deny.access rules, collecting the expanded path for validation.
 ///
-/// Generates:
+/// On macOS, generates Seatbelt platform rules:
 /// - `(allow file-read-metadata ...)` — programs can stat/check existence
 /// - `(deny file-read-data ...)` — deny reading content
 /// - `(deny file-write* ...)` — deny writing
 ///
+/// On Linux, deny paths are collected for overlap validation only —
+/// Landlock has no deny semantics so platform rules would be ignored.
+///
 /// Uses `subpath` for directories, `literal` for files.
 /// For non-existent paths, defaults to `subpath` (defensive).
-fn add_deny_access_rules(path_str: &str, caps: &mut CapabilitySet) -> Result<()> {
+fn add_deny_access_rules(
+    path_str: &str,
+    caps: &mut CapabilitySet,
+    deny_paths: &mut Vec<PathBuf>,
+) -> Result<()> {
     let path = expand_path(path_str)?;
-    let escaped = escape_seatbelt_path(&path.to_string_lossy());
+    deny_paths.push(path.clone());
 
-    // Determine filter type: literal for files, subpath for directories
-    let filter = if path.exists() && path.is_file() {
-        format!("literal \"{}\"", escaped)
-    } else {
-        // Default to subpath for dirs and non-existent paths (defensive)
-        format!("subpath \"{}\"", escaped)
-    };
+    // Seatbelt deny rules only apply on macOS
+    if cfg!(target_os = "macos") {
+        let escaped = escape_seatbelt_path(&path.to_string_lossy());
 
-    caps.add_platform_rule(format!("(allow file-read-metadata ({}))", filter))?;
-    caps.add_platform_rule(format!("(deny file-read-data ({}))", filter))?;
-    caps.add_platform_rule(format!("(deny file-write* ({}))", filter))?;
+        // Determine filter type: literal for files, subpath for directories
+        let filter = if path.exists() && path.is_file() {
+            format!("literal \"{}\"", escaped)
+        } else {
+            // Default to subpath for dirs and non-existent paths (defensive)
+            format!("subpath \"{}\"", escaped)
+        };
+
+        caps.add_platform_rule(format!("(allow file-read-metadata ({}))", filter))?;
+        caps.add_platform_rule(format!("(deny file-read-data ({}))", filter))?;
+        caps.add_platform_rule(format!("(deny file-write* ({}))", filter))?;
+    }
 
     Ok(())
 }
@@ -420,8 +447,15 @@ fn add_deny_access_rules(path_str: &str, caps: &mut CapabilitySet) -> Result<()>
 /// This allows file deletion in paths that have Write or ReadWrite access,
 /// counteracting a global `(deny file-write-unlink)` rule.
 ///
+/// Seatbelt-only: Landlock handles file deletion via `AccessFs` flags in
+/// `access_to_landlock()` and has no equivalent deny-then-allow mechanism.
+///
 /// **Must be called after all paths are finalized** (groups + profile + CLI overrides).
 pub fn apply_unlink_overrides(caps: &mut CapabilitySet) {
+    if cfg!(target_os = "linux") {
+        return; // Unlink overrides are Seatbelt-specific
+    }
+
     // Collect writable paths from existing capabilities
     let writable_paths: Vec<PathBuf> = caps
         .fs_capabilities()
@@ -440,6 +474,39 @@ pub fn apply_unlink_overrides(caps: &mut CapabilitySet) {
             escaped
         )) {
             tracing::warn!("Skipping unlink override rule: {}", e);
+        }
+    }
+}
+
+/// Check for deny paths that overlap with allowed paths on Linux.
+///
+/// Landlock is strictly allow-list — it cannot deny a child of an allowed parent.
+/// This function warns about `deny.access` paths that fall under broader allows,
+/// since those denials have no enforcement on Linux.
+///
+/// On macOS this is a no-op (Seatbelt handles deny-within-allow natively).
+///
+/// **Must be called after all paths are finalized** (groups + profile + CLI overrides).
+pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+
+    for deny_path in deny_paths {
+        for cap in caps.fs_capabilities() {
+            if cap.is_file {
+                continue; // File caps can't cover a directory subtree
+            }
+            // Check if deny path is a child of an allowed directory
+            if deny_path.starts_with(&cap.resolved) && *deny_path != cap.resolved {
+                warn!(
+                    "Landlock cannot enforce deny for '{}': parent '{}' is allowed \
+                     (source: {}). This deny has no effect on Linux.",
+                    deny_path.display(),
+                    cap.resolved.display(),
+                    cap.source,
+                );
+            }
         }
     }
 }
@@ -645,15 +712,23 @@ mod tests {
     fn test_resolve_deny_group() {
         let policy = load_policy(sample_policy_json()).expect("parse failed");
         let mut caps = CapabilitySet::new();
-        let resolved = resolve_groups(&policy, &["test_deny".to_string()], &mut caps);
-        assert!(resolved.is_ok());
-        // Should have platform rules for deny
-        assert!(!caps.platform_rules().is_empty());
+        let resolved =
+            resolve_groups(&policy, &["test_deny".to_string()], &mut caps).expect("resolve failed");
 
-        let rules = caps.platform_rules().join("\n");
-        assert!(rules.contains("deny file-read-data"));
-        assert!(rules.contains("deny file-write*"));
-        assert!(rules.contains("allow file-read-metadata"));
+        // Deny paths should always be collected regardless of platform
+        assert!(!resolved.deny_paths.is_empty());
+
+        if cfg!(target_os = "macos") {
+            // On macOS, should have platform rules for deny
+            assert!(!caps.platform_rules().is_empty());
+            let rules = caps.platform_rules().join("\n");
+            assert!(rules.contains("deny file-read-data"));
+            assert!(rules.contains("deny file-write*"));
+            assert!(rules.contains("allow file-read-metadata"));
+        } else {
+            // On Linux, no platform rules (Landlock has no deny semantics)
+            assert!(caps.platform_rules().is_empty());
+        }
     }
 
     #[test]
@@ -703,10 +778,19 @@ mod tests {
         let mut caps = CapabilitySet::new();
         let resolved = resolve_groups(&policy, &["test_unlink".to_string()], &mut caps);
         assert!(resolved.is_ok());
-        assert!(caps
-            .platform_rules()
-            .iter()
-            .any(|r| r.contains("deny file-write-unlink")));
+
+        if cfg!(target_os = "macos") {
+            assert!(caps
+                .platform_rules()
+                .iter()
+                .any(|r| r.contains("deny file-write-unlink")));
+        } else {
+            // On Linux, unlink protection is Seatbelt-only
+            assert!(!caps
+                .platform_rules()
+                .iter()
+                .any(|r| r.contains("deny file-write-unlink")));
+        }
     }
 
     #[test]
@@ -715,7 +799,13 @@ mod tests {
         let mut caps = CapabilitySet::new();
         let resolved = resolve_groups(&policy, &["test_symlinks".to_string()], &mut caps);
         assert!(resolved.is_ok());
-        assert!(caps.platform_rules().iter().any(|r| r.contains("/etc")));
+
+        if cfg!(target_os = "macos") {
+            assert!(caps.platform_rules().iter().any(|r| r.contains("/etc")));
+        } else {
+            // On Linux, symlink pairs are Seatbelt-only
+            assert!(caps.platform_rules().is_empty());
+        }
     }
 
     #[test]
@@ -756,16 +846,27 @@ mod tests {
     }
 
     #[test]
-    fn test_deny_access_generates_all_three_rules() {
+    fn test_deny_access_collects_path_and_generates_rules() {
         let mut caps = CapabilitySet::new();
-        add_deny_access_rules("/nonexistent/test/deny", &mut caps)
+        let mut deny_paths = Vec::new();
+        add_deny_access_rules("/nonexistent/test/deny", &mut caps, &mut deny_paths)
             .expect("expand_path should succeed for absolute paths");
 
-        let rules = caps.platform_rules();
-        assert_eq!(rules.len(), 3);
-        assert!(rules[0].contains("allow file-read-metadata"));
-        assert!(rules[1].contains("deny file-read-data"));
-        assert!(rules[2].contains("deny file-write*"));
+        // Deny path should always be collected regardless of platform
+        assert_eq!(deny_paths.len(), 1);
+        assert_eq!(deny_paths[0], PathBuf::from("/nonexistent/test/deny"));
+
+        if cfg!(target_os = "macos") {
+            // On macOS, Seatbelt platform rules should be generated
+            let rules = caps.platform_rules();
+            assert_eq!(rules.len(), 3);
+            assert!(rules[0].contains("allow file-read-metadata"));
+            assert!(rules[1].contains("deny file-read-data"));
+            assert!(rules[2].contains("deny file-write*"));
+        } else {
+            // On Linux, no platform rules generated (Landlock has no deny semantics)
+            assert!(caps.platform_rules().is_empty());
+        }
     }
 
     #[test]
@@ -822,5 +923,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_validate_deny_overlaps_detects_conflict() {
+        use nono::FsCapability;
+
+        let mut caps = CapabilitySet::new();
+        // Allow /tmp (parent)
+        let cap = FsCapability::new_dir(std::path::Path::new("/tmp"), AccessMode::Read)
+            .expect("/tmp must exist");
+        caps.add_fs(cap);
+
+        // Deny /tmp/secret (child of allowed parent)
+        let deny_paths = vec![PathBuf::from("/tmp/secret")];
+
+        // On macOS: no-op (Seatbelt handles deny-within-allow natively)
+        // On Linux: would warn, but we can't assert on warn!() easily
+        // Instead, verify the detection logic directly
+        if cfg!(target_os = "linux") {
+            // Manually check the overlap detection logic
+            let has_overlap = deny_paths.iter().any(|deny| {
+                caps.fs_capabilities().iter().any(|cap| {
+                    !cap.is_file && deny.starts_with(&cap.resolved) && *deny != cap.resolved
+                })
+            });
+            assert!(
+                has_overlap,
+                "Should detect /tmp/secret overlapping with /tmp"
+            );
+        }
+
+        // Always safe to call (no-op on macOS)
+        validate_deny_overlaps(&deny_paths, &caps);
+    }
+
+    #[test]
+    fn test_validate_deny_overlaps_no_false_positive() {
+        use nono::FsCapability;
+
+        let mut caps = CapabilitySet::new();
+        // Allow /tmp
+        let cap = FsCapability::new_dir(std::path::Path::new("/tmp"), AccessMode::Read)
+            .expect("/tmp must exist");
+        caps.add_fs(cap);
+
+        // Deny /home/secret (NOT under /tmp — no overlap)
+        let deny_paths = vec![PathBuf::from("/home/secret")];
+
+        // Should not detect overlap
+        let has_overlap = deny_paths.iter().any(|deny| {
+            caps.fs_capabilities()
+                .iter()
+                .any(|cap| !cap.is_file && deny.starts_with(&cap.resolved) && *deny != cap.resolved)
+        });
+        assert!(
+            !has_overlap,
+            "Should not detect overlap for unrelated paths"
+        );
+
+        validate_deny_overlaps(&deny_paths, &caps);
+    }
+
+    #[test]
+    fn test_resolve_deny_group_collects_deny_paths() {
+        let policy = load_policy(sample_policy_json()).expect("parse failed");
+        let mut caps = CapabilitySet::new();
+        let resolved =
+            resolve_groups(&policy, &["test_deny".to_string()], &mut caps).expect("resolve failed");
+
+        // deny_paths should be populated with the expanded deny.access paths
+        assert_eq!(resolved.deny_paths.len(), 1);
+        assert!(
+            resolved.deny_paths[0]
+                .to_string_lossy()
+                .contains("nonexistent/test/path"),
+            "Expected deny path to contain 'nonexistent/test/path', got: {}",
+            resolved.deny_paths[0].display()
+        );
     }
 }

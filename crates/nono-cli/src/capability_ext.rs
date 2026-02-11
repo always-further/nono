@@ -117,6 +117,9 @@ impl CapabilitySetExt for CapabilitySet {
             policy::apply_unlink_overrides(&mut caps);
         }
 
+        // Validate deny/allow overlaps (warns on Linux where Landlock can't enforce denies)
+        policy::validate_deny_overlaps(&resolved.deny_paths, &caps);
+
         // Deduplicate capabilities
         caps.deduplicate();
 
@@ -212,6 +215,9 @@ impl CapabilitySetExt for CapabilitySet {
         if needs_unlink_overrides {
             policy::apply_unlink_overrides(&mut caps);
         }
+
+        // Validate deny/allow overlaps (warns on Linux where Landlock can't enforce denies)
+        policy::validate_deny_overlaps(&resolved.deny_paths, &caps);
 
         // Deduplicate capabilities
         caps.deduplicate();
@@ -405,27 +411,29 @@ mod tests {
         // Groups should have populated filesystem capabilities
         assert!(caps.has_fs());
 
-        // Deny groups should have generated platform rules
-        assert!(!caps.platform_rules().is_empty());
+        if cfg!(target_os = "macos") {
+            // On macOS: deny groups generate Seatbelt platform rules
+            assert!(!caps.platform_rules().is_empty());
 
-        // Deny rules should include credential protection
-        let rules = caps.platform_rules().join("\n");
-        assert!(rules.contains("deny file-read-data"));
-        assert!(rules.contains("deny file-write*"));
+            let rules = caps.platform_rules().join("\n");
+            assert!(rules.contains("deny file-read-data"));
+            assert!(rules.contains("deny file-write*"));
 
-        // Unlink protection should be present
-        assert!(rules.contains("deny file-write-unlink"));
+            // Unlink protection should be present
+            assert!(rules.contains("deny file-write-unlink"));
 
-        // Unlink overrides must exist for writable paths (including ~/.claude from
-        // the profile [filesystem] section, which is added AFTER group resolution).
-        // This verifies the deferred unlink override fix.
-        assert!(
-            rules.contains("allow file-write-unlink"),
-            "Expected unlink overrides for writable paths, got:\n{}",
-            rules
-        );
+            // Unlink overrides must exist for writable paths (including ~/.claude from
+            // the profile [filesystem] section, which is added AFTER group resolution).
+            assert!(
+                rules.contains("allow file-write-unlink"),
+                "Expected unlink overrides for writable paths, got:\n{}",
+                rules
+            );
+        }
+        // On Linux: deny/unlink rules are not generated (Landlock has no deny semantics),
+        // but deny_paths are collected for overlap validation.
 
-        // Dangerous commands should be blocked
+        // Dangerous commands should be blocked (cross-platform)
         assert!(caps.blocked_commands().contains(&"rm".to_string()));
         assert!(caps.blocked_commands().contains(&"dd".to_string()));
     }

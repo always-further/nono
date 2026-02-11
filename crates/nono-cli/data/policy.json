@@ -283,7 +283,11 @@
       "allow": {
         "read": [
           "~/.local/bin",
-          "~/.local/share",
+          "~/.local/share/applications",
+          "~/.local/share/icons",
+          "~/.local/share/fonts",
+          "~/.local/share/man",
+          "~/.local/share/mime",
           "~/.local/state"
         ]
       }
