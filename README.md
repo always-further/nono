@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/nono-logo.png" alt="nono logo" width="400"/>
+<img src="assets/nono-logo.png" alt="nono logo" width="600"/>
 
 **The Swiss Army knife of agent security**
 
