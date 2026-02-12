@@ -4,7 +4,7 @@ use std::os::raw::c_char;
 
 use crate::capability_set::NonoCapabilitySet;
 use crate::types::{
-    NonoAccessMode, NonoErrorCode, NonoQueryReason, NonoQueryResult, NonoQueryStatus,
+    validate_access_mode, NonoErrorCode, NonoQueryReason, NonoQueryResult, NonoQueryStatus,
 };
 use crate::{c_str_to_str, rust_string_to_c, set_last_error};
 
@@ -127,13 +127,21 @@ pub unsafe extern "C" fn nono_query_context_free(ctx: *mut NonoQueryContext) {
 pub unsafe extern "C" fn nono_query_context_query_path(
     ctx: *const NonoQueryContext,
     path: *const c_char,
-    mode: NonoAccessMode,
+    mode: u32,
     out_result: *mut NonoQueryResult,
 ) -> NonoErrorCode {
     if ctx.is_null() || out_result.is_null() {
         set_last_error("ctx or out_result pointer is NULL");
         return NonoErrorCode::ErrInvalidArg;
     }
+
+    let access = match validate_access_mode(mode) {
+        Some(m) => m,
+        None => {
+            set_last_error(&format!("invalid access mode: {mode}"));
+            return NonoErrorCode::ErrInvalidArg;
+        }
+    };
 
     let path_str = match unsafe { c_str_to_str(path) } {
         Some(s) => s,
@@ -144,9 +152,7 @@ pub unsafe extern "C" fn nono_query_context_query_path(
     };
 
     let ctx = unsafe { &*ctx };
-    let result = ctx
-        .inner
-        .query_path(std::path::Path::new(path_str), mode.into());
+    let result = ctx.inner.query_path(std::path::Path::new(path_str), access);
 
     // SAFETY: caller guarantees out_result is valid and writable.
     unsafe { *out_result = query_result_to_c(&result) };
@@ -256,7 +262,11 @@ mod tests {
         let path = CString::new("/tmp").unwrap_or_default();
         // SAFETY: caps and path are valid.
         unsafe {
-            nono_capability_set_allow_path(caps, path.as_ptr(), NonoAccessMode::ReadWrite);
+            nono_capability_set_allow_path(
+                caps,
+                path.as_ptr(),
+                crate::types::NONO_ACCESS_MODE_READ_WRITE,
+            );
             let ctx = nono_query_context_new(caps);
 
             // On macOS /tmp canonicalizes to /private/tmp, so query with
@@ -269,7 +279,7 @@ mod tests {
             let rc = nono_query_context_query_path(
                 ctx,
                 query_path.as_ptr(),
-                NonoAccessMode::Read,
+                crate::types::NONO_ACCESS_MODE_READ,
                 &mut result,
             );
             assert_eq!(rc, NonoErrorCode::Ok);
@@ -297,7 +307,7 @@ mod tests {
             let rc = nono_query_context_query_path(
                 ctx,
                 query_path.as_ptr(),
-                NonoAccessMode::Read,
+                crate::types::NONO_ACCESS_MODE_READ,
                 &mut result,
             );
             assert_eq!(rc, NonoErrorCode::Ok);

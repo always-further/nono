@@ -5,34 +5,35 @@
 use std::os::raw::c_char;
 
 /// Access mode for filesystem capabilities.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NonoAccessMode {
-    /// Read-only access
-    Read = 0,
-    /// Write-only access
-    Write = 1,
-    /// Read and write access
-    ReadWrite = 2,
-}
+///
+/// Constants: `NONO_ACCESS_MODE_READ` (0), `NONO_ACCESS_MODE_WRITE` (1),
+/// `NONO_ACCESS_MODE_READ_WRITE` (2).
+///
+/// Represented as `u32` at the FFI boundary to prevent undefined behavior
+/// from invalid enum discriminants. Validated on entry to each FFI function.
+pub const NONO_ACCESS_MODE_READ: u32 = 0;
+pub const NONO_ACCESS_MODE_WRITE: u32 = 1;
+pub const NONO_ACCESS_MODE_READ_WRITE: u32 = 2;
 
-impl From<NonoAccessMode> for nono::AccessMode {
-    fn from(mode: NonoAccessMode) -> Self {
-        match mode {
-            NonoAccessMode::Read => nono::AccessMode::Read,
-            NonoAccessMode::Write => nono::AccessMode::Write,
-            NonoAccessMode::ReadWrite => nono::AccessMode::ReadWrite,
-        }
+/// Validate a raw access mode value from C and convert to `nono::AccessMode`.
+///
+/// Returns `None` for invalid values.
+pub fn validate_access_mode(raw: u32) -> Option<nono::AccessMode> {
+    match raw {
+        NONO_ACCESS_MODE_READ => Some(nono::AccessMode::Read),
+        NONO_ACCESS_MODE_WRITE => Some(nono::AccessMode::Write),
+        NONO_ACCESS_MODE_READ_WRITE => Some(nono::AccessMode::ReadWrite),
+        _ => None,
     }
 }
 
-impl From<nono::AccessMode> for NonoAccessMode {
-    fn from(mode: nono::AccessMode) -> Self {
-        match mode {
-            nono::AccessMode::Read => NonoAccessMode::Read,
-            nono::AccessMode::Write => NonoAccessMode::Write,
-            nono::AccessMode::ReadWrite => NonoAccessMode::ReadWrite,
-        }
+/// Convert a `nono::AccessMode` to its FFI constant value.
+#[must_use]
+pub fn access_mode_to_raw(mode: nono::AccessMode) -> u32 {
+    match mode {
+        nono::AccessMode::Read => NONO_ACCESS_MODE_READ,
+        nono::AccessMode::Write => NONO_ACCESS_MODE_WRITE,
+        nono::AccessMode::ReadWrite => NONO_ACCESS_MODE_READ_WRITE,
     }
 }
 

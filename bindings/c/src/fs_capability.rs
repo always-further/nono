@@ -4,7 +4,7 @@ use std::os::raw::c_char;
 
 use crate::capability_set::NonoCapabilitySet;
 use crate::rust_string_to_c;
-use crate::types::{NonoAccessMode, NonoCapabilitySourceTag};
+use crate::types::{access_mode_to_raw, NonoCapabilitySourceTag, NONO_ACCESS_MODE_READ};
 
 /// Get the number of filesystem capabilities in the set.
 ///
@@ -70,8 +70,8 @@ pub unsafe extern "C" fn nono_capability_set_fs_resolved(
 
 /// Get the access mode of the capability at `index`.
 ///
-/// Returns `NonoAccessMode::Read` as default if `caps` is NULL or `index`
-/// is out of bounds. Check `nono_capability_set_fs_count()` first.
+/// Returns `NONO_ACCESS_MODE_READ` (0) as default if `caps` is NULL or
+/// `index` is out of bounds. Check `nono_capability_set_fs_count()` first.
 ///
 /// # Safety
 ///
@@ -80,14 +80,14 @@ pub unsafe extern "C" fn nono_capability_set_fs_resolved(
 pub unsafe extern "C" fn nono_capability_set_fs_access(
     caps: *const NonoCapabilitySet,
     index: usize,
-) -> NonoAccessMode {
+) -> u32 {
     if caps.is_null() {
-        return NonoAccessMode::Read;
+        return NONO_ACCESS_MODE_READ;
     }
     let caps = unsafe { &*caps };
     match caps.inner.fs_capabilities().get(index) {
-        Some(cap) => cap.access.into(),
-        None => NonoAccessMode::Read,
+        Some(cap) => access_mode_to_raw(cap.access),
+        None => NONO_ACCESS_MODE_READ,
     }
 }
 
@@ -204,7 +204,11 @@ mod tests {
         let path = CString::new("/tmp").unwrap_or_default();
         // SAFETY: caps and path are valid.
         unsafe {
-            let rc = nono_capability_set_allow_path(caps, path.as_ptr(), NonoAccessMode::ReadWrite);
+            let rc = nono_capability_set_allow_path(
+                caps,
+                path.as_ptr(),
+                crate::types::NONO_ACCESS_MODE_READ_WRITE,
+            );
             assert_eq!(rc, crate::types::NonoErrorCode::Ok);
             assert_eq!(nono_capability_set_fs_count(caps), 1);
 
@@ -218,7 +222,7 @@ mod tests {
 
             assert_eq!(
                 nono_capability_set_fs_access(caps, 0),
-                NonoAccessMode::ReadWrite,
+                crate::types::NONO_ACCESS_MODE_READ_WRITE,
             );
             assert!(!nono_capability_set_fs_is_file(caps, 0));
             assert_eq!(

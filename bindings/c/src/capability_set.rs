@@ -2,7 +2,7 @@
 
 use std::os::raw::c_char;
 
-use crate::types::{NonoAccessMode, NonoErrorCode};
+use crate::types::{validate_access_mode, NonoErrorCode};
 use crate::{c_str_to_str, map_error, rust_string_to_c, set_last_error};
 
 /// Opaque handle to a capability set.
@@ -63,12 +63,21 @@ pub unsafe extern "C" fn nono_capability_set_free(caps: *mut NonoCapabilitySet) 
 pub unsafe extern "C" fn nono_capability_set_allow_path(
     caps: *mut NonoCapabilitySet,
     path: *const c_char,
-    mode: NonoAccessMode,
+    mode: u32,
 ) -> NonoErrorCode {
     if caps.is_null() {
         set_last_error("caps pointer is NULL");
         return NonoErrorCode::ErrInvalidArg;
     }
+
+    let access = match validate_access_mode(mode) {
+        Some(m) => m,
+        None => {
+            set_last_error(&format!("invalid access mode: {mode}"));
+            return NonoErrorCode::ErrInvalidArg;
+        }
+    };
+
     // SAFETY: caller guarantees caps is valid.
     let caps = unsafe { &mut *caps };
 
@@ -80,7 +89,7 @@ pub unsafe extern "C" fn nono_capability_set_allow_path(
         }
     };
 
-    match nono::FsCapability::new_dir(path_str, mode.into()) {
+    match nono::FsCapability::new_dir(path_str, access) {
         Ok(cap) => {
             caps.inner.add_fs(cap);
             NonoErrorCode::Ok
@@ -101,12 +110,21 @@ pub unsafe extern "C" fn nono_capability_set_allow_path(
 pub unsafe extern "C" fn nono_capability_set_allow_file(
     caps: *mut NonoCapabilitySet,
     path: *const c_char,
-    mode: NonoAccessMode,
+    mode: u32,
 ) -> NonoErrorCode {
     if caps.is_null() {
         set_last_error("caps pointer is NULL");
         return NonoErrorCode::ErrInvalidArg;
     }
+
+    let access = match validate_access_mode(mode) {
+        Some(m) => m,
+        None => {
+            set_last_error(&format!("invalid access mode: {mode}"));
+            return NonoErrorCode::ErrInvalidArg;
+        }
+    };
+
     let caps = unsafe { &mut *caps };
 
     let path_str = match unsafe { c_str_to_str(path) } {
@@ -117,7 +135,7 @@ pub unsafe extern "C" fn nono_capability_set_allow_file(
         }
     };
 
-    match nono::FsCapability::new_file(path_str, mode.into()) {
+    match nono::FsCapability::new_file(path_str, access) {
         Ok(cap) => {
             caps.inner.add_fs(cap);
             NonoErrorCode::Ok
@@ -356,7 +374,11 @@ mod tests {
         let path = CString::new("/tmp").unwrap_or_default();
         // SAFETY: caps and path are valid.
         unsafe {
-            let rc = nono_capability_set_allow_path(caps, path.as_ptr(), NonoAccessMode::Read);
+            let rc = nono_capability_set_allow_path(
+                caps,
+                path.as_ptr(),
+                crate::types::NONO_ACCESS_MODE_READ,
+            );
             assert_eq!(rc, NonoErrorCode::Ok);
             nono_capability_set_free(caps);
         }
@@ -368,7 +390,11 @@ mod tests {
         let path = CString::new("/nonexistent_path_abc123_xyz").unwrap_or_default();
         // SAFETY: caps and path are valid.
         unsafe {
-            let rc = nono_capability_set_allow_path(caps, path.as_ptr(), NonoAccessMode::Read);
+            let rc = nono_capability_set_allow_path(
+                caps,
+                path.as_ptr(),
+                crate::types::NONO_ACCESS_MODE_READ,
+            );
             assert_ne!(rc, NonoErrorCode::Ok);
 
             let err = crate::nono_last_error();
@@ -386,7 +412,7 @@ mod tests {
             let rc = nono_capability_set_allow_path(
                 std::ptr::null_mut(),
                 path.as_ptr(),
-                NonoAccessMode::Read,
+                crate::types::NONO_ACCESS_MODE_READ,
             );
             assert_eq!(rc, NonoErrorCode::ErrInvalidArg);
         }
@@ -397,7 +423,23 @@ mod tests {
         let caps = nono_capability_set_new();
         // SAFETY: caps is valid, path is NULL.
         unsafe {
-            let rc = nono_capability_set_allow_path(caps, std::ptr::null(), NonoAccessMode::Read);
+            let rc = nono_capability_set_allow_path(
+                caps,
+                std::ptr::null(),
+                crate::types::NONO_ACCESS_MODE_READ,
+            );
+            assert_eq!(rc, NonoErrorCode::ErrInvalidArg);
+            nono_capability_set_free(caps);
+        }
+    }
+
+    #[test]
+    fn test_allow_path_invalid_mode() {
+        let caps = nono_capability_set_new();
+        let path = CString::new("/tmp").unwrap_or_default();
+        // SAFETY: caps and path are valid, mode is intentionally invalid.
+        unsafe {
+            let rc = nono_capability_set_allow_path(caps, path.as_ptr(), 42);
             assert_eq!(rc, NonoErrorCode::ErrInvalidArg);
             nono_capability_set_free(caps);
         }

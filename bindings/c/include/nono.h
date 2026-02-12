@@ -11,21 +11,18 @@
 
 /**
  * Access mode for filesystem capabilities.
+ *
+ * Constants: `NONO_ACCESS_MODE_READ` (0), `NONO_ACCESS_MODE_WRITE` (1),
+ * `NONO_ACCESS_MODE_READ_WRITE` (2).
+ *
+ * Represented as `u32` at the FFI boundary to prevent undefined behavior
+ * from invalid enum discriminants. Validated on entry to each FFI function.
  */
-typedef enum NonoAccessMode {
-    /**
-     * Read-only access
-     */
-    NONO_ACCESS_MODE_READ = 0,
-    /**
-     * Write-only access
-     */
-    NONO_ACCESS_MODE_WRITE = 1,
-    /**
-     * Read and write access
-     */
-    NONO_ACCESS_MODE_READ_WRITE = 2,
-} NonoAccessMode;
+#define NONO_ACCESS_MODE_READ 0
+
+#define NONO_ACCESS_MODE_WRITE 1
+
+#define NONO_ACCESS_MODE_READ_WRITE 2
 
 /**
  * Tag for capability source discriminant.
@@ -267,7 +264,7 @@ void nono_capability_set_free(struct NonoCapabilitySet *caps);
  */
 enum NonoErrorCode nono_capability_set_allow_path(struct NonoCapabilitySet *caps,
                                                   const char *path,
-                                                  enum NonoAccessMode mode);
+                                                  uint32_t mode);
 
 /**
  * Add single-file access permission.
@@ -281,7 +278,7 @@ enum NonoErrorCode nono_capability_set_allow_path(struct NonoCapabilitySet *caps
  */
 enum NonoErrorCode nono_capability_set_allow_file(struct NonoCapabilitySet *caps,
                                                   const char *path,
-                                                  enum NonoAccessMode mode);
+                                                  uint32_t mode);
 
 /**
  * Set whether outbound network access is blocked.
@@ -411,15 +408,14 @@ char *nono_capability_set_fs_resolved(const struct NonoCapabilitySet *caps, uint
 /**
  * Get the access mode of the capability at `index`.
  *
- * Returns `NonoAccessMode::Read` as default if `caps` is NULL or `index`
- * is out of bounds. Check `nono_capability_set_fs_count()` first.
+ * Returns `NONO_ACCESS_MODE_READ` (0) as default if `caps` is NULL or
+ * `index` is out of bounds. Check `nono_capability_set_fs_count()` first.
  *
  * # Safety
  *
  * `caps` must be a valid pointer or NULL.
  */
-enum NonoAccessMode nono_capability_set_fs_access(const struct NonoCapabilitySet *caps,
-                                                  uintptr_t index);
+uint32_t nono_capability_set_fs_access(const struct NonoCapabilitySet *caps, uintptr_t index);
 
 /**
  * Get whether the capability at `index` is a single-file capability.
@@ -501,7 +497,7 @@ void nono_query_context_free(struct NonoQueryContext *ctx);
  */
 enum NonoErrorCode nono_query_context_query_path(const struct NonoQueryContext *ctx,
                                                  const char *path,
-                                                 enum NonoAccessMode mode,
+                                                 uint32_t mode,
                                                  struct NonoQueryResult *out_result);
 
 /**
