@@ -25,24 +25,39 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
-    // Initialize logging
+    let cli = Cli::parse();
+
+    // Extract verbose level from subcommand before initializing logging.
+    // This must happen before tracing_subscriber::init() because the
+    // EnvFilter is captured once at init and cannot be changed afterward.
+    let verbose = match &cli.command {
+        Commands::Run(args) => args.sandbox.verbose,
+        Commands::Shell(args) => args.sandbox.verbose,
+        Commands::Learn(args) => args.verbose,
+        Commands::Setup(args) => args.verbose,
+        Commands::Why(_) => 0,
+    };
+
+    let env_filter = match verbose {
+        0 => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        1 => EnvFilter::new("info"),
+        2 => EnvFilter::new("debug"),
+        _ => EnvFilter::new("trace"),
+    };
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
+        .with_env_filter(env_filter)
         .with_target(false)
         .init();
 
-    if let Err(e) = run() {
+    if let Err(e) = run(cli) {
         error!("{}", e);
         eprintln!("nono: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Learn(args) => {
             // Learn prints its own output
@@ -450,15 +465,6 @@ struct PreparedSandbox {
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
-    // Set log level based on verbosity
-    if args.verbose > 0 {
-        match args.verbose {
-            1 => std::env::set_var("RUST_LOG", "info"),
-            2 => std::env::set_var("RUST_LOG", "debug"),
-            _ => std::env::set_var("RUST_LOG", "trace"),
-        }
-    }
-
     // Clean up stale state files from previous nono runs
     // This prevents disk space exhaustion and information disclosure
     sandbox_state::cleanup_stale_state_files();
