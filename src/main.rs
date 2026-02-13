@@ -155,7 +155,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
         }
     } else if let Some(ref profile_name) = args.profile {
         // Load from profile
-        let prof = profile::load_profile(profile_name, args.trust_unsigned)?;
+        let prof = profile::load_profile(profile_name)?;
         let workdir = args
             .workdir
             .clone()
@@ -177,7 +177,6 @@ fn run_why(args: WhyArgs) -> Result<()> {
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
-            trust_unsigned: args.trust_unsigned,
             config: None,
             verbose: 0,
             dry_run: false,
@@ -200,7 +199,6 @@ fn run_why(args: WhyArgs) -> Result<()> {
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
-            trust_unsigned: false,
             config: None,
             verbose: 0,
             dry_run: false,
@@ -466,7 +464,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     sandbox_state::cleanup_stale_state_files();
     // Load profile once if specified (used for both capabilities and secrets)
     let loaded_profile = if let Some(ref profile_name) = args.profile {
-        let prof = profile::load_profile(profile_name, args.trust_unsigned)?;
+        let prof = profile::load_profile(profile_name)?;
 
         // Install hooks defined in the profile (idempotent - only installs if needed)
         if !prof.hooks.hooks.is_empty() {

@@ -100,14 +100,6 @@ Show all accessed paths, not just those that would be blocked by the sandbox.
 nono learn --all -- my-app
 ```
 
-### `--trust-unsigned`
-
-Trust unsigned user profiles when using `--profile`.
-
-```bash
-nono learn --profile my-custom-profile --trust-unsigned -- my-app
-```
-
 ### `--verbose`, `-v`
 
 Enable verbose output. Can be specified multiple times.
@@ -293,14 +285,6 @@ nono run --profile claude-code --allow-cwd -- claude
 nono -s run --profile claude-code --allow-cwd -- claude
 ```
 
-#### `--trust-unsigned`
-
-Trust unsigned user profiles. Required for profiles without signatures.
-
-```bash
-nono run --profile my-custom-profile --trust-unsigned -- command
-```
-
 ### Operational Flags
 
 #### `--dry-run`
@@ -427,7 +411,6 @@ Available context flags:
 - `--net-block` - Block network access
 - `--profile`, `-p` - Use a named profile
 - `--workdir` - Working directory for `$WORKDIR` expansion
-- `--trust-unsigned` - Trust unsigned user profiles
 
 ## `nono setup` Options
 

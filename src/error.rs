@@ -45,9 +45,6 @@ pub enum NonoError {
     #[error("Profile parse error: {0}")]
     ProfileParse(String),
 
-    #[error("Unsigned profile requires --trust-unsigned flag: {0}")]
-    UnsignedProfile(String),
-
     #[error("Failed to read profile {path}: {source}")]
     ProfileRead {
         path: std::path::PathBuf,

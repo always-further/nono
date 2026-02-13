@@ -1,6 +1,4 @@
 //! Built-in profiles compiled into the nono binary
-//!
-//! These profiles are trusted by default and don't require --trust-unsigned.
 
 use super::{
     FilesystemConfig, HookConfig, HooksConfig, NetworkConfig, Profile, ProfileMeta, SecretsConfig,
@@ -46,7 +44,6 @@ fn claude_code() -> Profile {
             version: "1.0.0".to_string(),
             description: Some("Anthropic Claude Code CLI agent".to_string()),
             author: Some("nono-project".to_string()),
-            signature: None,
         },
         filesystem: FilesystemConfig {
             // ~/.claude: agent state, debug logs, projects, etc.
@@ -88,7 +85,6 @@ fn openclaw() -> Profile {
             version: "1.0.0".to_string(),
             description: Some("OpenClaw messaging gateway".to_string()),
             author: Some("nono-project".to_string()),
-            signature: None,
         },
         filesystem: FilesystemConfig {
             allow: vec![
@@ -121,7 +117,6 @@ fn opencode() -> Profile {
             version: "1.0.0".to_string(),
             description: Some("OpenCode AI coding assistant".to_string()),
             author: Some("nono-project".to_string()),
-            signature: None,
         },
         filesystem: FilesystemConfig {
             allow: vec![

@@ -305,7 +305,7 @@ impl SetupRunner {
 
         for name in &profiles {
             // Load profile to get description
-            match profile::load_profile(name, true) {
+            match profile::load_profile(name) {
                 Ok(p) => {
                     let desc = p
                         .meta

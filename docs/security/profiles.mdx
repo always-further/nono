@@ -43,12 +43,12 @@ name = "my-agent"
 version = "1.0.0"
 description = "Profile for my custom agent"
 
+# Set to true for apps with interactive TUI (preserves TTY)
+interactive = false
+
 [workdir]
 # Controls automatic CWD sharing: "none", "read", "write", or "readwrite"
 access = "readwrite"
-
-# Set to true for apps with interactive TUI (preserves TTY)
-interactive = false
 
 [filesystem]
 # Directory permissions (recursive)
@@ -117,10 +117,17 @@ Hook installation is idempotent - nono only installs or updates when needed.
 
 ### Interactive Mode
 
-The `interactive` field (default: `false`) indicates whether the application has an interactive terminal UI that requires TTY preservation:
+The `interactive` field (default: `false`) is a **top-level** field (not nested under any section) that indicates whether the application has an interactive terminal UI that requires TTY preservation:
 
 ```toml
+[meta]
+name = "my-agent"
+
+# Top-level field, not under [workdir] or any other section
 interactive = true
+
+[workdir]
+access = "readwrite"
 ```
 
 When `true`, nono uses direct exec mode (equivalent to `--exec` flag), which preserves the terminal for apps like Claude Code, vim, or htop.
@@ -162,21 +169,8 @@ Profiles support these environment variables in path values:
 
 3. Use the profile:
    ```bash
-   nono run --profile my-agent --trust-unsigned -- my-agent-command
+   nono run --profile my-agent -- my-agent-command
    ```
-
-## Profile Verification
-
-Built-in profiles are compiled into the nono binary. User profiles can optionally be signed using minisign for integrity verification.
-
-```bash
-# Sign a profile
-minisign -Sm my-profile.toml
-
-# nono verifies signatures automatically when present
-```
-
-See [Profile Signing](/security/signing) for full details.
 
 ## Built-in Profile Policies
 

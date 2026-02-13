@@ -60,9 +60,9 @@ block = false
 anthropic_api_key = "ANTHROPIC_API_KEY"
 ```
 
-**Usage (custom profiles require `--trust-unsigned`):**
+**Usage:**
 ```bash
-nono run --profile claude-code --trust-unsigned --secrets -- claude
+nono run --profile claude-code --secrets -- claude
 ```
 
 <Note>
@@ -174,7 +174,7 @@ cp data/profiles/claude-code-secretive.toml ~/.config/nono/profiles/
 
 **Usage:**
 ```bash
-nono run --profile claude-code-secretive --trust-unsigned --allow-cwd -- claude
+nono run --profile claude-code-secretive --allow-cwd -- claude
 ```
 
 The profile extends the standard Claude Code profile with:

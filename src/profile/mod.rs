@@ -23,9 +23,6 @@ pub struct ProfileMeta {
     pub description: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
-    ///  signature support
-    #[serde(default)]
-    pub signature: Option<String>,
 }
 
 /// Filesystem configuration in a profile
@@ -146,21 +143,12 @@ pub struct Profile {
     pub interactive: bool,
 }
 
-impl Profile {
-    /// Check if this profile has a signature
-    pub fn is_signed(&self) -> bool {
-        self.meta.signature.is_some()
-    }
-}
-
 /// Load a profile by name
 ///
 /// Loading precedence:
 /// 1. User profiles from ~/.config/nono/profiles/<name>.toml (allows customization)
 /// 2. Built-in profiles (compiled into binary, fallback)
-///
-/// User profiles require --trust-unsigned unntil signed (planned feature)
-pub fn load_profile(name: &str, trust_unsigned: bool) -> Result<Profile> {
+pub fn load_profile(name: &str) -> Result<Profile> {
     // Validate profile name (alphanumeric + hyphen only)
     if !is_valid_profile_name(name) {
         return Err(NonoError::ProfileParse(format!(
@@ -173,14 +161,7 @@ pub fn load_profile(name: &str, trust_unsigned: bool) -> Result<Profile> {
     let profile_path = get_user_profile_path(name)?;
     if profile_path.exists() {
         tracing::info!("Loading user profile from: {}", profile_path.display());
-        let profile = load_from_file(&profile_path)?;
-
-        // Require --trust-unsigned for unsigned user profiles
-        if !profile.is_signed() && !trust_unsigned {
-            return Err(NonoError::UnsignedProfile(name.to_string()));
-        }
-
-        return Ok(profile);
+        return load_from_file(&profile_path);
     }
 
     // 2. Fall back to built-in profiles
@@ -335,14 +316,14 @@ mod tests {
 
     #[test]
     fn test_load_builtin_profile() {
-        let profile = load_profile("claude-code", false).unwrap();
+        let profile = load_profile("claude-code").unwrap();
         assert_eq!(profile.meta.name, "claude-code");
         assert!(!profile.network.block); // network allowed by default
     }
 
     #[test]
     fn test_load_nonexistent_profile() {
-        let result = load_profile("nonexistent-profile-12345", false);
+        let result = load_profile("nonexistent-profile-12345");
         assert!(matches!(result, Err(NonoError::ProfileNotFound(_))));
     }
 

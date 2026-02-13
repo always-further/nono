@@ -168,7 +168,7 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
 
     // Load profile if specified
     let profile = if let Some(ref profile_name) = args.profile {
-        Some(profile::load_profile(profile_name, args.trust_unsigned)?)
+        Some(profile::load_profile(profile_name)?)
     } else {
         None
     };
