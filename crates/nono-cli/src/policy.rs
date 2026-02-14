@@ -200,20 +200,25 @@ fn expand_path(path_str: &str) -> Result<PathBuf> {
 /// Escape a path for Seatbelt profile strings.
 ///
 /// Paths are placed inside double-quoted S-expression strings where `\` and `"`
-/// are the significant characters. All control characters (0x00-0x1F, 0x7F, and
-/// Unicode control chars) are stripped since they cannot appear in valid filesystem
-/// paths and could disrupt Seatbelt's S-expression parser.
-fn escape_seatbelt_path(path: &str) -> String {
+/// are the significant characters. Control characters are rejected (not stripped)
+/// to match the library's escape_path behavior — silently stripping could cause
+/// deny rules to target wrong paths.
+fn escape_seatbelt_path(path: &str) -> Result<String> {
     let mut result = String::with_capacity(path.len());
     for c in path.chars() {
+        if c.is_control() {
+            return Err(NonoError::ConfigParse(format!(
+                "Path contains control character: {:?}",
+                path
+            )));
+        }
         match c {
             '\\' => result.push_str("\\\\"),
             '"' => result.push_str("\\\""),
-            c if c.is_control() => {}
             _ => result.push(c),
         }
     }
-    result
+    Ok(result)
 }
 
 // ============================================================================
@@ -348,7 +353,7 @@ fn resolve_single_group(
         if let Some(pairs) = &group.symlink_pairs {
             for symlink in pairs.keys() {
                 let expanded = expand_path(symlink)?;
-                let escaped = escape_seatbelt_path(&expanded.to_string_lossy());
+                let escaped = escape_seatbelt_path(&expanded.to_string_lossy())?;
                 caps.add_platform_rule(format!("(allow file-read* (subpath \"{}\"))", escaped))?;
             }
         }
@@ -427,7 +432,7 @@ fn add_deny_access_rules(
 
     // Seatbelt deny rules only apply on macOS
     if cfg!(target_os = "macos") {
-        let escaped = escape_seatbelt_path(&path.to_string_lossy());
+        let escaped = escape_seatbelt_path(&path.to_string_lossy())?;
 
         // Determine filter type: literal for files, subpath for directories
         let filter = if path.exists() && path.is_file() {
@@ -469,7 +474,13 @@ pub fn apply_unlink_overrides(caps: &mut CapabilitySet) {
         .collect();
 
     for path in writable_paths {
-        let escaped = escape_seatbelt_path(&path.to_string_lossy());
+        let escaped = match escape_seatbelt_path(&path.to_string_lossy()) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Skipping unlink override for {}: {}", path.display(), e);
+                continue;
+            }
+        };
         // These rules are well-formed S-expressions for user-granted writable paths,
         // so validation should not fail. Log and skip on error to avoid breaking the sandbox.
         if let Err(e) = caps.add_platform_rule(format!(
@@ -874,48 +885,42 @@ mod tests {
 
     #[test]
     fn test_escape_seatbelt_path() {
-        assert_eq!(escape_seatbelt_path("/simple/path"), "/simple/path");
         assert_eq!(
-            escape_seatbelt_path("/path with\\slash"),
+            escape_seatbelt_path("/simple/path").expect("simple path"),
+            "/simple/path"
+        );
+        assert_eq!(
+            escape_seatbelt_path("/path with\\slash").expect("backslash"),
             "/path with\\\\slash"
         );
-        assert_eq!(escape_seatbelt_path("/path\"quoted"), "/path\\\"quoted");
         assert_eq!(
-            escape_seatbelt_path("/path\nwith\nnewlines"),
-            "/pathwithnewlines"
+            escape_seatbelt_path("/path\"quoted").expect("quote"),
+            "/path\\\"quoted"
         );
-        assert_eq!(
-            escape_seatbelt_path("/path\rwith\rreturns"),
-            "/pathwithreturns"
-        );
-        assert_eq!(escape_seatbelt_path("/path\0with\0nulls"), "/pathwithnulls");
-        // All control characters must be stripped
-        assert_eq!(escape_seatbelt_path("/path\twith\ttabs"), "/pathwithtabs");
-        assert_eq!(
-            escape_seatbelt_path("/path\x0bwith\x0cfeeds"),
-            "/pathwithfeeds"
-        );
-        assert_eq!(
-            escape_seatbelt_path("/path\x1bwith\x1bescape"),
-            "/pathwithescape"
-        );
-        assert_eq!(escape_seatbelt_path("/path\x7fwith\x7fdel"), "/pathwithdel");
+    }
+
+    #[test]
+    fn test_escape_seatbelt_path_rejects_control_chars() {
+        assert!(escape_seatbelt_path("/path\nwith\nnewlines").is_err());
+        assert!(escape_seatbelt_path("/path\rwith\rreturns").is_err());
+        assert!(escape_seatbelt_path("/path\0with\0nulls").is_err());
+        assert!(escape_seatbelt_path("/path\twith\ttabs").is_err());
+        assert!(escape_seatbelt_path("/path\x0bwith\x0cfeeds").is_err());
+        assert!(escape_seatbelt_path("/path\x1bwith\x1bescape").is_err());
+        assert!(escape_seatbelt_path("/path\x7fwith\x7fdel").is_err());
     }
 
     #[test]
     fn test_escape_seatbelt_path_injection_via_newline() {
         let malicious = "/tmp/evil\n(allow file-read* (subpath \"/\"))";
-        let escaped = escape_seatbelt_path(malicious);
-        assert!(
-            !escaped.contains('\n'),
-            "escaped path must not contain newlines"
-        );
+        // Control characters are now rejected outright
+        assert!(escape_seatbelt_path(malicious).is_err());
     }
 
     #[test]
     fn test_escape_seatbelt_path_injection_via_quote() {
         let malicious = "/tmp/evil\")(allow file-read* (subpath \"/\"))(\"";
-        let escaped = escape_seatbelt_path(malicious);
+        let escaped = escape_seatbelt_path(malicious).expect("no control chars");
         let chars: Vec<char> = escaped.chars().collect();
         for (i, &c) in chars.iter().enumerate() {
             if c == '"' {

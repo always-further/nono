@@ -14,11 +14,17 @@ use std::path::{Path, PathBuf};
 
 use super::types::{ContentHash, FileState};
 
+/// Domain separation prefixes per RFC 6962 to prevent second-preimage attacks.
+/// Leaf and internal nodes use distinct prefixes so an attacker cannot substitute
+/// a leaf node hash for an internal node hash or vice versa.
+const LEAF_PREFIX: u8 = 0x00;
+const INTERNAL_PREFIX: u8 = 0x01;
+
 /// A Merkle tree computed over snapshot file hashes.
 ///
-/// Leaves are `SHA-256(canonical_path_bytes || file_content_hash)` to bind
-/// path identity to content. Internal nodes are
-/// `SHA-256(left_child_hash || right_child_hash)`.
+/// Leaves are `SHA-256(0x00 || canonical_path_bytes || file_content_hash)` to bind
+/// path identity to content with domain separation. Internal nodes are
+/// `SHA-256(0x01 || left_child_hash || right_child_hash)`.
 ///
 /// File paths are sorted lexicographically to ensure deterministic tree
 /// construction regardless of insertion order.
@@ -98,17 +104,25 @@ impl MerkleTree {
     }
 }
 
-/// Compute a leaf hash: SHA-256(path_bytes || content_hash)
+/// Compute a leaf hash: SHA-256(0x00 || path_bytes || content_hash)
+///
+/// The 0x00 prefix provides domain separation per RFC 6962,
+/// preventing second-preimage attacks where leaf and internal
+/// node hashes could be confused.
 fn compute_leaf_hash(path: &Path, content_hash: &ContentHash) -> [u8; 32] {
     let mut hasher = Sha256::new();
+    hasher.update([LEAF_PREFIX]);
     hasher.update(path.to_string_lossy().as_bytes());
     hasher.update(content_hash.as_bytes());
     hasher.finalize().into()
 }
 
-/// Compute an internal node hash: SHA-256(left || right)
+/// Compute an internal node hash: SHA-256(0x01 || left || right)
+///
+/// The 0x01 prefix provides domain separation per RFC 6962.
 fn compute_internal_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
+    hasher.update([INTERNAL_PREFIX]);
     hasher.update(left);
     hasher.update(right);
     hasher.finalize().into()

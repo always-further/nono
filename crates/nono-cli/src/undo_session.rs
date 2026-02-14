@@ -89,9 +89,21 @@ pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
 }
 
 /// Load a specific session by ID.
+///
+/// The session_id is validated to prevent path traversal — it must not
+/// contain path separators or `..` components. The resolved path is
+/// verified to be within the undo root directory.
 pub fn load_session(session_id: &str) -> Result<SessionInfo> {
+    validate_session_id(session_id)?;
     let root = undo_root()?;
     let dir = root.join(session_id);
+
+    // Defense in depth: verify the resolved path is within undo root
+    if let (Ok(canonical_dir), Ok(canonical_root)) = (dir.canonicalize(), root.canonicalize()) {
+        if !canonical_dir.starts_with(&canonical_root) {
+            return Err(NonoError::SessionNotFound(session_id.to_string()));
+        }
+    }
 
     if !dir.exists() {
         return Err(NonoError::SessionNotFound(session_id.to_string()));
@@ -129,6 +141,26 @@ pub fn remove_session(dir: &Path) -> Result<()> {
             dir.display()
         ))
     })
+}
+
+/// Validate a session ID to prevent path traversal.
+///
+/// Session IDs must match the format `YYYYMMDD-HHMMSS-<pid>` and must not
+/// contain path separators, `..`, or other dangerous characters.
+fn validate_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty() {
+        return Err(NonoError::SessionNotFound("empty session ID".to_string()));
+    }
+    if session_id.contains(std::path::MAIN_SEPARATOR)
+        || session_id.contains('/')
+        || session_id.contains("..")
+        || session_id.contains('\0')
+    {
+        return Err(NonoError::SessionNotFound(format!(
+            "invalid session ID: {session_id}"
+        )));
+    }
+    Ok(())
 }
 
 /// Parse the PID from a session ID formatted as `YYYYMMDD-HHMMSS-<pid>`.
@@ -175,6 +207,21 @@ pub fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_session_id_rejects_traversal() {
+        assert!(validate_session_id("../../../etc").is_err());
+        assert!(validate_session_id("foo/bar").is_err());
+        assert!(validate_session_id("foo\0bar").is_err());
+        assert!(validate_session_id("..").is_err());
+        assert!(validate_session_id("").is_err());
+    }
+
+    #[test]
+    fn validate_session_id_accepts_valid() {
+        assert!(validate_session_id("20260214-143022-12345").is_ok());
+        assert!(validate_session_id("test-session").is_ok());
+    }
 
     #[test]
     fn parse_pid_from_session_id_valid() {

@@ -96,10 +96,19 @@ impl ObjectStore {
 
     /// Retrieve an object and write it to a target path atomically.
     ///
-    /// Writes to a temp file in the same directory as target, then
-    /// renames for atomic replacement.
+    /// Verifies content integrity by re-hashing before writing. Writes to
+    /// a temp file in the same directory as target, then renames for atomic
+    /// replacement.
     pub fn retrieve_to(&self, hash: &ContentHash, target: &Path) -> Result<()> {
         let content = self.retrieve(hash)?;
+
+        // Verify content integrity before writing to target
+        let actual: [u8; 32] = Sha256::digest(&content).into();
+        if actual != *hash.as_bytes() {
+            return Err(NonoError::ObjectStore(format!(
+                "Object integrity check failed for {hash}: content hash mismatch"
+            )));
+        }
 
         let parent = target.parent().ok_or_else(|| {
             NonoError::ObjectStore(format!(
@@ -108,8 +117,13 @@ impl ObjectStore {
             ))
         })?;
 
-        // Write to temp file in the same directory for atomic rename
-        let temp_path = parent.join(format!(".nono-restore-{}", std::process::id()));
+        // Write to temp file in the same directory for atomic rename.
+        // Use PID + random suffix to prevent predictable temp file names.
+        let temp_path = parent.join(format!(
+            ".nono-restore-{}-{:08x}",
+            std::process::id(),
+            random_u32()
+        ));
 
         let write_result = (|| -> Result<()> {
             let mut file = fs::File::create(&temp_path).map_err(|e| {
@@ -191,7 +205,8 @@ impl ObjectStore {
             ))
         })?;
 
-        let temp_path = prefix_dir.join(format!(".tmp-{}", std::process::id()));
+        let temp_path =
+            prefix_dir.join(format!(".tmp-{}-{:08x}", std::process::id(), random_u32()));
 
         let write_result = (|| -> Result<()> {
             let mut file = fs::File::create(&temp_path).map_err(|e| {
@@ -231,6 +246,23 @@ impl ObjectStore {
                 e
             ))
         })
+    }
+}
+
+/// Generate a random u32 for temp file name unpredictability.
+///
+/// Uses getrandom for cryptographic randomness when available,
+/// falling back to timestamp-based entropy.
+pub(super) fn random_u32() -> u32 {
+    let mut buf = [0u8; 4];
+    if getrandom::getrandom(&mut buf).is_ok() {
+        u32::from_ne_bytes(buf)
+    } else {
+        // Fallback: use timestamp + PID for some entropy
+        let duration = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        duration.subsec_nanos() ^ std::process::id()
     }
 }
 

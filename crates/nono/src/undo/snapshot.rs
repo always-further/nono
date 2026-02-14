@@ -133,6 +133,7 @@ impl SnapshotManager {
     /// Compares the current filesystem state against the manifest and returns
     /// the list of changes that would be applied. Useful for dry-run previews.
     pub fn compute_restore_diff(&self, manifest: &SnapshotManifest) -> Result<Vec<Change>> {
+        self.validate_manifest_paths(manifest)?;
         let current_files = self.walk_current()?;
         let mut changes = Vec::new();
 
@@ -180,7 +181,11 @@ impl SnapshotManager {
     /// For each file in the manifest: restores content from object store
     /// via atomic temp+rename. Deletes files that exist on disk but aren't
     /// in the manifest. Returns the list of changes applied.
+    ///
+    /// All manifest paths are validated to be within tracked directories
+    /// before any writes occur.
     pub fn restore_to(&self, manifest: &SnapshotManifest) -> Result<Vec<Change>> {
+        self.validate_manifest_paths(manifest)?;
         let current_files = self.walk_current()?;
         let mut applied_changes = Vec::new();
 
@@ -204,12 +209,14 @@ impl SnapshotManager {
 
                 self.object_store.retrieve_to(&state.hash, path)?;
 
-                // Restore permissions
+                // Restore permissions (mask out setuid/setgid/sticky bits)
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let perms = fs::Permissions::from_mode(state.permissions);
-                    let _ = fs::set_permissions(path, perms);
+                    let perms = fs::Permissions::from_mode(state.permissions & 0o0777);
+                    if let Err(e) = fs::set_permissions(path, perms) {
+                        tracing::warn!("Failed to set permissions on {}: {}", path.display(), e);
+                    }
                 }
 
                 let change_type = if current_files.contains_key(path) {
@@ -388,6 +395,27 @@ impl SnapshotManager {
         serde_json::from_str(&content).map_err(|e| {
             NonoError::Snapshot(format!("Failed to parse changes {}: {e}", path.display()))
         })
+    }
+
+    /// Validate that all paths in a manifest are within the tracked directories.
+    ///
+    /// Prevents path traversal attacks via tampered manifests. Each path must
+    /// be a descendant of at least one tracked path (checked via `Path::starts_with`
+    /// which performs component-wise comparison, not string prefix matching).
+    fn validate_manifest_paths(&self, manifest: &SnapshotManifest) -> Result<()> {
+        for path in manifest.files.keys() {
+            let within_tracked = self
+                .tracked_paths
+                .iter()
+                .any(|tracked| path.starts_with(tracked));
+            if !within_tracked {
+                return Err(NonoError::Snapshot(format!(
+                    "Manifest contains path outside tracked directories: {}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Walk tracked paths and store all non-excluded files in the object store.
@@ -608,7 +636,11 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         NonoError::Snapshot(format!("Path has no parent directory: {}", path.display()))
     })?;
 
-    let temp_path = parent.join(format!(".tmp-{}", std::process::id()));
+    let temp_path = parent.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        super::object_store::random_u32()
+    ));
 
     let write_result = (|| -> Result<()> {
         let mut file = fs::File::create(&temp_path).map_err(|e| {

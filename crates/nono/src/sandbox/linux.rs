@@ -108,6 +108,7 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
             })?
         } else {
             warn!("Network blocking requested but kernel ABI doesn't support it (requires V4+)");
+            eprintln!("WARNING: Network blocking requested but kernel Landlock ABI doesn't support it (requires V4+). Network access will NOT be restricted.");
             ruleset_builder
         }
     } else {

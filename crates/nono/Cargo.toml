@@ -18,6 +18,7 @@ serde_json.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 sha2.workspace = true
+getrandom = "0.2"
 walkdir.workspace = true
 ignore.workspace = true
 globset.workspace = true
