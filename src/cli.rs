@@ -133,9 +133,9 @@ pub struct SandboxArgs {
     pub read: Vec<PathBuf>,
 
     /// Directories to allow write-only access (recursive).
-    /// Write access includes: creating files/dirs, modifying content, deleting files,
-    /// renaming/moving files (atomic writes), and truncating files.
-    /// Note: Directory deletion is NOT included for safety.
+    /// Write access includes: creating files/dirs, modifying content, deleting files
+    /// and directories, renaming/moving files and directories (atomic writes),
+    /// and truncating files.
     #[arg(long, short = 'w', value_name = "DIR")]
     pub write: Vec<PathBuf>,
 

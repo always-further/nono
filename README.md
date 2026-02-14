@@ -195,10 +195,9 @@ nono run --allow . --block-command my-dangerous-tool -- my-script.sh
 
 nono applies kernel-level protections that limit destructive operations:
 
-- **File deletion blocked outside granted paths** - `unlink`/`rmdir` syscalls are blocked for system paths like `/tmp`, `/dev`, and any path not explicitly granted with `--allow` or `--write`
-- **Directory deletion blocked everywhere** - `rmdir` is blocked even within granted write paths (Linux: `RemoveDir` excluded from Landlock rules; macOS: global `deny file-write-unlink` with targeted overrides for file deletion only)
+- **File and directory deletion blocked outside granted paths** - `unlink`/`rmdir` syscalls are blocked for system paths like `/tmp`, `/dev`, and any path not explicitly granted with `--allow` or `--write`
 
-Within paths you explicitly grant write access to (`--allow` or `--write`), file creation, modification, and deletion are permitted - this is necessary for normal file operations like atomic writes.
+Within paths you explicitly grant write access to (`--allow` or `--write`), file creation, modification, and deletion (including directory deletion) are permitted - this is necessary for normal file operations like atomic writes and directory renames.
 
 ```bash
 # File deletion blocked in system paths (even with --allow-command rm)
@@ -240,7 +239,7 @@ nono follows a capability-based security model with defense-in-depth:
 
 1. **Command validation** - Dangerous commands (rm, dd, chmod, etc.) are blocked before execution
 2. **Sandbox applied** - OS-level restrictions are applied (irreversible)
-3. **Kernel enforcement** - Directory deletion blocked everywhere; file deletion blocked outside granted write paths
+3. **Kernel enforcement** - File and directory deletion blocked outside granted write paths
 4. **Command executed** - The command runs with only granted capabilities
 5. **All children inherit** - Subprocesses also run under restrictions
 6. **Key isolation** - Secrets are injected securely and cannot be accessed outside the sandbox

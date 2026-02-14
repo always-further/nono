@@ -71,11 +71,12 @@ AccessFs::MakeFifo
 AccessFs::MakeBlock
 AccessFs::MakeSym
 AccessFs::RemoveFile  // File deletion (needed for atomic writes)
+AccessFs::RemoveDir   // Directory deletion (needed for rename() on directories)
 AccessFs::Refer       // Rename/hard link across directories (ABI v2+)
 AccessFs::Truncate    // ABI v3+
 ```
 
-Note: `RemoveDir` is intentionally excluded for safety - directory deletion is blocked even within writable paths.
+Note: `RemoveFile` and `RemoveDir` are both included because `rename()` requires removal rights on the source. This enables atomic write patterns (write to `.tmp` then rename to target) for both files and directories.
 
 ### Full Access (`--allow`)
 

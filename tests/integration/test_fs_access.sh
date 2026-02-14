@@ -68,6 +68,25 @@ expect_success "can write to nested path in granted directory" \
     "$NONO_BIN" run --allow "$TMPDIR/allowed" -- sh -c "echo 'nested' > '$TMPDIR/allowed/nested/deep/written.txt'"
 
 # =============================================================================
+# Directory Rename (atomic directory rename via RemoveDir permission)
+# =============================================================================
+
+echo ""
+echo "--- Directory Rename ---"
+
+# Create source directory with content for rename test
+mkdir -p "$TMPDIR/allowed/rename_src"
+echo "rename content" > "$TMPDIR/allowed/rename_src/data.txt"
+
+expect_success "rename directory within granted writable path" \
+    "$NONO_BIN" run --allow "$TMPDIR/allowed" --allow-command mv -- mv "$TMPDIR/allowed/rename_src" "$TMPDIR/allowed/rename_dst"
+
+# Verify the rename actually happened
+run_test "renamed directory exists at destination" 0 test -d "$TMPDIR/allowed/rename_dst"
+run_test "renamed directory content preserved" 0 test -f "$TMPDIR/allowed/rename_dst/data.txt"
+run_test "source directory no longer exists" 1 test -d "$TMPDIR/allowed/rename_src"
+
+# =============================================================================
 # Read-only vs Write-only Access
 # =============================================================================
 
