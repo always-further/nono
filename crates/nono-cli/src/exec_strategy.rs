@@ -843,6 +843,29 @@ pub fn execute_supervised(
             // No output piping needed - child inherits the terminal directly.
             setup_signal_forwarding(child);
 
+            // Validate supervisor socket peer is our child (L3 review finding).
+            // This ensures no other process has connected to our socket pair.
+            if let Some(ref sup_sock) = supervisor_sock {
+                match sup_sock.peer_pid() {
+                    Ok(peer) => {
+                        let expected = child.as_raw() as u32;
+                        if peer != expected {
+                            let _ = signal::kill(child, Signal::SIGKILL);
+                            let _ = waitpid(child, None);
+                            return Err(NonoError::SandboxInit(format!(
+                                "Supervisor socket peer PID mismatch: expected {} but got {}. \
+                                 Aborting: possible socket hijack.",
+                                expected, peer
+                            )));
+                        }
+                        debug!("Supervisor socket peer validated: PID {}", peer);
+                    }
+                    Err(e) => {
+                        warn!("Could not verify supervisor socket peer PID: {}", e);
+                    }
+                }
+            }
+
             // Build initial-set path lookup for seccomp fast-path (Linux)
             #[cfg(target_os = "linux")]
             let initial_paths: std::collections::HashSet<std::path::PathBuf> = {
@@ -1558,7 +1581,7 @@ fn handle_seccomp_notification(
 
     if in_initial_set {
         // Path is in the initial set -- open and inject immediately (no prompt)
-        match open_path_for_access(&canonicalized, &access) {
+        match open_path_for_access(&canonicalized, &access, config.never_grant) {
             Ok(file) => {
                 // Second TOCTOU check before inject
                 if notif_id_valid(notify_fd, notif.id)? {
@@ -1587,7 +1610,7 @@ fn handle_seccomp_notification(
 
     // 7. Delegate to approval backend
     let request = nono::supervisor::CapabilityRequest {
-        request_id: format!("seccomp-{}", uuid_v4_simple()),
+        request_id: format!("seccomp-{}", unique_request_id()),
         path: path.clone(),
         access,
         reason: Some("Sandbox intercepted file operation (seccomp-notify)".to_string()),
@@ -1626,12 +1649,16 @@ fn handle_seccomp_notification(
 
     // 9. Act on the decision
     if decision.is_granted() {
-        match open_path_for_access(&path, &access) {
+        match open_path_for_access(&canonicalized, &access, config.never_grant) {
             Ok(file) => {
                 inject_fd(notify_fd, notif.id, file.as_raw_fd())?;
             }
             Err(e) => {
-                warn!("Failed to open approved path {}: {}", path.display(), e);
+                warn!(
+                    "Failed to open approved path {}: {}",
+                    canonicalized.display(),
+                    e
+                );
                 let _ = deny_notif(notify_fd, notif.id);
             }
         }
@@ -1707,7 +1734,7 @@ fn handle_supervisor_message(
 
             // 3. If granted, open the path and send fd before the response
             if decision.is_granted() {
-                match open_path_for_access(&request.path, &request.access) {
+                match open_path_for_access(&request.path, &request.access, config.never_grant) {
                     Ok(file) => {
                         if let Err(e) = sock.send_fd(file.as_raw_fd()) {
                             warn!("Failed to send fd: {}", e);
@@ -1812,7 +1839,7 @@ fn handle_shim_request(
 
     // 2. Construct a CapabilityRequest for the approval backend
     let request = CapabilityRequest {
-        request_id: format!("shim-{}", uuid_v4_simple()),
+        request_id: format!("shim-{}", unique_request_id()),
         path: path.to_path_buf(),
         access: *access,
         reason: Some("Sandbox denied file operation (DYLD shim interception)".to_string()),
@@ -1899,45 +1926,87 @@ fn handle_shim_request(
     sock.send_response(&response)
 }
 
-/// Generate a simple unique ID for shim requests.
-fn uuid_v4_simple() -> String {
+/// Generate a unique request ID from timestamp + random component.
+///
+/// Uses nanosecond timestamp for ordering plus random bytes for
+/// uniqueness under concurrency. Not cryptographically significant --
+/// used for audit correlation and replay detection, not security.
+fn unique_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{:x}", nanos)
+        .unwrap_or(0) as u64;
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // Combine timestamp with monotonic counter for uniqueness
+    format!("{:x}-{:x}", nanos, seq)
 }
 
 /// Open a filesystem path with the requested access mode.
 ///
 /// Used by the supervisor to open files on behalf of the sandboxed child
-/// before passing the fd via `SCM_RIGHTS`.
+/// before passing the fd via `SCM_RIGHTS` or seccomp fd injection.
+///
+/// # Security
+///
+/// This function canonicalizes the path and re-checks it against the
+/// `never_grant` list AFTER resolution. This prevents symlink-based
+/// bypasses where a child creates `/tmp/innocent -> /etc/shadow` and
+/// requests access to `/tmp/innocent`.
+///
+/// File creation is intentionally disabled (`create(false)`) -- the
+/// supervisor only grants access to existing files. File creation should
+/// go through the initial capability set, not capability expansion.
 fn open_path_for_access(
     path: &std::path::Path,
     access: &nono::AccessMode,
+    never_grant: &NeverGrantChecker,
 ) -> Result<std::fs::File> {
     use std::fs::OpenOptions;
 
+    // Canonicalize to resolve symlinks before opening. This ensures
+    // we check and open the real target, not a symlink alias.
+    let canonical = std::fs::canonicalize(path).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to canonicalize {} for access: {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    // Re-check never_grant on the resolved path. A symlink could point
+    // from an innocuous path to a never_grant target.
+    let check = never_grant.check(&canonical);
+    if check.is_blocked() {
+        return Err(NonoError::SandboxInit(format!(
+            "Path {} resolves to {} which is blocked by never_grant policy",
+            path.display(),
+            canonical.display(),
+        )));
+    }
+
     let result = match access {
-        nono::AccessMode::Read => OpenOptions::new().read(true).open(path),
+        nono::AccessMode::Read => OpenOptions::new().read(true).open(&canonical),
         nono::AccessMode::Write => OpenOptions::new()
             .write(true)
-            .create(true)
             .truncate(false)
-            .open(path),
+            .open(&canonical),
         nono::AccessMode::ReadWrite => OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
             .truncate(false)
-            .open(path),
+            .open(&canonical),
     };
 
     result.map_err(|e| {
         NonoError::SandboxInit(format!(
             "Failed to open {} for {:?} access: {}",
-            path.display(),
+            canonical.display(),
             access,
             e
         ))

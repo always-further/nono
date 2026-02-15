@@ -568,8 +568,8 @@ pub fn inject_fd(
         id: notif_id,
         flags: SECCOMP_ADDFD_FLAG_SEND,
         srcfd: fd as u32,
-        newfd: 0,       // Let kernel choose the fd number
-        newfd_flags: 0, // No special flags
+        newfd: 0,                            // Let kernel choose the fd number
+        newfd_flags: libc::O_CLOEXEC as u32, // Prevent fd leaking to child's children
     };
 
     // SAFETY: SECCOMP_IOCTL_NOTIF_ADDFD injects a file descriptor from our
