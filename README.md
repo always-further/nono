@@ -8,7 +8,7 @@
   From the creator of
   <a href="https://sigstore.dev"><strong>Sigstore</strong></a>
   <br/>
-  <sub>The standard for software signing, used by PyPI, npm, and GitHub</sub>
+  <sub>The standard for secure software attestation, used by PyPI, npm, brew, and Maven Central</sub>
 </p>
 
 <a href="https://discord.gg/pPcjYzGvbS">
