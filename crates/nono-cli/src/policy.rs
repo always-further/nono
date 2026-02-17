@@ -7,7 +7,7 @@ use crate::profile;
 use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 // ============================================================================
@@ -451,6 +451,62 @@ fn add_deny_access_rules(
     }
 
     Ok(())
+}
+
+/// Add a narrow macOS exception for explicit login.keychain-db file grants.
+///
+/// This keeps broad keychain deny groups active while allowing only the exact
+/// file capability intended by a profile or CLI flag.
+pub fn apply_macos_login_keychain_exception(caps: &mut CapabilitySet) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
+    let user_login_db = std::env::var("HOME")
+        .ok()
+        .map(|home| Path::new(&home).join("Library/Keychains/login.keychain-db"));
+    let system_login_db = Path::new("/Library/Keychains/login.keychain-db");
+
+    let is_login_db = |path: &Path| -> bool {
+        if path == system_login_db {
+            return true;
+        }
+        if let Some(ref user_login_db) = user_login_db {
+            if path == user_login_db {
+                return true;
+            }
+        }
+        false
+    };
+
+    let allow_rules: Vec<String> = caps
+        .fs_capabilities()
+        .iter()
+        .filter(|cap| cap.is_file)
+        .filter(|cap| matches!(cap.access, AccessMode::Read | AccessMode::ReadWrite))
+        .map(|cap| cap.resolved.clone())
+        .filter(|path| is_login_db(path))
+        .filter_map(|path| {
+            let escaped = match escape_seatbelt_path(&path.to_string_lossy()) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "Skipping login keychain exception for {}: {}",
+                        path.display(),
+                        e
+                    );
+                    return None;
+                }
+            };
+            Some(format!("(allow file-read-data (literal \"{}\"))", escaped))
+        })
+        .collect();
+
+    for rule in allow_rules {
+        if let Err(e) = caps.add_platform_rule(rule) {
+            warn!("Failed to add login keychain exception rule: {}", e);
+        }
+    }
 }
 
 /// Apply unlink override rules for all writable paths in the capability set.

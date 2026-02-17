@@ -197,6 +197,7 @@
           "/private",
           "/tmp",
           "/System/Volumes",
+          "/System/Cryptexes",
           "/Applications",
           "/cores",
           "/opt",
@@ -365,6 +366,16 @@
         ]
       }
     },
+    "vscode": {
+      "description": "Visual Studio Code configuration and extension directories",
+      "platform": "macos",
+      "allow": {
+        "write": [
+          "$HOME/.vscode",
+          "$HOME/Library/Application Support/Code"
+        ]
+      }
+    },
     "unlink_protection": {
       "description": "Block file deletion globally, override for user-writable paths",
       "deny": {
@@ -450,12 +461,12 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "python_runtime", "unlink_protection"]
+        "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "python_runtime", "vscode", "unlink_protection"]
       },
       "trust_groups": [],
       "filesystem": {
         "allow": ["$HOME/.claude"],
-        "read": ["$HOME/.vscode", "$HOME/Library/Application Support/Code"],
+        "read": [],
         "allow_file": ["$HOME/.claude.json"],
         "read_file": ["$HOME/Library/Keychains/login.keychain-db", "$HOME/.gitconfig", "$HOME/.gitignore_global"]
       },

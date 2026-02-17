@@ -125,6 +125,10 @@ impl CapabilitySetExt for CapabilitySet {
         // Validate deny/allow overlaps (warns on Linux where Landlock can't enforce denies)
         policy::validate_deny_overlaps(&resolved.deny_paths, &caps);
 
+        // Keep broad keychain deny groups active, but allow explicit
+        // login.keychain-db read grants (profile/CLI) on macOS.
+        policy::apply_macos_login_keychain_exception(&mut caps);
+
         // Deduplicate capabilities
         caps.deduplicate();
 
@@ -228,6 +232,10 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Validate deny/allow overlaps (warns on Linux where Landlock can't enforce denies)
         policy::validate_deny_overlaps(&resolved.deny_paths, &caps);
+
+        // Keep broad keychain deny groups active, but allow explicit
+        // login.keychain-db read grants (profile/CLI) on macOS.
+        policy::apply_macos_login_keychain_exception(&mut caps);
 
         // Deduplicate capabilities
         caps.deduplicate();
