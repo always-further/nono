@@ -7,6 +7,7 @@ use crate::cli::{
     UndoVerifyArgs,
 };
 use crate::config::user::load_user_config;
+use crate::undo_base_exclusions;
 use crate::undo_session::{
     discover_sessions, format_bytes, load_session, remove_session, undo_root, SessionInfo,
 };
@@ -516,11 +517,11 @@ fn cmd_restore(args: UndoRestoreArgs) -> Result<()> {
 
     let manifest = SnapshotManager::load_manifest_from(&session.dir, snapshot)?;
 
-    // For restore we need to construct a SnapshotManager with the tracked paths
-    // and a minimal exclusion filter (we're restoring, not snapshotting)
+    // Restore must use the same exclusions as snapshot creation so that
+    // walk_current() does not see VCS internals and try to delete them
     let exclusion_config = nono::undo::ExclusionConfig {
         use_gitignore: false,
-        exclude_patterns: Vec::new(),
+        exclude_patterns: undo_base_exclusions(),
         exclude_globs: Vec::new(),
         force_include: Vec::new(),
     };

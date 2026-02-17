@@ -659,10 +659,14 @@ fn execute_sandboxed(
 /// Profiles can add additional patterns via `undo.exclude_patterns` in
 /// policy.json. Patterns without `/` match exact path components; patterns
 /// with `/` match as substrings of the full path.
-fn undo_base_exclusions() -> Vec<String> {
+pub(crate) fn undo_base_exclusions() -> Vec<String> {
     [
-        // VCS internals
-        ".git/objects",
+        // VCS internals — git manages its own state; restoring partial
+        // .git/ contents (e.g. index without matching objects) corrupts
+        // the repository
+        ".git",
+        ".hg",
+        ".svn",
         // OS metadata
         ".DS_Store",
     ]
