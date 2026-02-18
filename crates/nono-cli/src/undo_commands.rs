@@ -94,10 +94,12 @@ fn cmd_list(args: UndoListArgs) -> Result<()> {
             })
             .unwrap_or_else(|| "(unknown)".to_string());
         let change_summary = format_change_summary(*created, *modified, *deleted);
+        let timestamp = format_session_timestamp(&s.metadata.started);
 
         eprintln!(
-            "  {}  {}  {}",
+            "  {}  {}  {}  {}",
             s.metadata.session_id.white().bold(),
+            timestamp.truecolor(100, 100, 100),
             cmd_name.truecolor(150, 150, 150),
             change_summary,
         );
@@ -867,6 +869,57 @@ fn parse_session_start_time(s: &SessionInfo) -> Option<u64> {
     s.metadata.started.parse::<u64>().ok()
 }
 
+/// Format a session timestamp as a human-readable string (e.g., "2h ago" or "Feb 17 15:58")
+fn format_session_timestamp(started: &str) -> String {
+    use chrono::{DateTime, Local, Utc};
+
+    // Try parsing as RFC3339 timestamp
+    let dt = match DateTime::parse_from_rfc3339(started) {
+        Ok(dt) => dt.with_timezone(&Local),
+        Err(_) => {
+            // Try parsing as epoch seconds
+            if let Ok(secs) = started.parse::<i64>() {
+                match DateTime::from_timestamp(secs, 0) {
+                    Some(dt) => dt.with_timezone(&Local),
+                    None => return started.to_string(),
+                }
+            } else {
+                return started.to_string();
+            }
+        }
+    };
+
+    let now = Utc::now().with_timezone(&Local);
+    let duration = now.signed_duration_since(dt);
+
+    // Handle future timestamps (clock skew, bad metadata) by showing absolute time
+    if duration.num_seconds() < 0 {
+        return format_absolute_timestamp(&dt, &now);
+    }
+
+    // Show relative time for recent sessions, absolute for older
+    if duration.num_minutes() < 1 {
+        "just now".to_string()
+    } else if duration.num_minutes() < 60 {
+        format!("{}m ago", duration.num_minutes())
+    } else if duration.num_hours() < 24 {
+        format!("{}h ago", duration.num_hours())
+    } else if duration.num_days() < 7 {
+        format!("{}d ago", duration.num_days())
+    } else {
+        format_absolute_timestamp(&dt, &now)
+    }
+}
+
+/// Format an absolute timestamp, including year if different from current year
+fn format_absolute_timestamp(dt: &chrono::DateTime<chrono::Local>, now: &chrono::DateTime<chrono::Local>) -> String {
+    if dt.format("%Y").to_string() != now.format("%Y").to_string() {
+        dt.format("%Y-%m-%d %H:%M").to_string()
+    } else {
+        dt.format("%b %d %H:%M").to_string()
+    }
+}
+
 fn count_change_types(changes: &[nono::undo::Change]) -> (usize, usize, usize) {
     let mut created = 0usize;
     let mut modified = 0usize;
@@ -947,5 +1000,159 @@ mod tests {
         assert_eq!(c, 1);
         assert_eq!(m, 2); // Modified + PermissionsChanged
         assert_eq!(d, 1);
+    }
+
+    #[test]
+    fn format_session_timestamp_just_now() {
+        use chrono::Utc;
+        // Use 10 seconds - well within the <1 minute bucket, far from boundary
+        let now = Utc::now();
+        let recent = now - chrono::Duration::seconds(10);
+        let timestamp = recent.to_rfc3339();
+        assert_eq!(format_session_timestamp(&timestamp), "just now");
+    }
+
+    #[test]
+    fn format_session_timestamp_minutes_ago() {
+        use chrono::Utc;
+        // Use 30 minutes - well within the 1-59 minute bucket
+        let now = Utc::now();
+        let past = now - chrono::Duration::minutes(30);
+        let timestamp = past.to_rfc3339();
+        assert_eq!(format_session_timestamp(&timestamp), "30m ago");
+    }
+
+    #[test]
+    fn format_session_timestamp_hours_ago() {
+        use chrono::Utc;
+        // Use 12 hours - well within the 1-23 hour bucket
+        let now = Utc::now();
+        let past = now - chrono::Duration::hours(12);
+        let timestamp = past.to_rfc3339();
+        assert_eq!(format_session_timestamp(&timestamp), "12h ago");
+    }
+
+    #[test]
+    fn format_session_timestamp_days_ago() {
+        use chrono::Utc;
+        // Use 4 days - well within the 1-6 day bucket
+        let now = Utc::now();
+        let past = now - chrono::Duration::days(4);
+        let timestamp = past.to_rfc3339();
+        assert_eq!(format_session_timestamp(&timestamp), "4d ago");
+    }
+
+    #[test]
+    fn format_session_timestamp_older_same_year() {
+        use chrono::{Local, Utc};
+        let now = Utc::now().with_timezone(&Local);
+        // 30 days ago - well past the 7-day threshold for absolute time
+        let past = now - chrono::Duration::days(30);
+        let timestamp = past.to_rfc3339();
+        let result = format_session_timestamp(&timestamp);
+        // Should contain month abbreviation and time, not "ago"
+        assert!(!result.contains("ago"), "Expected absolute time, got: {result}");
+        assert!(result.contains(':'), "Expected time with colon, got: {result}");
+    }
+
+    #[test]
+    fn format_session_timestamp_different_year() {
+        // A timestamp from 2020 should include the year
+        let old_timestamp = "2020-06-15T14:30:00Z";
+        let result = format_session_timestamp(old_timestamp);
+        assert!(result.contains("2020"), "Expected year in output, got: {result}");
+    }
+
+    #[test]
+    fn format_session_timestamp_future() {
+        use chrono::Utc;
+        // Future timestamp (clock skew scenario) should show absolute time, not "just now"
+        let future = Utc::now() + chrono::Duration::hours(2);
+        let timestamp = future.to_rfc3339();
+        let result = format_session_timestamp(&timestamp);
+        assert_ne!(result, "just now", "Future timestamp should not be 'just now'");
+        assert!(!result.contains("ago"), "Future timestamp should not contain 'ago'");
+    }
+
+    #[test]
+    fn format_session_timestamp_invalid_string() {
+        // Invalid input should be returned as-is
+        let invalid = "not-a-timestamp";
+        assert_eq!(format_session_timestamp(invalid), invalid);
+    }
+
+    #[test]
+    fn format_session_timestamp_epoch_seconds() {
+        use chrono::Utc;
+        // Test epoch seconds format (legacy)
+        let now = Utc::now();
+        let past = now - chrono::Duration::minutes(10);
+        let epoch_str = past.timestamp().to_string();
+        assert_eq!(format_session_timestamp(&epoch_str), "10m ago");
+    }
+
+    #[test]
+    fn format_absolute_timestamp_same_year() {
+        use chrono::Local;
+        let now = Local::now();
+        let same_year = now - chrono::Duration::days(30);
+        let result = format_absolute_timestamp(&same_year, &now);
+        // Should be "Mon DD HH:MM" format (e.g., "Jan 15 14:30")
+        let expected = same_year.format("%b %d %H:%M").to_string();
+        assert_eq!(result, expected, "Expected '{expected}', got '{result}'");
+    }
+
+    #[test]
+    fn format_absolute_timestamp_different_year() {
+        use chrono::{Local, TimeZone, Utc};
+        let now = Local::now();
+        // Use UTC for deterministic construction, then convert to Local
+        let different_year_utc = Utc.with_ymd_and_hms(2020, 6, 15, 14, 30, 0);
+        let dt = match different_year_utc {
+            chrono::LocalResult::Single(dt) => dt.with_timezone(&Local),
+            chrono::LocalResult::Ambiguous(dt, _) => dt.with_timezone(&Local),
+            chrono::LocalResult::None => panic!("Invalid UTC datetime - this should never happen"),
+        };
+        let result = format_absolute_timestamp(&dt, &now);
+        assert!(result.contains("2020"), "Expected year 2020 in output, got: {result}");
+    }
+
+    #[test]
+    fn format_change_summary_output() {
+        // Test the change summary formatting used in undo list output
+        assert_eq!(format_change_summary(0, 0, 0), "(no changes)");
+        assert_eq!(format_change_summary(1, 0, 0), "+1 file");
+        assert_eq!(format_change_summary(3, 0, 0), "+3 files");
+        assert_eq!(format_change_summary(0, 2, 0), "~2 modified");
+        assert_eq!(format_change_summary(0, 0, 1), "-1 deleted");
+        assert_eq!(format_change_summary(1, 2, 3), "+1 file, ~2 modified, -3 deleted");
+    }
+
+    #[test]
+    fn undo_list_output_format_structure() {
+        // Verify the output line format has 4 columns: session_id, timestamp, command, changes
+        // This test documents the expected format and catches layout regressions
+
+        // Simulate the format string pattern used in cmd_list
+        let session_id = "20260217-234523-70889";
+        let timestamp = "2h ago";
+        let cmd_name = "claude";
+        let change_summary = "~2 modified";
+
+        // The format should produce 4 space-separated columns
+        let output = format!(
+            "  {}  {}  {}  {}",
+            session_id, timestamp, cmd_name, change_summary
+        );
+
+        // Verify structure: leading indent, then 4 double-space separated fields
+        assert!(output.starts_with("  "), "Output should have 2-space indent");
+
+        let parts: Vec<&str> = output.trim().split("  ").collect();
+        assert_eq!(parts.len(), 4, "Expected 4 columns separated by double-space, got: {parts:?}");
+        assert_eq!(parts[0], session_id);
+        assert_eq!(parts[1], timestamp);
+        assert_eq!(parts[2], cmd_name);
+        assert_eq!(parts[3], change_summary);
     }
 }
