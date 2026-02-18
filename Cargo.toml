@@ -41,7 +41,7 @@ globset = "0.4"
 tempfile = "3"
 
 # C FFI bindings
-cbindgen = "0.27"
+cbindgen = "0.29"
 
 [profile.release]
 opt-level = 3
