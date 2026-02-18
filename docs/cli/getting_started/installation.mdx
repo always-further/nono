@@ -3,12 +3,10 @@ title: Installation
 description: How to install nono on your system
 ---
 
-# Installing nono
-
 ## Homebrew (macOS)
 
 ```bash
-brew tap always-further/nono 
+brew tap always-further/nono
 brew install nono
 ```
 
@@ -24,19 +22,6 @@ We are in the process of packaging nono for popular Linux distributions. In the 
 
 See the [Development Guide](/cli/development) for instructions on building nono from source.
 
-## Where next?
-
-I expect you want to get going with nono and a coding agent. Here are some of the current documented clients
-- [Claude Code](/cli/clients/claude-code)
-- [OpenClaw](/cli/clients/openclaw)
-- [OpenCode](/cli/clients/opencode)
-
-<Note>
-  If there is an Agent you want supported please open an issue or PR to add it! Its fairly straightforward to add new ones, and we will be adding more over time.
-</Note>
-
-Alternatively, you can check out the [Usage](/cli/usage) guide to learn how to use nono.
-
 ## Platform Support
 
 | Platform | Mechanism | Status |
@@ -44,4 +29,3 @@ Alternatively, you can check out the [Usage](/cli/usage) guide to learn how to u
 | Linux (kernel 5.13+) | Landlock LSM | Supported |
 | macOS | Seatbelt (sandbox_init) | Supported |
 | Windows | - | Not supported |
-

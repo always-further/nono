@@ -15,21 +15,21 @@ Command fails with "Permission denied" or "Operation not permitted" errors.
 
 1. **Check what access was granted**:
    ```bash
-   nono run --allow . --dry-run -- command
+   nono run --allow-cwd --dry-run -- command
    ```
 
 2. **Query capabilities from inside the sandbox**:
    ```bash
    # Check if a specific path is accessible
-   nono run --allow . -- nono why --self --path /tmp --op write --json
+   nono run --allow-cwd -- nono why --self --path /tmp --op write --json
 
    # Human-readable output
-   nono run --allow . -- nono why --self --path ~/.ssh --op read
+   nono run --allow-cwd -- nono why --self --path ~/.ssh --op read
    ```
 
 3. **Run with verbose logging**:
    ```bash
-   nono run -vvv --allow . -- command
+   nono run -vvv --allow-cwd -- command
    ```
 
 ### Common Causes
@@ -74,12 +74,12 @@ Commands like `curl`, `wget`, or API calls fail with connection errors.
 1. **If you used `--net-block`, remove it**:
    ```bash
    # Network is allowed by default
-   nono run --allow . -- curl https://example.com
+   nono run --allow-cwd -- curl https://example.com
    ```
 
 2. **Check if network is allowed from inside the sandbox**:
    ```bash
-   nono run --allow . -- nono why --self --host example.com --json
+   nono run --allow-cwd -- nono why --self --host example.com --json
    # Should show {"status":"allowed",...}
    ```
 
@@ -116,10 +116,10 @@ error: No such file or directory: my-command
 2. **Target command not in PATH**:
    ```bash
    # Use absolute path
-   nono run --allow . -- /usr/local/bin/my-command
+   nono run --allow-cwd -- /usr/local/bin/my-command
 
    # Or ensure PATH is set correctly
-   nono run --allow . -- sh -c 'which my-command'
+   nono run --allow-cwd -- sh -c 'which my-command'
    ```
 
 ---
@@ -184,7 +184,7 @@ This is intentional to prevent symlink escape attacks.
 $ pwd
 /home/user/project
 
-$ nono run --allow . --dry-run -- command
+$ nono run --allow-cwd --dry-run -- command
 Capabilities:
   [rw] /home/user/project    # Resolved from "."
 ```
@@ -204,14 +204,14 @@ Child processes always inherit sandbox restrictions. If you're seeing this:
 1. **Verify the parent is sandboxed**:
    ```bash
    # The --self flag only works inside a sandbox
-   nono run --allow . -- nono why --self --path /etc --op read
+   nono run --allow-cwd -- nono why --self --path /etc --op read
    # Should show current sandbox capabilities
    ```
 
 2. **Check if you're testing correctly**:
    ```bash
    # Parent and child are BOTH sandboxed
-   nono run --allow . -- sh -c 'sh -c "cat /etc/passwd"'
+   nono run --allow-cwd -- sh -c 'sh -c "cat /etc/passwd"'
    # Should fail if /etc is not allowed
    ```
 
@@ -245,23 +245,23 @@ When running inside a nono sandbox, you can query your own capabilities using `n
 
 ```bash
 # Check if a path would be readable
-nono run --allow . -- nono why --self --path ~/.ssh --op read
+nono run --allow-cwd -- nono why --self --path ~/.ssh --op read
 # Output: DENIED - sensitive_path (SSH keys and config)
 
 # Check if a path would be writable
-nono run --allow . -- nono why --self --path ./src --op write
+nono run --allow-cwd -- nono why --self --path ./src --op write
 # Output: ALLOWED - Granted by: --allow .
 
 # JSON output for programmatic use (useful for AI agents)
-nono run --allow . -- nono why --self --path /tmp --op write --json
+nono run --allow-cwd -- nono why --self --path /tmp --op write --json
 # {"status":"denied","reason":"not_in_allowed_paths","suggestion":"--write /tmp"}
 
 # Check network status
-nono run --allow . -- nono why --self --host api.openai.com
+nono run --allow-cwd -- nono why --self --host api.openai.com
 # Output: ALLOWED - network allowed by default
 
 # Check network when blocked
-nono run --allow . --net-block -- nono why --self --host api.openai.com
+nono run --allow-cwd --net-block -- nono why --self --host api.openai.com
 # Output: DENIED - network_blocked
 ```
 
@@ -278,7 +278,7 @@ The `--self` flag reads the sandbox state from `NONO_CAP_FILE`, which is the onl
 This usually means the Seatbelt profile was malformed. Run with `-vvv` to see the generated profile:
 
 ```bash
-nono run -vvv --allow . -- command
+nono run -vvv --allow-cwd -- command
 ```
 
 ### Linux: "Landlock not supported"

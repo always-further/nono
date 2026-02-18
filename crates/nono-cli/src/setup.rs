@@ -391,7 +391,7 @@ impl SetupRunner {
         println!("  You can add these aliases to {}:", shell_rc);
         println!();
         println!("    alias nono-claude='nono run --profile claude-code -- claude'");
-        println!("    alias nono-safe='nono run --allow . --net-block --'");
+        println!("    alias nono-safe='nono run --allow-cwd --net-block --'");
         println!();
     }
 
@@ -412,7 +412,7 @@ impl SetupRunner {
             println!("  nono run --profile claude-code -- claude");
             println!();
             println!("  # Run any command with current directory access");
-            println!("  nono run --allow . -- <command>");
+            println!("  nono run --allow-cwd -- <command>");
             println!();
             println!("  # Check why a sensitive path is blocked");
             println!("  nono why ~/.ssh/id_rsa");

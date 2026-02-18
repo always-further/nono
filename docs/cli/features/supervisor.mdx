@@ -1,0 +1,105 @@
+---
+title: Supervisor Mode
+description: Transparent capability expansion and runtime approval
+---
+
+Supervisor mode keeps a parent process alive outside the sandbox to provide runtime services that a fully sandboxed process cannot perform on its own. This enables transparent capability expansion on Linux and undo snapshots on both platforms.
+
+## Enabling Supervisor Mode
+
+```bash
+nono run --supervised --profile claude-code -- claude
+```
+
+The `--supervised` flag changes the execution model:
+
+1. nono forks before applying the sandbox
+2. The **child** is sandboxed and runs the command
+3. The **parent** remains unsandboxed to provide supervisor services
+
+See [Execution Modes](/cli/features/execution-modes) for how this compares to Direct and Monitor modes.
+
+## Capability Expansion (Linux)
+
+On Linux, supervisor mode enables transparent capability expansion. When the sandboxed process tries to access a file outside its allowed paths, instead of getting `EPERM`, the supervisor intercepts the request and can grant access on the fly.
+
+### How It Works
+
+1. A seccomp BPF filter intercepts `openat`/`openat2` syscalls before they reach Landlock
+2. The supervisor reads the requested path from the child's memory
+3. The path is checked against the `never_grant` list (see below)
+4. If not blocked, the supervisor prompts the user for approval
+5. On approval, the supervisor opens the file and injects the file descriptor into the child process via `SECCOMP_IOCTL_NOTIF_ADDFD`
+6. The child's `open()` call returns a valid file descriptor
+
+The agent never needs to know about nono. Its `open()` call succeeds after a brief pause while the user approves - no retries, no special handling.
+
+### Fast Path
+
+Paths already in the initial capability set are served immediately via an O(1) lookup without prompting. The supervisor prompt only appears for paths outside the granted set.
+
+### Rate Limiting
+
+To prevent prompt flooding, the supervisor uses a token bucket rate limiter:
+
+- **Rate**: 10 requests per second
+- **Burst capacity**: 5
+
+Requests exceeding the rate limit are automatically denied.
+
+### Minimum Requirements
+
+- Linux kernel 5.14+ (for `SECCOMP_ADDFD_FLAG_SEND`)
+- `PR_SET_NO_NEW_PRIVS` (standard for unprivileged seccomp)
+
+### macOS Limitations
+
+Capability expansion is not available on macOS. Apple's SIP (System Integrity Protection) strips `DYLD_INSERT_LIBRARIES` from Apple Platform Binaries, making transparent interposition infeasible for commands that route through `/usr/bin/env`, `/bin/bash`, or `/bin/sh`.
+
+On macOS, supervised mode provides undo snapshots and the diagnostic footer, but does not prompt for capability expansion.
+
+## never_grant
+
+The `never_grant` list defines paths that can never be granted through the supervisor, regardless of user approval. These are a hard safety net:
+
+| Path | Reason |
+|------|--------|
+| `/etc/shadow` | System password hashes |
+| `/etc/sudoers` | Sudo configuration |
+| `/etc/passwd` | User account database |
+| `/boot`, `/boot/grub` | Boot configuration |
+| `~/.ssh/authorized_keys` | SSH access control |
+| `~/.ssh/id_*` | SSH private keys |
+| `~/.gnupg` | GPG private keys |
+| macOS launch daemons | Persistence mechanisms |
+
+The `never_grant` check runs before any approval backend is consulted. These paths cannot be overridden by profiles, CLI flags, or user confirmation.
+
+## Approval Backends
+
+The supervisor uses an `ApprovalBackend` trait to determine whether to grant access. The library defines the trait; backends are implemented by clients.
+
+### Terminal Approval (implemented)
+
+The default backend reads approval from `/dev/tty` directly (since stdin belongs to the sandboxed child). The user sees a prompt like:
+
+```
+[nono] claude wants to read /home/luke/.config/something
+        Allow? [y/N]
+```
+
+### Webhook / Policy Approval (planned)
+
+Future backends will support:
+- **Webhook**: HTTP callback to an external approval service
+- **Policy**: Automatic decisions based on predefined rules
+
+## Diagnostic Footer
+
+In both Monitor and Supervised modes, when the child exits with a non-zero exit code, nono prints a diagnostic footer to stderr explaining what happened and suggesting fixes.
+
+## Limitations
+
+- `--supervised` is incompatible with `--secrets` (keyring threads cause a deadlock across fork)
+- The unsandboxed parent represents a larger attack surface than Monitor mode. The parent applies ptrace hardening to mitigate this.
+- Capability expansion is Linux-only. macOS supervised mode provides undo and diagnostics only.

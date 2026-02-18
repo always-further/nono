@@ -14,7 +14,7 @@ These options work with all commands.
 Suppress all nono output (banner, summary, status messages). Only the executed command's output will be shown.
 
 ```bash
-nono -s run --allow . -- my-agent
+nono -s run --allow-cwd -- my-agent
 nono --silent why --path ~/.ssh/id_rsa --op read
 ```
 
@@ -184,7 +184,7 @@ Block all network access. Network is **allowed by default**.
 
 ```bash
 # Block network for a build process that should be offline
-nono run --allow . --net-block -- cargo build
+nono run --allow-cwd --net-block -- cargo build
 ```
 
 <Note>
@@ -202,7 +202,7 @@ nono run --allow . --net-block -- cargo build
 Override the shell binary.
 
 ```bash
-nono shell --allow . --shell /bin/zsh
+nono shell --allow-cwd --shell /bin/zsh
 ```
 
 ### Command Blocking
@@ -213,10 +213,10 @@ Allow a normally-blocked dangerous command. By default, destructive commands lik
 
 ```bash
 # Allow rm (blocked by default)
-nono run --allow . --allow-command rm -- rm ./temp-file.txt
+nono run --allow-cwd --allow-command rm -- rm ./temp-file.txt
 
 # Allow multiple commands
-nono run --allow . --allow-command rm --allow-command mv -- my-script.sh
+nono run --allow-cwd --allow-command rm --allow-command mv -- my-script.sh
 ```
 
 <Note>
@@ -229,7 +229,7 @@ Block an additional command beyond the default blocklist.
 
 ```bash
 # Block a custom tool in addition to defaults
-nono run --allow . --block-command my-dangerous-tool -- my-script.sh
+nono run --allow-cwd --block-command my-dangerous-tool -- my-script.sh
 ```
 
 ### Secrets Options
@@ -240,7 +240,7 @@ Load secrets from the system keystore (macOS Keychain / Linux Secret Service) an
 
 ```bash
 # Load specific secrets by account name
-nono run --allow . --secrets openai_api_key,anthropic_api_key -- my-agent
+nono run --allow-cwd --secrets openai_api_key,anthropic_api_key -- my-agent
 
 # Use with profile (loads secrets defined in profile's [secrets] section)
 nono run --profile claude-code --secrets -- claude
@@ -292,7 +292,7 @@ nono -s run --profile claude-code --allow-cwd -- claude
 Show what capabilities would be granted without actually executing the command or applying the sandbox.
 
 ```bash
-nono run --allow . --read /etc --dry-run -- my-agent
+nono run --allow-cwd --read /etc --dry-run -- my-agent
 ```
 
 Output:
@@ -317,7 +317,7 @@ Increase logging verbosity. Can be specified multiple times.
 | `-vvv` | Trace | Full trace output |
 
 ```bash
-nono run -vvv --allow . -- command
+nono run -vvv --allow-cwd -- command
 ```
 
 #### `--config`, `-c`

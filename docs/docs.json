@@ -27,36 +27,42 @@
     "groups": [
       {
         "group": "Getting Started",
-        "pages": ["cli/getting_started/installation"]
-      },
-      {
-        "group": "Usage",
         "pages": [
-          "cli/usage/index",
-          "cli/usage/secrets",
+          "cli/getting_started/installation",
+          "cli/getting_started/quickstart",
           "cli/usage/examples",
           "cli/usage/troubleshooting"
         ]
       },
       {
+        "group": "Features",
+        "pages": [
+          "cli/features/profiles-groups",
+          "cli/features/secrets",
+          "cli/features/atomic-rollbacks",
+          "cli/features/audit",
+          "cli/features/supervisor",
+          "cli/features/execution-modes",
+          "cli/features/learn"
+        ]
+      },
+      {
         "group": "Agents & Clients",
         "pages": [
-          "cli/clients/quickstart",
           "cli/clients/claude-code",
           "cli/clients/opencode",
           "cli/clients/openclaw"
         ]
       },
       {
-        "group": "Security",
+        "group": "Platform Internals",
         "pages": [
-          "cli/security/index",
-          "cli/security/profiles",
-          "cli/security/signing",
-          "cli/security/containers",
-          "cli/security/landlock",
-          "cli/security/seatbelt",
-          "cli/security/application"
+          "cli/internals/index",
+          "cli/internals/landlock",
+          "cli/internals/seatbelt",
+          "cli/internals/application",
+          "cli/internals/signing",
+          "cli/internals/containers"
         ]
       },
       {
