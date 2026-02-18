@@ -74,7 +74,13 @@ pub fn query_path(path: &Path, requested: AccessMode, caps: &CapabilitySet) -> R
         });
     }
 
-    // Check capabilities
+    // Check capabilities. Prefer the most specific matching grant so broad system
+    // reads (e.g. /private on macOS) do not shadow explicit user grants.
+    let mut best_covering: Option<&nono::FsCapability> = None;
+    let mut best_sufficient: Option<&nono::FsCapability> = None;
+    let mut best_covering_score = 0usize;
+    let mut best_sufficient_score = 0usize;
+
     for cap in caps.fs_capabilities() {
         let covers = if cap.is_file {
             cap.resolved == canonical
@@ -82,31 +88,45 @@ pub fn query_path(path: &Path, requested: AccessMode, caps: &CapabilitySet) -> R
             canonical.starts_with(&cap.resolved)
         };
 
-        if covers {
-            // Check if access mode is sufficient
-            let sufficient = matches!(
-                (cap.access, requested),
-                (AccessMode::ReadWrite, _)
-                    | (AccessMode::Read, AccessMode::Read)
-                    | (AccessMode::Write, AccessMode::Write)
-            );
-
-            if sufficient {
-                return Ok(QueryResult::Allowed {
-                    reason: "granted_path".to_string(),
-                    granted_path: Some(cap.resolved.display().to_string()),
-                    access: Some(cap.access.to_string()),
-                });
-            } else {
-                return Ok(QueryResult::Denied {
-                    reason: "insufficient_access".to_string(),
-                    details: Some(format!(
-                        "Path is covered by capability with {} access, but {} was requested",
-                        cap.access, requested
-                    )),
-                });
-            }
+        if !covers {
+            continue;
         }
+
+        let score = cap.resolved.as_os_str().len();
+        if score >= best_covering_score {
+            best_covering = Some(cap);
+            best_covering_score = score;
+        }
+
+        let sufficient = matches!(
+            (cap.access, requested),
+            (AccessMode::ReadWrite, _)
+                | (AccessMode::Read, AccessMode::Read)
+                | (AccessMode::Write, AccessMode::Write)
+        );
+
+        if sufficient && score >= best_sufficient_score {
+            best_sufficient = Some(cap);
+            best_sufficient_score = score;
+        }
+    }
+
+    if let Some(cap) = best_sufficient {
+        return Ok(QueryResult::Allowed {
+            reason: "granted_path".to_string(),
+            granted_path: Some(cap.resolved.display().to_string()),
+            access: Some(cap.access.to_string()),
+        });
+    }
+
+    if let Some(cap) = best_covering {
+        return Ok(QueryResult::Denied {
+            reason: "insufficient_access".to_string(),
+            details: Some(format!(
+                "Path is covered by capability with {} access, but {} was requested",
+                cap.access, requested
+            )),
+        });
     }
 
     Ok(QueryResult::Denied {
@@ -198,6 +218,42 @@ mod tests {
 
         let result = query_path(&path, AccessMode::Read, &caps).expect("Query failed");
         assert!(matches!(result, QueryResult::Denied { .. }));
+    }
+
+    #[test]
+    fn test_query_path_prefers_more_specific_sufficient_capability() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let dir_canon = dir.path().canonicalize().expect("Failed to canonicalize");
+
+        let mut caps = CapabilitySet::new();
+        let parent = dir_canon
+            .parent()
+            .expect("tempdir has parent")
+            .to_path_buf();
+
+        // Broad read-only capability.
+        caps.add_fs(FsCapability {
+            original: parent.clone(),
+            resolved: parent,
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+
+        // More specific read-write user capability.
+        caps.add_fs(FsCapability {
+            original: dir_canon.clone(),
+            resolved: dir_canon.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        let test_file = dir_canon.join("test.txt");
+        std::fs::write(&test_file, "test").expect("Failed to write test file");
+
+        let result = query_path(&test_file, AccessMode::Write, &caps).expect("Query failed");
+        assert!(matches!(result, QueryResult::Allowed { .. }));
     }
 
     #[test]

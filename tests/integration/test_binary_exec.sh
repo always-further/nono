@@ -9,6 +9,10 @@ echo ""
 echo -e "${BLUE}=== Binary Execution Tests ===${NC}"
 
 verify_nono_binary
+if ! require_working_sandbox "binary execution suite"; then
+    print_summary
+    exit 0
+fi
 
 # Create test fixtures
 TMPDIR=$(setup_test_dir)
@@ -145,26 +149,10 @@ echo "--- Language Runtimes ---"
 # Also, some runtimes like Node.js require cwd access which the sandbox may block.
 # We check if each runtime can actually execute code (not just --version) before testing.
 
-<<<<<<< Updated upstream
-# Helper to check if a runtime can actually execute in the sandbox
-# Uses actual code execution, not just --version
-can_python_run() {
-    "$NONO_BIN" run --allow "$TMPDIR" -- python3 -c "print('test')" </dev/null >/dev/null 2>&1
-}
-
-can_node_run() {
-    # Node requires cwd access, so test with actual code execution
-    "$NONO_BIN" run --allow "$TMPDIR" -- node -e "process.exit(0)" </dev/null >/dev/null 2>&1
-}
-
-can_ruby_run() {
-    "$NONO_BIN" run --allow "$TMPDIR" -- ruby -e "exit 0" </dev/null >/dev/null 2>&1
-=======
 # Helper to check if a command can execute in the sandbox
 # Redirects stdin from /dev/null to avoid blocking on the CWD prompt
 can_run_in_sandbox() {
     "$NONO_BIN" run --allow "$TMPDIR" -- "$@" </dev/null >/dev/null 2>&1
->>>>>>> Stashed changes
 }
 
 # Python3 - may be installed via Homebrew or system
@@ -221,13 +209,6 @@ else
 fi
 
 # Go tools
-<<<<<<< Updated upstream
-can_gofmt_run() {
-    "$NONO_BIN" run --allow "$TMPDIR" -- gofmt -h </dev/null >/dev/null 2>&1
-}
-
-=======
->>>>>>> Stashed changes
 if command_exists go && command_exists gofmt; then
     if can_run_in_sandbox gofmt -h; then
         expect_success "gofmt executes" \

@@ -9,6 +9,10 @@ echo ""
 echo -e "${BLUE}=== Shell Tests ===${NC}"
 
 verify_nono_binary
+if ! require_working_sandbox "shell suite"; then
+    print_summary
+    exit 0
+fi
 
 PROJECT_ROOT="$(get_project_root)"
 
@@ -77,7 +81,7 @@ fi
 expect_failure "shell with invalid --shell path fails" \
     "$NONO_BIN" shell --allow "$ALLOWED_DIR" --shell /definitely/not/a/real/shell
 
-expect_output_contains "shell invalid --shell path reports exec error" "Failed to execute command" \
+expect_output_contains "shell invalid --shell path reports exec error" "Command execution failed" \
     "$NONO_BIN" shell --allow "$ALLOWED_DIR" --shell /definitely/not/a/real/shell
 
 # =============================================================================

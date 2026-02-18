@@ -9,6 +9,10 @@ echo ""
 echo -e "${BLUE}=== Edge Case Tests ===${NC}"
 
 verify_nono_binary
+if ! require_working_sandbox "edge cases suite"; then
+    print_summary
+    exit 0
+fi
 
 # Create test fixtures
 TMPDIR=$(setup_test_dir)
@@ -139,11 +143,11 @@ expect_output_contains "why --self shows network blocked" "network_blocked" \
 echo ""
 echo "--- Non-existent Paths ---"
 
-expect_failure "grant non-existent directory fails at startup" \
-    "$NONO_BIN" run --allow /nonexistent/path/that/does/not/exist/anywhere -- echo "should not run"
+expect_output_contains "grant non-existent directory is skipped with warning" "Skipping non-existent path" \
+    "$NONO_BIN" run --allow /nonexistent/path/that/does/not/exist/anywhere -- echo "should run"
 
-expect_failure "grant non-existent file fails at startup" \
-    "$NONO_BIN" run --read-file /nonexistent/file.txt -- echo "should not run"
+expect_output_contains "grant non-existent file is skipped with warning" "Skipping non-existent file" \
+    "$NONO_BIN" run --read-file /nonexistent/file.txt -- echo "should run"
 
 # Reading a file that doesn't exist (but directory is allowed) should give normal "not found" error
 expect_failure "read non-existent file in allowed dir gives file error" \

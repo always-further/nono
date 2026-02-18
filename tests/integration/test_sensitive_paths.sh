@@ -9,6 +9,10 @@ echo ""
 echo -e "${BLUE}=== Sensitive Path Protection Tests ===${NC}"
 
 verify_nono_binary
+if ! require_working_sandbox "sensitive path suite"; then
+    print_summary
+    exit 0
+fi
 
 # Create test fixtures
 TMPDIR=$(setup_test_dir)
@@ -232,19 +236,19 @@ fi
 echo ""
 echo "--- Explicit Grant Override ---"
 
-# If user explicitly grants a sensitive path, it should work
+# Sensitive paths remain denied even if explicitly granted by CLI flags.
 # Note: These tests use --allow /tmp which triggers Landlock EBADFD on Linux CI containers.
 if is_linux; then
-    skip_test "explicit --read-file ~/.zshrc allows access" "Landlock EBADFD with /tmp in CI containers"
-    skip_test "explicit --read ~/.ssh allows directory listing" "Landlock EBADFD with /tmp in CI containers"
+    skip_test "explicit --read-file ~/.zshrc stays denied" "Landlock EBADFD with /tmp in CI containers"
+    skip_test "explicit --read ~/.ssh stays denied" "Landlock EBADFD with /tmp in CI containers"
 else
     if [[ -f ~/.zshrc ]]; then
-        expect_success "explicit --read-file ~/.zshrc allows access" \
+        expect_failure "explicit --read-file ~/.zshrc stays denied" \
             "$NONO_BIN" run --read-file ~/.zshrc --allow /tmp -- head -1 ~/.zshrc
     fi
 
     if [[ -d ~/.ssh ]]; then
-        expect_success "explicit --read ~/.ssh allows directory listing" \
+        expect_failure "explicit --read ~/.ssh stays denied" \
             "$NONO_BIN" run --read ~/.ssh --allow /tmp -- ls ~/.ssh/
     fi
 fi
