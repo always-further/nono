@@ -1,96 +1,48 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "nono",
-  "logo": {
-    "dark": "/assets/logo.png",
-    "light": "/assets/logo.png"
-  },
-  "favicon": "/assets/logo.png",
-  "colors": {
-    "primary": "#0D9373",
-    "light": "#07C983",
-    "dark": "#0D9373"
-  },
-  "appearance": {
-    "default": "dark"
-  },
-
-  "navbar": {
-    "links": [
-      {
-        "label": "GitHub",
-        "href": "https://github.com/always-further/nono"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Discord",
-      "href": "https://discord.gg/pPcjYzGvbS"
-    }
-  },
   "navigation": {
-    "tabs": [
+    "groups": [
       {
-        "tab": "Documentation",
-        "groups": [
-          {
-            "group": "Getting Started",
-            "pages": [
-              "getting_started/installation"
-            ]
-          },
-          {
-            "group": "Usage",
-            "pages": [
-              "usage/index",
-              "usage/secrets",
-              "usage/examples",
-              "usage/troubleshooting"
-            ]
-          },
-          {
-            "group": "Agents & Clients",
-            "pages": [
-              "clients/quickstart",
-              "clients/claude-code",
-              "clients/opencode",
-              "clients/openclaw"
-            ]
-          },
-          {
-            "group": "Security",
-            "pages": [
-              "security/index",
-              "security/profiles",
-              "security/signing",
-              "security/vs-containers",
-              "security/landlock",
-              "security/seatbelt",
-              "security/vs-application"
-            ]
-          },
-          {
-            "group": "Reference",
-            "pages": [
-              "usage/flags"
-            ]
-          },
-          {
-            "group": "Development",
-            "pages": [
-              "development/index",
-              "development/testing"
-            ]
-          }
+        "group": "Getting Started",
+        "pages": ["cli/getting_started/installation"]
+      },
+      {
+        "group": "Usage",
+        "pages": [
+          "cli/usage/index",
+          "cli/usage/secrets",
+          "cli/usage/examples",
+          "cli/usage/troubleshooting"
         ]
+      },
+      {
+        "group": "Agents & Clients",
+        "pages": [
+          "cli/clients/quickstart",
+          "cli/clients/claude-code",
+          "cli/clients/opencode",
+          "cli/clients/openclaw"
+        ]
+      },
+      {
+        "group": "Security",
+        "pages": [
+          "cli/security/index",
+          "cli/security/profiles",
+          "cli/security/signing",
+          "cli/security/vs-containers",
+          "cli/security/landlock",
+          "cli/security/seatbelt",
+          "cli/security/vs-application"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": ["cli/usage/flags"]
+      },
+      {
+        "group": "Development",
+        "pages": ["cli/development/index", "cli/development/testing"]
       }
     ]
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/always-further/nono",
-      "discord": "https://discord.gg/pPcjYzGvbS"
-    }
   }
 }
