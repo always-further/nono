@@ -249,8 +249,9 @@ fn merge_base_groups(profile: &mut Profile) -> Result<()> {
         .filter(|g| !profile.security.trust_groups.contains(g))
         .collect();
     // Append profile-specific groups (avoiding duplicates)
+    let mut seen: std::collections::HashSet<String> = merged.iter().cloned().collect();
     for g in &profile.security.groups {
-        if !merged.contains(g) {
+        if seen.insert(g.clone()) {
             merged.push(g.clone());
         }
     }
