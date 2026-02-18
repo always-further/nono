@@ -81,7 +81,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -143,7 +143,7 @@ jobs:
           path: homebrew-nono
 
       - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: nono-*-apple-darwin
           path: artifacts
