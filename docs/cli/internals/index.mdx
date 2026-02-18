@@ -1,6 +1,6 @@
 ---
-title: Security Model
-description: Understanding nono's security guarantees, assumptions, and limitations
+title: Platform Internals
+description: How nono enforces sandboxing at the OS level - threat model, guarantees, and limitations
 ---
 
 nono implements a capability-based security model using kernel-level enforcement. This page explains the security guarantees, assumptions, and limitations.
@@ -117,6 +117,6 @@ nono applies the sandbox and immediately exec()s into the target command.
 
 ## Next Steps
 
-- [macOS Seatbelt](/cli/security/seatbelt) - How nono uses Seatbelt on macOS
-- [Linux Landlock](/cli/security/landlock) - How nono uses Landlock on Linux
-- [Why OS-Level Controls](/cli/security/application) - Why kernel enforcement beats application-level controls
+- [macOS Seatbelt](/cli/internals/seatbelt) - How nono uses Seatbelt on macOS
+- [Linux Landlock](/cli/internals/landlock) - How nono uses Landlock on Linux
+- [Why OS-Level Controls](/cli/internals/application) - Why kernel enforcement beats application-level controls

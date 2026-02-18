@@ -1,0 +1,24 @@
+{
+  "meta": {
+    "name": "npm-install",
+    "version": "1.0.0",
+    "description": "npm install with minimal sandbox permissions",
+    "author": "nono-project"
+  },
+  "security": {
+    "groups": ["node_runtime"]
+  },
+  "filesystem": {
+    "allow": [
+      "$HOME/.npm",
+      "$WORKDIR/node_modules"
+    ],
+    "write_file": [
+      "$WORKDIR/package.json",
+      "$WORKDIR/package-lock.json"
+    ]
+  },
+  "network": { "block": false },
+  "workdir": { "access": "read" },
+  "interactive": false
+}

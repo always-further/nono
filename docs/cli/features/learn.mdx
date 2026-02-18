@@ -1,0 +1,114 @@
+---
+title: Learn (Path Discovery)
+description: Trace commands to discover required filesystem paths
+---
+
+The `learn` command uses `strace` to trace a command's file accesses and report which paths it needs. This helps you build accurate profiles without guessing.
+
+<Warning>
+`nono learn` is Linux-only. It requires `strace` to be installed.
+</Warning>
+
+## Basic Usage
+
+```bash
+nono learn -- my-command --with-args
+```
+
+nono runs the command under `strace`, captures all file access syscalls, and produces a summary:
+
+```
+Read access needed:
+  /home/luke/.config/my-tool/config.yaml
+  /home/luke/data/input/
+
+Write access needed:
+  /home/luke/data/output/
+  /tmp/my-tool-cache/
+
+(15 paths already covered by system defaults)
+```
+
+Paths already covered by base groups (system libraries, temp directories, etc.) are filtered out by default.
+
+## Comparing Against a Profile
+
+Use `--profile` to see only the paths that a profile doesn't already cover:
+
+```bash
+nono learn --profile my-agent -- my-command
+```
+
+This shows the gap between what the profile grants and what the command actually needs - useful for tightening or expanding a profile.
+
+## JSON Output
+
+Use `--json` to get machine-readable output suitable for adding to a profile:
+
+```bash
+nono learn --json -- my-command
+```
+
+```json
+{
+  "filesystem": {
+    "allow": ["/home/luke/project"],
+    "read": ["/home/luke/data"],
+    "write": ["/tmp/my-tool-cache"]
+  }
+}
+```
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `--profile NAME` | Compare against an existing profile, showing only missing paths |
+| `--json` | Output as JSON fragment for profile creation |
+| `--timeout SECS` | Kill trace after N seconds (useful for long-running commands) |
+| `--all` | Show all accessed paths, including those covered by system defaults |
+| `--verbose` | Show detailed trace output |
+
+## How It Works
+
+Under the hood, `nono learn` runs:
+
+```
+strace -f -e openat,open,access,stat,execve,creat,mkdir,rename,unlink -- <command>
+```
+
+It then:
+
+1. Parses all file access syscalls from the trace output
+2. Categorizes each access as read, write, or readwrite
+3. Filters out paths already covered by base groups (system libraries, etc.)
+4. Collapses individual file paths to parent directories where appropriate
+5. Produces the summary or JSON output
+
+## Workflow
+
+A typical workflow for creating a new profile:
+
+```bash
+# 1. Discover what paths the command needs
+nono learn --json -- my-agent
+
+# 2. Create a profile based on the output
+cat > ~/.config/nono/profiles/my-agent.toml << 'EOF'
+[meta]
+name = "my-agent"
+version = "1.0.0"
+
+[filesystem]
+read = ["/home/luke/data"]
+write = ["/tmp/my-tool-cache"]
+allow = ["/home/luke/project"]
+EOF
+
+# 3. Verify the profile covers everything
+nono learn --profile my-agent -- my-agent
+# Should show: "All paths covered by profile"
+
+# 4. Run with the profile
+nono run --profile my-agent -- my-agent
+```

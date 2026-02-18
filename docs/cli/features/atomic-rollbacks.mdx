@@ -1,0 +1,184 @@
+---
+title: Atomic Rollbacks
+description: Content-addressable filesystem snapshots with integrity verification
+---
+
+nono can take filesystem snapshots before and after sandboxed execution, allowing you to review and reverse any changes an agent made. The undo system uses content-addressable storage with SHA-256 deduplication and Merkle tree integrity verification.
+
+## How It Works
+
+When you run a command in supervised mode, nono:
+
+1. **Takes a baseline snapshot** of all files in tracked directories before the command starts
+2. **Runs the command** inside the sandbox
+3. **Takes a final snapshot** after the command exits
+4. **Shows an interactive diff** of all changes, offering to restore any modified or deleted files
+
+```bash
+# Enable undo with supervised mode
+nono run --supervised --profile claude-code -- claude
+```
+
+<Note>
+Undo requires `--supervised` mode because the parent process needs to remain unsandboxed to write snapshots to `~/.nono/undo/`.
+</Note>
+
+## Snapshot Architecture
+
+### Content-Addressable Object Store
+
+Files are stored by their SHA-256 hash, so identical content is never stored twice. On macOS with APFS, nono uses `clonefile()` for copy-on-write storage - snapshots consume minimal additional disk space when files haven't changed.
+
+### Merkle Tree Integrity
+
+Each snapshot builds a Merkle tree over all tracked files. The root hash provides a cryptographic commitment to the exact filesystem state at that point in time. This allows:
+
+- Verifying that no snapshot data has been tampered with
+- Detecting corruption in stored objects
+- Efficient comparison between snapshots (only recompute changed subtrees)
+
+### Session Structure
+
+Sessions are stored in `~/.nono/undo/` with the following layout:
+
+```
+~/.nono/undo/
+  <session-id>/
+    manifest.json       # Session metadata, Merkle roots, timestamps
+    objects/            # Content-addressable file store
+      ab/cd1234...      # Files stored by SHA-256 hash
+    snapshots/
+      0/                # Baseline snapshot
+      1/                # Final snapshot (or intermediate)
+```
+
+Session IDs use the format `YYYYMMDD-HHMMSS-PID` (e.g., `20260214-143022-12345`).
+
+### Exclusion Filters
+
+Not every file needs tracking. The undo system respects:
+
+- **Profile-defined patterns**: Common build artifacts like `node_modules`, `.next`, `__pycache__`, `target`
+- **Profile-defined globs**: Patterns like `*.tmp.[0-9]*.[0-9]*`
+- **gitignore integration**: Reads `.gitignore` patterns from the working directory
+
+These exclusions keep snapshots fast and storage efficient.
+
+## Commands
+
+### `nono undo list`
+
+List past sessions that have recorded changes.
+
+```bash
+# Show recent sessions
+nono undo list
+
+# Show only the 5 most recent
+nono undo list --recent 5
+
+# Include sessions with no file changes
+nono undo list --all
+
+# Machine-readable output
+nono undo list --json
+```
+
+Output shows session ID, timestamp, command, and number of files changed.
+
+### `nono undo show`
+
+Inspect the changes made during a session.
+
+```bash
+# Show summary of changes
+nono undo show 20260214-143022-12345
+
+# Show unified diff (git-style)
+nono undo show 20260214-143022-12345 --diff
+
+# Side-by-side diff
+nono undo show 20260214-143022-12345 --side-by-side
+
+# Show full file content from snapshot
+nono undo show 20260214-143022-12345 --full
+
+# Machine-readable output
+nono undo show 20260214-143022-12345 --json
+```
+
+### `nono undo restore`
+
+Restore files from a past session to their pre-change state.
+
+```bash
+# Restore all files to baseline state
+nono undo restore 20260214-143022-12345
+
+# Restore to a specific snapshot (0 = baseline, 1 = final)
+nono undo restore 20260214-143022-12345 --snapshot 0
+
+# Preview what would change without modifying files
+nono undo restore 20260214-143022-12345 --dry-run
+```
+
+Restoration uses atomic rename per file to prevent partial restores.
+
+### `nono undo verify`
+
+Verify the integrity of a stored session by recomputing Merkle tree hashes and checking all objects in the store.
+
+```bash
+nono undo verify 20260214-143022-12345
+```
+
+Reports any missing objects, hash mismatches, or corrupted metadata.
+
+### `nono undo cleanup`
+
+Remove old sessions to reclaim disk space.
+
+```bash
+# Keep only the 10 most recent sessions
+nono undo cleanup --keep 10
+
+# Remove sessions older than 30 days
+nono undo cleanup --older-than 30
+
+# Preview what would be deleted
+nono undo cleanup --dry-run
+
+# Remove all sessions (requires confirmation)
+nono undo cleanup --all
+```
+
+## Interactive Post-Exit Flow
+
+When a supervised command exits and file changes are detected, nono presents an interactive review:
+
+1. Shows a summary of all changes (created, modified, deleted files)
+2. Offers to show diffs for individual files
+3. Asks whether to restore some or all files
+
+Use `--no-undo-prompt` to suppress the interactive UI while still taking snapshots (useful for scripting).
+
+## Storage Management
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Max sessions | 10 | Oldest sessions pruned automatically |
+| Max storage | 5 GB | Total storage limit for all sessions |
+
+Configure these in your nono config file or use `nono undo cleanup` for manual management.
+
+## Profile Undo Configuration
+
+Profiles can customize undo behavior:
+
+```toml
+[undo]
+exclude_patterns = ["node_modules", ".next", "__pycache__", "target"]
+exclude_globs = ["*.tmp.[0-9]*.[0-9]*"]
+```
+
+These exclusions are combined with gitignore patterns from the working directory.

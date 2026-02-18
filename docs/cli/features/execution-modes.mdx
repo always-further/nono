@@ -1,0 +1,96 @@
+---
+title: Execution Modes
+description: Direct, Monitor, and Supervised execution strategies
+---
+
+nono provides three execution modes that trade off between attack surface, features, and use case. Understanding them helps you choose the right mode for your situation.
+
+## Overview
+
+| Mode | Flag | Parent Sandboxed | Undo | Expansion | Attack Surface |
+|------|------|-----------------|------|-----------|----------------|
+| Direct | `--exec` | N/A (no parent) | No | No | Minimal |
+| Monitor | (default) | Yes | No | No | Small |
+| Supervised | `--supervised` | No | Yes | Linux only | Larger |
+
+## Direct Mode
+
+```bash
+nono run --exec --allow-cwd -- my-command
+```
+
+nono applies the sandbox and then `exec()`s directly into the target command. nono disappears from the process tree entirely - there is no parent process.
+
+**When to use:**
+- Scripts and CI/CD where you want minimal overhead
+- Backward compatibility with tools that expect to be PID 1
+- Maximum security (smallest attack surface)
+
+**Trade-offs:**
+- No diagnostic footer on errors
+- No undo snapshots
+- No capability expansion
+
+Profiles with `interactive = true` (like `claude-code`) use Direct mode by default to preserve TTY behavior.
+
+## Monitor Mode (default)
+
+```bash
+nono run --allow-cwd -- my-command
+```
+
+nono applies the sandbox to itself, then forks. Both the parent and child are sandboxed with identical restrictions. The parent waits for the child to exit.
+
+**When to use:**
+- Interactive AI agents (default for most usage)
+- When you want diagnostic output on failures
+
+**Trade-offs:**
+- Small overhead (parent process stays alive)
+- Cannot write undo snapshots (parent is sandboxed too)
+- Cannot do capability expansion (parent is sandboxed too)
+
+**Features:**
+- Diagnostic footer on non-zero exit explaining what went wrong
+- Signal forwarding to child process
+
+## Supervised Mode
+
+```bash
+nono run --supervised --allow-cwd -- my-command
+```
+
+nono forks first, then sandboxes only the child. The parent remains unsandboxed to provide runtime services.
+
+**When to use:**
+- When you want [undo snapshots](/cli/features/atomic-rollbacks) to recover from agent mistakes
+- When you want [capability expansion](/cli/features/supervisor) (Linux only)
+- Long-running agent sessions where recovery matters
+
+**Trade-offs:**
+- Larger attack surface (unsandboxed parent, mitigated by ptrace hardening)
+- Incompatible with `--secrets` (keyring threads deadlock across fork)
+
+**Features:**
+- Undo snapshots (baseline + final)
+- Interactive post-exit review of changes
+- Capability expansion prompts (Linux only)
+- Diagnostic footer on non-zero exit
+
+## Choosing a Mode
+
+```
+Do you need undo or capability expansion?
+├── Yes → Supervised (--supervised)
+└── No
+    │
+    Do you need diagnostic output on errors?
+    ├── Yes → Monitor (default, no flag needed)
+    └── No
+        │
+        Do you need minimal overhead or TTY preservation?
+        ├── Yes → Direct (--exec)
+        └── No → Monitor (default)
+```
+
+For most users running AI agents interactively, the default Monitor mode is the right choice. Switch to Supervised when you want the safety net of undo snapshots.

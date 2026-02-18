@@ -1,0 +1,380 @@
+---
+title: Profiles & Groups
+description: Pre-configured capability sets and composable security groups
+---
+
+Profiles are pre-configured capability sets that define what a sandboxed process can access. Groups are the composable building blocks that profiles are made from. Together they codify security policy so you don't have to specify flags manually every time.
+
+## Profiles
+
+### Why Profiles?
+
+Manually specifying capabilities for every tool is tedious and error-prone:
+
+```bash
+# Without profiles - verbose and easy to misconfigure
+nono run --allow-cwd --read ~/.claude --read-file ~/.claude/config.json -- claude
+```
+
+Profiles simplify this:
+
+```bash
+# With profiles - concise and auditable
+nono run --profile claude-code -- claude
+```
+
+### Profile Sources
+
+Profiles can come from three sources, in order of precedence:
+
+| Source | Location | Trust Level |
+|--------|----------|-------------|
+| CLI flags | Command line | Highest - explicit user intent |
+| User profiles | `~/.config/nono/profiles/` | Medium - user-defined |
+| Built-in profiles | Compiled into binary | Base - audited defaults |
+
+CLI flags always override profile settings.
+
+### Profile Format
+
+Profiles use JSON format:
+
+```json
+{
+  "meta": {
+    "name": "my-agent",
+    "version": "1.0.0",
+    "description": "Profile for my custom agent"
+  },
+  "interactive": false,
+  "workdir": {
+    "access": "readwrite"
+  },
+  "security": {
+    "groups": ["node_runtime", "python_runtime"]
+  },
+  "filesystem": {
+    "allow": ["$HOME/.config/my-agent"],
+    "read": [],
+    "write": [],
+    "allow_file": [],
+    "read_file": ["$HOME/.gitconfig"],
+    "write_file": []
+  },
+  "network": {
+    "block": false
+  }
+}
+```
+
+### Working Directory
+
+The `workdir` section controls whether and how the current working directory is automatically shared with the sandboxed process.
+
+| Value | Meaning |
+|-------|---------|
+| `"none"` | No automatic CWD access (default if section omitted) |
+| `"read"` | Read-only access to CWD |
+| `"write"` | Write-only access to CWD |
+| `"readwrite"` | Full read+write access to CWD |
+
+When a profile specifies a workdir access level, nono will prompt the user to confirm CWD sharing (unless `--allow-cwd` is used to skip the prompt).
+
+### Secrets
+
+The `secrets` section maps keystore account names to environment variable names. Secrets are loaded from the system keystore (macOS Keychain / Linux Secret Service) before the sandbox is applied, then injected as environment variables.
+
+```json
+{
+  "secrets": {
+    "openai_api_key": "OPENAI_API_KEY",
+    "database_url": "DATABASE_URL"
+  }
+}
+```
+
+```bash
+nono run --profile my-agent --secrets -- my-command
+```
+
+See [Secrets Management](/cli/features/secrets) for details on storing secrets in the keystore.
+
+### Hooks
+
+The `hooks` section defines hooks that nono will automatically install for specific applications.
+
+```json
+{
+  "hooks": {
+    "claude-code": {
+      "event": "PostToolUseFailure",
+      "matcher": "Read|Write|Edit|Bash",
+      "script": "nono-hook.sh"
+    }
+  }
+}
+```
+
+Hook installation is idempotent - nono only installs or updates when needed.
+
+### Interactive Mode
+
+The `interactive` field (default: `false`) indicates whether the application has an interactive terminal UI that requires TTY preservation:
+
+```json
+{
+  "meta": { "name": "my-agent" },
+  "interactive": true
+}
+```
+
+When `true`, nono uses direct exec mode (equivalent to `--exec` flag), which preserves the terminal for apps like Claude Code, vim, or htop.
+
+### Undo Exclusions
+
+The `undo` section controls which files are excluded from [atomic rollback](/cli/features/atomic-rollbacks) snapshots:
+
+```json
+{
+  "undo": {
+    "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
+    "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
+  }
+}
+```
+
+These exclusions are combined with gitignore patterns from the working directory.
+
+### Environment Variables
+
+Profiles support these environment variables in path values:
+
+| Variable | Expands To |
+|----------|------------|
+| `$WORKDIR` | Current working directory (from `--workdir` or cwd) |
+| `$HOME` | User's home directory |
+| `$XDG_CONFIG_HOME` | XDG config directory (default: `~/.config`) |
+| `$XDG_DATA_HOME` | XDG data directory (default: `~/.local/share`) |
+| `$TMPDIR` | System temporary directory |
+| `$UID` | Current user ID |
+
+### Creating User Profiles
+
+1. Create the profiles directory:
+   ```bash
+   mkdir -p ~/.config/nono/profiles
+   ```
+
+2. Create a JSON file:
+   ```json
+   // ~/.config/nono/profiles/my-agent.json
+   {
+     "meta": {
+       "name": "my-agent",
+       "version": "1.0.0"
+     },
+     "security": {
+       "groups": ["node_runtime"]
+     },
+     "filesystem": {
+       "allow": ["$WORKDIR"]
+     },
+     "network": {
+       "block": true
+     }
+   }
+   ```
+
+3. Use the profile:
+   ```bash
+   nono run --profile my-agent -- my-agent-command
+   ```
+
+You can also load a profile by file path:
+
+```bash
+nono run --profile ./profiles/my-agent.json -- my-command
+```
+
+### Overriding Built-in Profiles
+
+CLI flags always take precedence over profile settings:
+
+```bash
+# Use claude-code profile but block network
+nono run --profile claude-code --net-block -- claude
+
+# Add extra directory access
+nono run --profile claude-code --allow ~/other-project -- claude
+```
+
+You can also create a user profile with the same name to override a built-in profile entirely.
+
+---
+
+## Groups
+
+Groups are named, composable collections of security rules. Profiles reference groups by name in their `security.groups` field.
+
+### How Groups Compose
+
+Every profile's effective capability set is built through composition:
+
+```
+(base_groups - trust_groups) + profile.security.groups + profile.filesystem + CLI flags
+```
+
+1. **base_groups** are always applied (deny rules, system paths, dangerous commands)
+2. **trust_groups** are per-profile exclusions from base (e.g., removing `deny_credentials` for an infrastructure agent that legitimately needs credential access)
+3. **profile.security.groups** add additional groups on top
+4. **profile.filesystem** entries are additive
+5. **CLI overrides** (`--allow`, `--read`, etc.) are applied last
+
+### Group Taxonomy
+
+Groups use a structured allow/deny taxonomy:
+
+#### Allow Operations
+
+| Field | Meaning |
+|-------|---------|
+| `allow.read` | Read-only access to listed paths |
+| `allow.write` | Write-only access (no read) |
+| `allow.readwrite` | Both read and write access |
+
+#### Deny Operations
+
+| Field | Meaning |
+|-------|---------|
+| `deny.access` | Block both read and write content (metadata like `stat` still allowed) |
+| `deny.unlink` | Block file deletion globally |
+| `deny.commands` | Block execution of listed commands |
+
+#### Other
+
+| Field | Meaning |
+|-------|---------|
+| `symlink_pairs` | macOS symlink-to-target path mappings (e.g., `/etc` to `/private/etc`) |
+| `platform` | Restrict group to `"macos"` or `"linux"` only |
+
+### Built-in Groups
+
+nono ships with 22 built-in groups:
+
+**Deny groups** (block sensitive content):
+- `deny_credentials` - SSH keys, cloud credentials, GPG keys
+- `deny_keychains_macos` - macOS Keychain databases
+- `deny_browser_data_macos` - Browser data (Chrome, Firefox, Safari, etc.)
+- `deny_shell_history` - Shell history files
+- `deny_shell_configs` - Shell config files (may contain API keys)
+
+**System path groups** (grant necessary system access):
+- `system_read_macos` - macOS system libraries, frameworks, dyld cache
+- `system_read_linux` - Linux system libraries, locale data
+- `system_write_macos` - macOS temp directories, cache paths
+- `system_write_linux` - Linux temp directories
+
+**Runtime groups** (language toolchain paths):
+- `node_runtime` - nvm, fnm, npm, volta
+- `rust_runtime` - rustup, cargo
+- `python_runtime` - pyenv, conda, pip
+- `user_tools` - Homebrew, local bins
+
+**Protection groups**:
+- `unlink_protection` - Prevents file deletion, with override for user-writable paths
+- `dangerous_commands` - Blocks `rm`, `dd`, `chmod`, `sudo`, `mkfs`, etc.
+
+### Platform-Specific Groups
+
+Groups with a `platform` field only apply on that OS:
+
+```json
+{
+  "system_read_macos": {
+    "platform": "macos",
+    "allow": {
+      "read": ["/System/Library", "/usr/lib"]
+    }
+  }
+}
+```
+
+Groups without a `platform` field (like `deny_credentials`) apply on all platforms.
+
+Platform-specific groups use `_macos` or `_linux` suffixes by convention.
+
+### never_grant
+
+The `never_grant` list in policy.json defines paths that can never be granted access through the supervisor, even with explicit user approval:
+
+- `/etc/shadow`, `/etc/sudoers`, `/etc/passwd`
+- `/boot`, `/boot/grub`
+- macOS launch daemons
+- `~/.ssh/authorized_keys`, SSH private keys, `~/.gnupg`
+
+These are a hard safety net below all other policy.
+
+### Platform Differences
+
+**macOS (Seatbelt)** supports full deny-within-allow semantics. A group can allow `/Users` but deny `/Users/luke/.ssh` and the deny takes precedence.
+
+**Linux (Landlock)** is strictly allow-list. Deny groups are implemented as exclusion filters - broad allow groups that overlap deny paths will generate warnings. Avoid granting access to parent directories of deny paths on Linux.
+
+---
+
+## Built-in Profiles
+
+### claude-code
+
+```bash
+nono run --profile claude-code -- claude
+```
+
+**Groups:** `user_caches_macos`, `node_runtime`, `rust_runtime`, `python_runtime`, `vscode`, `unlink_protection` (plus all base_groups)
+
+**Filesystem:** `~/.claude` (read+write), `~/.claude.json` (read+write)
+
+**Network:** Allowed
+
+**Special:** `interactive = true` (preserves TTY), auto-installs Claude Code hooks
+
+### opencode
+
+```bash
+nono run --profile opencode -- opencode
+```
+
+**Groups:** Base groups only
+
+**Filesystem:** `~/.config/opencode`, `~/.cache/opencode`, `~/.local/share/opencode` (all read+write)
+
+**Network:** Allowed
+
+### openclaw
+
+```bash
+nono run --profile openclaw -- openclaw
+```
+
+**Groups:** Base groups only
+
+**Filesystem:** `~/.openclaw`, `~/.config/openclaw`, `~/.local`, `$TMPDIR/openclaw-$UID` (all read+write)
+
+**CWD:** Read-only
+
+**Network:** Allowed
+
+---
+
+## Requesting New Built-in Profiles
+
+If you'd like a built-in profile for a tool not listed here:
+
+1. Open an issue on the [nono GitHub repository](https://github.com/always-further/nono/issues)
+2. Include:
+   - Tool name and repository URL
+   - Required filesystem access patterns
+   - Network requirements
+   - Any special considerations
+
+Built-in profiles are reviewed for security before inclusion.

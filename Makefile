@@ -81,7 +81,7 @@ run-setup:
 	cargo run -p nono-cli -- setup --check-only
 
 run-dry:
-	cargo run -p nono-cli -- run --allow . --dry-run -- echo "test"
+	cargo run -p nono-cli -- run --allow-cwd --dry-run -- echo "test"
 
 # Development helpers
 watch:

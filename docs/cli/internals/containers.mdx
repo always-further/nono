@@ -28,7 +28,7 @@ This guide helps you understand what each brings to the table and when to use on
 
 ```bash
 # Instant startup - no container overhead
-nono run --allow . -- claude-code
+nono run --allow-cwd -- claude-code
 
 # Compare to Docker
 docker run -v $(pwd):/work -it my-agent  # 100-500ms+ overhead per invocation
@@ -40,7 +40,7 @@ AI coding agents need to read and modify your actual source files. With nono, th
 
 ```bash
 # Agent can edit files in current directory
-nono run --allow . -- aider
+nono run --allow-cwd -- aider
 ```
 
 With Docker, you need to configure volume mounts and handle permission issues:
@@ -72,7 +72,7 @@ nono requires no setup - just install and run:
 
 ```bash
 brew install nono
-nono run --allow . -- my-agent
+nono run --allow-cwd -- my-agent
 ```
 
 Docker requires:
@@ -177,7 +177,7 @@ This gives you:
 
 ```bash
 # nono: instant
-time nono run --allow . -- echo hello
+time nono run --allow-cwd -- echo hello
 # real    0m0.005s
 
 # Docker (warm, image cached)
@@ -208,7 +208,7 @@ If you're currently using Docker only for sandboxing (not for environment isolat
 docker run -v $(pwd):/work -w /work python:3.11 python script.py
 
 # After: nono (uses your installed Python, zero overhead)
-nono run --allow . -- python script.py
+nono run --allow-cwd -- python script.py
 ```
 
 If you need Docker for environment reasons, add nono inside the container for path-level control:
@@ -256,6 +256,6 @@ Do you need a different OS or runtime?
 
 ## Next Steps
 
-- [Security Model](/cli/security) - Understanding nono's guarantees
-- [Profiles](/cli/security/profiles) - Pre-configured sandboxes for common agents
-- [Installation](/cli/getting_started/installation) - Get started with nono
+- [Security Model](index.mdx) - Understanding nono's guarantees
+- [Profiles](/security/profiles) - Pre-configured sandboxes for common agents
+- [Installation](/getting_started/installation) - Get started with nono

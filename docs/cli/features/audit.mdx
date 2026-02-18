@@ -1,0 +1,114 @@
+---
+title: Audit Trail
+description: Session tracking, filtering, and compliance reporting
+---
+
+Every sandboxed execution is recorded as an audit session. The audit trail captures what command was run, when, what paths were tracked, what changed, and how the process exited. This gives you a complete history of agent activity for debugging, compliance, and forensic analysis.
+
+## How It Works
+
+Audit data is a natural byproduct of the snapshot system. Each session records:
+
+- **Command**: The exact command and arguments
+- **Timestamps**: Start time, end time, duration
+- **Tracked paths**: Which directories were monitored
+- **Changes**: Files created, modified, or deleted
+- **Merkle roots**: Cryptographic commitment to filesystem state at each snapshot
+- **Exit code**: How the process terminated
+
+No additional configuration is needed - audit trails are captured automatically when undo snapshots are enabled (i.e., in supervised mode).
+
+## Commands
+
+### `nono audit list`
+
+List all recorded sessions with filtering.
+
+```bash
+# Show all sessions
+nono audit list
+
+# Show only today's sessions
+nono audit list --today
+
+# Filter by date range
+nono audit list --since 2026-02-01 --until 2026-02-15
+
+# Filter by command
+nono audit list --command claude
+
+# Filter by tracked path
+nono audit list --path /Users/luke/project
+
+# Show only the 10 most recent
+nono audit list --recent 10
+
+# Machine-readable output
+nono audit list --json
+```
+
+Filters can be combined:
+
+```bash
+# Claude sessions from last week that touched the project directory
+nono audit list --command claude --path ~/project --since 2026-02-10
+```
+
+### `nono audit show`
+
+Show complete details for a specific session.
+
+```bash
+# Human-readable output
+nono audit show 20260214-143022-12345
+
+# Machine-readable JSON export
+nono audit show 20260214-143022-12345 --json
+```
+
+The JSON output includes all session metadata, snapshot Merkle roots, the full change timeline, and exit status. This format is suitable for ingestion by compliance tools or log aggregators.
+
+## Use Cases
+
+### Debugging
+
+When an agent produces unexpected results, the audit trail tells you exactly what files it changed and when:
+
+```bash
+# What did the last Claude session do?
+nono audit list --command claude --recent 1
+nono audit show <session-id>
+```
+
+### Compliance
+
+For teams that need to demonstrate control over AI agent activity, the audit trail provides:
+
+- Timestamped proof that sandboxing was active
+- Complete record of filesystem changes with cryptographic integrity (Merkle roots)
+- Machine-readable JSON export for automated compliance reporting
+
+### Forensics
+
+If something goes wrong, the audit trail helps reconstruct what happened:
+
+```bash
+# What touched this file recently?
+nono audit list --path /etc/config.yaml
+
+# Full details of a suspicious session
+nono audit show <session-id> --json
+```
+
+## Relationship to Undo
+
+Audit and undo share the same underlying session data:
+
+| Aspect | Audit | Undo |
+|--------|-------|------|
+| Scope | All supervised sessions | Sessions with file changes |
+| Purpose | Record keeping | Recovery |
+| Commands | `nono audit list/show` | `nono undo list/show/restore/verify/cleanup` |
+| Data | Metadata + change summary | Metadata + full file content |
+
+The `nono audit` commands are read-only - they report on session history. The `nono undo` commands can additionally restore files and manage storage.

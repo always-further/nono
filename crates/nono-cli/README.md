@@ -29,7 +29,7 @@ cargo build --release
 
 ```bash
 # Allow read+write to current directory
-nono run --allow . -- command
+nono run --allow-cwd -- command
 
 # Separate read and write permissions
 nono run --read ./src --write ./output -- cargo build
@@ -38,7 +38,7 @@ nono run --read ./src --write ./output -- cargo build
 nono run --allow ./project-a --allow ./project-b -- command
 
 # Block network access
-nono run --allow . --net-block -- command
+nono run --allow-cwd --net-block -- command
 
 # Use a built-in profile
 nono run --profile claude-code -- claude
@@ -50,7 +50,7 @@ nono shell --allow .
 nono why --path ~/.ssh/id_rsa --op read
 
 # Dry run (show what would be sandboxed)
-nono run --allow . --dry-run -- command
+nono run --allow-cwd --dry-run -- command
 ```
 
 ## Built-in Profiles
@@ -75,7 +75,7 @@ Dangerous commands are blocked by default:
 Override with `--allow-command`:
 
 ```bash
-nono run --allow . --allow-command rm -- rm ./temp-file.txt
+nono run --allow-cwd --allow-command rm -- rm ./temp-file.txt
 ```
 
 ## Documentation
