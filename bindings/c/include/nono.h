@@ -30,28 +30,6 @@
 #define NONO_ACCESS_MODE_INVALID UINT32_MAX
 
 /**
- * Tag for capability source discriminant.
- */
-typedef enum NonoCapabilitySourceTag {
-    /**
-     * Added directly by the user via CLI flags
-     */
-    NONO_CAPABILITY_SOURCE_TAG_USER = 0,
-    /**
-     * Resolved from a named policy group
-     */
-    NONO_CAPABILITY_SOURCE_TAG_GROUP = 1,
-    /**
-     * System-level path
-     */
-    NONO_CAPABILITY_SOURCE_TAG_SYSTEM = 2,
-    /**
-     * Added from a profile's filesystem section
-     */
-    NONO_CAPABILITY_SOURCE_TAG_PROFILE = 3,
-} NonoCapabilitySourceTag;
-
-/**
  * Error codes returned by nono FFI functions.
  *
  * Zero means success. Negative values indicate error categories.
@@ -117,6 +95,36 @@ typedef enum NonoErrorCode {
 } NonoErrorCode;
 
 /**
+ * Tag for capability source discriminant.
+ */
+typedef enum NonoCapabilitySourceTag {
+    /**
+     * Added directly by the user via CLI flags
+     */
+    NONO_CAPABILITY_SOURCE_TAG_USER = 0,
+    /**
+     * Resolved from a named policy group
+     */
+    NONO_CAPABILITY_SOURCE_TAG_GROUP = 1,
+    /**
+     * System-level path
+     */
+    NONO_CAPABILITY_SOURCE_TAG_SYSTEM = 2,
+    /**
+     * Added from a profile's filesystem section
+     */
+    NONO_CAPABILITY_SOURCE_TAG_PROFILE = 3,
+} NonoCapabilitySourceTag;
+
+/**
+ * Status of a query result.
+ */
+typedef enum NonoQueryStatus {
+    NONO_QUERY_STATUS_ALLOWED = 0,
+    NONO_QUERY_STATUS_DENIED = 1,
+} NonoQueryStatus;
+
+/**
  * Reason code for a query result.
  */
 typedef enum NonoQueryReason {
@@ -141,14 +149,6 @@ typedef enum NonoQueryReason {
      */
     NONO_QUERY_REASON_NETWORK_BLOCKED = 4,
 } NonoQueryReason;
-
-/**
- * Status of a query result.
- */
-typedef enum NonoQueryStatus {
-    NONO_QUERY_STATUS_ALLOWED = 0,
-    NONO_QUERY_STATUS_DENIED = 1,
-} NonoQueryStatus;
 
 /**
  * Result of a permission query.
