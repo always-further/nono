@@ -94,6 +94,7 @@ run_suite "$SCRIPT_DIR/integration/test_binary_exec.sh" "Binary Execution"
 run_suite "$SCRIPT_DIR/integration/test_network.sh" "Network"
 run_suite "$SCRIPT_DIR/integration/test_commands.sh" "Dangerous Commands"
 run_suite "$SCRIPT_DIR/integration/test_edge_cases.sh" "Edge Cases"
+run_suite "$SCRIPT_DIR/integration/test_policy_queries.sh" "Policy Queries"
 run_suite "$SCRIPT_DIR/integration/test_shell.sh" "Shell"
 
 set -e

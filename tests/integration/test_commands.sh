@@ -9,6 +9,10 @@ echo ""
 echo -e "${BLUE}=== Dangerous Command Tests ===${NC}"
 
 verify_nono_binary
+if ! require_working_sandbox "dangerous commands suite"; then
+    print_summary
+    exit 0
+fi
 
 # Create test fixtures
 TMPDIR=$(setup_test_dir)

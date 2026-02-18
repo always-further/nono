@@ -12,6 +12,9 @@ TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
 TESTS_SKIPPED=0
+SANDBOX_PROBE_DONE=0
+SANDBOX_AVAILABLE=1
+SANDBOX_UNAVAILABLE_REASON=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -242,6 +245,53 @@ verify_nono_binary() {
         echo "Run 'cargo build --release' first"
         exit 1
     fi
+}
+
+# Detect whether the host can initialize nono's kernel sandbox backend.
+# Some CI/hosted environments disallow Seatbelt/Landlock initialization.
+probe_sandbox_availability() {
+    if [[ "$SANDBOX_PROBE_DONE" -eq 1 ]]; then
+        [[ "$SANDBOX_AVAILABLE" -eq 1 ]]
+        return
+    fi
+
+    SANDBOX_PROBE_DONE=1
+
+    local probe_dir
+    probe_dir=$(mktemp -d)
+
+    set +e
+    local probe_output
+    probe_output=$("$NONO_BIN" run --allow "$probe_dir" -- true </dev/null 2>&1)
+    local probe_exit=$?
+    set -e
+
+    rm -rf "$probe_dir"
+
+    if [[ "$probe_exit" -eq 0 ]]; then
+        SANDBOX_AVAILABLE=1
+        return 0
+    fi
+
+    if echo "$probe_output" | grep -Eiq "sandbox initialization failed|sandbox init|operation not permitted"; then
+        SANDBOX_AVAILABLE=0
+        SANDBOX_UNAVAILABLE_REASON="kernel sandbox unavailable in this environment"
+        return 1
+    fi
+
+    SANDBOX_AVAILABLE=1
+    return 0
+}
+
+# Skip a sandbox-dependent suite when the host cannot initialize kernel sandboxing.
+require_working_sandbox() {
+    local suite_name="$1"
+    if probe_sandbox_availability; then
+        return 0
+    fi
+
+    skip_test "$suite_name" "$SANDBOX_UNAVAILABLE_REASON"
+    return 1
 }
 
 # Get the directory of the current script
