@@ -225,8 +225,10 @@ pub struct SandboxArgs {
     pub secrets: Option<String>,
 
     // === Profile options ===
-    /// Use a named profile (built-in or from ~/.config/nono/profiles/)
-    #[arg(long, short = 'p', value_name = "NAME")]
+    /// Use a profile by name or file path.
+    /// Names resolve from ~/.config/nono/profiles/ then built-ins.
+    /// Paths (containing '/' or ending in .json) load directly.
+    #[arg(long, short = 'p', value_name = "NAME_OR_PATH")]
     pub profile: Option<String>,
 
     /// Allow access to current working directory without prompting.

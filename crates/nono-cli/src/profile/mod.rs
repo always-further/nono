@@ -178,35 +178,84 @@ pub struct Profile {
     pub interactive: bool,
 }
 
-/// Load a profile by name
+/// Load a profile by name or file path
 ///
-/// Loading precedence:
+/// If `name_or_path` contains a path separator or ends with `.json`, it is
+/// treated as a direct file path. Otherwise it is resolved as a profile name.
+///
+/// Name loading precedence:
 /// 1. User profiles from ~/.config/nono/profiles/<name>.json (allows customization)
 /// 2. Built-in profiles (compiled into binary, fallback)
-pub fn load_profile(name: &str) -> Result<Profile> {
+pub fn load_profile(name_or_path: &str) -> Result<Profile> {
+    // Direct file path: contains separator or ends with .json
+    if name_or_path.contains('/') || name_or_path.ends_with(".json") {
+        return load_profile_from_path(Path::new(name_or_path));
+    }
+
     // Validate profile name (alphanumeric + hyphen only)
-    if !is_valid_profile_name(name) {
+    if !is_valid_profile_name(name_or_path) {
         return Err(NonoError::ProfileParse(format!(
             "Invalid profile name '{}': must be alphanumeric with hyphens only",
-            name
+            name_or_path
         )));
     }
 
     // 1. Check user profiles first (allows overriding built-ins)
-    let profile_path = get_user_profile_path(name)?;
+    let profile_path = get_user_profile_path(name_or_path)?;
     if profile_path.exists() {
         tracing::info!("Loading user profile from: {}", profile_path.display());
-        let profile = load_from_file(&profile_path)?;
+        let mut profile = load_from_file(&profile_path)?;
+        merge_base_groups(&mut profile)?;
         return Ok(profile);
     }
 
     // 2. Fall back to built-in profiles
-    if let Some(profile) = builtin::get_builtin(name) {
-        tracing::info!("Using built-in profile: {}", name);
+    if let Some(profile) = builtin::get_builtin(name_or_path) {
+        tracing::info!("Using built-in profile: {}", name_or_path);
         return Ok(profile);
     }
 
-    Err(NonoError::ProfileNotFound(name.to_string()))
+    Err(NonoError::ProfileNotFound(name_or_path.to_string()))
+}
+
+/// Load a profile from a direct file path.
+///
+/// The path must exist and point to a valid JSON profile file.
+/// Base groups are merged automatically.
+pub fn load_profile_from_path(path: &Path) -> Result<Profile> {
+    if !path.exists() {
+        return Err(NonoError::ProfileRead {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "profile file not found"),
+        });
+    }
+
+    tracing::info!("Loading profile from path: {}", path.display());
+    let mut profile = load_from_file(path)?;
+    merge_base_groups(&mut profile)?;
+    Ok(profile)
+}
+
+/// Merge base_groups from policy.json into a user profile.
+///
+/// User profiles loaded from file only declare their own groups in
+/// `security.groups`. Built-in profiles get base_groups merged by
+/// `ProfileDef::to_profile()`, but user profiles bypass that path.
+/// This function applies the same merge: `(base_groups - trust_groups) + profile.groups`.
+fn merge_base_groups(profile: &mut Profile) -> Result<()> {
+    let base = crate::policy::base_groups()?;
+    let mut merged: Vec<String> = base
+        .into_iter()
+        .filter(|g| !profile.security.trust_groups.contains(g))
+        .collect();
+    // Append profile-specific groups (avoiding duplicates)
+    for g in &profile.security.groups {
+        if !merged.contains(g) {
+            merged.push(g.clone());
+        }
+    }
+    profile.security.groups = merged;
+    Ok(())
 }
 
 /// Load a profile from a JSON file
@@ -438,6 +487,41 @@ mod tests {
     }
 
     #[test]
+    fn test_load_profile_from_file_path() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("custom.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "custom-test" },
+                "security": { "groups": ["node_runtime"] },
+                "network": { "block": true }
+            }"#,
+        )
+        .expect("write profile");
+
+        let profile =
+            load_profile(profile_path.to_str().expect("valid utf8")).expect("load from path");
+        assert_eq!(profile.meta.name, "custom-test");
+        assert!(profile.network.block);
+        // base_groups should be merged in
+        assert!(profile
+            .security
+            .groups
+            .contains(&"deny_credentials".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"node_runtime".to_string()));
+    }
+
+    #[test]
+    fn test_load_profile_from_nonexistent_path() {
+        let result = load_profile("/tmp/does-not-exist-nono-test.json");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_list_profiles() {
         let profiles = list_profiles();
         assert!(profiles.contains(&"claude-code".to_string()));
@@ -473,6 +557,78 @@ mod tests {
 
         let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert!(profile.secrets.mappings.is_empty());
+    }
+
+    #[test]
+    fn test_merge_base_groups_into_user_profile() {
+        let mut profile = Profile {
+            security: SecurityConfig {
+                groups: vec!["node_runtime".to_string()],
+                trust_groups: vec![],
+            },
+            ..Default::default()
+        };
+
+        merge_base_groups(&mut profile).expect("merge should succeed");
+
+        // Should contain base groups
+        assert!(
+            profile
+                .security
+                .groups
+                .contains(&"deny_credentials".to_string()),
+            "Expected base group 'deny_credentials'"
+        );
+        assert!(
+            profile
+                .security
+                .groups
+                .contains(&"system_read_macos".to_string())
+                || profile
+                    .security
+                    .groups
+                    .contains(&"system_read_linux".to_string()),
+            "Expected platform system_read group"
+        );
+
+        // Should still contain the profile's own group
+        assert!(
+            profile
+                .security
+                .groups
+                .contains(&"node_runtime".to_string()),
+            "Expected profile group 'node_runtime'"
+        );
+
+        // No duplicates
+        let unique: std::collections::HashSet<_> = profile.security.groups.iter().collect();
+        assert_eq!(
+            unique.len(),
+            profile.security.groups.len(),
+            "Groups should have no duplicates"
+        );
+    }
+
+    #[test]
+    fn test_merge_base_groups_respects_trust_groups() {
+        let mut profile = Profile {
+            security: SecurityConfig {
+                groups: vec!["node_runtime".to_string()],
+                trust_groups: vec!["dangerous_commands".to_string()],
+            },
+            ..Default::default()
+        };
+
+        merge_base_groups(&mut profile).expect("merge should succeed");
+
+        // trust_groups should be excluded
+        assert!(
+            !profile
+                .security
+                .groups
+                .contains(&"dangerous_commands".to_string()),
+            "trusted group 'dangerous_commands' should be excluded"
+        );
     }
 
     #[test]
