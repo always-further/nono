@@ -69,26 +69,30 @@ impl ApprovalBackend for TerminalApproval {
 /// Strip control characters and ANSI escape sequences from untrusted input
 /// before displaying on the terminal.
 ///
-/// Replaces bytes 0x00-0x1F (except tab/newline, replaced with space), 0x7F,
-/// and ANSI CSI/OSC escape sequences with a replacement character.
+/// Handles all standard escape sequence types:
+/// - CSI (ESC [): cursor movement, SGR colors, erase commands
+/// - OSC (ESC ]): title changes, hyperlinks — terminated by BEL or ST
+/// - DCS (ESC P), APC (ESC _), PM (ESC ^), SOS (ESC X): all consume through ST
+///
+/// All control characters (0x00-0x1F, 0x7F) are replaced with space.
 fn sanitize_for_terminal(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
 
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // Skip ANSI escape sequence: ESC [ ... final_byte  or  ESC ] ... ST
             if let Some(&next) = chars.peek() {
                 if next == '[' {
-                    // CSI sequence: consume until 0x40-0x7E
+                    // CSI sequence: consume until final byte 0x40-0x7E
                     chars.next();
                     for seq_c in chars.by_ref() {
                         if ('\x40'..='\x7e').contains(&seq_c) {
                             break;
                         }
                     }
-                } else if next == ']' {
-                    // OSC sequence: consume until ST (ESC \) or BEL
+                } else if matches!(next, ']' | 'P' | '_' | '^' | 'X') {
+                    // String sequences (OSC, DCS, APC, PM, SOS):
+                    // consume until ST (ESC \) or BEL (0x07)
                     chars.next();
                     let mut prev = '\0';
                     for seq_c in chars.by_ref() {
@@ -98,13 +102,12 @@ fn sanitize_for_terminal(input: &str) -> String {
                         prev = seq_c;
                     }
                 }
-                // Other ESC sequences: just drop the ESC
+                // Other ESC sequences (e.g. ESC c, ESC 7): drop the ESC
             }
             continue;
         }
 
         if c.is_control() {
-            // Replace all control chars (CR, LF, tab, null, etc.) with space
             result.push(' ');
         } else {
             result.push(c);
@@ -195,5 +198,54 @@ mod tests {
         let del_input = "/tmp/\x7Fevil";
         let sanitized = sanitize_for_terminal(del_input);
         assert!(!sanitized.contains('\x7F'));
+    }
+
+    #[test]
+    fn test_sanitize_dcs_sequence() {
+        // DCS (ESC P ... ST) -- Device Control String
+        let malicious = "/tmp/\x1bPq#0;2;0;0;0#1;2;100;100;0\x1b\\path";
+        let sanitized = sanitize_for_terminal(malicious);
+        assert!(!sanitized.contains('\x1b'));
+        assert!(sanitized.contains("/tmp/"));
+        assert!(sanitized.contains("path"));
+    }
+
+    #[test]
+    fn test_sanitize_apc_sequence() {
+        // APC (ESC _) -- Application Program Command
+        let malicious = "/tmp/\x1b_evil-command\x1b\\path";
+        let sanitized = sanitize_for_terminal(malicious);
+        assert!(!sanitized.contains('\x1b'));
+        assert!(sanitized.contains("/tmp/"));
+        assert!(sanitized.contains("path"));
+    }
+
+    #[test]
+    fn test_sanitize_pm_sequence() {
+        // PM (ESC ^) -- Privacy Message
+        let malicious = "/tmp/\x1b^private-data\x1b\\path";
+        let sanitized = sanitize_for_terminal(malicious);
+        assert!(!sanitized.contains('\x1b'));
+        assert!(sanitized.contains("/tmp/"));
+        assert!(sanitized.contains("path"));
+    }
+
+    #[test]
+    fn test_sanitize_sos_sequence() {
+        // SOS (ESC X) -- Start of String
+        let malicious = "/tmp/\x1bXsome-string\x1b\\path";
+        let sanitized = sanitize_for_terminal(malicious);
+        assert!(!sanitized.contains('\x1b'));
+        assert!(sanitized.contains("/tmp/"));
+        assert!(sanitized.contains("path"));
+    }
+
+    #[test]
+    fn test_sanitize_unterminated_csi() {
+        // Unterminated CSI: ESC [ with no final byte -- exhausts iterator cleanly
+        let malicious = "/tmp/\x1b[999";
+        let sanitized = sanitize_for_terminal(malicious);
+        assert!(!sanitized.contains('\x1b'));
+        assert!(sanitized.contains("/tmp/"));
     }
 }

@@ -98,11 +98,22 @@ pub fn load_session(session_id: &str) -> Result<SessionInfo> {
     let root = rollback_root()?;
     let dir = root.join(session_id);
 
-    // Defense in depth: verify the resolved path is within rollback root
-    if let (Ok(canonical_dir), Ok(canonical_root)) = (dir.canonicalize(), root.canonicalize()) {
-        if !canonical_dir.starts_with(&canonical_root) {
-            return Err(NonoError::SessionNotFound(session_id.to_string()));
-        }
+    // Defense in depth: verify the resolved path is within rollback root.
+    // Both canonicalizations must succeed -- fail closed if either cannot
+    // be resolved (prevents bypassing the traversal check).
+    let canonical_root = root.canonicalize().map_err(|e| {
+        NonoError::SessionNotFound(format!(
+            "Cannot canonicalize rollback root {}: {}",
+            root.display(),
+            e
+        ))
+    })?;
+    let canonical_dir = dir.canonicalize().map_err(|_| {
+        // Don't leak path details in error -- session simply doesn't exist
+        NonoError::SessionNotFound(session_id.to_string())
+    })?;
+    if !canonical_dir.starts_with(&canonical_root) {
+        return Err(NonoError::SessionNotFound(session_id.to_string()));
     }
 
     if !dir.exists() {

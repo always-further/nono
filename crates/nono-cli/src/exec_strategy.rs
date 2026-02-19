@@ -329,7 +329,7 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
     }
 
     // Validate threading context before fork
-    let thread_count = get_thread_count();
+    let thread_count = get_thread_count()?;
     match (config.threading, thread_count) {
         (_, 1) => {}
         (ThreadingContext::KeyringExpected, n) if n <= MAX_KEYRING_THREADS => {
@@ -603,7 +603,7 @@ pub fn execute_supervised(
     // Validate single-threaded execution before fork.
     // Supervised mode applies sandbox in child (allocates), so extra threads
     // would risk deadlock from contended allocator locks.
-    let thread_count = get_thread_count();
+    let thread_count = get_thread_count()?;
     if thread_count != 1 {
         return Err(NonoError::SandboxInit(format!(
             "Cannot fork in supervised mode: process has {} threads (expected 1). \
@@ -1195,22 +1195,27 @@ fn setup_signal_forwarding(child: Pid) {
 /// Get the current thread count for the process.
 ///
 /// Used to verify single-threaded execution before fork().
-/// Returns 1 if the count cannot be determined (conservative assumption).
-fn get_thread_count() -> usize {
+/// Returns an error if the count cannot be determined, since fork()
+/// safety depends on knowing the exact thread count.
+fn get_thread_count() -> Result<usize> {
     #[cfg(target_os = "linux")]
     {
         // On Linux, read /proc/self/status for accurate thread count
-        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-            for line in status.lines() {
-                if let Some(count_str) = line.strip_prefix("Threads:") {
-                    if let Ok(count) = count_str.trim().parse::<usize>() {
-                        return count;
-                    }
-                }
+        let status = std::fs::read_to_string("/proc/self/status").map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Cannot read /proc/self/status for thread count: {e}"
+            ))
+        })?;
+        for line in status.lines() {
+            if let Some(count_str) = line.strip_prefix("Threads:") {
+                return count_str.trim().parse::<usize>().map_err(|e| {
+                    NonoError::SandboxInit(format!("Cannot parse thread count: {e}"))
+                });
             }
         }
-        // Fallback: assume single-threaded if we can't read /proc
-        1
+        return Err(NonoError::SandboxInit(
+            "Thread count not found in /proc/self/status".to_string(),
+        ));
     }
 
     #[cfg(target_os = "macos")]
@@ -1230,17 +1235,19 @@ fn get_thread_count() -> usize {
                 // Deallocate the thread list (required by mach API contract)
                 let list_size = thread_count as usize * std::mem::size_of::<libc::thread_act_t>();
                 libc::vm_deallocate(task, thread_list as libc::vm_address_t, list_size);
-                return thread_count as usize;
+                return Ok(thread_count as usize);
             }
         }
-        // Fallback: assume single-threaded if mach call fails
-        1
+        Err(NonoError::SandboxInit(
+            "Cannot determine thread count via mach task_threads API".to_string(),
+        ))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        // On other platforms, assume single-threaded (conservative)
-        1
+        Err(NonoError::SandboxInit(
+            "Cannot determine thread count on this platform".to_string(),
+        ))
     }
 }
 
@@ -1606,6 +1613,25 @@ fn open_path_for_access(
             path.display(),
             canonical.display(),
         )));
+    }
+
+    // Block sensitive per-PID /proc paths that can't be enumerated in never_grant
+    // (they contain dynamic PIDs). These expose process memory/environment of
+    // arbitrary processes.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(suffix) = canonical.to_str().and_then(|s| s.strip_prefix("/proc/")) {
+            let parts: Vec<&str> = suffix.splitn(2, '/').collect();
+            if parts.len() == 2 && parts[0].chars().all(|c| c.is_ascii_digit()) {
+                let sensitive = ["mem", "environ", "maps", "syscall", "stack"];
+                if sensitive.contains(&parts[1]) {
+                    return Err(NonoError::SandboxInit(format!(
+                        "Access to /proc/{}/{} is blocked by policy",
+                        parts[0], parts[1],
+                    )));
+                }
+            }
+        }
     }
 
     let result = match access {

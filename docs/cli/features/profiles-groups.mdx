@@ -284,6 +284,10 @@ nono ships with 22 built-in groups:
 - `unlink_protection` - Prevents file deletion, with override for user-writable paths
 - `dangerous_commands` - Blocks `rm`, `dd`, `chmod`, `sudo`, `mkfs`, etc.
 
+<Note>
+  Command blocking is a best-effort surface-level control. It matches against the executable name being invoked directly. A process can bypass this by calling the equivalent syscall from within an allowed interpreter (e.g., `os.remove()` in Python, `fs.unlinkSync()` in Node.js) or by invoking a renamed copy of the binary. For hard filesystem protection, rely on the kernel-enforced deny groups and `unlink_protection`, which cannot be bypassed from userspace regardless of how the operation is invoked.
+</Note>
+
 ### Platform-Specific Groups
 
 Groups with a `platform` field only apply on that OS:

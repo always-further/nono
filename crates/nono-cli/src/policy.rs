@@ -193,8 +193,11 @@ fn expand_path(path_str: &str) -> Result<PathBuf> {
     let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
         let home = config::validated_home()?;
         format!("{}/{}", home, rest)
-    } else if path_str == "~" {
+    } else if path_str == "~" || path_str == "$HOME" {
         config::validated_home()?
+    } else if let Some(rest) = path_str.strip_prefix("$HOME/") {
+        let home = config::validated_home()?;
+        format!("{}/{}", home, rest)
     } else if path_str == "$TMPDIR" {
         config::validated_tmpdir()?
     } else if let Some(rest) = path_str.strip_prefix("$TMPDIR/") {
@@ -205,6 +208,16 @@ fn expand_path(path_str: &str) -> Result<PathBuf> {
     };
 
     Ok(PathBuf::from(expanded))
+}
+
+/// Convert a PathBuf to a UTF-8 string, returning an error for non-UTF-8 paths.
+///
+/// Non-UTF-8 paths would produce incorrect Seatbelt rules via lossy conversion,
+/// potentially targeting the wrong path in deny rules.
+fn path_to_utf8(path: &Path) -> Result<&str> {
+    path.to_str().ok_or_else(|| {
+        NonoError::ConfigParse(format!("Path contains non-UTF-8 bytes: {}", path.display()))
+    })
 }
 
 /// Escape a path for Seatbelt profile strings.
@@ -363,7 +376,7 @@ fn resolve_single_group(
         if let Some(pairs) = &group.symlink_pairs {
             for symlink in pairs.keys() {
                 let expanded = expand_path(symlink)?;
-                let escaped = escape_seatbelt_path(&expanded.to_string_lossy())?;
+                let escaped = escape_seatbelt_path(path_to_utf8(&expanded)?)?;
                 caps.add_platform_rule(format!("(allow file-read* (subpath \"{}\"))", escaped))?;
             }
         }
@@ -442,7 +455,7 @@ fn add_deny_access_rules(
 
     // Seatbelt deny rules only apply on macOS
     if cfg!(target_os = "macos") {
-        let escaped = escape_seatbelt_path(&path.to_string_lossy())?;
+        let escaped = escape_seatbelt_path(path_to_utf8(&path)?)?;
 
         // Determine filter type: literal for files, subpath for directories
         let filter = if path.exists() && path.is_file() {
@@ -494,7 +507,18 @@ pub fn apply_macos_login_keychain_exception(caps: &mut CapabilitySet) {
         .map(|cap| cap.resolved.clone())
         .filter(|path| is_login_db(path))
         .filter_map(|path| {
-            let escaped = match escape_seatbelt_path(&path.to_string_lossy()) {
+            let path_str = match path_to_utf8(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        "Skipping login keychain exception for {}: {}",
+                        path.display(),
+                        e
+                    );
+                    return None;
+                }
+            };
+            let escaped = match escape_seatbelt_path(path_str) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(
@@ -540,7 +564,14 @@ pub fn apply_unlink_overrides(caps: &mut CapabilitySet) {
         .collect();
 
     for path in writable_paths {
-        let escaped = match escape_seatbelt_path(&path.to_string_lossy()) {
+        let path_str = match path_to_utf8(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Skipping unlink override for {}: {}", path.display(), e);
+                continue;
+            }
+        };
+        let escaped = match escape_seatbelt_path(path_str) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("Skipping unlink override for {}: {}", path.display(), e);

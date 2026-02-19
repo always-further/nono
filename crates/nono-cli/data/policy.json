@@ -24,7 +24,9 @@
     "~/.ssh/id_ed25519",
     "~/.ssh/id_ecdsa",
     "~/.ssh/id_dsa",
-    "~/.gnupg"
+    "~/.gnupg",
+    "/proc/kcore",
+    "/proc/kmem"
   ],
   "base_groups": [
     "deny_credentials",
