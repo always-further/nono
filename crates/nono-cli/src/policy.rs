@@ -613,7 +613,7 @@ pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> R
         return Ok(());
     }
 
-    let mut conflicts = Vec::new();
+    let mut fatal_conflicts = Vec::new();
 
     for deny_path in deny_paths {
         for cap in caps.fs_capabilities() {
@@ -632,26 +632,28 @@ pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> R
                     "Landlock cannot enforce {}. This deny has no effect on Linux.",
                     conflict
                 );
-                conflicts.push(conflict);
+                if cap.source.is_user_intent() {
+                    fatal_conflicts.push(conflict);
+                }
             }
         }
     }
 
-    if conflicts.is_empty() {
+    if fatal_conflicts.is_empty() {
         return Ok(());
     }
 
-    conflicts.sort();
-    conflicts.dedup();
+    fatal_conflicts.sort();
+    fatal_conflicts.dedup();
 
-    let preview = conflicts
+    let preview = fatal_conflicts
         .iter()
         .take(5)
         .map(|c| format!("- {}", c))
         .collect::<Vec<_>>()
         .join("\n");
 
-    let remainder = conflicts.len().saturating_sub(5);
+    let remainder = fatal_conflicts.len().saturating_sub(5);
     let more = if remainder > 0 {
         format!("\n- ... and {} more conflict(s)", remainder)
     } else {
@@ -1171,6 +1173,24 @@ mod tests {
         );
 
         validate_deny_overlaps(&deny_paths, &caps).expect("No overlap should succeed");
+    }
+
+    #[test]
+    fn test_validate_deny_overlaps_group_overlap_warn_only() {
+        use nono::FsCapability;
+
+        let mut caps = CapabilitySet::new();
+        let mut cap = FsCapability::new_dir(std::path::Path::new("/tmp"), AccessMode::Read)
+            .expect("/tmp must exist");
+        cap.source = CapabilitySource::Group("user_tools".to_string());
+        caps.add_fs(cap);
+
+        let deny_paths = vec![PathBuf::from("/tmp/secret")];
+
+        // Group/system overlaps are warning-only. Fatal errors are reserved for
+        // explicit user intent (CLI/profile), where deny-within-allow is likely accidental.
+        validate_deny_overlaps(&deny_paths, &caps)
+            .expect("group overlap should not hard-fail validation");
     }
 
     #[test]
