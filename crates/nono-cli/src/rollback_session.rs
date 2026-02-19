@@ -1,7 +1,7 @@
-//! Session discovery and management for the undo system
+//! Session discovery and management for the rollback system
 //!
-//! Provides functions to discover, load, and manage undo sessions
-//! stored in `~/.nono/undo/`. This is a CLI concern — the library
+//! Provides functions to discover, load, and manage rollback sessions
+//! stored in `~/.nono/rollbacks/`. This is a CLI concern — the library
 //! provides primitives, the CLI provides session lifecycle management.
 
 use nono::undo::{SessionMetadata, SnapshotManager};
@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-/// Information about a discovered undo session
+/// Information about a discovered rollback session
 #[derive(Debug)]
 pub struct SessionInfo {
     /// Session metadata loaded from session.json
@@ -25,19 +25,19 @@ pub struct SessionInfo {
     pub is_stale: bool,
 }
 
-/// Get the undo root directory (`~/.nono/undo/`)
-pub fn undo_root() -> Result<PathBuf> {
+/// Get the rollback root directory (`~/.nono/rollbacks/`)
+pub fn rollback_root() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
-    Ok(home.join(".nono").join("undo"))
+    Ok(home.join(".nono").join("rollbacks"))
 }
 
-/// Discover all undo sessions in `~/.nono/undo/`.
+/// Discover all rollback sessions in `~/.nono/rollbacks/`.
 ///
-/// Scans the undo root directory, loads session metadata from each
+/// Scans the rollback root directory, loads session metadata from each
 /// subdirectory, and enriches with derived data (disk size, alive status).
 /// Sessions with missing or corrupt metadata are skipped.
 pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
-    let root = undo_root()?;
+    let root = rollback_root()?;
     if !root.exists() {
         return Ok(Vec::new());
     }
@@ -46,7 +46,7 @@ pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
 
     let entries = fs::read_dir(&root).map_err(|e| {
         NonoError::Snapshot(format!(
-            "Failed to read undo directory {}: {e}",
+            "Failed to read rollback directory {}: {e}",
             root.display()
         ))
     })?;
@@ -92,13 +92,13 @@ pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
 ///
 /// The session_id is validated to prevent path traversal — it must not
 /// contain path separators or `..` components. The resolved path is
-/// verified to be within the undo root directory.
+/// verified to be within the rollback root directory.
 pub fn load_session(session_id: &str) -> Result<SessionInfo> {
     validate_session_id(session_id)?;
-    let root = undo_root()?;
+    let root = rollback_root()?;
     let dir = root.join(session_id);
 
-    // Defense in depth: verify the resolved path is within undo root
+    // Defense in depth: verify the resolved path is within rollback root
     if let (Ok(canonical_dir), Ok(canonical_root)) = (dir.canonicalize(), root.canonicalize()) {
         if !canonical_dir.starts_with(&canonical_root) {
             return Err(NonoError::SessionNotFound(session_id.to_string()));
@@ -126,7 +126,7 @@ pub fn load_session(session_id: &str) -> Result<SessionInfo> {
 
 /// Calculate the total disk usage of all sessions.
 pub fn total_storage_bytes() -> Result<u64> {
-    let root = undo_root()?;
+    let root = rollback_root()?;
     if !root.exists() {
         return Ok(0);
     }

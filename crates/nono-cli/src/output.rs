@@ -126,13 +126,20 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
 }
 
 /// Print supervised mode status
-pub fn print_supervised_info(silent: bool) {
+pub fn print_supervised_info(silent: bool, rollback: bool, supervised: bool) {
     if silent {
         return;
     }
+    let detail = match (rollback, supervised) {
+        (true, true) => "rollback snapshots + approval sidecar",
+        (true, false) => "rollback snapshots",
+        (false, true) => "approval sidecar",
+        (false, false) => return, // shouldn't happen
+    };
     eprintln!(
         "{}",
-        "Supervised mode: child sandboxed, parent manages undo snapshots.".truecolor(150, 150, 150)
+        format!("Supervised mode: child sandboxed, parent manages {detail}.")
+            .truecolor(150, 150, 150)
     );
     eprintln!();
 }
@@ -180,15 +187,12 @@ pub fn print_dry_run(program: &OsStr, cmd_args: &[OsString], silent: bool) {
     eprintln!("Command: {:?}", command);
 }
 
-/// Print undo tracking status during session start
-pub fn print_undo_tracking(paths: &[std::path::PathBuf], silent: bool) {
+/// Print rollback tracking status during session start
+pub fn print_rollback_tracking(paths: &[std::path::PathBuf], silent: bool) {
     if silent {
         return;
     }
-    eprintln!(
-        "{}",
-        "Undo snapshots enabled (supervised mode).".truecolor(150, 150, 150)
-    );
+    eprintln!("{}", "Rollback snapshots enabled.".truecolor(150, 150, 150));
     if paths.len() <= 3 {
         for path in paths {
             eprintln!(
@@ -213,8 +217,8 @@ pub fn print_undo_tracking(paths: &[std::path::PathBuf], silent: bool) {
     eprintln!();
 }
 
-/// Print post-exit summary of changes detected by the undo system
-pub fn print_undo_session_summary(changes: &[nono::undo::Change], silent: bool) {
+/// Print post-exit summary of changes detected by the rollback system
+pub fn print_rollback_session_summary(changes: &[nono::undo::Change], silent: bool) {
     if silent || changes.is_empty() {
         return;
     }

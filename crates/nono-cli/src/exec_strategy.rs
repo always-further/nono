@@ -90,7 +90,7 @@ pub enum ExecStrategy {
     ///
     /// - Minimal attack surface (no persistent parent)
     /// - No diagnostic footer on error
-    /// - No undo support
+    /// - No rollback support
     /// - For backward compatibility and scripts
     Direct,
 
@@ -99,7 +99,7 @@ pub enum ExecStrategy {
     ///
     /// - Small attack surface (parent sandboxed too)
     /// - Diagnostic footer on non-zero exit
-    /// - No undo support (parent can't write to ~/.nono/undo)
+    /// - No rollback support (parent can't write to ~/.nono/rollbacks)
     /// - Default for interactive use
     #[default]
     Monitor,
@@ -458,7 +458,7 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
 ///
 /// Unlike Monitor mode where the sandbox is applied before forking (both processes
 /// sandboxed), Supervised mode forks first and applies the sandbox only in the child.
-/// The parent remains unsandboxed, enabling undo snapshots and future IPC capability
+/// The parent remains unsandboxed, enabling rollback snapshots and IPC capability
 /// expansion.
 ///
 /// # Security Properties
@@ -493,7 +493,7 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
 /// inherits the parent's terminal directly, preserving TTY semantics for
 /// interactive programs (e.g., Claude Code, vim). Diagnostic injection is not
 /// needed because the parent is alive after the child exits and can print
-/// diagnostics and undo UI directly.
+/// diagnostics and rollback UI directly.
 pub fn execute_supervised(
     config: &ExecConfig<'_>,
     supervisor: Option<&SupervisorConfig<'_>>,
@@ -613,11 +613,12 @@ pub fn execute_supervised(
         )));
     }
 
-    // NOTE: In supervised mode, we do NOT set PR_SET_DUMPABLE(0) before fork.
-    // The child must remain dumpable so the parent can read /proc/CHILD/mem
-    // for seccomp-notify path extraction. The child is already sandboxed by
-    // Landlock + seccomp, so being dumpable adds minimal risk.
-    // The parent sets itself non-dumpable immediately after fork (below).
+    // NOTE: In supervised mode with IPC (--supervised), we do NOT set
+    // PR_SET_DUMPABLE(0) before fork. The child must remain dumpable so
+    // the parent can read /proc/CHILD/mem for seccomp-notify path extraction.
+    // In rollback-only mode (no IPC), the child is made non-dumpable after
+    // sandbox apply (see child branch below).
+    // The parent sets itself non-dumpable immediately after fork.
 
     // Compute child's FD keep list: supervisor socket fd if IPC is enabled
     let child_keep_fds: Vec<i32> = child_sock_fd.into_iter().collect();
@@ -711,9 +712,20 @@ pub fn execute_supervised(
                 }
             }
 
-            // In supervised mode, the child stays dumpable so the parent can
-            // read /proc/CHILD/mem for seccomp-notify path extraction. The child
-            // is already sandboxed by Landlock + seccomp (defense in depth).
+            // In rollback-only mode (no supervisor IPC), make the child
+            // non-dumpable to prevent ptrace attachment from same-UID
+            // processes. When supervisor IPC is active, the child must stay
+            // dumpable so the parent can read /proc/CHILD/mem for
+            // seccomp-notify path extraction.
+            #[cfg(target_os = "linux")]
+            {
+                if child_sock_fd.is_none() {
+                    // No supervisor IPC — safe to drop dumpable
+                    unsafe {
+                        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+                    }
+                }
+            }
 
             #[cfg(target_os = "macos")]
             {
@@ -748,8 +760,8 @@ pub fn execute_supervised(
             // Failure to harden is fatal - we kill the child and abort.
 
             // On Linux, set PR_SET_DUMPABLE(0) on the parent to prevent
-            // ptrace attachment. The child stays dumpable so the parent
-            // can read /proc/CHILD/mem for seccomp-notify path extraction.
+            // ptrace attachment. The child stays dumpable only when
+            // supervisor IPC is active (for /proc/CHILD/mem path extraction).
             #[cfg(target_os = "linux")]
             {
                 use nix::sys::prctl;

@@ -16,16 +16,16 @@ Audit data is a natural byproduct of the snapshot system. Each session records:
 - **Merkle roots**: Cryptographic commitment to filesystem state at each snapshot
 - **Exit code**: How the process terminated
 
-No additional configuration is needed - audit trails are captured automatically when undo snapshots are enabled (i.e., in supervised mode).
+No additional configuration is needed - audit trails are captured automatically when rollback snapshots are enabled (i.e., with `--rollback`).
 
 ## Commands
 
 ### `nono audit list`
 
-List all recorded sessions with filtering.
+List all recorded sessions, grouped by project directory.
 
 ```bash
-# Show all sessions
+# Show all sessions (grouped by project)
 nono audit list
 
 # Show only today's sessions
@@ -38,13 +38,30 @@ nono audit list --since 2026-02-01 --until 2026-02-15
 nono audit list --command claude
 
 # Filter by tracked path
-nono audit list --path /Users/luke/project
+nono audit list --path ~/dev/my-project
 
 # Show only the 10 most recent
 nono audit list --recent 10
 
 # Machine-readable output
 nono audit list --json
+```
+
+Example output:
+
+```
+[nono] 14 session(s)
+
+  ~/dev/sprockets (11 sessions)
+    20260219-092017-8117 completed claude
+    20260219-091403-90291 completed claude
+    20260218-134433-28210 completed claude
+    ...
+
+  ~/dev/widgets (3 sessions)
+    20260219-100000-1234 completed claude
+    20260218-120000-5678 completed my-agent
+    ...
 ```
 
 Filters can be combined:
@@ -100,15 +117,15 @@ nono audit list --path /etc/config.yaml
 nono audit show <session-id> --json
 ```
 
-## Relationship to Undo
+## Relationship to Rollbacks
 
-Audit and undo share the same underlying session data:
+Audit and rollback share the same underlying session data:
 
-| Aspect | Audit | Undo |
-|--------|-------|------|
-| Scope | All supervised sessions | Sessions with file changes |
+| Aspect | Audit | Rollback |
+|--------|-------|----------|
+| Scope | All sessions with `--rollback` | Sessions with file changes |
 | Purpose | Record keeping | Recovery |
-| Commands | `nono audit list/show` | `nono undo list/show/restore/verify/cleanup` |
+| Commands | `nono audit list/show` | `nono rollback list/show/restore/verify/cleanup` |
 | Data | Metadata + change summary | Metadata + full file content |
 
-The `nono audit` commands are read-only - they report on session history. The `nono undo` commands can additionally restore files and manage storage.
+The `nono audit` commands are read-only - they report on session history. The `nono rollback` commands can additionally restore files and manage storage.

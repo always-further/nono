@@ -285,6 +285,47 @@ nono run --profile claude-code --allow-cwd -- claude
 nono -s run --profile claude-code --allow-cwd -- claude
 ```
 
+### Execution Mode Flags
+
+#### `--rollback`
+
+Enable [atomic rollback snapshots](/cli/features/atomic-rollbacks) for the session. Takes content-addressable snapshots of writable directories so you can restore to the pre-session state after the command exits. Automatically selects supervised execution.
+
+```bash
+nono run --rollback --profile claude-code -- claude
+nono run --rollback --allow-cwd -- my-agent
+```
+
+#### `--supervised`
+
+Enable the approval sidecar for runtime capability expansion. On Linux, the supervisor can grant additional filesystem access via seccomp user notification when the sandboxed process requests it.
+
+```bash
+nono run --supervised --allow-cwd -- my-agent
+```
+
+Can be combined with `--rollback` for both snapshots and capability expansion:
+
+```bash
+nono run --rollback --supervised --allow-cwd -- my-agent
+```
+
+#### `--no-rollback-prompt`
+
+Suppress the interactive post-exit review when using `--rollback`. Snapshots are still taken but the user is not prompted to review or restore changes. Useful for scripting.
+
+```bash
+nono run --rollback --no-rollback-prompt --allow-cwd -- my-agent
+```
+
+#### `--exec`
+
+Use direct execution mode. nono applies the sandbox and then `exec()`s directly into the target command. No parent process remains.
+
+```bash
+nono run --exec --allow-cwd -- my-command
+```
+
 ### Operational Flags
 
 #### `--dry-run`

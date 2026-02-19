@@ -13,12 +13,12 @@ mod output;
 mod policy;
 mod profile;
 mod query_ext;
+mod rollback_commands;
+mod rollback_session;
+mod rollback_ui;
 mod sandbox_state;
 mod setup;
 mod terminal_approval;
-mod undo_commands;
-mod undo_session;
-mod undo_ui;
 
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
@@ -58,8 +58,9 @@ fn run() -> Result<()> {
                 args.command,
                 args.no_diagnostics,
                 args.direct_exec,
+                args.rollback,
                 args.supervised,
-                args.no_undo_prompt,
+                args.no_rollback_prompt,
                 cli.silent,
             )
         }
@@ -69,7 +70,7 @@ fn run() -> Result<()> {
         }
         Commands::Why(args) => run_why(*args),
         Commands::Setup(args) => run_setup(args),
-        Commands::Undo(args) => undo_commands::run_undo(args),
+        Commands::Rollback(args) => rollback_commands::run_rollback(args),
         Commands::Audit(args) => audit_commands::run_audit(args),
     }
 }
@@ -244,13 +245,15 @@ fn run_why(args: WhyArgs) -> Result<()> {
 }
 
 /// Run a command inside the sandbox
+#[allow(clippy::too_many_arguments)]
 fn run_sandbox(
     args: SandboxArgs,
     command: Vec<String>,
     no_diagnostics: bool,
     direct_exec: bool,
+    rollback: bool,
     supervised: bool,
-    no_undo_prompt: bool,
+    no_rollback_prompt: bool,
     silent: bool,
 ) -> Result<()> {
     // Check if we have a command to run
@@ -297,11 +300,12 @@ fn run_sandbox(
             interactive: prepared.interactive,
             no_diagnostics,
             direct_exec,
+            rollback,
             supervised,
-            no_undo_prompt,
+            no_rollback_prompt,
             silent,
-            undo_exclude_patterns: prepared.undo_exclude_patterns,
-            undo_exclude_globs: prepared.undo_exclude_globs,
+            rollback_exclude_patterns: prepared.rollback_exclude_patterns,
+            rollback_exclude_globs: prepared.rollback_exclude_globs,
         },
     )
 }
@@ -351,11 +355,12 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             interactive: true,
             no_diagnostics: true,
             direct_exec: false,
+            rollback: false,
             supervised: false,
-            no_undo_prompt: false,
+            no_rollback_prompt: false,
             silent,
-            undo_exclude_patterns: Vec::new(),
-            undo_exclude_globs: Vec::new(),
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
         },
     )
 }
@@ -365,23 +370,25 @@ struct ExecutionFlags {
     interactive: bool,
     no_diagnostics: bool,
     direct_exec: bool,
+    rollback: bool,
     supervised: bool,
-    no_undo_prompt: bool,
+    no_rollback_prompt: bool,
     silent: bool,
-    /// Profile-specific undo exclusion patterns (additive on base)
-    undo_exclude_patterns: Vec<String>,
-    /// Profile-specific undo exclusion globs (filename matching)
-    undo_exclude_globs: Vec<String>,
+    /// Profile-specific rollback exclusion patterns (additive on base)
+    rollback_exclude_patterns: Vec<String>,
+    /// Profile-specific rollback exclusion globs (filename matching)
+    rollback_exclude_globs: Vec<String>,
 }
 
 /// Select execution strategy from user/runtime flags.
 ///
 /// Threat-model boundary:
-/// - `Supervised` is an explicit user choice that permits an unsandboxed parent.
+/// - `Supervised` is selected when `--rollback` (snapshots) or `--supervised`
+///   (approval sidecar) is active. Both require an unsandboxed parent.
 /// - `Direct` is used for interactive/direct-exec paths.
 /// - `Monitor` is the default safer parent-sandboxed mode.
 fn select_execution_strategy(flags: &ExecutionFlags) -> exec_strategy::ExecStrategy {
-    if flags.supervised {
+    if flags.rollback || flags.supervised {
         exec_strategy::ExecStrategy::Supervised
     } else if flags.interactive || flags.direct_exec {
         exec_strategy::ExecStrategy::Direct
@@ -461,7 +468,7 @@ fn execute_sandboxed(
     let strategy = select_execution_strategy(&flags);
 
     if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
-        output::print_supervised_info(flags.silent);
+        output::print_supervised_info(flags.silent, flags.rollback, flags.supervised);
     }
 
     // Apply sandbox BEFORE fork for Direct and Monitor modes.
@@ -514,106 +521,122 @@ fn execute_sandboxed(
         exec_strategy::ExecStrategy::Supervised => {
             output::print_applying_sandbox(flags.silent);
 
-            // --- Undo snapshot lifecycle ---
-            // Collect tracked paths: only USER-specified directories with write access.
-            // System/group paths (caches, frameworks, etc.) are excluded to avoid
-            // snapshotting system directories the user didn't ask to track.
-            let tracked_paths: Vec<std::path::PathBuf> = caps
-                .fs_capabilities()
-                .iter()
-                .filter(|c| {
-                    !c.is_file
-                        && matches!(c.access, AccessMode::Write | AccessMode::ReadWrite)
-                        && matches!(c.source, nono::CapabilitySource::User)
-                })
-                .map(|c| c.resolved.clone())
-                .collect();
+            // --- Rollback snapshot lifecycle (only when --rollback is active) ---
+            let rollback_state = if flags.rollback {
+                // Collect tracked paths: only USER-specified directories with write access.
+                // System/group paths (caches, frameworks, etc.) are excluded to avoid
+                // snapshotting system directories the user didn't ask to track.
+                let tracked_paths: Vec<std::path::PathBuf> = caps
+                    .fs_capabilities()
+                    .iter()
+                    .filter(|c| {
+                        !c.is_file
+                            && matches!(c.access, AccessMode::Write | AccessMode::ReadWrite)
+                            && matches!(c.source, nono::CapabilitySource::User)
+                    })
+                    .map(|c| c.resolved.clone())
+                    .collect();
 
-            // Enforce storage limits before creating a new session
-            enforce_undo_limits(flags.silent);
+                // Enforce storage limits before creating a new session
+                enforce_rollback_limits(flags.silent);
 
-            // Set up snapshot manager if we have writable paths to track
-            let undo_state = if !tracked_paths.is_empty() {
-                let session_id = format!(
-                    "{}-{}",
-                    chrono::Local::now().format("%Y%m%d-%H%M%S"),
-                    std::process::id()
-                );
+                if !tracked_paths.is_empty() {
+                    let session_id = format!(
+                        "{}-{}",
+                        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+                        std::process::id()
+                    );
 
-                let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
-                let session_dir = home.join(".nono").join("undo").join(&session_id);
-                std::fs::create_dir_all(&session_dir).map_err(|e| {
-                    NonoError::Snapshot(format!(
-                        "Failed to create session directory {}: {}",
-                        session_dir.display(),
-                        e
+                    let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+                    let session_dir = home.join(".nono").join("rollbacks").join(&session_id);
+                    std::fs::create_dir_all(&session_dir).map_err(|e| {
+                        NonoError::Snapshot(format!(
+                            "Failed to create session directory {}: {}",
+                            session_dir.display(),
+                            e
+                        ))
+                    })?;
+
+                    // Set directory permissions to 0700
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let perms = std::fs::Permissions::from_mode(0o700);
+                        let _ = std::fs::set_permissions(&session_dir, perms);
+                    }
+
+                    let mut patterns = rollback_base_exclusions();
+                    patterns.extend(flags.rollback_exclude_patterns.iter().cloned());
+                    patterns.dedup();
+                    let exclusion_config = nono::undo::ExclusionConfig {
+                        use_gitignore: true,
+                        exclude_patterns: patterns,
+                        exclude_globs: flags.rollback_exclude_globs.clone(),
+                        force_include: Vec::new(),
+                    };
+                    // Use the first tracked path as gitignore root
+                    let gitignore_root = tracked_paths
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let exclusion =
+                        nono::undo::ExclusionFilter::new(exclusion_config, &gitignore_root)?;
+
+                    let mut manager = nono::undo::SnapshotManager::new(
+                        session_dir.clone(),
+                        tracked_paths.clone(),
+                        exclusion,
+                    )?;
+
+                    let baseline = manager.create_baseline()?;
+                    let atomic_temp_before = manager.collect_atomic_temp_files();
+
+                    output::print_rollback_tracking(&tracked_paths, flags.silent);
+
+                    Some((
+                        manager,
+                        baseline,
+                        session_id,
+                        session_dir,
+                        tracked_paths,
+                        atomic_temp_before,
                     ))
-                })?;
-
-                // Set directory permissions to 0700
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let perms = std::fs::Permissions::from_mode(0o700);
-                    let _ = std::fs::set_permissions(&session_dir, perms);
+                } else {
+                    None
                 }
-
-                let mut patterns = undo_base_exclusions();
-                patterns.extend(flags.undo_exclude_patterns.iter().cloned());
-                patterns.dedup();
-                let exclusion_config = nono::undo::ExclusionConfig {
-                    use_gitignore: true,
-                    exclude_patterns: patterns,
-                    exclude_globs: flags.undo_exclude_globs.clone(),
-                    force_include: Vec::new(),
-                };
-                // Use the first tracked path as gitignore root
-                let gitignore_root = tracked_paths
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."));
-                let exclusion =
-                    nono::undo::ExclusionFilter::new(exclusion_config, &gitignore_root)?;
-
-                let mut manager = nono::undo::SnapshotManager::new(
-                    session_dir.clone(),
-                    tracked_paths.clone(),
-                    exclusion,
-                )?;
-
-                let baseline = manager.create_baseline()?;
-                let atomic_temp_before = manager.collect_atomic_temp_files();
-
-                output::print_undo_tracking(&tracked_paths, flags.silent);
-
-                Some((
-                    manager,
-                    baseline,
-                    session_id,
-                    session_dir,
-                    atomic_temp_before,
-                ))
             } else {
                 None
             };
 
-            // --- Supervisor IPC setup ---
-            // Load never_grant paths from policy and create approval backend
-            let policy_data = policy::load_embedded_policy()?;
-            let never_grant_checker = nono::NeverGrantChecker::new(&policy_data.never_grant)?;
-            let approval_backend = terminal_approval::TerminalApproval;
-            let supervisor_cfg = exec_strategy::SupervisorConfig {
-                never_grant: &never_grant_checker,
-                approval_backend: &approval_backend,
+            // --- Supervisor IPC setup (only when --supervised is active) ---
+            let supervisor_cfg_data = if flags.supervised {
+                let policy_data = policy::load_embedded_policy()?;
+                let never_grant_checker = nono::NeverGrantChecker::new(&policy_data.never_grant)?;
+                let approval_backend = terminal_approval::TerminalApproval;
+                Some((never_grant_checker, approval_backend))
+            } else {
+                None
             };
+            let supervisor_cfg = supervisor_cfg_data.as_ref().map(|(checker, backend)| {
+                exec_strategy::SupervisorConfig {
+                    never_grant: checker,
+                    approval_backend: backend,
+                }
+            });
 
             let started = chrono::Local::now().to_rfc3339();
-            let exit_code = exec_strategy::execute_supervised(&config, Some(&supervisor_cfg))?;
+            let exit_code = exec_strategy::execute_supervised(&config, supervisor_cfg.as_ref())?;
             let ended = chrono::Local::now().to_rfc3339();
 
             // Post-exit: take final snapshot and offer restore
-            if let Some((mut manager, baseline, session_id, _session_dir, atomic_temp_before)) =
-                undo_state
+            if let Some((
+                mut manager,
+                baseline,
+                session_id,
+                _session_dir,
+                tracked_paths,
+                atomic_temp_before,
+            )) = rollback_state
             {
                 let (final_manifest, changes) = manager.create_incremental(&baseline)?;
 
@@ -635,10 +658,10 @@ fn execute_sandboxed(
 
                 // Show summary and offer restore
                 if !changes.is_empty() {
-                    output::print_undo_session_summary(&changes, flags.silent);
+                    output::print_rollback_session_summary(&changes, flags.silent);
 
-                    if !flags.no_undo_prompt && !flags.silent {
-                        let _ = undo_ui::review_and_restore(&manager, &baseline, &changes);
+                    if !flags.no_rollback_prompt && !flags.silent {
+                        let _ = rollback_ui::review_and_restore(&manager, &baseline, &changes);
                     }
                 }
 
@@ -653,13 +676,13 @@ fn execute_sandboxed(
     }
 }
 
-/// Base exclusion patterns for undo snapshots.
+/// Base exclusion patterns for rollback snapshots.
 ///
 /// These are CLI policy — the library provides only the matching mechanism.
-/// Profiles can add additional patterns via `undo.exclude_patterns` in
+/// Profiles can add additional patterns via `rollback.exclude_patterns` in
 /// policy.json. Patterns without `/` match exact path components; patterns
 /// with `/` match as substrings of the full path.
-pub(crate) fn undo_base_exclusions() -> Vec<String> {
+pub(crate) fn rollback_base_exclusions() -> Vec<String> {
     [
         // VCS internals — git manages its own state; restoring partial
         // .git/ contents (e.g. index without matching objects) corrupts
@@ -681,10 +704,10 @@ struct PreparedSandbox {
     secrets: Vec<nono::LoadedSecret>,
     /// Whether the profile indicates interactive mode (needs TTY)
     interactive: bool,
-    /// Profile-specific undo exclusion patterns (additive on base patterns)
-    undo_exclude_patterns: Vec<String>,
-    /// Profile-specific undo exclusion globs (filename matching)
-    undo_exclude_globs: Vec<String>,
+    /// Profile-specific rollback exclusion patterns (additive on base patterns)
+    rollback_exclude_patterns: Vec<String>,
+    /// Profile-specific rollback exclusion globs (filename matching)
+    rollback_exclude_globs: Vec<String>,
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
@@ -766,13 +789,13 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .as_ref()
         .map(|p| p.interactive)
         .unwrap_or(false);
-    let profile_undo_patterns = loaded_profile
+    let profile_rollback_patterns = loaded_profile
         .as_ref()
-        .map(|p| p.undo.exclude_patterns.clone())
+        .map(|p| p.rollback.exclude_patterns.clone())
         .unwrap_or_default();
-    let profile_undo_globs = loaded_profile
+    let profile_rollback_globs = loaded_profile
         .as_ref()
-        .map(|p| p.undo.exclude_globs.clone())
+        .map(|p| p.rollback.exclude_globs.clone())
         .unwrap_or_default();
 
     // Build capabilities from profile or arguments.
@@ -896,28 +919,28 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         caps,
         secrets: loaded_secrets,
         interactive: profile_interactive,
-        undo_exclude_patterns: profile_undo_patterns,
-        undo_exclude_globs: profile_undo_globs,
+        rollback_exclude_patterns: profile_rollback_patterns,
+        rollback_exclude_globs: profile_rollback_globs,
     })
 }
 
-/// Enforce undo storage limits before creating a new session.
+/// Enforce rollback storage limits before creating a new session.
 ///
 /// Loads user config (or defaults) and prunes oldest completed sessions
 /// until session count and total storage are under the configured limits.
 /// Errors are logged but non-fatal — failing to prune should not block
 /// the sandbox from running.
-fn enforce_undo_limits(silent: bool) {
+fn enforce_rollback_limits(silent: bool) {
     let config = match config::user::load_user_config() {
         Ok(Some(c)) => c,
         Ok(None) => config::user::UserConfig::default(),
         Err(e) => {
-            tracing::warn!("Failed to load user config for undo limits: {e}");
+            tracing::warn!("Failed to load user config for rollback limits: {e}");
             return;
         }
     };
 
-    let sessions = match undo_session::discover_sessions() {
+    let sessions = match rollback_session::discover_sessions() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("Failed to discover sessions for limit enforcement: {e}");
@@ -929,14 +952,14 @@ fn enforce_undo_limits(silent: bool) {
         return;
     }
 
-    let max_sessions = config.undo.max_sessions;
+    let max_sessions = config.rollback.max_sessions;
     // Clamp to 0.0 to prevent negative/NaN from producing bogus u64 values
     let storage_bytes_f64 =
-        (config.undo.max_storage_gb.max(0.0) * 1024.0 * 1024.0 * 1024.0).min(u64::MAX as f64);
+        (config.rollback.max_storage_gb.max(0.0) * 1024.0 * 1024.0 * 1024.0).min(u64::MAX as f64);
     let max_storage_bytes = storage_bytes_f64 as u64;
 
     // Sessions are sorted newest-first. Only prune completed (non-alive) sessions.
-    let completed: Vec<&undo_session::SessionInfo> =
+    let completed: Vec<&rollback_session::SessionInfo> =
         sessions.iter().filter(|s| !s.is_alive).collect();
 
     let mut pruned = 0usize;
@@ -945,7 +968,7 @@ fn enforce_undo_limits(silent: bool) {
     // Prune excess sessions beyond keep limit
     if completed.len() > max_sessions {
         for s in &completed[max_sessions..] {
-            if let Err(e) = undo_session::remove_session(&s.dir) {
+            if let Err(e) = rollback_session::remove_session(&s.dir) {
                 tracing::warn!("Failed to prune session {}: {e}", s.metadata.session_id);
             } else {
                 pruned = pruned.saturating_add(1);
@@ -955,14 +978,14 @@ fn enforce_undo_limits(silent: bool) {
     }
 
     // Prune by storage limit if still over
-    let total = match undo_session::total_storage_bytes() {
+    let total = match rollback_session::total_storage_bytes() {
         Ok(t) => t,
         Err(_) => return,
     };
 
     if total > max_storage_bytes {
         // Re-discover after count-based pruning
-        let remaining = match undo_session::discover_sessions() {
+        let remaining = match rollback_session::discover_sessions() {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -973,7 +996,7 @@ fn enforce_undo_limits(silent: bool) {
             if current_total <= max_storage_bytes {
                 break;
             }
-            if let Err(e) = undo_session::remove_session(&s.dir) {
+            if let Err(e) = rollback_session::remove_session(&s.dir) {
                 tracing::warn!("Failed to prune session {}: {e}", s.metadata.session_id);
             } else {
                 current_total = current_total.saturating_sub(s.disk_size);
@@ -987,7 +1010,7 @@ fn enforce_undo_limits(silent: bool) {
         eprintln!(
             "  Auto-pruned {} old session(s) (freed {})",
             pruned,
-            undo_session::format_bytes(pruned_bytes),
+            rollback_session::format_bytes(pruned_bytes),
         );
     }
 }

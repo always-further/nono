@@ -115,8 +115,8 @@ pub struct ProfileDef {
     pub workdir: profile::WorkdirConfig,
     #[serde(default)]
     pub hooks: profile::HooksConfig,
-    #[serde(default)]
-    pub undo: profile::UndoConfig,
+    #[serde(default, alias = "undo")]
+    pub rollback: profile::RollbackConfig,
     #[serde(default)]
     pub interactive: bool,
 }
@@ -144,7 +144,7 @@ impl ProfileDef {
             secrets: self.secrets.clone(),
             workdir: self.workdir.clone(),
             hooks: self.hooks.clone(),
-            undo: self.undo.clone(),
+            rollback: self.rollback.clone(),
             interactive: self.interactive,
         }
     }

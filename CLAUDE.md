@@ -47,7 +47,7 @@ crates/nono-cli/src/                # CLI - security policy and UX
 ├── hooks.rs                        # Claude Code hook installation
 ├── setup.rs                        # System setup and verification
 ├── output.rs                       # Banner, dry-run output, prompts
-├── undo_ui.rs                      # Interactive undo review and restore prompts
+├── rollback_ui.rs                  # Interactive rollback review and restore prompts
 ├── learn.rs                        # strace-based path discovery (Linux only)
 ├── config/
 │   ├── mod.rs                      # Config module root
@@ -85,7 +85,7 @@ The library is a **pure sandbox primitive**. It applies ONLY what clients explic
 | `DiagnosticFormatter` | Profile loading and hooks |
 | `QueryContext` | All output and UX |
 | `keystore` | `learn` mode |
-| `undo` module (ObjectStore, SnapshotManager, MerkleTree, ExclusionFilter) | Undo lifecycle, exclusion policy, undo UI |
+| `undo` module (ObjectStore, SnapshotManager, MerkleTree, ExclusionFilter) | Rollback lifecycle, exclusion policy, rollback UI |
 
 ## Build & Test
 
@@ -131,7 +131,7 @@ make fmt             # Auto-format
 
 1. **No escape hatch**: Once sandbox is applied via `restrict_self()` (Landlock) or `sandbox_init()` (Seatbelt), there is no API to expand permissions.
 
-2. **Fork+wait process model**: nono stays alive as a parent process. On child failure, prints a diagnostic footer to stderr. Three execution strategies: `Direct` (exec, backward compat), `Monitor` (sandbox-then-fork, default), `Supervised` (fork-then-sandbox, for undo).
+2. **Fork+wait process model**: nono stays alive as a parent process. On child failure, prints a diagnostic footer to stderr. Three execution strategies: `Direct` (exec, backward compat), `Monitor` (sandbox-then-fork, default), `Supervised` (fork-then-sandbox, for rollbacks/expansion).
 
 3. **Capability resolution**: All paths are canonicalized at grant time to prevent symlink escapes.
 

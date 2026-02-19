@@ -3,15 +3,22 @@ title: Supervisor Mode
 description: Transparent capability expansion and runtime approval
 ---
 
-Supervisor mode keeps a parent process alive outside the sandbox to provide runtime services that a fully sandboxed process cannot perform on its own. This enables transparent capability expansion on Linux and undo snapshots on both platforms.
+Supervisor mode keeps a parent process alive outside the sandbox to provide runtime services that a fully sandboxed process cannot perform on its own. This enables transparent capability expansion on Linux and rollback snapshots on both platforms.
 
 ## Enabling Supervisor Mode
 
 ```bash
+# Enable approval sidecar (capability expansion on Linux)
 nono run --supervised --profile claude-code -- claude
+
+# Enable rollback snapshots
+nono run --rollback --profile claude-code -- claude
+
+# Both: rollback snapshots + approval sidecar
+nono run --rollback --supervised --profile claude-code -- claude
 ```
 
-The `--supervised` flag changes the execution model:
+Either `--supervised` or `--rollback` (or both) activates supervised execution. The flags change the execution model:
 
 1. nono forks before applying the sandbox
 2. The **child** is sandboxed and runs the command
@@ -56,7 +63,7 @@ Requests exceeding the rate limit are automatically denied.
 
 Capability expansion is not available on macOS. Apple's SIP (System Integrity Protection) strips `DYLD_INSERT_LIBRARIES` from Apple Platform Binaries, making transparent interposition infeasible for commands that route through `/usr/bin/env`, `/bin/bash`, or `/bin/sh`.
 
-On macOS, supervised mode provides undo snapshots and the diagnostic footer, but does not prompt for capability expansion.
+On macOS, supervised mode provides rollback snapshots and the diagnostic footer, but does not prompt for capability expansion.
 
 ## never_grant
 
@@ -100,6 +107,6 @@ In both Monitor and Supervised modes, when the child exits with a non-zero exit 
 
 ## Limitations
 
-- `--supervised` is incompatible with `--secrets` (keyring threads cause a deadlock across fork)
+- `--supervised` and `--rollback` are incompatible with `--secrets` (keyring threads cause a deadlock across fork)
 - The unsandboxed parent represents a larger attack surface than Monitor mode. The parent applies ptrace hardening to mitigate this.
-- Capability expansion is Linux-only. macOS supervised mode provides undo and diagnostics only.
+- Capability expansion is Linux-only. macOS supervised mode provides rollback snapshots and diagnostics only.

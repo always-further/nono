@@ -3,11 +3,12 @@
 //! Handles `nono audit list|show` for viewing the audit trail of sandboxed sessions.
 
 use crate::cli::{AuditArgs, AuditCommands, AuditListArgs, AuditShowArgs};
-use crate::undo_session::{discover_sessions, load_session, SessionInfo};
+use crate::rollback_session::{discover_sessions, load_session, SessionInfo};
 use colored::Colorize;
 use nono::undo::SnapshotManager;
 use nono::{NonoError, Result};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// Prefix used for all audit command output
 fn prefix() -> colored::ColoredString {
@@ -45,20 +46,29 @@ fn cmd_list(args: AuditListArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Group sessions by their primary tracked path (project directory)
+    let grouped = group_by_project(&sessions);
     eprintln!("{} {} session(s)\n", prefix(), sessions.len());
 
-    for s in &sessions {
-        let cmd = truncate_command(&s.metadata.command, 35);
-        let paths = format_paths(&s.metadata.tracked_paths);
-        let status = session_status_label(s);
-
+    for (project_path, group) in &grouped {
+        let display_path = shorten_home(project_path);
         eprintln!(
-            "  {} {} {:<35} {}",
-            s.metadata.session_id.white().bold(),
-            status,
-            cmd.truecolor(150, 150, 150),
-            paths.truecolor(100, 100, 100),
+            "  {} ({} session{})",
+            display_path.white().bold(),
+            group.len(),
+            if group.len() == 1 { "" } else { "s" },
         );
+        for s in group {
+            let cmd = truncate_command(&s.metadata.command, 35);
+            let status = session_status_label(s);
+            eprintln!(
+                "    {} {} {}",
+                s.metadata.session_id,
+                status,
+                cmd.truecolor(150, 150, 150),
+            );
+        }
+        eprintln!();
     }
 
     Ok(())
@@ -305,32 +315,37 @@ fn session_status_label(s: &SessionInfo) -> colored::ColoredString {
     }
 }
 
+fn group_by_project(sessions: &[SessionInfo]) -> BTreeMap<PathBuf, Vec<&SessionInfo>> {
+    let mut groups: BTreeMap<PathBuf, Vec<&SessionInfo>> = BTreeMap::new();
+    for s in sessions {
+        let project = s
+            .metadata
+            .tracked_paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("(unknown)"));
+        groups.entry(project).or_default().push(s);
+    }
+    groups
+}
+
+fn shorten_home(path: &Path) -> String {
+    let s = path.display().to_string();
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.display().to_string();
+        if let Some(rest) = s.strip_prefix(&home_str) {
+            return format!("~{rest}");
+        }
+    }
+    s
+}
+
 fn truncate_command(cmd: &[String], max_len: usize) -> String {
     let full = cmd.join(" ");
     if full.len() <= max_len {
         full
     } else {
         format!("{}...", &full[..max_len.saturating_sub(3)])
-    }
-}
-
-fn format_paths(paths: &[std::path::PathBuf]) -> String {
-    if paths.is_empty() {
-        return String::new();
-    }
-    if paths.len() == 1 {
-        return shorten_path(&paths[0]);
-    }
-    format!("{} (+{} more)", shorten_path(&paths[0]), paths.len() - 1)
-}
-
-fn shorten_path(path: &Path) -> String {
-    let s = path.display().to_string();
-    if s.len() <= 40 {
-        s
-    } else {
-        // Show last 37 chars with ...
-        format!("...{}", &s[s.len().saturating_sub(37)..])
     }
 }
 

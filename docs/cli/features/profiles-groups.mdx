@@ -130,13 +130,13 @@ The `interactive` field (default: `false`) indicates whether the application has
 
 When `true`, nono uses direct exec mode (equivalent to `--exec` flag), which preserves the terminal for apps like Claude Code, vim, or htop.
 
-### Undo Exclusions
+### Rollback Exclusions
 
-The `undo` section controls which files are excluded from [atomic rollback](/cli/features/atomic-rollbacks) snapshots:
+The `rollback` section controls which files are excluded from [atomic rollback](/cli/features/atomic-rollbacks) snapshots:
 
 ```json
 {
-  "undo": {
+  "rollback": {
     "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
     "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
   }

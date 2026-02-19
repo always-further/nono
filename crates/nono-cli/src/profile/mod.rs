@@ -136,19 +136,19 @@ pub struct SecurityConfig {
     pub trust_groups: Vec<String>,
 }
 
-/// Undo snapshot configuration in a profile
+/// Rollback snapshot configuration in a profile
 ///
-/// Controls which files are excluded from undo snapshots. Patterns are
+/// Controls which files are excluded from rollback snapshots. Patterns are
 /// matched against path components (exact match) or, if they contain `/`,
 /// as substrings of the full path. Glob patterns are matched against
 /// the filename (last path component).
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct UndoConfig {
-    /// Patterns to exclude from undo snapshots.
+pub struct RollbackConfig {
+    /// Patterns to exclude from rollback snapshots.
     /// Added on top of the CLI's base exclusion list.
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
-    /// Glob patterns to exclude from undo snapshots.
+    /// Glob patterns to exclude from rollback snapshots.
     /// Matched against the filename using standard glob syntax.
     #[serde(default)]
     pub exclude_globs: Vec<String>,
@@ -171,8 +171,8 @@ pub struct Profile {
     pub workdir: WorkdirConfig,
     #[serde(default)]
     pub hooks: HooksConfig,
-    #[serde(default)]
-    pub undo: UndoConfig,
+    #[serde(default, alias = "undo")]
+    pub rollback: RollbackConfig,
     /// App has interactive UI that needs TTY preserved (implies --exec mode)
     #[serde(default)]
     pub interactive: bool,

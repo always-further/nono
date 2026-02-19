@@ -1,14 +1,14 @@
-//! Post-exit interactive review/restore UI for the undo system
+//! Post-exit interactive review/restore UI for the rollback system
 //!
-//! Presents the user with a summary of changes made during the supervised
-//! session and offers to restore to the initial state.
+//! Presents the user with a summary of changes made during the session
+//! and offers to restore to the initial state.
 
 use colored::Colorize;
 use nono::undo::{Change, ChangeType, SnapshotManager, SnapshotManifest};
 use nono::Result;
 use std::io::{BufRead, IsTerminal, Write};
 
-/// Run the post-exit undo review UI.
+/// Run the post-exit rollback review UI.
 ///
 /// Shows a change summary and prompts the user to restore or exit.
 /// Returns `true` if the user chose to restore.

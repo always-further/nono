@@ -158,7 +158,7 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Process profile filesystem config (profile-specific paths on top of groups).
         // These are marked as CapabilitySource::Profile so they are displayed in
-        // the banner but NOT tracked for undo snapshots (only User-sourced paths
+        // the banner but NOT tracked for rollback snapshots (only User-sourced paths
         // representing the project workspace are tracked).
         let fs = &profile.filesystem;
 

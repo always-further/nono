@@ -31,7 +31,7 @@
 
 AI agents get filesystem access, run shell commands, and are inherently open to prompt injection. The standard response is guardrails and policies. The problem is that policies can be bypassed and guardrails linguistically overcome.
 
-Kernel-enforced sandboxing (Landlock on Linux, Seatbelt on macOS) blocks unauthorized access at the syscall level. Destructive commands are denied before they run. Secrets are injected securely without touching disk. Every filesystem change gets an undo snapshot. Every command leaves a tamper resistant trail. When the agent needs to do something outside its permissions, a supervisor handles approval.
+Kernel-enforced sandboxing (Landlock on Linux, Seatbelt on macOS) blocks unauthorized access at the syscall level. Destructive commands are denied before they run. Secrets are injected securely without touching disk. Every filesystem change gets a rollback snapshot. Every command leaves a tamper resistant trail. When the agent needs to do something outside its permissions, a supervisor handles approval.
 
 ## CLI
 
@@ -177,10 +177,10 @@ nono takes content-addressable snapshots of your working directory before the sa
 
 ```bash
 # List snapshots taken during sandboxed sessions
-nono undo list
+nono rollback list
 
 # Interactively review and restore changes
-nono undo restore
+nono rollback restore
 ```
 
 ### Supervisor and Capability Expansion (Coming Soon!)
@@ -188,8 +188,8 @@ nono undo restore
 On Linux, nono can run in supervised mode where the sandboxed process starts with minimal permissions. When the agent needs access to a file outside its sandbox, the request is intercepted via seccomp user notification and routed to the supervisor, which prompts the user for approval. Approved access is granted transparently by injecting file descriptors -- the agent never needs to know about nono. Sensitive paths (system config, SSH keys, etc.) are configured as never-grantable regardless of user approval.
 
 ```bash
-# Run in supervised mode — agent starts locked down, requests are prompted
-nono run --supervised --allow-cwd -- claude
+# Run with rollback snapshots and capability expansion
+nono run --rollback --supervised --allow-cwd -- claude
 ```
  
 ### Audit Trail (Coming Soon!)

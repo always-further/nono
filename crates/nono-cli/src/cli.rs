@@ -124,27 +124,27 @@ pub enum Commands {
 ")]
     Setup(SetupArgs),
 
-    /// Manage undo sessions (browse, restore, cleanup)
+    /// Manage rollback sessions (browse, restore, cleanup)
     #[command(after_help = "EXAMPLES:
     # List sessions with file changes
-    nono undo list
+    nono rollback list
 
     # Show changes in a session (with diff)
-    nono undo show 20260214-143022-12345 --diff
+    nono rollback show 20260214-143022-12345 --diff
 
     # Restore files from a session
-    nono undo restore 20260214-143022-12345
+    nono rollback restore 20260214-143022-12345
 
     # Dry-run restore to see what would change
-    nono undo restore 20260214-143022-12345 --dry-run
+    nono rollback restore 20260214-143022-12345 --dry-run
 
     # Verify session integrity
-    nono undo verify 20260214-143022-12345
+    nono rollback verify 20260214-143022-12345
 
     # Clean up old sessions (dry-run first)
-    nono undo cleanup --dry-run
+    nono rollback cleanup --dry-run
 ")]
-    Undo(UndoArgs),
+    Rollback(RollbackArgs),
 
     /// View audit trail of sandboxed commands
     #[command(after_help = "EXAMPLES:
@@ -269,17 +269,23 @@ pub struct RunArgs {
     #[arg(long = "exec")]
     pub direct_exec: bool,
 
-    /// Use supervised execution mode: fork first, sandbox only the child.
-    /// The parent stays unsandboxed for diagnostics and monitoring.
-    /// Required for features that need an unsandboxed parent (e.g., undo).
+    /// Enable atomic rollback snapshots for the session.
+    /// Takes content-addressable snapshots of writable directories so you
+    /// can restore to the pre-session state after the command exits.
+    #[arg(long)]
+    pub rollback: bool,
+
+    /// Use supervised execution mode for capability expansion approval.
+    /// Fork first, sandbox only the child. The parent stays unsandboxed
+    /// to handle approval prompts for additional path access requests.
     #[arg(long)]
     pub supervised: bool,
 
-    /// Skip the post-exit undo review prompt in supervised mode.
+    /// Skip the post-exit rollback review prompt.
     /// Snapshots are still taken for audit purposes, but the interactive
     /// restore UI is suppressed.
     #[arg(long)]
-    pub no_undo_prompt: bool,
+    pub no_rollback_prompt: bool,
 
     /// Command to run inside the sandbox
     #[arg(required = true)]
@@ -419,32 +425,34 @@ pub enum WhyOp {
 }
 
 #[derive(Parser, Debug)]
-pub struct UndoArgs {
+pub struct RollbackArgs {
     #[command(subcommand)]
-    pub command: UndoCommands,
+    pub command: RollbackCommands,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum UndoCommands {
+pub enum RollbackCommands {
     /// List sessions with file changes
-    List(UndoListArgs),
+    List(RollbackListArgs),
     /// Show changes in a session
-    Show(UndoShowArgs),
+    Show(RollbackShowArgs),
     /// Restore files from a past session
-    Restore(UndoRestoreArgs),
+    Restore(RollbackRestoreArgs),
     /// Verify session integrity
-    Verify(UndoVerifyArgs),
+    Verify(RollbackVerifyArgs),
     /// Clean up old sessions
-    Cleanup(UndoCleanupArgs),
+    Cleanup(RollbackCleanupArgs),
 }
 
-// Note: UndoAuditArgs has been moved to AuditShowArgs under `nono audit show`
-
 #[derive(Parser, Debug)]
-pub struct UndoListArgs {
+pub struct RollbackListArgs {
     /// Show only the N most recent sessions
     #[arg(long, value_name = "N")]
     pub recent: Option<usize>,
+
+    /// Filter sessions by tracked path (matches if session tracked this path or a parent/child)
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
 
     /// Show all sessions (including those with no file changes)
     #[arg(long)]
@@ -456,7 +464,7 @@ pub struct UndoListArgs {
 }
 
 #[derive(Parser, Debug)]
-pub struct UndoShowArgs {
+pub struct RollbackShowArgs {
     /// Session ID (e.g., 20260214-143022-12345)
     pub session_id: String,
 
@@ -478,7 +486,7 @@ pub struct UndoShowArgs {
 }
 
 #[derive(Parser, Debug)]
-pub struct UndoRestoreArgs {
+pub struct RollbackRestoreArgs {
     /// Session ID (e.g., 20260214-143022-12345)
     pub session_id: String,
 
@@ -492,13 +500,13 @@ pub struct UndoRestoreArgs {
 }
 
 #[derive(Parser, Debug)]
-pub struct UndoVerifyArgs {
+pub struct RollbackVerifyArgs {
     /// Session ID (e.g., 20260214-143022-12345)
     pub session_id: String,
 }
 
 #[derive(Parser, Debug)]
-pub struct UndoCleanupArgs {
+pub struct RollbackCleanupArgs {
     /// Retain N newest sessions (default: from config, usually 10)
     #[arg(long, value_name = "N")]
     pub keep: Option<usize>,
@@ -670,71 +678,72 @@ mod tests {
     }
 
     #[test]
-    fn test_undo_list() {
-        let cli = Cli::parse_from(["nono", "undo", "list"]);
+    fn test_rollback_list() {
+        let cli = Cli::parse_from(["nono", "rollback", "list"]);
         match cli.command {
-            Commands::Undo(args) => match args.command {
-                UndoCommands::List(list_args) => {
+            Commands::Rollback(args) => match args.command {
+                RollbackCommands::List(list_args) => {
                     assert!(list_args.recent.is_none());
+                    assert!(list_args.path.is_none());
                     assert!(!list_args.json);
                 }
                 _ => panic!("Expected List subcommand"),
             },
-            _ => panic!("Expected Undo command"),
+            _ => panic!("Expected Rollback command"),
         }
     }
 
     #[test]
-    fn test_undo_list_recent_json() {
-        let cli = Cli::parse_from(["nono", "undo", "list", "--recent", "5", "--json"]);
+    fn test_rollback_list_recent_json() {
+        let cli = Cli::parse_from(["nono", "rollback", "list", "--recent", "5", "--json"]);
         match cli.command {
-            Commands::Undo(args) => match args.command {
-                UndoCommands::List(list_args) => {
+            Commands::Rollback(args) => match args.command {
+                RollbackCommands::List(list_args) => {
                     assert_eq!(list_args.recent, Some(5));
                     assert!(list_args.json);
                 }
                 _ => panic!("Expected List subcommand"),
             },
-            _ => panic!("Expected Undo command"),
+            _ => panic!("Expected Rollback command"),
         }
     }
 
     #[test]
-    fn test_undo_show() {
-        let cli = Cli::parse_from(["nono", "undo", "show", "20260214-143022-12345"]);
+    fn test_rollback_show() {
+        let cli = Cli::parse_from(["nono", "rollback", "show", "20260214-143022-12345"]);
         match cli.command {
-            Commands::Undo(args) => match args.command {
-                UndoCommands::Show(show_args) => {
+            Commands::Rollback(args) => match args.command {
+                RollbackCommands::Show(show_args) => {
                     assert_eq!(show_args.session_id, "20260214-143022-12345");
                     assert!(!show_args.json);
                 }
                 _ => panic!("Expected Show subcommand"),
             },
-            _ => panic!("Expected Undo command"),
+            _ => panic!("Expected Rollback command"),
         }
     }
 
     #[test]
-    fn test_undo_restore_defaults() {
-        let cli = Cli::parse_from(["nono", "undo", "restore", "20260214-143022-12345"]);
+    fn test_rollback_restore_defaults() {
+        let cli = Cli::parse_from(["nono", "rollback", "restore", "20260214-143022-12345"]);
         match cli.command {
-            Commands::Undo(args) => match args.command {
-                UndoCommands::Restore(restore_args) => {
+            Commands::Rollback(args) => match args.command {
+                RollbackCommands::Restore(restore_args) => {
                     assert_eq!(restore_args.session_id, "20260214-143022-12345");
                     assert_eq!(restore_args.snapshot, None); // Default to last snapshot
                     assert!(!restore_args.dry_run);
                 }
                 _ => panic!("Expected Restore subcommand"),
             },
-            _ => panic!("Expected Undo command"),
+            _ => panic!("Expected Rollback command"),
         }
     }
 
     #[test]
-    fn test_undo_restore_with_options() {
+    fn test_rollback_restore_with_options() {
         let cli = Cli::parse_from([
             "nono",
-            "undo",
+            "rollback",
             "restore",
             "20260214-143022-12345",
             "--snapshot",
@@ -742,14 +751,14 @@ mod tests {
             "--dry-run",
         ]);
         match cli.command {
-            Commands::Undo(args) => match args.command {
-                UndoCommands::Restore(restore_args) => {
+            Commands::Rollback(args) => match args.command {
+                RollbackCommands::Restore(restore_args) => {
                     assert_eq!(restore_args.snapshot, Some(3));
                     assert!(restore_args.dry_run);
                 }
                 _ => panic!("Expected Restore subcommand"),
             },
-            _ => panic!("Expected Undo command"),
+            _ => panic!("Expected Rollback command"),
         }
     }
 
@@ -784,25 +793,25 @@ mod tests {
     }
 
     #[test]
-    fn test_undo_verify() {
-        let cli = Cli::parse_from(["nono", "undo", "verify", "20260214-143022-12345"]);
+    fn test_rollback_verify() {
+        let cli = Cli::parse_from(["nono", "rollback", "verify", "20260214-143022-12345"]);
         match cli.command {
-            Commands::Undo(args) => match args.command {
-                UndoCommands::Verify(verify_args) => {
+            Commands::Rollback(args) => match args.command {
+                RollbackCommands::Verify(verify_args) => {
                     assert_eq!(verify_args.session_id, "20260214-143022-12345");
                 }
                 _ => panic!("Expected Verify subcommand"),
             },
-            _ => panic!("Expected Undo command"),
+            _ => panic!("Expected Rollback command"),
         }
     }
 
     #[test]
-    fn test_undo_cleanup_defaults() {
-        let cli = Cli::parse_from(["nono", "undo", "cleanup"]);
+    fn test_rollback_cleanup_defaults() {
+        let cli = Cli::parse_from(["nono", "rollback", "cleanup"]);
         match cli.command {
-            Commands::Undo(args) => match args.command {
-                UndoCommands::Cleanup(cleanup_args) => {
+            Commands::Rollback(args) => match args.command {
+                RollbackCommands::Cleanup(cleanup_args) => {
                     assert!(cleanup_args.keep.is_none());
                     assert!(cleanup_args.older_than.is_none());
                     assert!(!cleanup_args.dry_run);
@@ -810,15 +819,15 @@ mod tests {
                 }
                 _ => panic!("Expected Cleanup subcommand"),
             },
-            _ => panic!("Expected Undo command"),
+            _ => panic!("Expected Rollback command"),
         }
     }
 
     #[test]
-    fn test_undo_cleanup_with_options() {
+    fn test_rollback_cleanup_with_options() {
         let cli = Cli::parse_from([
             "nono",
-            "undo",
+            "rollback",
             "cleanup",
             "--keep",
             "5",
@@ -827,8 +836,8 @@ mod tests {
             "--dry-run",
         ]);
         match cli.command {
-            Commands::Undo(args) => match args.command {
-                UndoCommands::Cleanup(cleanup_args) => {
+            Commands::Rollback(args) => match args.command {
+                RollbackCommands::Cleanup(cleanup_args) => {
                     assert_eq!(cleanup_args.keep, Some(5));
                     assert_eq!(cleanup_args.older_than, Some(30));
                     assert!(cleanup_args.dry_run);
@@ -836,7 +845,7 @@ mod tests {
                 }
                 _ => panic!("Expected Cleanup subcommand"),
             },
-            _ => panic!("Expected Undo command"),
+            _ => panic!("Expected Rollback command"),
         }
     }
 }

@@ -1,42 +1,61 @@
-//! Undo subcommand implementations
+//! Rollback subcommand implementations
 //!
-//! Handles `nono undo list|show|restore|verify|cleanup`.
+//! Handles `nono rollback list|show|restore|verify|cleanup`.
 
 use crate::cli::{
-    UndoArgs, UndoCleanupArgs, UndoCommands, UndoListArgs, UndoRestoreArgs, UndoShowArgs,
-    UndoVerifyArgs,
+    RollbackArgs, RollbackCleanupArgs, RollbackCommands, RollbackListArgs, RollbackRestoreArgs,
+    RollbackShowArgs, RollbackVerifyArgs,
 };
 use crate::config::user::load_user_config;
-use crate::undo_base_exclusions;
-use crate::undo_session::{
-    discover_sessions, format_bytes, load_session, remove_session, undo_root, SessionInfo,
+use crate::rollback_base_exclusions;
+use crate::rollback_session::{
+    discover_sessions, format_bytes, load_session, remove_session, rollback_root, SessionInfo,
 };
 use colored::Colorize;
 use nono::undo::{MerkleTree, ObjectStore, SnapshotManager};
 use nono::{NonoError, Result};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-/// Prefix used for all undo command output
+/// A session paired with its change counts (created, modified, deleted).
+type SessionChanges<'a> = (&'a SessionInfo, (usize, usize, usize));
+
+/// Prefix used for all rollback command output
 fn prefix() -> colored::ColoredString {
     "[nono]".truecolor(204, 102, 0)
 }
 
-/// Dispatch to the appropriate undo subcommand.
-pub fn run_undo(args: UndoArgs) -> Result<()> {
+/// Dispatch to the appropriate rollback subcommand.
+pub fn run_rollback(args: RollbackArgs) -> Result<()> {
     match args.command {
-        UndoCommands::List(args) => cmd_list(args),
-        UndoCommands::Show(args) => cmd_show(args),
-        UndoCommands::Restore(args) => cmd_restore(args),
-        UndoCommands::Verify(args) => cmd_verify(args),
-        UndoCommands::Cleanup(args) => cmd_cleanup(args),
+        RollbackCommands::List(args) => cmd_list(args),
+        RollbackCommands::Show(args) => cmd_show(args),
+        RollbackCommands::Restore(args) => cmd_restore(args),
+        RollbackCommands::Verify(args) => cmd_verify(args),
+        RollbackCommands::Cleanup(args) => cmd_cleanup(args),
     }
 }
 
 // ---------------------------------------------------------------------------
-// nono undo list
+// nono rollback list
 // ---------------------------------------------------------------------------
 
-fn cmd_list(args: UndoListArgs) -> Result<()> {
+fn cmd_list(args: RollbackListArgs) -> Result<()> {
     let mut sessions = discover_sessions()?;
+
+    // Filter by --path if provided (canonicalize both sides to handle symlinks)
+    if let Some(ref filter_path) = args.path {
+        let filter_canonical = filter_path
+            .canonicalize()
+            .unwrap_or_else(|_| filter_path.clone());
+        sessions.retain(|s| {
+            s.metadata.tracked_paths.iter().any(|p| {
+                let p_canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+                p_canonical.starts_with(&filter_canonical)
+                    || filter_canonical.starts_with(&p_canonical)
+            })
+        });
+    }
 
     if let Some(n) = args.recent {
         sessions.truncate(n);
@@ -67,7 +86,7 @@ fn cmd_list(args: UndoListArgs) -> Result<()> {
 
     if filtered.is_empty() {
         if args.all {
-            eprintln!("{} No undo sessions found.", prefix());
+            eprintln!("{} No rollback sessions found.", prefix());
         } else {
             eprintln!(
                 "{} No sessions with file changes. Use --all to see all sessions.",
@@ -77,35 +96,85 @@ fn cmd_list(args: UndoListArgs) -> Result<()> {
         return Ok(());
     }
 
-    eprintln!("{} {} session(s)\n", prefix(), filtered.len());
+    // Group sessions by their primary tracked path (project directory)
+    let grouped = group_by_project(&filtered);
+    let total: usize = grouped.values().map(|v| v.len()).sum();
+    eprintln!("{} {} session(s)\n", prefix(), total);
 
-    for (s, (created, modified, deleted)) in &filtered {
-        // Show just the first command (program name), not args
-        let cmd_name = s
-            .metadata
-            .command
-            .first()
-            .map(|c| {
-                // Extract just the program name from path
-                std::path::Path::new(c)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| c.clone())
-            })
-            .unwrap_or_else(|| "(unknown)".to_string());
-        let change_summary = format_change_summary(*created, *modified, *deleted);
-        let timestamp = format_session_timestamp(&s.metadata.started);
-
+    for (project_path, sessions) in &grouped {
+        let display_path = shorten_home(project_path);
         eprintln!(
-            "  {}  {}  {}  {}",
-            s.metadata.session_id.white().bold(),
-            timestamp.truecolor(100, 100, 100),
-            cmd_name.truecolor(150, 150, 150),
-            change_summary,
+            "  {} ({} session{})",
+            display_path.white().bold(),
+            sessions.len(),
+            if sessions.len() == 1 { "" } else { "s" },
         );
+        for (s, (created, modified, deleted)) in sessions {
+            print_session_line(s, *created, *modified, *deleted);
+        }
+        eprintln!();
     }
 
     Ok(())
+}
+
+/// Group sessions by their primary tracked path.
+///
+/// Each session's first tracked path is used as the project identifier.
+/// Sessions with no tracked paths are grouped under "(unknown)".
+fn group_by_project<'a>(
+    sessions: &[SessionChanges<'a>],
+) -> BTreeMap<PathBuf, Vec<SessionChanges<'a>>> {
+    let mut groups: BTreeMap<PathBuf, Vec<SessionChanges<'a>>> = BTreeMap::new();
+
+    for (s, changes) in sessions {
+        let project = s
+            .metadata
+            .tracked_paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("(unknown)"));
+        groups.entry(project).or_default().push((s, *changes));
+    }
+
+    groups
+}
+
+/// Replace the home directory prefix with ~ for display
+fn shorten_home(path: &Path) -> String {
+    let s = path.display().to_string();
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.display().to_string();
+        if let Some(rest) = s.strip_prefix(&home_str) {
+            return format!("~{rest}");
+        }
+    }
+    s
+}
+
+/// Print a single session line in the list output
+fn print_session_line(s: &SessionInfo, created: usize, modified: usize, deleted: usize) {
+    let cmd_name = s
+        .metadata
+        .command
+        .first()
+        .map(|c| {
+            Path::new(c)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| c.clone())
+        })
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let change_summary = format_change_summary(created, modified, deleted);
+    let timestamp = format_session_timestamp(&s.metadata.started);
+
+    eprintln!(
+        "    {}  {}  {}  {}",
+        s.metadata.session_id.white().bold(),
+        timestamp.truecolor(100, 100, 100),
+        cmd_name.truecolor(150, 150, 150),
+        change_summary,
+    );
 }
 
 /// Get total changes across all snapshots in a session
@@ -174,10 +243,10 @@ fn print_sessions_json(sessions: &[&SessionInfo]) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// nono undo show
+// nono rollback show
 // ---------------------------------------------------------------------------
 
-fn cmd_show(args: UndoShowArgs) -> Result<()> {
+fn cmd_show(args: RollbackShowArgs) -> Result<()> {
     let session = load_session(&args.session_id)?;
 
     if args.json {
@@ -499,10 +568,10 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// nono undo restore
+// nono rollback restore
 // ---------------------------------------------------------------------------
 
-fn cmd_restore(args: UndoRestoreArgs) -> Result<()> {
+fn cmd_restore(args: RollbackRestoreArgs) -> Result<()> {
     let session = load_session(&args.session_id)?;
 
     // Default to the last snapshot (final state), not baseline
@@ -523,7 +592,7 @@ fn cmd_restore(args: UndoRestoreArgs) -> Result<()> {
     // walk_current() does not see VCS internals and try to delete them
     let exclusion_config = nono::undo::ExclusionConfig {
         use_gitignore: false,
-        exclude_patterns: undo_base_exclusions(),
+        exclude_patterns: rollback_base_exclusions(),
         exclude_globs: Vec::new(),
         force_include: Vec::new(),
     };
@@ -578,10 +647,10 @@ fn cmd_restore(args: UndoRestoreArgs) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// nono undo verify
+// nono rollback verify
 // ---------------------------------------------------------------------------
 
-fn cmd_verify(args: UndoVerifyArgs) -> Result<()> {
+fn cmd_verify(args: RollbackVerifyArgs) -> Result<()> {
     let session = load_session(&args.session_id)?;
     let object_store = ObjectStore::new(session.dir.clone())?;
 
@@ -681,22 +750,22 @@ fn cmd_verify(args: UndoVerifyArgs) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// nono undo cleanup
+// nono rollback cleanup
 // ---------------------------------------------------------------------------
 
-fn cmd_cleanup(args: UndoCleanupArgs) -> Result<()> {
+fn cmd_cleanup(args: RollbackCleanupArgs) -> Result<()> {
     if args.all {
         return cleanup_all(args.dry_run);
     }
 
     let sessions = discover_sessions()?;
     if sessions.is_empty() {
-        eprintln!("{} No undo sessions to clean up.", prefix());
+        eprintln!("{} No rollback sessions to clean up.", prefix());
         return Ok(());
     }
 
     let config = load_user_config()?.unwrap_or_default();
-    let keep = args.keep.unwrap_or(config.undo.max_sessions);
+    let keep = args.keep.unwrap_or(config.rollback.max_sessions);
 
     let mut to_remove: Vec<&SessionInfo> = Vec::new();
 
@@ -717,7 +786,7 @@ fn cmd_cleanup(args: UndoCleanupArgs) -> Result<()> {
         }
     } else {
         // Default: remove orphaned sessions + enforce keep limit
-        let orphan_grace_secs = config.undo.stale_grace_hours.saturating_mul(3600);
+        let orphan_grace_secs = config.rollback.stale_grace_hours.saturating_mul(3600);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -798,9 +867,9 @@ fn cmd_cleanup(args: UndoCleanupArgs) -> Result<()> {
 }
 
 fn cleanup_all(dry_run: bool) -> Result<()> {
-    let root = undo_root()?;
+    let root = rollback_root()?;
     if !root.exists() {
-        eprintln!("{} No undo directory found.", prefix());
+        eprintln!("{} No rollback directory found.", prefix());
         return Ok(());
     }
 
@@ -1150,26 +1219,26 @@ mod tests {
     }
 
     #[test]
-    fn undo_list_output_format_structure() {
+    fn rollback_list_output_format_structure() {
         // Verify the output line format has 4 columns: session_id, timestamp, command, changes
         // This test documents the expected format and catches layout regressions
 
-        // Simulate the format string pattern used in cmd_list
+        // Simulate the format string pattern used in print_session_line
         let session_id = "20260217-234523-70889";
         let timestamp = "2h ago";
         let cmd_name = "claude";
         let change_summary = "~2 modified";
 
-        // The format should produce 4 space-separated columns
+        // The format should produce 4 space-separated columns with 4-space indent
         let output = format!(
-            "  {}  {}  {}  {}",
+            "    {}  {}  {}  {}",
             session_id, timestamp, cmd_name, change_summary
         );
 
         // Verify structure: leading indent, then 4 double-space separated fields
         assert!(
-            output.starts_with("  "),
-            "Output should have 2-space indent"
+            output.starts_with("    "),
+            "Output should have 4-space indent"
         );
 
         let parts: Vec<&str> = output.trim().split("  ").collect();
@@ -1182,5 +1251,97 @@ mod tests {
         assert_eq!(parts[1], timestamp);
         assert_eq!(parts[2], cmd_name);
         assert_eq!(parts[3], change_summary);
+    }
+
+    #[test]
+    fn group_by_project_single_path() {
+        use nono::undo::SessionMetadata;
+
+        let metadata = SessionMetadata {
+            session_id: "20260219-100000-12345".to_string(),
+            started: "2026-02-19T10:00:00Z".to_string(),
+            ended: None,
+            command: vec!["claude".to_string()],
+            tracked_paths: vec![std::path::PathBuf::from("/home/user/widgets")],
+            snapshot_count: 2,
+            exit_code: None,
+            merkle_roots: vec![],
+        };
+
+        let session = SessionInfo {
+            metadata,
+            dir: std::path::PathBuf::from("/tmp/test"),
+            disk_size: 0,
+            is_alive: false,
+            is_stale: false,
+        };
+
+        let sessions_with_changes = vec![(&session, (1usize, 2usize, 0usize))];
+        let grouped = group_by_project(&sessions_with_changes);
+
+        assert_eq!(grouped.len(), 1);
+        assert!(grouped.contains_key(std::path::Path::new("/home/user/widgets")));
+    }
+
+    #[test]
+    fn group_by_project_multiple_paths() {
+        use nono::undo::SessionMetadata;
+
+        let meta1 = SessionMetadata {
+            session_id: "20260219-100000-12345".to_string(),
+            started: "2026-02-19T10:00:00Z".to_string(),
+            ended: None,
+            command: vec!["claude".to_string()],
+            tracked_paths: vec![std::path::PathBuf::from("/home/user/widgets")],
+            snapshot_count: 2,
+            exit_code: None,
+            merkle_roots: vec![],
+        };
+        let meta2 = SessionMetadata {
+            session_id: "20260219-110000-67890".to_string(),
+            started: "2026-02-19T11:00:00Z".to_string(),
+            ended: None,
+            command: vec!["opencode".to_string()],
+            tracked_paths: vec![std::path::PathBuf::from("/home/user/thingamajigs")],
+            snapshot_count: 2,
+            exit_code: None,
+            merkle_roots: vec![],
+        };
+
+        let s1 = SessionInfo {
+            metadata: meta1,
+            dir: std::path::PathBuf::from("/tmp/test1"),
+            disk_size: 0,
+            is_alive: false,
+            is_stale: false,
+        };
+        let s2 = SessionInfo {
+            metadata: meta2,
+            dir: std::path::PathBuf::from("/tmp/test2"),
+            disk_size: 0,
+            is_alive: false,
+            is_stale: false,
+        };
+
+        let sessions_with_changes = vec![
+            (&s1, (1usize, 0usize, 0usize)),
+            (&s2, (0usize, 3usize, 0usize)),
+        ];
+        let grouped = group_by_project(&sessions_with_changes);
+
+        assert_eq!(grouped.len(), 2);
+        assert!(grouped.contains_key(std::path::Path::new("/home/user/widgets")));
+        assert!(grouped.contains_key(std::path::Path::new("/home/user/thingamajigs")));
+    }
+
+    #[test]
+    fn shorten_home_replaces_prefix() {
+        // This test is best-effort since it depends on the actual home dir
+        if let Some(home) = dirs::home_dir() {
+            let path = home.join("dev").join("project");
+            let result = shorten_home(&path);
+            assert!(result.starts_with("~/"), "Expected ~/... but got: {result}");
+            assert!(result.ends_with("dev/project"));
+        }
     }
 }

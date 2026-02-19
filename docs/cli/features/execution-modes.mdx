@@ -7,11 +7,11 @@ nono provides three execution modes that trade off between attack surface, featu
 
 ## Overview
 
-| Mode | Flag | Parent Sandboxed | Undo | Expansion | Attack Surface |
-|------|------|-----------------|------|-----------|----------------|
+| Mode | Flag | Parent Sandboxed | Rollback | Expansion | Attack Surface |
+|------|------|-----------------|----------|-----------|----------------|
 | Direct | `--exec` | N/A (no parent) | No | No | Minimal |
 | Monitor | (default) | Yes | No | No | Small |
-| Supervised | `--supervised` | No | Yes | Linux only | Larger |
+| Supervised | `--rollback` / `--supervised` | No | `--rollback` only | Linux only | Larger |
 
 ## Direct Mode
 
@@ -28,7 +28,7 @@ nono applies the sandbox and then `exec()`s directly into the target command. no
 
 **Trade-offs:**
 - No diagnostic footer on errors
-- No undo snapshots
+- No rollback snapshots
 - No capability expansion
 
 Profiles with `interactive = true` (like `claude-code`) use Direct mode by default to preserve TTY behavior.
@@ -47,7 +47,7 @@ nono applies the sandbox to itself, then forks. Both the parent and child are sa
 
 **Trade-offs:**
 - Small overhead (parent process stays alive)
-- Cannot write undo snapshots (parent is sandboxed too)
+- Cannot write rollback snapshots (parent is sandboxed too)
 - Cannot do capability expansion (parent is sandboxed too)
 
 **Features:**
@@ -57,40 +57,50 @@ nono applies the sandbox to itself, then forks. Both the parent and child are sa
 ## Supervised Mode
 
 ```bash
+# Enable rollback snapshots
+nono run --rollback --allow-cwd -- my-command
+
+# Enable approval sidecar (capability expansion on Linux)
 nono run --supervised --allow-cwd -- my-command
+
+# Both: rollback snapshots + approval sidecar
+nono run --rollback --supervised --allow-cwd -- my-command
 ```
 
-nono forks first, then sandboxes only the child. The parent remains unsandboxed to provide runtime services.
+nono forks first, then sandboxes only the child. The parent remains unsandboxed to provide runtime services. Either `--rollback` or `--supervised` (or both) triggers supervised execution.
 
-**When to use:**
-- When you want [undo snapshots](/cli/features/atomic-rollbacks) to recover from agent mistakes
-- When you want [capability expansion](/cli/features/supervisor) (Linux only)
-- Long-running agent sessions where recovery matters
+**`--rollback`** enables [atomic rollback snapshots](/cli/features/atomic-rollbacks) - content-addressable filesystem snapshots that let you restore files to their pre-session state.
+
+**`--supervised`** enables the [approval sidecar](/cli/features/supervisor) - on Linux, the parent can grant additional capabilities at runtime via seccomp user notification.
 
 **Trade-offs:**
 - Larger attack surface (unsandboxed parent, mitigated by ptrace hardening)
 - Incompatible with `--secrets` (keyring threads deadlock across fork)
 
 **Features:**
-- Undo snapshots (baseline + final)
-- Interactive post-exit review of changes
-- Capability expansion prompts (Linux only)
+- Rollback snapshots (baseline + final) with `--rollback`
+- Interactive post-exit review of changes with `--rollback`
+- Capability expansion prompts (Linux only) with `--supervised`
 - Diagnostic footer on non-zero exit
 
 ## Choosing a Mode
 
 ```
-Do you need undo or capability expansion?
-├── Yes → Supervised (--supervised)
+Do you need rollback snapshots?
+├── Yes → --rollback
 └── No
     │
-    Do you need diagnostic output on errors?
-    ├── Yes → Monitor (default, no flag needed)
+    Do you need capability expansion (Linux)?
+    ├── Yes → --supervised
     └── No
         │
-        Do you need minimal overhead or TTY preservation?
-        ├── Yes → Direct (--exec)
-        └── No → Monitor (default)
+        Do you need diagnostic output on errors?
+        ├── Yes → Monitor (default, no flag needed)
+        └── No
+            │
+            Do you need minimal overhead or TTY preservation?
+            ├── Yes → Direct (--exec)
+            └── No → Monitor (default)
 ```
 
-For most users running AI agents interactively, the default Monitor mode is the right choice. Switch to Supervised when you want the safety net of undo snapshots.
+For most users running AI agents interactively, the default Monitor mode is the right choice. Add `--rollback` when you want the safety net of atomic rollback snapshots.
