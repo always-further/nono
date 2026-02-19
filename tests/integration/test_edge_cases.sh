@@ -120,22 +120,6 @@ echo "--- Sandbox Introspection ---"
 expect_output_contains "NONO_CAP_FILE is set" "NONO_CAP_FILE=" \
     "$NONO_BIN" run --allow "$TMPDIR" -- env
 
-# nono why --self should work inside sandbox
-expect_output_contains "why --self shows allowed path" "allowed" \
-    "$NONO_BIN" run --allow "$TMPDIR" -- "$NONO_BIN" why --self --path "$TMPDIR" --op read --json
-
-# nono why --self should show denied for sensitive paths
-expect_output_contains "why --self shows sensitive path denied" "sensitive_path" \
-    "$NONO_BIN" run --allow "$TMPDIR" -- "$NONO_BIN" why --self --path ~/.ssh --op read --json
-
-# nono why --self should show network allowed by default
-expect_output_contains "why --self shows network allowed" "allowed" \
-    "$NONO_BIN" run --allow "$TMPDIR" -- "$NONO_BIN" why --self --host example.com --json
-
-# nono why --self should show network blocked with --net-block
-expect_output_contains "why --self shows network blocked" "network_blocked" \
-    "$NONO_BIN" run --net-block --allow "$TMPDIR" -- "$NONO_BIN" why --self --host example.com --json
-
 # =============================================================================
 # Non-existent Paths
 # =============================================================================

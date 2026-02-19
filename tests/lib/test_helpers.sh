@@ -62,7 +62,9 @@ run_test() {
         echo "       Expected exit code: $expected, got: $actual"
         echo "       Command: $*"
         if [[ -n "$output" ]]; then
-            echo "       Output: ${output:0:500}"
+            local stripped
+            stripped=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
+            echo "       Output: ${stripped:0:2000}"
         fi
         TESTS_FAILED=$((TESTS_FAILED + 1))
         return 1
@@ -97,7 +99,9 @@ expect_failure() {
         echo "       Expected failure, but got success (exit 0)"
         echo "       Command: $*"
         if [[ -n "$output" ]]; then
-            echo "       Output: ${output:0:500}"
+            local stripped
+            stripped=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
+            echo "       Output: ${stripped:0:2000}"
         fi
         TESTS_FAILED=$((TESTS_FAILED + 1))
         return 1
@@ -127,7 +131,10 @@ expect_output_contains() {
         echo "       Output missing: '$expected_str'"
         echo "       Exit code: $exit_code"
         if [[ -n "$output" ]]; then
-            echo "       Actual output: ${output:0:200}"
+            # Strip ANSI escape codes before truncation so they don't eat the budget
+            local stripped
+            stripped=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
+            echo "       Actual output: ${stripped:0:2000}"
         fi
         TESTS_FAILED=$((TESTS_FAILED + 1))
         return 1
