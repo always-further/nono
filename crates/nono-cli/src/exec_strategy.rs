@@ -1508,26 +1508,15 @@ fn handle_supervisor_message(
     match msg {
         SupervisorMessage::Request(request) => {
             // Replay detection and bounded request-id cache.
-            if !seen_request_ids.contains(&request.request_id) {
-                if seen_request_ids.len() >= MAX_TRACKED_REQUEST_IDS {
-                    record_denial(
-                        denials,
-                        DenialRecord {
-                            path: request.path.clone(),
-                            access: request.access,
-                            reason: DenialReason::PolicyBlocked,
-                        },
-                    );
-                    let response = SupervisorResponse::Decision {
-                        request_id: request.request_id,
-                        decision: ApprovalDecision::Denied {
-                            reason: "Request replay cache is full; refusing request".to_string(),
-                        },
-                    };
-                    return sock.send_response(&response);
-                }
-                seen_request_ids.insert(request.request_id.clone());
+            let replay_denial_reason = if seen_request_ids.contains(&request.request_id) {
+                Some("Duplicate request_id rejected (replay detected)")
+            } else if seen_request_ids.len() >= MAX_TRACKED_REQUEST_IDS {
+                Some("Request replay cache is full; refusing request")
             } else {
+                None
+            };
+
+            if let Some(reason) = replay_denial_reason {
                 record_denial(
                     denials,
                     DenialRecord {
@@ -1539,11 +1528,12 @@ fn handle_supervisor_message(
                 let response = SupervisorResponse::Decision {
                     request_id: request.request_id,
                     decision: ApprovalDecision::Denied {
-                        reason: "Duplicate request_id rejected (replay detected)".to_string(),
+                        reason: reason.to_string(),
                     },
                 };
                 return sock.send_response(&response);
             }
+            seen_request_ids.insert(request.request_id.clone());
 
             // 1. Check never_grant list first (before consulting the backend)
             let never_grant_check = config.never_grant.check(&request.path);
