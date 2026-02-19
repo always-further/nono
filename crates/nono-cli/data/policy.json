@@ -313,11 +313,14 @@
       }
     },
     "user_tools": {
-      "description": "User-local executables and tool directories",
+      "description": "User-local executables, .desktop files, man pages, and shell completions",
       "allow": {
         "read": [
           "~/.local/bin",
-          "~/.local/share"
+          "~/.local/share/applications",
+          "~/.local/share/man",
+          "~/.local/share/bash-completion",
+          "~/.local/share/zsh"
         ],
         "readwrite": [
           "~/.local/state"

@@ -1194,6 +1194,74 @@ mod tests {
     }
 
     #[test]
+    fn test_base_groups_no_deny_within_allow_overlap() {
+        // Invariant: among Linux-applicable base groups, no deny.access path
+        // may be a child of any allow path. Landlock is strictly allow-list and
+        // cannot express deny-within-allow, so such overlaps silently disable
+        // the deny.
+        //
+        // We check Linux-applicable groups (platform: None or "linux") directly
+        // from the parsed policy, not via resolve_groups(), so this test catches
+        // regressions on all CI platforms (including macOS).
+        let policy = load_embedded_policy().expect("embedded policy must load");
+
+        let is_linux_applicable =
+            |g: &Group| g.platform.is_none() || g.platform.as_deref() == Some("linux");
+
+        // Collect expanded deny.access paths from Linux-applicable base groups
+        let mut deny_paths: Vec<(String, PathBuf)> = Vec::new();
+        // Collect expanded allow paths from Linux-applicable base groups
+        let mut allow_paths: Vec<(String, PathBuf)> = Vec::new();
+
+        for name in &policy.base_groups {
+            let group = policy
+                .groups
+                .get(name.as_str())
+                .unwrap_or_else(|| panic!("base group '{}' missing from policy", name));
+
+            if !is_linux_applicable(group) {
+                continue;
+            }
+
+            if let Some(deny) = &group.deny {
+                for p in &deny.access {
+                    if let Ok(expanded) = expand_path(p) {
+                        deny_paths.push((name.clone(), expanded));
+                    }
+                }
+            }
+
+            if let Some(allow) = &group.allow {
+                for p in allow
+                    .read
+                    .iter()
+                    .chain(&allow.write)
+                    .chain(&allow.readwrite)
+                {
+                    if let Ok(expanded) = expand_path(p) {
+                        allow_paths.push((name.clone(), expanded));
+                    }
+                }
+            }
+        }
+
+        for (deny_group, deny_path) in &deny_paths {
+            for (allow_group, allow_path) in &allow_paths {
+                assert!(
+                    !deny_path.starts_with(allow_path) || deny_path == allow_path,
+                    "Base-group deny-within-allow overlap on Linux: deny '{}' (group: {}) \
+                     is under allowed '{}' (group: {}). Landlock cannot enforce this. \
+                     Narrow the allow path or move the deny to never_grant.",
+                    deny_path.display(),
+                    deny_group,
+                    allow_path.display(),
+                    allow_group,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_resolve_deny_group_collects_deny_paths() {
         let policy = load_policy(sample_policy_json()).expect("parse failed");
         let mut caps = CapabilitySet::new();
