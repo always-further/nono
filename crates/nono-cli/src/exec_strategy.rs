@@ -1213,9 +1213,9 @@ fn get_thread_count() -> Result<usize> {
                 });
             }
         }
-        return Err(NonoError::SandboxInit(
+        Err(NonoError::SandboxInit(
             "Thread count not found in /proc/self/status".to_string(),
-        ));
+        ))
     }
 
     #[cfg(target_os = "macos")]
@@ -1621,13 +1621,14 @@ fn open_path_for_access(
     // /proc/<pid>/task/<tid>/<file> paths.
     #[cfg(target_os = "linux")]
     {
+        const SENSITIVE_PROC_FILES: &[&str] =
+            &["mem", "environ", "maps", "syscall", "stack", "cmdline"];
         if let Some(suffix) = canonical.to_str().and_then(|s| s.strip_prefix("/proc/")) {
-            let sensitive = ["mem", "environ", "maps", "syscall", "stack", "cmdline"];
             let components: Vec<&str> = suffix.split('/').collect();
             // /proc/<pid>/<sensitive>
             if components.len() == 2
                 && components[0].chars().all(|c| c.is_ascii_digit())
-                && sensitive.contains(&components[1])
+                && SENSITIVE_PROC_FILES.contains(&components[1])
             {
                 return Err(NonoError::SandboxInit(format!(
                     "Access to /proc/{}/{} is blocked by policy",
@@ -1639,7 +1640,7 @@ fn open_path_for_access(
                 && components[0].chars().all(|c| c.is_ascii_digit())
                 && components[1] == "task"
                 && components[2].chars().all(|c| c.is_ascii_digit())
-                && sensitive.contains(&components[3])
+                && SENSITIVE_PROC_FILES.contains(&components[3])
             {
                 return Err(NonoError::SandboxInit(format!(
                     "Access to /proc/{}/task/{}/{} is blocked by policy",
