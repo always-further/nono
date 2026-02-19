@@ -48,6 +48,7 @@
   "groups": {
     "deny_credentials": {
       "description": "Block access to cryptographic keys, tokens, and cloud credentials",
+      "required": true,
       "deny": {
         "access": [
           "~/.ssh",
@@ -72,6 +73,7 @@
     },
     "deny_keychains_macos": {
       "description": "Block access to macOS keychains and password stores",
+      "required": true,
       "platform": "macos",
       "deny": {
         "access": [
@@ -84,6 +86,7 @@
     },
     "deny_keychains_linux": {
       "description": "Block access to Linux keyrings and password stores",
+      "required": true,
       "platform": "linux",
       "deny": {
         "access": [
@@ -95,6 +98,7 @@
     },
     "deny_browser_data_macos": {
       "description": "Block access to macOS browser stored data (cookies, saved passwords, sessions)",
+      "required": true,
       "platform": "macos",
       "deny": {
         "access": [
@@ -109,6 +113,7 @@
     },
     "deny_browser_data_linux": {
       "description": "Block access to Linux browser stored data (cookies, saved passwords, sessions)",
+      "required": true,
       "platform": "linux",
       "deny": {
         "access": [
@@ -122,6 +127,7 @@
     },
     "deny_macos_private": {
       "description": "Block access to macOS private data (messages, mail, cookies)",
+      "required": true,
       "platform": "macos",
       "deny": {
         "access": [
@@ -135,6 +141,7 @@
     },
     "deny_shell_history": {
       "description": "Block access to shell command history files",
+      "required": true,
       "deny": {
         "access": [
           "~/.bash_history",
@@ -146,6 +153,7 @@
     },
     "deny_shell_configs": {
       "description": "Block access to shell configuration files that may embed secrets",
+      "required": true,
       "deny": {
         "access": [
           "~/.zshrc",

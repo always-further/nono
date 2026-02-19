@@ -49,6 +49,9 @@ pub struct Group {
     /// If set, this group only applies on the specified platform
     #[serde(default)]
     pub platform: Option<String>,
+    /// If true, this group cannot be removed via trust_groups
+    #[serde(default)]
+    pub required: bool,
     /// Allow operations
     #[serde(default)]
     pub allow: Option<AllowOps>,
@@ -125,7 +128,11 @@ impl ProfileDef {
     /// Convert to a full Profile with merged group list.
     ///
     /// Computes: `(base_groups - trust_groups) + security.groups`
-    pub fn to_profile(&self, base_groups: &[String]) -> profile::Profile {
+    ///
+    /// Returns an error if trust_groups attempts to remove a required group.
+    pub fn to_profile(&self, base_groups: &[String], policy: &Policy) -> Result<profile::Profile> {
+        validate_trust_groups(policy, &self.trust_groups)?;
+
         let mut groups: Vec<String> = base_groups
             .iter()
             .filter(|g| !self.trust_groups.contains(g))
@@ -133,7 +140,7 @@ impl ProfileDef {
             .collect();
         groups.extend(self.security.groups.clone());
 
-        profile::Profile {
+        Ok(profile::Profile {
             meta: self.meta.clone(),
             security: profile::SecurityConfig {
                 groups,
@@ -146,7 +153,7 @@ impl ProfileDef {
             hooks: self.hooks.clone(),
             rollback: self.rollback.clone(),
             interactive: self.interactive,
-        }
+        })
     }
 }
 
@@ -712,6 +719,32 @@ pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
     result
 }
 
+/// Validate that trust_groups does not attempt to remove any required groups.
+///
+/// Required groups have `required: true` in policy.json and cannot be excluded
+/// by profiles or user configuration. Returns an error listing all violations.
+pub fn validate_trust_groups(policy: &Policy, trust_groups: &[String]) -> Result<()> {
+    let violations: Vec<&String> = trust_groups
+        .iter()
+        .filter(|name| policy.groups.get(name.as_str()).is_some_and(|g| g.required))
+        .collect();
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    let names = violations
+        .iter()
+        .map(|n| format!("'{}'", n))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(NonoError::ConfigParse(format!(
+        "Cannot exclude required groups via trust_groups: {}",
+        names
+    )))
+}
+
 /// Common deny + system groups shared by all sandbox invocations.
 ///
 /// Reads from the embedded policy.json `base_groups` array. This is the base
@@ -727,10 +760,10 @@ pub fn base_groups() -> Result<Vec<String>> {
 /// Returns `None` if the profile name is not defined in policy.json.
 pub fn get_policy_profile(name: &str) -> Result<Option<profile::Profile>> {
     let policy = load_embedded_policy()?;
-    Ok(policy
-        .profiles
-        .get(name)
-        .map(|def| def.to_profile(&policy.base_groups)))
+    match policy.profiles.get(name) {
+        Some(def) => Ok(Some(def.to_profile(&policy.base_groups, &policy)?)),
+        None => Ok(None),
+    }
 }
 
 /// List all built-in profile names from embedded policy.json.
@@ -790,6 +823,11 @@ mod tests {
                 "test_symlinks": {
                     "description": "Symlink test",
                     "symlink_pairs": { "/etc": "/private/etc" }
+                },
+                "test_required": {
+                    "description": "Required deny group",
+                    "required": true,
+                    "deny": { "access": ["/nonexistent/required/path"] }
                 }
             }
         }"#
@@ -801,7 +839,7 @@ mod tests {
         assert!(policy.is_ok());
         let policy = policy.expect("parse failed");
         assert_eq!(policy.meta.version, 2);
-        assert_eq!(policy.groups.len(), 7);
+        assert_eq!(policy.groups.len(), 8);
     }
 
     #[test]
@@ -1119,6 +1157,55 @@ mod tests {
                 .contains("nonexistent/test/path"),
             "Expected deny path to contain 'nonexistent/test/path', got: {}",
             resolved.deny_paths[0].display()
+        );
+    }
+
+    #[test]
+    fn test_validate_trust_groups_allows_non_required() {
+        let policy = load_policy(sample_policy_json()).expect("parse failed");
+        let result = validate_trust_groups(&policy, &["test_read".to_string()]);
+        assert!(result.is_ok(), "Non-required group should be removable");
+    }
+
+    #[test]
+    fn test_validate_trust_groups_rejects_required() {
+        let policy = load_policy(sample_policy_json()).expect("parse failed");
+        let result = validate_trust_groups(&policy, &["test_required".to_string()]);
+        assert!(result.is_err(), "Required group must not be removable");
+        let err = result.expect_err("expected error");
+        assert!(
+            err.to_string().contains("test_required"),
+            "Error should name the group: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_trust_groups_ignores_unknown() {
+        let policy = load_policy(sample_policy_json()).expect("parse failed");
+        let result = validate_trust_groups(&policy, &["nonexistent_group".to_string()]);
+        assert!(
+            result.is_ok(),
+            "Unknown groups should not trigger required check"
+        );
+    }
+
+    #[test]
+    fn test_embedded_policy_required_groups() {
+        let policy = load_embedded_policy().expect("embedded policy");
+        let required: Vec<&str> = policy
+            .groups
+            .iter()
+            .filter(|(_, g)| g.required)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            required.contains(&"deny_credentials"),
+            "deny_credentials must be required"
+        );
+        assert!(
+            required.contains(&"deny_shell_configs"),
+            "deny_shell_configs must be required"
         );
     }
 }

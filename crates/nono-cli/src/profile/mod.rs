@@ -243,7 +243,10 @@ pub fn load_profile_from_path(path: &Path) -> Result<Profile> {
 /// `ProfileDef::to_profile()`, but user profiles bypass that path.
 /// This function applies the same merge: `(base_groups - trust_groups) + profile.groups`.
 fn merge_base_groups(profile: &mut Profile) -> Result<()> {
-    let base = crate::policy::base_groups()?;
+    let policy = crate::policy::load_embedded_policy()?;
+    crate::policy::validate_trust_groups(&policy, &profile.security.trust_groups)?;
+
+    let base = policy.base_groups;
     let mut merged: Vec<String> = base
         .into_iter()
         .filter(|g| !profile.security.trust_groups.contains(g))
@@ -629,6 +632,30 @@ mod tests {
                 .groups
                 .contains(&"dangerous_commands".to_string()),
             "trusted group 'dangerous_commands' should be excluded"
+        );
+    }
+
+    #[test]
+    fn test_merge_base_groups_rejects_required_trust_group() {
+        let mut profile = Profile {
+            security: SecurityConfig {
+                groups: vec![],
+                trust_groups: vec!["deny_credentials".to_string()],
+            },
+            ..Default::default()
+        };
+
+        let result = merge_base_groups(&mut profile);
+        assert!(
+            result.is_err(),
+            "Trusting a required group must be rejected"
+        );
+        assert!(
+            result
+                .expect_err("expected error")
+                .to_string()
+                .contains("deny_credentials"),
+            "Error should name the required group"
         );
     }
 
