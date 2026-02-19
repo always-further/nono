@@ -9,7 +9,7 @@ This page explains the layered enforcement architecture, the trust boundaries be
 
 ## Trust Boundaries
 
-<img src="/assets/kernel-space.png" alt="Trust boundaries: kernel space (Landlock, seccomp, Seatbelt), sandboxed child (untrusted), and supervisor (trusted)" />
+![Trust boundaries: kernel space (Landlock, seccomp, Seatbelt), sandboxed child (untrusted), and supervisor (trusted)](/assets/kernel-space.png)
 
 There are three trust domains:
 
@@ -48,7 +48,7 @@ On approval, the child's `open()` call returns a valid file descriptor. The chil
 
 ### Why This Ordering Matters
 
-<img src="/assets/child-flow.png" alt="Child open() flow: seccomp BPF traps openat, supervisor decides, fd injected or Landlock enforces" />
+![Child open() flow: seccomp BPF traps openat, supervisor decides, fd injected or Landlock enforces](/assets/child-flow.png)
 
 If the supervisor has a bug and fails to inject an fd, the child's syscall falls through to Landlock, which denies it. The Landlock floor catches supervisor failures. This is defense in depth: the dynamic layer can only grant access within what the supervisor can open; the static layer ensures the child never exceeds its baseline even if the dynamic layer breaks.
 
