@@ -200,13 +200,9 @@ else
     skip_test "ruby executes" "ruby not installed"
 fi
 
-# Perl - usually system-installed and works reliably
-if command_exists perl; then
-    expect_success "perl executes" \
-        "$NONO_BIN" run --allow "$TMPDIR" -- perl -e 'print "hello from perl\n"'
-else
-    skip_test "perl executes" "perl not installed"
-fi
+# printf - POSIX coreutil, always available
+expect_success "printf executes" \
+    "$NONO_BIN" run --allow "$TMPDIR" -- printf "hello from printf\n"
 
 # Go tools
 if command_exists go && command_exists gofmt; then
