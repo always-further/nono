@@ -33,6 +33,9 @@ AI agents get filesystem access, run shell commands, and are inherently open to 
 
 Kernel-enforced sandboxing (Landlock/Seatbelt) blocks unauthorized access at the syscall level. Every filesystem change gets a rollback snapshot with built in integrity protection. Every command leaves a tamper resistant trail. Destructive commands are denied before they run. Secrets are injected securely without touching disk When the agent needs to do something outside its permissions, a kernel-mediated supervisor intercepts the syscall via seccomp, opens the file itself after user approval, and injects only the file descriptor — the agent never executes its own open. Unlike with other sandboxes based on namespaces - No root, or `CAP_SYS_ADMIN` is required.
 
+> *"If I ever built an AI Agent sandbox, it would be like nono"* — Chuck Norris (allegedly)
+
+> 
 ## CLI
 
 The CLI builds on the library to provide a ready-to-use sandboxing tool, popular with coding-agents, with built-in profiles, policy groups, and interactive UX.
