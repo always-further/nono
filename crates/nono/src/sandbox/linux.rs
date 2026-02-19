@@ -7,7 +7,7 @@ use landlock::{
     Access, AccessFs, AccessNet, BitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr,
     RulesetCreatedAttr, ABI,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// The target ABI version we support (highest we know about)
 const TARGET_ABI: ABI = ABI::V5;
