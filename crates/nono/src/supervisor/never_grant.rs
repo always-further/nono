@@ -6,6 +6,7 @@
 //! for accessing critical system files.
 
 use crate::error::{NonoError, Result};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// Validates paths against the `never_grant` list from policy.json.
@@ -183,7 +184,70 @@ fn resolve_path(path: &Path) -> PathBuf {
 
 /// Get the user's home directory.
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    let env_home = std::env::var_os("HOME").map(PathBuf::from);
+    let pw_home = home_from_passwd();
+
+    match (env_home, pw_home) {
+        (Some(env), Some(pw)) => {
+            if same_path(&env, &pw) {
+                Some(env)
+            } else {
+                // HOME is untrusted input; prefer passwd database for security checks.
+                Some(pw)
+            }
+        }
+        (Some(env), None) => Some(env),
+        (None, Some(pw)) => Some(pw),
+        (None, None) => None,
+    }
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ac), Ok(bc)) => ac == bc,
+        _ => false,
+    }
+}
+
+fn home_from_passwd() -> Option<PathBuf> {
+    let uid = unsafe { libc::geteuid() };
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let mut buf_len = 1024usize;
+
+    loop {
+        let mut buf = vec![0u8; buf_len];
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &mut pwd,
+                buf.as_mut_ptr().cast::<libc::c_char>(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        if rc == 0 {
+            if result.is_null() || pwd.pw_dir.is_null() {
+                return None;
+            }
+            let cstr = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+            return Some(PathBuf::from(std::ffi::OsStr::from_bytes(cstr.to_bytes())));
+        }
+
+        if rc == libc::ERANGE {
+            buf_len = buf_len.saturating_mul(2);
+            if buf_len > 1024 * 1024 {
+                return None;
+            }
+            continue;
+        }
+
+        return None;
+    }
 }
 
 #[cfg(test)]

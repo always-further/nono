@@ -13,6 +13,8 @@ use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use tracing::warn;
 
 /// Length prefix size: 4 bytes (u32 big-endian)
 const LENGTH_PREFIX_SIZE: usize = 4;
@@ -67,12 +69,7 @@ impl SupervisorSocket {
     /// The supervisor binds and listens; the child connects after fork.
     /// The socket file is cleaned up on drop.
     pub fn bind(path: &Path) -> Result<Self> {
-        let listener = std::os::unix::net::UnixListener::bind(path).map_err(|e| {
-            NonoError::SandboxInit(format!(
-                "Failed to bind supervisor socket at {}: {e}",
-                path.display()
-            ))
-        })?;
+        let listener = bind_socket_owner_only(path)?;
 
         // Set permissions to 0700 (owner only)
         #[cfg(unix)]
@@ -216,7 +213,10 @@ impl SupervisorSocket {
     /// Used by the child to receive an opened fd for a granted path.
     /// Returns an `OwnedFd` that the caller is responsible for.
     pub fn recv_fd(&self) -> Result<OwnedFd> {
-        use libc::{c_void, cmsghdr, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_LEN, CMSG_SPACE};
+        use libc::{
+            c_void, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR,
+            CMSG_SPACE,
+        };
         use std::mem;
 
         let mut data: [u8; 1] = [0];
@@ -242,44 +242,54 @@ impl SupervisorSocket {
                 std::io::Error::last_os_error()
             )));
         }
-
-        // Extract the fd from ancillary data
-        // SAFETY: We check that the cmsg header matches our expected level/type
-        // before reading the fd data.
-        let cmsg: &cmsghdr = unsafe { &*(cmsg_buf.as_ptr().cast::<cmsghdr>()) };
-        if cmsg.cmsg_level != libc::SOL_SOCKET || cmsg.cmsg_type != libc::SCM_RIGHTS {
+        if received == 0 {
             return Err(NonoError::SandboxInit(
-                "No SCM_RIGHTS data in received message".to_string(),
+                "Supervisor socket closed while waiting for SCM_RIGHTS".to_string(),
+            ));
+        }
+        if (msg.msg_flags & libc::MSG_CTRUNC) != 0 {
+            return Err(NonoError::SandboxInit(
+                "SCM_RIGHTS ancillary data was truncated".to_string(),
             ));
         }
 
+        // Extract the first SCM_RIGHTS fd from ancillary data.
         let expected_len = unsafe { CMSG_LEN(mem::size_of::<RawFd>() as u32) } as usize;
-        if (cmsg.cmsg_len as usize) < expected_len {
-            return Err(NonoError::SandboxInit(
-                "SCM_RIGHTS ancillary data too small".to_string(),
-            ));
+        let mut cmsg = unsafe { CMSG_FIRSTHDR(&msg as *const msghdr as *mut msghdr) };
+        while !cmsg.is_null() {
+            let header = unsafe { &*cmsg };
+            if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+                if (header.cmsg_len as usize) < expected_len {
+                    return Err(NonoError::SandboxInit(
+                        "SCM_RIGHTS ancillary data too small".to_string(),
+                    ));
+                }
+
+                let mut fd: RawFd = -1;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        CMSG_DATA(cmsg),
+                        &mut fd as *mut RawFd as *mut u8,
+                        mem::size_of::<RawFd>(),
+                    );
+                }
+
+                if fd < 0 {
+                    return Err(NonoError::SandboxInit(
+                        "Received invalid fd from SCM_RIGHTS".to_string(),
+                    ));
+                }
+
+                // SAFETY: The fd was just received via SCM_RIGHTS and validated as non-negative.
+                // We take ownership so it will be properly closed.
+                return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
+            }
+            cmsg = unsafe { CMSG_NXTHDR(&msg as *const msghdr as *mut msghdr, cmsg) };
         }
 
-        let mut fd: RawFd = -1;
-        // SAFETY: CMSG_DATA returns a pointer into the cmsg buffer we received.
-        // We read exactly one RawFd, matching the expected CMSG_LEN.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                CMSG_DATA(cmsg),
-                &mut fd as *mut RawFd as *mut u8,
-                mem::size_of::<RawFd>(),
-            );
-        }
-
-        if fd < 0 {
-            return Err(NonoError::SandboxInit(
-                "Received invalid fd from SCM_RIGHTS".to_string(),
-            ));
-        }
-
-        // SAFETY: The fd was just received via SCM_RIGHTS and validated as non-negative.
-        // We take ownership so it will be properly closed.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        Err(NonoError::SandboxInit(
+            "No SCM_RIGHTS data in received message".to_string(),
+        ))
     }
 
     /// Authenticate the peer using platform-specific mechanisms.
@@ -405,11 +415,47 @@ impl SupervisorSocket {
     }
 }
 
+/// Bind a Unix socket with restrictive permissions from creation time.
+///
+/// This avoids a TOCTOU window where a freshly bound socket could be more
+/// permissive before `set_permissions` runs.
+fn bind_socket_owner_only(path: &Path) -> Result<std::os::unix::net::UnixListener> {
+    let lock = umask_guard();
+    let _guard = lock.lock().map_err(|_| {
+        NonoError::SandboxInit("Failed to acquire umask synchronization lock".to_string())
+    })?;
+
+    let old_umask = unsafe { libc::umask(0o077) };
+    let listener = std::os::unix::net::UnixListener::bind(path).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to bind supervisor socket at {}: {e}",
+            path.display()
+        ))
+    });
+    unsafe {
+        libc::umask(old_umask);
+    }
+    listener
+}
+
+fn umask_guard() -> &'static Mutex<()> {
+    static UMASK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    UMASK_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 impl Drop for SupervisorSocket {
     fn drop(&mut self) {
         // Clean up the socket file if we created one
         if let Some(ref path) = self.socket_path {
-            let _ = std::fs::remove_file(path);
+            if let Err(e) = std::fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(
+                        "Failed to remove supervisor socket path {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
         }
     }
 }

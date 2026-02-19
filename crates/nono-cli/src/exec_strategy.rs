@@ -23,10 +23,10 @@ use nono::{
     ApprovalBackend, CapabilitySet, DenialReason, DenialRecord, DiagnosticFormatter,
     DiagnosticMode, NeverGrantChecker, NonoError, Result, Sandbox, SupervisorSocket,
 };
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Write};
 use std::mem::ManuallyDrop;
-#[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
@@ -58,6 +58,10 @@ pub fn resolve_program(program: &str) -> Result<PathBuf> {
 /// Maximum threads allowed when keyring backend is active.
 /// Main thread (1) + up to 3 keyring threads for D-Bus/Security.framework.
 const MAX_KEYRING_THREADS: usize = 4;
+/// Hard cap on retained denial records to prevent memory exhaustion.
+const MAX_DENIAL_RECORDS: usize = 1000;
+/// Hard cap on request IDs tracked for replay detection.
+const MAX_TRACKED_REQUEST_IDS: usize = 4096;
 
 /// Threading context for fork safety validation.
 ///
@@ -146,6 +150,8 @@ pub struct SupervisorConfig<'a> {
     pub never_grant: &'a NeverGrantChecker,
     /// Backend for approval decisions (terminal prompt, webhook, policy engine)
     pub approval_backend: &'a dyn ApprovalBackend,
+    /// Session identifier used for audit correlation.
+    pub session_id: &'a str,
 }
 
 /// Execute a command using the Direct strategy (exec, nono disappears).
@@ -375,6 +381,9 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
 
     // Compute max FD in parent (get_max_fd may allocate on Linux)
     let max_fd = get_max_fd();
+
+    // Clear any stale forwarding target before forking.
+    clear_signal_forwarding_target();
 
     // SAFETY: fork() is safe here because we validated threading context
     // and child will only use async-signal-safe functions until exec()
@@ -628,6 +637,9 @@ pub fn execute_supervised(
     // Compute max FD in parent (get_max_fd may allocate on Linux)
     let max_fd = get_max_fd();
 
+    // Clear any stale forwarding target before forking.
+    clear_signal_forwarding_target();
+
     // SAFETY: fork() is safe here because we validated threading context.
     // Child will call Sandbox::apply() which allocates, but this is safe
     // because the child is single-threaded (validated above).
@@ -820,6 +832,7 @@ pub fn execute_supervised(
             // Set up signal forwarding.
             // No output piping needed - child inherits the terminal directly.
             setup_signal_forwarding(child);
+            let _signal_forwarding_guard = SignalForwardingGuard;
 
             // NOTE: peer_pid() is NOT called here. For socketpair() created
             // before fork, LOCAL_PEERPID/SO_PEERCRED return the parent's own PID
@@ -957,6 +970,7 @@ fn execute_parent_monitor(
 
     // Set up signal forwarding
     setup_signal_forwarding(child);
+    let _signal_forwarding_guard = SignalForwardingGuard;
 
     // Shared flag to track if we've injected diagnostics recently
     // This allows debouncing across both stdout and stderr
@@ -1163,19 +1177,7 @@ fn setup_signal_forwarding(child: Pid) {
     // - Unix signal handlers cannot access instance data
     // - The only safe option is process-global static storage
     // - AtomicI32 ensures atomic reads/writes
-    static CHILD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
     CHILD_PID.store(child.as_raw(), std::sync::atomic::Ordering::SeqCst);
-
-    extern "C" fn forward_signal(sig: libc::c_int) {
-        let child_raw = CHILD_PID.load(std::sync::atomic::Ordering::SeqCst);
-        if child_raw > 0 {
-            // Forward signal to child
-            // SAFETY: kill() is async-signal-safe
-            unsafe {
-                libc::kill(child_raw, sig);
-            }
-        }
-    }
 
     // Install signal handlers for common signals
     // SAFETY: signal handlers are async-signal-safe (only call kill())
@@ -1190,6 +1192,31 @@ fn setup_signal_forwarding(child: Pid) {
                 debug!("Failed to install handler for {:?}: {}", sig, e);
             }
         }
+    }
+}
+
+static CHILD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn forward_signal(sig: libc::c_int) {
+    let child_raw = CHILD_PID.load(std::sync::atomic::Ordering::SeqCst);
+    if child_raw > 0 {
+        // Forward signal to child
+        // SAFETY: kill() is async-signal-safe
+        unsafe {
+            libc::kill(child_raw, sig);
+        }
+    }
+}
+
+fn clear_signal_forwarding_target() {
+    CHILD_PID.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+struct SignalForwardingGuard;
+
+impl Drop for SignalForwardingGuard {
+    fn drop(&mut self) {
+        clear_signal_forwarding_target();
     }
 }
 /// Get the current thread count for the process.
@@ -1262,8 +1289,10 @@ fn run_supervisor_loop(
     sock: &mut SupervisorSocket,
     config: &SupervisorConfig<'_>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
+    let _ = config.session_id;
     let sock_fd = sock.as_raw_fd();
     let mut denials = Vec::new();
+    let mut seen_request_ids = HashSet::new();
 
     loop {
         let mut pfd = libc::pollfd {
@@ -1283,7 +1312,13 @@ fn run_supervisor_loop(
             if pfd.revents & libc::POLLIN != 0 {
                 match sock.recv_message() {
                     Ok(msg) => {
-                        if let Err(e) = handle_supervisor_message(sock, msg, config, &mut denials) {
+                        if let Err(e) = handle_supervisor_message(
+                            sock,
+                            msg,
+                            config,
+                            &mut denials,
+                            &mut seen_request_ids,
+                        ) {
                             warn!("Error handling supervisor message: {}", e);
                         }
                     }
@@ -1349,6 +1384,7 @@ fn run_supervisor_loop(
     let notify_raw_fd = seccomp_fd.map(|fd| fd.as_raw_fd());
     let mut rate_limiter = supervisor_linux::RateLimiter::new(10, 5);
     let mut denials = Vec::new();
+    let mut seen_request_ids = HashSet::new();
     // Track whether the supervisor socket is still alive. After exec,
     // CLOEXEC closes the child's socket end, causing POLLHUP. We stop
     // polling the dead socket but continue handling seccomp notifications.
@@ -1390,7 +1426,13 @@ fn run_supervisor_loop(
             if sock_fd_active && pfds[0].revents & libc::POLLIN != 0 {
                 match sock.recv_message() {
                     Ok(msg) => {
-                        if let Err(e) = handle_supervisor_message(sock, msg, config, &mut denials) {
+                        if let Err(e) = handle_supervisor_message(
+                            sock,
+                            msg,
+                            config,
+                            &mut denials,
+                            &mut seen_request_ids,
+                        ) {
                             warn!("Error handling supervisor message: {}", e);
                         }
                     }
@@ -1461,9 +1503,48 @@ fn handle_supervisor_message(
     msg: SupervisorMessage,
     config: &SupervisorConfig<'_>,
     denials: &mut Vec<DenialRecord>,
+    seen_request_ids: &mut HashSet<String>,
 ) -> Result<()> {
     match msg {
         SupervisorMessage::Request(request) => {
+            // Replay detection and bounded request-id cache.
+            if !seen_request_ids.contains(&request.request_id) {
+                if seen_request_ids.len() >= MAX_TRACKED_REQUEST_IDS {
+                    record_denial(
+                        denials,
+                        DenialRecord {
+                            path: request.path.clone(),
+                            access: request.access,
+                            reason: DenialReason::PolicyBlocked,
+                        },
+                    );
+                    let response = SupervisorResponse::Decision {
+                        request_id: request.request_id,
+                        decision: ApprovalDecision::Denied {
+                            reason: "Request replay cache is full; refusing request".to_string(),
+                        },
+                    };
+                    return sock.send_response(&response);
+                }
+                seen_request_ids.insert(request.request_id.clone());
+            } else {
+                record_denial(
+                    denials,
+                    DenialRecord {
+                        path: request.path.clone(),
+                        access: request.access,
+                        reason: DenialReason::PolicyBlocked,
+                    },
+                );
+                let response = SupervisorResponse::Decision {
+                    request_id: request.request_id,
+                    decision: ApprovalDecision::Denied {
+                        reason: "Duplicate request_id rejected (replay detected)".to_string(),
+                    },
+                };
+                return sock.send_response(&response);
+            }
+
             // 1. Check never_grant list first (before consulting the backend)
             let never_grant_check = config.never_grant.check(&request.path);
 
@@ -1472,11 +1553,14 @@ fn handle_supervisor_message(
                     "Supervisor: path {} blocked by never_grant",
                     request.path.display()
                 );
-                denials.push(DenialRecord {
-                    path: request.path.clone(),
-                    access: request.access,
-                    reason: DenialReason::PolicyBlocked,
-                });
+                record_denial(
+                    denials,
+                    DenialRecord {
+                        path: request.path.clone(),
+                        access: request.access,
+                        reason: DenialReason::PolicyBlocked,
+                    },
+                );
                 ApprovalDecision::Denied {
                     reason: format!(
                         "Path is permanently blocked by never_grant policy: {}",
@@ -1488,21 +1572,27 @@ fn handle_supervisor_message(
                 match config.approval_backend.request_capability(&request) {
                     Ok(d) => {
                         if d.is_denied() {
-                            denials.push(DenialRecord {
-                                path: request.path.clone(),
-                                access: request.access,
-                                reason: DenialReason::UserDenied,
-                            });
+                            record_denial(
+                                denials,
+                                DenialRecord {
+                                    path: request.path.clone(),
+                                    access: request.access,
+                                    reason: DenialReason::UserDenied,
+                                },
+                            );
                         }
                         d
                     }
                     Err(e) => {
                         warn!("Approval backend error: {}", e);
-                        denials.push(DenialRecord {
-                            path: request.path.clone(),
-                            access: request.access,
-                            reason: DenialReason::BackendError,
-                        });
+                        record_denial(
+                            denials,
+                            DenialRecord {
+                                path: request.path.clone(),
+                                access: request.access,
+                                reason: DenialReason::BackendError,
+                            },
+                        );
                         ApprovalDecision::Denied {
                             reason: format!("Approval backend error: {e}"),
                         }
@@ -1550,6 +1640,12 @@ fn handle_supervisor_message(
     Ok(())
 }
 
+pub(super) fn record_denial(denials: &mut Vec<DenialRecord>, record: DenialRecord) {
+    if denials.len() < MAX_DENIAL_RECORDS {
+        denials.push(record);
+    }
+}
+
 /// Generate a unique request ID from timestamp + random component.
 ///
 /// Uses nanosecond timestamp for ordering plus random bytes for
@@ -1592,8 +1688,6 @@ fn open_path_for_access(
     access: &nono::AccessMode,
     never_grant: &NeverGrantChecker,
 ) -> Result<std::fs::File> {
-    use std::fs::OpenOptions;
-
     // Canonicalize to resolve symlinks before opening. This ensures
     // we check and open the real target, not a symlink alias.
     let canonical = std::fs::canonicalize(path).map_err(|e| {
@@ -1647,23 +1741,20 @@ fn open_path_for_access(
                     components[0], components[2], components[3],
                 )));
             }
+            // /proc/self/<sensitive> and /proc/thread-self/<sensitive>
+            if components.len() == 2
+                && (components[0] == "self" || components[0] == "thread-self")
+                && SENSITIVE_PROC_FILES.contains(&components[1])
+            {
+                return Err(NonoError::SandboxInit(format!(
+                    "Access to /proc/{}/{} is blocked by policy",
+                    components[0], components[1],
+                )));
+            }
         }
     }
 
-    let result = match access {
-        nono::AccessMode::Read => OpenOptions::new().read(true).open(&canonical),
-        nono::AccessMode::Write => OpenOptions::new()
-            .write(true)
-            .truncate(false)
-            .open(&canonical),
-        nono::AccessMode::ReadWrite => OpenOptions::new()
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&canonical),
-    };
-
-    result.map_err(|e| {
+    open_canonical_path_no_symlinks(&canonical, access).map_err(|e| {
         NonoError::SandboxInit(format!(
             "Failed to open {} for {:?} access: {}",
             canonical.display(),
@@ -1671,6 +1762,86 @@ fn open_path_for_access(
             e
         ))
     })
+}
+
+/// Open a canonical absolute path by traversing path components using `openat`.
+///
+/// Every component is opened with `O_NOFOLLOW` to prevent symlink substitution
+/// between canonicalization and open time (TOCTOU).
+fn open_canonical_path_no_symlinks(
+    canonical: &std::path::Path,
+    access: &nono::AccessMode,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+
+    if !canonical.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "canonical path must be absolute",
+        ));
+    }
+
+    let components: Vec<_> = canonical
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect();
+
+    if components.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cannot open root path",
+        ));
+    }
+
+    // Start resolution from the real root directory.
+    let root = CString::new("/")
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
+    let root_fd = unsafe {
+        libc::open(
+            root.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if root_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut dir_fd = unsafe { OwnedFd::from_raw_fd(root_fd) };
+
+    for part in &components[..components.len() - 1] {
+        let c_part = CString::new(part.as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
+        let next_fd = unsafe {
+            libc::openat(
+                dir_fd.as_raw_fd(),
+                c_part.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next_fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        dir_fd = unsafe { OwnedFd::from_raw_fd(next_fd) };
+    }
+
+    let flags = match access {
+        nono::AccessMode::Read => libc::O_RDONLY,
+        nono::AccessMode::Write => libc::O_WRONLY,
+        nono::AccessMode::ReadWrite => libc::O_RDWR,
+    } | libc::O_NOFOLLOW
+        | libc::O_CLOEXEC;
+
+    let leaf = CString::new(components[components.len() - 1].as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
+    let file_fd = unsafe { libc::openat(dir_fd.as_raw_fd(), leaf.as_ptr(), flags) };
+    if file_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let file_fd = unsafe { OwnedFd::from_raw_fd(file_fd) };
+    Ok(std::fs::File::from(file_fd))
 }
 
 #[cfg(test)]
@@ -1765,5 +1936,21 @@ mod tests {
         assert!(!is_dangerous_env_var("CARGO_HOME"));
         assert!(!is_dangerous_env_var("RUST_LOG"));
         assert!(!is_dangerous_env_var("SSH_AUTH_SOCK"));
+    }
+
+    #[test]
+    fn test_record_denial_is_capped() {
+        let mut denials = Vec::new();
+        for _ in 0..(MAX_DENIAL_RECORDS + 10) {
+            record_denial(
+                &mut denials,
+                DenialRecord {
+                    path: "/tmp/test".into(),
+                    access: nono::AccessMode::Read,
+                    reason: DenialReason::PolicyBlocked,
+                },
+            );
+        }
+        assert_eq!(denials.len(), MAX_DENIAL_RECORDS);
     }
 }

@@ -163,11 +163,14 @@ pub(super) fn handle_seccomp_notification(
                 canonicalized.display(),
                 path.display()
             );
-            denials.push(DenialRecord {
-                path: path.clone(),
-                access,
-                reason: DenialReason::PolicyBlocked,
-            });
+            record_denial(
+                denials,
+                DenialRecord {
+                    path: path.clone(),
+                    access,
+                    reason: DenialReason::PolicyBlocked,
+                },
+            );
             let _ = deny_notif(notify_fd, notif.id);
             return Ok(());
         }
@@ -176,11 +179,14 @@ pub(super) fn handle_seccomp_notification(
             "Seccomp: path {} blocked by never_grant",
             canonicalized.display()
         );
-        denials.push(DenialRecord {
-            path: canonicalized.clone(),
-            access,
-            reason: DenialReason::PolicyBlocked,
-        });
+        record_denial(
+            denials,
+            DenialRecord {
+                path: canonicalized.clone(),
+                access,
+                reason: DenialReason::PolicyBlocked,
+            },
+        );
         let _ = deny_notif(notify_fd, notif.id);
         return Ok(());
     }
@@ -215,11 +221,14 @@ pub(super) fn handle_seccomp_notification(
     // 6. Rate limit check
     if !rate_limiter.try_acquire() {
         debug!("Rate limited seccomp notification for {}", path.display());
-        denials.push(DenialRecord {
-            path: path.clone(),
-            access,
-            reason: DenialReason::RateLimited,
-        });
+        record_denial(
+            denials,
+            DenialRecord {
+                path: path.clone(),
+                access,
+                reason: DenialReason::RateLimited,
+            },
+        );
         let _ = deny_notif(notify_fd, notif.id);
         return Ok(());
     }
@@ -231,27 +240,33 @@ pub(super) fn handle_seccomp_notification(
         access,
         reason: Some("Sandbox intercepted file operation (seccomp-notify)".to_string()),
         child_pid: child.as_raw() as u32,
-        session_id: String::new(),
+        session_id: config.session_id.to_string(),
     };
 
     let decision = match config.approval_backend.request_capability(&request) {
         Ok(d) => {
             if d.is_denied() {
-                denials.push(DenialRecord {
-                    path: path.clone(),
-                    access,
-                    reason: DenialReason::UserDenied,
-                });
+                record_denial(
+                    denials,
+                    DenialRecord {
+                        path: path.clone(),
+                        access,
+                        reason: DenialReason::UserDenied,
+                    },
+                );
             }
             d
         }
         Err(e) => {
             warn!("Approval backend error for seccomp notification: {}", e);
-            denials.push(DenialRecord {
-                path: path.clone(),
-                access,
-                reason: DenialReason::BackendError,
-            });
+            record_denial(
+                denials,
+                DenialRecord {
+                    path: path.clone(),
+                    access,
+                    reason: DenialReason::BackendError,
+                },
+            );
             let _ = deny_notif(notify_fd, notif.id);
             return Ok(());
         }

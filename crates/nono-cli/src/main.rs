@@ -617,10 +617,21 @@ fn execute_sandboxed(
             } else {
                 None
             };
+            let supervisor_session_id = rollback_state
+                .as_ref()
+                .map(|(_, _, session_id, _, _, _)| session_id.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "supervised-{}-{}",
+                        std::process::id(),
+                        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                    )
+                });
             let supervisor_cfg = supervisor_cfg_data.as_ref().map(|(checker, backend)| {
                 exec_strategy::SupervisorConfig {
                     never_grant: checker,
                     approval_backend: backend,
+                    session_id: &supervisor_session_id,
                 }
             });
 
