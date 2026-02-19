@@ -20,6 +20,39 @@ use std::path::{Path, PathBuf};
 /// A session paired with its change counts (created, modified, deleted).
 type SessionChanges<'a> = (&'a SessionInfo, (usize, usize, usize));
 
+/// Build a list of canonical path candidates for matching.
+///
+/// Returns the canonicalized path plus, on macOS, symlink equivalents
+/// (`/tmp` <-> `/private/tmp`, `/etc` <-> `/private/etc`, `/var` <-> `/private/var`)
+/// so that user input in either form matches stored canonical paths.
+fn canonical_candidates(path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(2);
+
+    // Primary: canonicalize if possible, otherwise use as-is
+    let primary = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    candidates.push(primary.clone());
+
+    // macOS symlink aliases: try both directions
+    #[cfg(target_os = "macos")]
+    {
+        let prefixes: &[(&str, &str)] = &[
+            ("/tmp", "/private/tmp"),
+            ("/etc", "/private/etc"),
+            ("/var", "/private/var"),
+        ];
+        let primary_str = primary.to_string_lossy();
+        for &(short, long) in prefixes {
+            if let Some(rest) = primary_str.strip_prefix(long) {
+                candidates.push(PathBuf::from(format!("{short}{rest}")));
+            } else if let Some(rest) = primary_str.strip_prefix(short) {
+                candidates.push(PathBuf::from(format!("{long}{rest}")));
+            }
+        }
+    }
+
+    candidates
+}
+
 /// Prefix used for all rollback command output
 fn prefix() -> colored::ColoredString {
     "[nono]".truecolor(204, 102, 0)
@@ -43,16 +76,17 @@ pub fn run_rollback(args: RollbackArgs) -> Result<()> {
 fn cmd_list(args: RollbackListArgs) -> Result<()> {
     let mut sessions = discover_sessions()?;
 
-    // Filter by --path if provided (canonicalize both sides to handle symlinks)
+    // Filter by --path if provided.
+    // Tracked paths are stored canonical (from FsCapability::resolved), so we
+    // canonicalize the user's filter and compare directly. On macOS, also try
+    // the /private symlink equivalents so `/tmp/x` matches `/private/tmp/x`.
     if let Some(ref filter_path) = args.path {
-        let filter_canonical = filter_path
-            .canonicalize()
-            .unwrap_or_else(|_| filter_path.clone());
+        let filter_candidates = canonical_candidates(filter_path);
         sessions.retain(|s| {
-            s.metadata.tracked_paths.iter().any(|p| {
-                let p_canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
-                p_canonical.starts_with(&filter_canonical)
-                    || filter_canonical.starts_with(&p_canonical)
+            s.metadata.tracked_paths.iter().any(|stored| {
+                filter_candidates
+                    .iter()
+                    .any(|filter| stored.starts_with(filter) || filter.starts_with(stored))
             })
         });
     }
