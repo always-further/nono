@@ -1617,19 +1617,34 @@ fn open_path_for_access(
 
     // Block sensitive per-PID /proc paths that can't be enumerated in never_grant
     // (they contain dynamic PIDs). These expose process memory/environment of
-    // arbitrary processes.
+    // arbitrary processes. Covers both /proc/<pid>/<file> and the equivalent
+    // /proc/<pid>/task/<tid>/<file> paths.
     #[cfg(target_os = "linux")]
     {
         if let Some(suffix) = canonical.to_str().and_then(|s| s.strip_prefix("/proc/")) {
-            let parts: Vec<&str> = suffix.splitn(2, '/').collect();
-            if parts.len() == 2 && parts[0].chars().all(|c| c.is_ascii_digit()) {
-                let sensitive = ["mem", "environ", "maps", "syscall", "stack"];
-                if sensitive.contains(&parts[1]) {
-                    return Err(NonoError::SandboxInit(format!(
-                        "Access to /proc/{}/{} is blocked by policy",
-                        parts[0], parts[1],
-                    )));
-                }
+            let sensitive = ["mem", "environ", "maps", "syscall", "stack", "cmdline"];
+            let components: Vec<&str> = suffix.split('/').collect();
+            // /proc/<pid>/<sensitive>
+            if components.len() == 2
+                && components[0].chars().all(|c| c.is_ascii_digit())
+                && sensitive.contains(&components[1])
+            {
+                return Err(NonoError::SandboxInit(format!(
+                    "Access to /proc/{}/{} is blocked by policy",
+                    components[0], components[1],
+                )));
+            }
+            // /proc/<pid>/task/<tid>/<sensitive>
+            if components.len() == 4
+                && components[0].chars().all(|c| c.is_ascii_digit())
+                && components[1] == "task"
+                && components[2].chars().all(|c| c.is_ascii_digit())
+                && sensitive.contains(&components[3])
+            {
+                return Err(NonoError::SandboxInit(format!(
+                    "Access to /proc/{}/task/{}/{} is blocked by policy",
+                    components[0], components[2], components[3],
+                )));
             }
         }
     }
