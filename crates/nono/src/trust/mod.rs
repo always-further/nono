@@ -18,6 +18,7 @@
 //! - **Types** ([`types`]): Trust policy, publisher identity, blocklist, verification result
 //! - **Digest** ([`digest`]): SHA-256 digest computation for files and byte slices
 //! - **Policy** ([`policy`]): Loading, merging, and evaluation of trust policies
+//! - **DSSE** ([`dsse`]): Dead Simple Signing Envelope parsing, PAE construction, in-toto statements
 //!
 //! # Security
 //!
@@ -27,10 +28,15 @@
 //! - No TOFU: files must have valid signatures from trusted publishers on first encounter
 
 pub mod digest;
+pub mod dsse;
 pub mod policy;
 pub mod types;
 
 pub use digest::{bytes_digest, file_digest};
+pub use dsse::{
+    new_envelope, new_instruction_statement, pae, DsseEnvelope, DsseSignature, InTotoStatement,
+    InTotoSubject, IN_TOTO_PAYLOAD_TYPE, IN_TOTO_STATEMENT_TYPE, NONO_PREDICATE_TYPE,
+};
 pub use policy::{
     evaluate_file, find_instruction_files, load_policy_from_file, load_policy_from_str,
     merge_policies,
