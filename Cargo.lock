@@ -1143,10 +1143,12 @@ dependencies = [
 name = "nono-cli"
 version = "0.6.0-alpha.1"
 dependencies = [
+ "aws-lc-rs",
  "chrono",
  "clap",
  "colored",
  "dirs",
+ "keyring",
  "landlock",
  "nix",
  "nono",
@@ -1163,6 +1165,7 @@ dependencies = [
  "walkdir",
  "which",
  "xdg-home",
+ "zeroize",
 ]
 
 [[package]]

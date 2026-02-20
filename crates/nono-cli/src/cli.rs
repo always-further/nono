@@ -146,6 +146,29 @@ pub enum Commands {
 ")]
     Rollback(RollbackArgs),
 
+    /// Manage instruction file trust and attestation
+    #[command(after_help = "EXAMPLES:
+    # Sign an instruction file with the default keystore key
+    nono trust sign SKILLS.md
+
+    # Sign with a specific key ID
+    nono trust sign SKILLS.md --key my-signing-key
+
+    # Verify an instruction file against the trust policy
+    nono trust verify SKILLS.md
+
+    # Verify all instruction files in the current directory
+    nono trust verify --all
+
+    # List instruction files and their verification status
+    nono trust list
+
+    # Generate a new signing key pair
+    nono trust keygen
+    nono trust keygen --id my-signing-key
+")]
+    Trust(TrustArgs),
+
     /// View audit trail of sandboxed commands
     #[command(after_help = "EXAMPLES:
     # List all sessions (including read-only commands)
@@ -583,6 +606,84 @@ pub struct AuditShowArgs {
     pub json: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Trust command args
+// ---------------------------------------------------------------------------
+
+#[derive(Parser, Debug)]
+pub struct TrustArgs {
+    #[command(subcommand)]
+    pub command: TrustCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TrustCommands {
+    /// Sign an instruction file, producing a .bundle alongside it
+    Sign(TrustSignArgs),
+    /// Verify an instruction file's bundle against the trust policy
+    Verify(TrustVerifyArgs),
+    /// List instruction files and their verification status
+    List(TrustListArgs),
+    /// Generate a new ECDSA P-256 signing key pair
+    Keygen(TrustKeygenArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustSignArgs {
+    /// Instruction file(s) to sign
+    #[arg(required_unless_present = "all")]
+    pub files: Vec<PathBuf>,
+
+    /// Sign all instruction files matching trust policy patterns in CWD
+    #[arg(long)]
+    pub all: bool,
+
+    /// Key ID to use from the system keystore (default: "default")
+    #[arg(long, value_name = "KEY_ID")]
+    pub key: Option<String>,
+
+    /// Trust policy file (default: auto-discover)
+    #[arg(long, value_name = "FILE")]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustVerifyArgs {
+    /// Instruction file(s) to verify
+    #[arg(required_unless_present = "all")]
+    pub files: Vec<PathBuf>,
+
+    /// Verify all instruction files matching trust policy patterns in CWD
+    #[arg(long)]
+    pub all: bool,
+
+    /// Trust policy file (default: auto-discover)
+    #[arg(long, value_name = "FILE")]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustListArgs {
+    /// Trust policy file (default: auto-discover)
+    #[arg(long, value_name = "FILE")]
+    pub policy: Option<PathBuf>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustKeygenArgs {
+    /// Key identifier (stored in system keystore under this name)
+    #[arg(long, value_name = "NAME", default_value = "default")]
+    pub id: String,
+
+    /// Overwrite existing key with the same ID
+    #[arg(long)]
+    pub force: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,6 +947,110 @@ mod tests {
                 _ => panic!("Expected Cleanup subcommand"),
             },
             _ => panic!("Expected Rollback command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_sign() {
+        let cli = Cli::parse_from(["nono", "trust", "sign", "SKILLS.md"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Sign(sign_args) => {
+                    assert_eq!(sign_args.files, vec![PathBuf::from("SKILLS.md")]);
+                    assert!(!sign_args.all);
+                    assert!(sign_args.key.is_none());
+                }
+                _ => panic!("Expected Sign subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_sign_with_key() {
+        let cli = Cli::parse_from(["nono", "trust", "sign", "SKILLS.md", "--key", "my-key"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Sign(sign_args) => {
+                    assert_eq!(sign_args.key, Some("my-key".to_string()));
+                }
+                _ => panic!("Expected Sign subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_sign_all() {
+        let cli = Cli::parse_from(["nono", "trust", "sign", "--all"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Sign(sign_args) => {
+                    assert!(sign_args.all);
+                    assert!(sign_args.files.is_empty());
+                }
+                _ => panic!("Expected Sign subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_verify() {
+        let cli = Cli::parse_from(["nono", "trust", "verify", "SKILLS.md"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Verify(verify_args) => {
+                    assert_eq!(verify_args.files, vec![PathBuf::from("SKILLS.md")]);
+                    assert!(!verify_args.all);
+                }
+                _ => panic!("Expected Verify subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_list() {
+        let cli = Cli::parse_from(["nono", "trust", "list"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::List(list_args) => {
+                    assert!(!list_args.json);
+                }
+                _ => panic!("Expected List subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_keygen() {
+        let cli = Cli::parse_from(["nono", "trust", "keygen"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Keygen(keygen_args) => {
+                    assert_eq!(keygen_args.id, "default");
+                    assert!(!keygen_args.force);
+                }
+                _ => panic!("Expected Keygen subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_keygen_with_id() {
+        let cli = Cli::parse_from(["nono", "trust", "keygen", "--id", "my-key", "--force"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Keygen(keygen_args) => {
+                    assert_eq!(keygen_args.id, "my-key");
+                    assert!(keygen_args.force);
+                }
+                _ => panic!("Expected Keygen subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
         }
     }
 }

@@ -29,6 +29,13 @@ dirs = "6"
 walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
 
+# Signing key PKCS#8 serialization (already transitive via sigstore-verify)
+aws-lc-rs = "1"
+
+# Keystore access for trust signing keys
+keyring = "3"
+
+zeroize.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -39,9 +46,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", features = ["process", "signal", "fs", "user"] }
 landlock = "0.4"
+keyring = { version = "3", features = ["sync-secret-service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nix = { version = "0.31", features = ["process", "signal", "fs", "user"] }
+keyring = { version = "3", features = ["apple-native"] }
 
 [build-dependencies]
 toml = "1.0"

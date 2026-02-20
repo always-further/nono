@@ -27,6 +27,23 @@ pub struct TrustPolicy {
     pub enforcement: Enforcement,
 }
 
+impl Default for TrustPolicy {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            instruction_patterns: vec![
+                "SKILLS*".to_string(),
+                "CLAUDE*".to_string(),
+                "AGENT.MD".to_string(),
+                ".claude/**/*.md".to_string(),
+            ],
+            publishers: Vec::new(),
+            blocklist: Blocklist::default(),
+            enforcement: Enforcement::default(),
+        }
+    }
+}
+
 impl TrustPolicy {
     /// Build an [`InstructionPatterns`] matcher from this policy's patterns.
     ///
@@ -149,7 +166,7 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 /// Known-malicious file digests.
 ///
 /// Checked before any cryptographic verification for fast rejection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Blocklist {
     /// List of blocked digests
     pub digests: Vec<BlocklistEntry>,
@@ -184,12 +201,13 @@ pub struct BlockedPublisher {
 }
 
 /// Enforcement mode for trust verification failures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Enforcement {
     /// Allow access, log verification result for post-hoc review
     Audit = 0,
     /// Log warning but allow access (migration/adoption mode)
+    #[default]
     Warn = 1,
     /// Hard deny unsigned/invalid/untrusted files (production default)
     Deny = 2,

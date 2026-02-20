@@ -20,6 +20,7 @@ mod rollback_ui;
 mod sandbox_state;
 mod setup;
 mod terminal_approval;
+mod trust_cmd;
 
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
@@ -72,6 +73,7 @@ fn run() -> Result<()> {
         Commands::Why(args) => run_why(*args),
         Commands::Setup(args) => run_setup(args),
         Commands::Rollback(args) => rollback_commands::run_rollback(args),
+        Commands::Trust(args) => trust_cmd::run_trust(args),
         Commands::Audit(args) => audit_commands::run_audit(args),
     }
 }
