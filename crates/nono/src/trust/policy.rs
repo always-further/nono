@@ -299,6 +299,7 @@ mod tests {
             workflow: None,
             ref_pattern: None,
             key_id: Some(key_id.to_string()),
+            public_key: None,
         }
     }
 
@@ -310,6 +311,7 @@ mod tests {
             workflow: Some("*".to_string()),
             ref_pattern: Some("*".to_string()),
             key_id: None,
+            public_key: None,
         }
     }
 

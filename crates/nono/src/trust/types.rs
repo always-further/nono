@@ -99,6 +99,10 @@ pub struct Publisher {
     /// Key ID in the system keystore (keyed publishers only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
+    /// Base64-encoded DER SPKI public key for cryptographic verification (keyed publishers only).
+    /// Required for signature verification of keyed bundles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
 }
 
 impl Publisher {
@@ -207,9 +211,9 @@ pub enum Enforcement {
     /// Allow access, log verification result for post-hoc review
     Audit = 0,
     /// Log warning but allow access (migration/adoption mode)
-    #[default]
     Warn = 1,
     /// Hard deny unsigned/invalid/untrusted files (production default)
+    #[default]
     Deny = 2,
 }
 
@@ -390,6 +394,7 @@ mod tests {
                     workflow: Some(".github/workflows/sign.yml".to_string()),
                     ref_pattern: Some("refs/tags/v*".to_string()),
                     key_id: None,
+                    public_key: None,
                 },
                 Publisher {
                     name: "local-dev".to_string(),
@@ -398,6 +403,7 @@ mod tests {
                     workflow: None,
                     ref_pattern: None,
                     key_id: Some("nono-keystore:default".to_string()),
+                    public_key: None,
                 },
             ],
             blocklist: Blocklist {
@@ -535,6 +541,7 @@ mod tests {
             workflow: Some("*".to_string()),
             ref_pattern: Some("*".to_string()),
             key_id: None,
+            public_key: None,
         };
         let identity = SignerIdentity::Keyless {
             issuer: "https://token.actions.githubusercontent.com".to_string(),
@@ -628,6 +635,7 @@ mod tests {
             workflow: None,
             ref_pattern: None,
             key_id: Some("id".to_string()),
+            public_key: None,
         };
         assert!(keyed.is_keyed());
         assert!(!keyed.is_keyless());
@@ -639,6 +647,7 @@ mod tests {
             workflow: Some("*".to_string()),
             ref_pattern: Some("*".to_string()),
             key_id: None,
+            public_key: None,
         };
         assert!(!keyless.is_keyed());
         assert!(keyless.is_keyless());

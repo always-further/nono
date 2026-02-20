@@ -45,20 +45,26 @@ pub struct TrustInterceptor {
     matcher: trust::InstructionPatterns,
     /// Verification result cache keyed by canonical path
     cache: HashMap<PathBuf, CacheEntry>,
+    /// Project root for computing relative paths in pattern matching
+    project_root: PathBuf,
 }
 
 impl TrustInterceptor {
-    /// Create a new trust interceptor from a trust policy.
+    /// Create a new trust interceptor from a trust policy and project root.
+    ///
+    /// The `project_root` is used to compute relative paths from absolute paths
+    /// for instruction file pattern matching (e.g., `.claude/**/*.md`).
     ///
     /// # Errors
     ///
     /// Returns an error if the instruction patterns cannot be compiled.
-    pub fn new(policy: TrustPolicy) -> nono::Result<Self> {
+    pub fn new(policy: TrustPolicy, project_root: PathBuf) -> nono::Result<Self> {
         let matcher = policy.instruction_matcher()?;
         Ok(Self {
             policy,
             matcher,
             cache: HashMap::new(),
+            project_root,
         })
     }
 
@@ -68,15 +74,14 @@ impl TrustInterceptor {
     /// approval flow handle it). Returns `Some(Ok(publisher))` if the file is
     /// verified, or `Some(Err(reason))` if verification fails.
     pub fn check_path(&mut self, path: &Path) -> Option<std::result::Result<String, String>> {
-        // Only check files that match instruction patterns
-        let file_name = path.file_name()?.to_str()?;
-        if !self.matcher.is_match(file_name) {
-            // Also try matching with parent components for patterns like .claude/**/*.md
-            let relative = path
-                .file_name()
-                .map(Path::new)
-                .unwrap_or_else(|| Path::new(""));
-            if !self.matcher.is_match(relative) {
+        // Compute relative path from project root for pattern matching.
+        // Patterns like ".claude/**/*.md" require relative path context.
+        let relative = path.strip_prefix(&self.project_root).unwrap_or(path);
+
+        if !self.matcher.is_match(relative) {
+            // Also try just the filename for simple patterns like "SKILLS*"
+            let file_name = path.file_name().map(Path::new)?;
+            if !self.matcher.is_match(file_name) {
                 return None;
             }
         }
@@ -161,7 +166,7 @@ impl TrustInterceptor {
         // Load and verify bundle
         let bundle_path = trust::bundle_path_for(path);
         let signer = if bundle_path.exists() {
-            match load_signer(&bundle_path, &digest) {
+            match load_signer(&bundle_path, &digest, &self.policy) {
                 Ok(identity) => Some(identity),
                 Err(reason) => {
                     self.store_cache(
@@ -264,20 +269,33 @@ impl TrustInterceptor {
     }
 }
 
-/// Load a bundle and extract the signer identity, verifying digest integrity.
+/// Load a bundle, extract the signer identity, verify digest integrity,
+/// and perform cryptographic signature verification for keyed bundles.
 fn load_signer(
     bundle_path: &Path,
     file_digest: &str,
+    policy: &trust::TrustPolicy,
 ) -> std::result::Result<trust::SignerIdentity, String> {
     let bundle = trust::load_bundle(bundle_path).map_err(|e| format!("invalid bundle: {e}"))?;
 
     let identity = trust::extract_signer_identity(&bundle, bundle_path)
         .map_err(|e| format!("no signer identity: {e}"))?;
 
-    // Verify digest integrity via JSON extraction
-    if let Ok(bundle_digest) = extract_bundle_digest(&bundle) {
-        if bundle_digest != file_digest {
-            return Err("bundle digest does not match file content".to_string());
+    // Verify digest integrity (fail-closed: extraction failure = reject)
+    let bundle_digest =
+        extract_bundle_digest(&bundle).map_err(|e| format!("malformed bundle: {e}"))?;
+    if bundle_digest != file_digest {
+        return Err("bundle digest does not match file content".to_string());
+    }
+
+    // Cryptographic signature verification for keyed bundles
+    if let trust::SignerIdentity::Keyed { .. } = &identity {
+        let matching = policy.matching_publishers(&identity);
+        if let Some(b64) = matching.iter().find_map(|p| p.public_key.as_ref()) {
+            let key_bytes = base64_decode(b64)
+                .map_err(|_| "invalid base64 in publisher public_key".to_string())?;
+            trust::verify_keyed_signature(&bundle, &key_bytes, bundle_path)
+                .map_err(|e| format!("signature verification failed: {e}"))?;
         }
     }
 
@@ -358,8 +376,9 @@ mod tests {
 
     #[test]
     fn interceptor_ignores_non_instruction_files() {
+        let dir = tempfile::tempdir().unwrap();
         let policy = TrustPolicy::default();
-        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+        let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
 
         assert!(interceptor
             .check_path(Path::new("/tmp/README.md"))
@@ -376,7 +395,7 @@ mod tests {
         std::fs::write(&skills, "# Skills").unwrap();
 
         let policy = TrustPolicy::default();
-        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+        let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
 
         // Should return Some (it IS an instruction file)
         let result = interceptor.check_path(&skills);
@@ -393,7 +412,7 @@ mod tests {
             enforcement: trust::Enforcement::Warn,
             ..TrustPolicy::default()
         };
-        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+        let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
 
         // First check populates cache
         let _result1 = interceptor.check_path(&skills);
@@ -413,7 +432,7 @@ mod tests {
             enforcement: trust::Enforcement::Warn,
             ..TrustPolicy::default()
         };
-        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+        let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
 
         // First check
         let _ = interceptor.check_path(&skills);
@@ -448,7 +467,7 @@ mod tests {
             },
             ..TrustPolicy::default()
         };
-        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+        let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
 
         let result = interceptor.check_path(&skills);
         assert!(result.is_some());

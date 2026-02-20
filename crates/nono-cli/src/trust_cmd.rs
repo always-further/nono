@@ -68,11 +68,16 @@ fn run_keygen(args: TrustKeygenArgs) -> Result<()> {
         .set_password(pkcs8_b64.as_str())
         .map_err(|e| nono::NonoError::KeystoreAccess(format!("failed to store key: {e}")))?;
 
+    let pub_key_b64 = base64_encode(pub_key.as_bytes());
+
     eprintln!("{}", "Signing key generated successfully.".green());
     eprintln!("  Key ID:      {key_id}");
     eprintln!("  Fingerprint: {hex_id}");
     eprintln!("  Algorithm:   ECDSA P-256 (SHA-256)");
     eprintln!("  Stored in:   system keystore (service: {TRUST_SERVICE})");
+    eprintln!();
+    eprintln!("Public key (base64 DER, for trust-policy.json):");
+    eprintln!("  {pub_key_b64}");
     eprintln!();
     eprintln!("Public key (PEM):");
     eprintln!("{}", pub_key.to_pem());
@@ -239,10 +244,20 @@ fn verify_single_file(
     let content = std::fs::read(file_path).map_err(|e| format!("failed to read file: {e}"))?;
     let file_digest_hex = trust::bytes_digest(&content);
 
-    // Try to extract statement from bundle's DSSE envelope
-    if let Ok(statement_digest) = extract_bundle_digest(&bundle) {
-        if statement_digest != file_digest_hex {
-            return Err("bundle digest does not match file content".to_string());
+    // Verify digest from bundle (fail-closed: extraction failure = reject)
+    let statement_digest =
+        extract_bundle_digest(&bundle).map_err(|e| format!("malformed bundle: {e}"))?;
+    if statement_digest != file_digest_hex {
+        return Err("bundle digest does not match file content".to_string());
+    }
+
+    // Cryptographic signature verification for keyed bundles
+    if let trust::SignerIdentity::Keyed { .. } = &identity {
+        if let Some(b64) = matching.iter().find_map(|p| p.public_key.as_ref()) {
+            let key_bytes = base64_decode(b64)
+                .map_err(|_| "invalid base64 in publisher public_key".to_string())?;
+            trust::verify_keyed_signature(&bundle, &key_bytes, file_path)
+                .map_err(|e| format!("signature verification failed: {e}"))?;
         }
     }
 

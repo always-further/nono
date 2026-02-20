@@ -39,8 +39,9 @@ pub mod types;
 pub use bundle::{
     bundle_path_for, extract_signer_identity, load_bundle, load_bundle_from_str,
     load_production_trusted_root, load_trusted_root, load_trusted_root_from_str, parse_cert_info,
-    verify_bundle, verify_bundle_keyed, verify_bundle_with_digest, Bundle, CertificateInfo,
-    DerPublicKey, Sha256Hash, SigstoreVerificationResult, TrustedRoot, VerificationPolicy,
+    verify_bundle, verify_bundle_keyed, verify_bundle_with_digest, verify_keyed_signature, Bundle,
+    CertificateInfo, DerPublicKey, Sha256Hash, SigstoreVerificationResult, TrustedRoot,
+    VerificationPolicy,
 };
 pub use digest::{bytes_digest, file_digest};
 pub use dsse::{

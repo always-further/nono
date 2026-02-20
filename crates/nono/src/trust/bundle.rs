@@ -205,6 +205,94 @@ pub fn verify_bundle_keyed(
     )
 }
 
+/// Verify a keyed bundle's ECDSA signature directly without a Sigstore TrustedRoot.
+///
+/// For keyed bundles (signed with a managed ECDSA P-256 key), this verifies the
+/// DSSE envelope signature against the provided SPKI public key. This is the
+/// standalone keyed verification path — it does not require Fulcio certificates,
+/// Rekor transparency logs, or a TrustedRoot.
+///
+/// # Verification steps
+///
+/// 1. Serialize the bundle and extract the DSSE envelope
+/// 2. Decode the payload and compute PAE(payloadType, payload)
+/// 3. Decode the signature from the first signature entry
+/// 4. Verify ECDSA P-256 SHA-256 signature over the PAE using the public key
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustVerification` if any step fails (missing envelope
+/// components, invalid encoding, or signature mismatch).
+pub fn verify_keyed_signature(
+    bundle: &Bundle,
+    public_key_der: &[u8],
+    artifact_path: &Path,
+) -> Result<()> {
+    use sigstore_verify::crypto::signing::SigningScheme;
+    use sigstore_verify::crypto::verification::VerificationKey;
+    use sigstore_verify::types::{PayloadBytes, SignatureBytes};
+
+    let bundle_json = bundle.to_json().map_err(|e| NonoError::TrustVerification {
+        path: artifact_path.display().to_string(),
+        reason: format!("failed to serialize bundle: {e}"),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&bundle_json).map_err(|e| NonoError::TrustVerification {
+            path: artifact_path.display().to_string(),
+            reason: format!("invalid bundle JSON: {e}"),
+        })?;
+
+    // Extract payload and signature from DSSE envelope
+    let payload_b64 =
+        value["dsseEnvelope"]["payload"]
+            .as_str()
+            .ok_or_else(|| NonoError::TrustVerification {
+                path: artifact_path.display().to_string(),
+                reason: "missing DSSE payload".to_string(),
+            })?;
+    let sig_b64 = value["dsseEnvelope"]["signatures"][0]["sig"]
+        .as_str()
+        .ok_or_else(|| NonoError::TrustVerification {
+            path: artifact_path.display().to_string(),
+            reason: "missing DSSE signature".to_string(),
+        })?;
+
+    // Decode payload
+    let payload_bytes =
+        PayloadBytes::from_base64(payload_b64).map_err(|e| NonoError::TrustVerification {
+            path: artifact_path.display().to_string(),
+            reason: format!("invalid base64 payload: {e}"),
+        })?;
+
+    // Compute PAE over the payload
+    let pae_bytes = sigstore_verify::types::dsse::pae(
+        crate::trust::dsse::IN_TOTO_PAYLOAD_TYPE,
+        payload_bytes.as_bytes(),
+    );
+
+    // Decode signature
+    let sig_bytes =
+        SignatureBytes::from_base64(sig_b64).map_err(|e| NonoError::TrustVerification {
+            path: artifact_path.display().to_string(),
+            reason: format!("invalid base64 signature: {e}"),
+        })?;
+
+    // Verify ECDSA P-256 signature over the PAE
+    let pub_key = DerPublicKey::from(public_key_der.to_vec());
+    let vk = VerificationKey::from_spki(&pub_key, SigningScheme::EcdsaP256Sha256).map_err(|e| {
+        NonoError::TrustVerification {
+            path: artifact_path.display().to_string(),
+            reason: format!("invalid public key: {e}"),
+        }
+    })?;
+
+    vk.verify(&pae_bytes, &sig_bytes)
+        .map_err(|e| NonoError::TrustVerification {
+            path: artifact_path.display().to_string(),
+            reason: format!("ECDSA signature verification failed: {e}"),
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Identity extraction
 // ---------------------------------------------------------------------------
@@ -217,8 +305,9 @@ pub fn verify_bundle_keyed(
 /// - Build config / workflow (OID 1.3.6.1.4.1.57264.1.11)
 /// - Source repository ref (OID 1.3.6.1.4.1.57264.1.10)
 ///
-/// For bundles with a public key hint (keyed), returns the key hint as
-/// the key ID.
+/// For bundles with a public key hint (keyed), extracts the human key ID
+/// from the DSSE predicate's `signer.key_id` field. Falls back to the
+/// public key hint (fingerprint) if predicate extraction fails.
 ///
 /// # Errors
 ///
@@ -226,9 +315,18 @@ pub fn verify_bundle_keyed(
 /// parsed or lacks required identity fields.
 pub fn extract_signer_identity(bundle: &Bundle, bundle_path: &Path) -> Result<SignerIdentity> {
     match &bundle.verification_material.content {
-        VerificationMaterialContent::PublicKey { hint } => Ok(SignerIdentity::Keyed {
-            key_id: hint.clone(),
-        }),
+        VerificationMaterialContent::PublicKey { hint } => {
+            // Try to read the human key_id from the DSSE predicate
+            match extract_keyed_identity_from_dsse(bundle, bundle_path) {
+                Ok(identity) => Ok(identity),
+                Err(_) => {
+                    // Fall back to the public key hint (fingerprint)
+                    Ok(SignerIdentity::Keyed {
+                        key_id: hint.clone(),
+                    })
+                }
+            }
+        }
         VerificationMaterialContent::Certificate(cert_content) => {
             extract_identity_from_cert(cert_content.raw_bytes.as_bytes(), bundle_path)
         }
@@ -242,6 +340,50 @@ pub fn extract_signer_identity(bundle: &Bundle, bundle_path: &Path) -> Result<Si
             extract_identity_from_cert(leaf.raw_bytes.as_bytes(), bundle_path)
         }
     }
+}
+
+/// Extract the human key_id from a keyed bundle's DSSE predicate.
+///
+/// Parses the bundle's DSSE envelope payload as an in-toto statement and
+/// reads `predicate.signer.key_id`. This gives the operator-chosen key alias
+/// (e.g., "default") rather than the cryptographic fingerprint in the hint.
+fn extract_keyed_identity_from_dsse(bundle: &Bundle, bundle_path: &Path) -> Result<SignerIdentity> {
+    let bundle_json = bundle.to_json().map_err(|e| NonoError::TrustVerification {
+        path: bundle_path.display().to_string(),
+        reason: format!("failed to serialize bundle: {e}"),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&bundle_json).map_err(|e| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: format!("invalid bundle JSON: {e}"),
+        })?;
+
+    let payload_b64 =
+        value["dsseEnvelope"]["payload"]
+            .as_str()
+            .ok_or_else(|| NonoError::TrustVerification {
+                path: bundle_path.display().to_string(),
+                reason: "missing DSSE payload".to_string(),
+            })?;
+
+    // Decode the payload — the envelope stores it in the sigstore PayloadBytes format
+    let payload_bytes =
+        sigstore_verify::types::PayloadBytes::from_base64(payload_b64).map_err(|e| {
+            NonoError::TrustVerification {
+                path: bundle_path.display().to_string(),
+                reason: format!("invalid DSSE payload encoding: {e}"),
+            }
+        })?;
+
+    let payload_str = std::str::from_utf8(payload_bytes.as_bytes()).map_err(|e| {
+        NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: format!("DSSE payload is not UTF-8: {e}"),
+        }
+    })?;
+
+    let statement = crate::trust::dsse::InTotoStatement::from_json(payload_str)?;
+    statement.extract_signer()
 }
 
 /// Extract signer identity fields from a DER-encoded Fulcio certificate.

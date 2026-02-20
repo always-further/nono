@@ -11,20 +11,19 @@
 
 use colored::Colorize;
 use nono::trust::{self, Enforcement, TrustPolicy, VerificationOutcome, VerificationResult};
-use nono::{NonoError, Result};
+use nono::Result;
 use std::path::Path;
 
-/// Load the trust policy for scanning, auto-discovering from CWD and user config.
+/// Load the trust policy for scanning, auto-discovering from the given root and user config.
 ///
-/// Checks CWD for `trust-policy.json`, then user config dir, merging if both
-/// exist. Falls back to default policy (warn enforcement) if none found.
+/// Checks `root` for `trust-policy.json`, then user config dir, merging if both
+/// exist. Falls back to default policy (deny enforcement) if none found.
 ///
 /// # Errors
 ///
 /// Returns `NonoError::TrustPolicy` if a found policy file is malformed.
-pub fn load_scan_policy() -> Result<TrustPolicy> {
-    let cwd = std::env::current_dir().map_err(NonoError::Io)?;
-    let cwd_policy = cwd.join("trust-policy.json");
+pub fn load_scan_policy(root: &Path) -> Result<TrustPolicy> {
+    let cwd_policy = root.join("trust-policy.json");
 
     let project = if cwd_policy.exists() {
         Some(trust::load_policy_from_file(&cwd_policy)?)
@@ -159,7 +158,7 @@ fn verify_instruction_file(file_path: &Path, policy: &TrustPolicy) -> Verificati
     // Try to load bundle and extract signer identity
     let bundle_path = trust::bundle_path_for(file_path);
     let signer = if bundle_path.exists() {
-        match load_and_extract_signer(&bundle_path, &digest) {
+        match load_and_extract_signer(&bundle_path, &digest, policy) {
             Ok(identity) => Some(identity),
             Err(outcome) => {
                 return VerificationResult {
@@ -177,13 +176,15 @@ fn verify_instruction_file(file_path: &Path, policy: &TrustPolicy) -> Verificati
     trust::evaluate_file(policy, file_path, &digest, signer.as_ref())
 }
 
-/// Load a bundle, extract signer identity, and verify digest integrity.
+/// Load a bundle, extract signer identity, verify digest integrity, and
+/// perform cryptographic signature verification for keyed bundles.
 ///
 /// Returns the signer identity on success, or a `VerificationOutcome`
 /// describing the failure.
 fn load_and_extract_signer(
     bundle_path: &Path,
     file_digest: &str,
+    policy: &TrustPolicy,
 ) -> std::result::Result<trust::SignerIdentity, VerificationOutcome> {
     // Load bundle
     let bundle =
@@ -198,17 +199,46 @@ fn load_and_extract_signer(
         }
     })?;
 
-    // Verify bundle digest matches file content
-    if let Ok(bundle_digest) = extract_statement_digest(&bundle) {
-        if bundle_digest != file_digest {
-            return Err(VerificationOutcome::DigestMismatch {
-                expected: bundle_digest,
-                actual: file_digest.to_string(),
-            });
-        }
+    // Verify bundle digest matches file content (fail-closed: extraction failure = reject)
+    let bundle_digest = extract_statement_digest(&bundle)?;
+    if bundle_digest != file_digest {
+        return Err(VerificationOutcome::DigestMismatch {
+            expected: bundle_digest,
+            actual: file_digest.to_string(),
+        });
+    }
+
+    // Cryptographic signature verification for keyed bundles
+    if let trust::SignerIdentity::Keyed { .. } = &identity {
+        verify_keyed_crypto(&bundle, &identity, policy, bundle_path)?;
     }
 
     Ok(identity)
+}
+
+/// Verify the ECDSA signature on a keyed bundle using the publisher's public key.
+fn verify_keyed_crypto(
+    bundle: &trust::Bundle,
+    identity: &trust::SignerIdentity,
+    policy: &TrustPolicy,
+    bundle_path: &Path,
+) -> std::result::Result<(), VerificationOutcome> {
+    let matching = policy.matching_publishers(identity);
+    let pub_key_b64 = matching.iter().find_map(|p| p.public_key.as_ref());
+
+    if let Some(b64) = pub_key_b64 {
+        let key_bytes = base64_decode(b64).map_err(|_| VerificationOutcome::InvalidSignature {
+            detail: "invalid base64 in publisher public_key".to_string(),
+        })?;
+        trust::verify_keyed_signature(bundle, &key_bytes, bundle_path).map_err(|e| {
+            VerificationOutcome::InvalidSignature {
+                detail: format!("{e}"),
+            }
+        })?;
+    }
+    // If no public_key in policy, crypto verification is skipped — publisher match
+    // is still enforced by evaluate_file. Users should add public_key for full security.
+    Ok(())
 }
 
 /// Extract the SHA-256 digest from a bundle's DSSE envelope statement.

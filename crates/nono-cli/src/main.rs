@@ -290,6 +290,13 @@ fn run_sandbox(
     #[cfg(target_os = "linux")]
     let mut prepared = prepare_sandbox(&args, silent)?;
 
+    // Compute scan root for trust policy discovery and instruction file scanning.
+    let scan_root = args
+        .workdir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
     // Pre-exec trust scan: verify instruction files before the agent reads them.
     // Must run BEFORE sandbox application so we can still read bundles and policy.
     if trust_override {
@@ -301,12 +308,7 @@ fn run_sandbox(
             );
         }
     } else {
-        let scan_root = args
-            .workdir
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let trust_policy = trust_scan::load_scan_policy()?;
+        let trust_policy = trust_scan::load_scan_policy(&scan_root)?;
         let scan_result = trust_scan::run_pre_exec_scan(&scan_root, &trust_policy, silent)?;
         if !scan_result.results.is_empty() {
             info!(
@@ -347,6 +349,7 @@ fn run_sandbox(
             no_rollback_prompt,
             trust_override,
             silent,
+            scan_root,
             rollback_exclude_patterns: prepared.rollback_exclude_patterns,
             rollback_exclude_globs: prepared.rollback_exclude_globs,
         },
@@ -403,6 +406,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             no_rollback_prompt: false,
             trust_override: false,
             silent,
+            scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
         },
@@ -419,6 +423,8 @@ struct ExecutionFlags {
     no_rollback_prompt: bool,
     trust_override: bool,
     silent: bool,
+    /// Root directory for trust policy discovery and scanning
+    scan_root: std::path::PathBuf,
     /// Profile-specific rollback exclusion patterns (additive on base)
     rollback_exclude_patterns: Vec<String>,
     /// Profile-specific rollback exclusion globs (filename matching)
@@ -686,9 +692,11 @@ fn execute_sandboxed(
             });
 
             let trust_interceptor = if !flags.trust_override {
-                trust_scan::load_scan_policy()
+                trust_scan::load_scan_policy(&flags.scan_root)
                     .ok()
-                    .and_then(|p| trust_intercept::TrustInterceptor::new(p).ok())
+                    .and_then(|p| {
+                        trust_intercept::TrustInterceptor::new(p, flags.scan_root.clone()).ok()
+                    })
             } else {
                 None
             };
