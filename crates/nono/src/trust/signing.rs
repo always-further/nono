@@ -139,6 +139,74 @@ pub fn sign_bytes(
     key_pair: &KeyPair,
     key_id: &str,
 ) -> Result<String> {
+    sign_bytes_inner(
+        content,
+        filename,
+        key_pair,
+        key_id,
+        dsse::NONO_PREDICATE_TYPE,
+    )
+}
+
+/// Sign arbitrary bytes as a trust policy attestation.
+///
+/// Identical to `sign_bytes` but uses the policy predicate type to
+/// distinguish policy bundles from instruction file bundles.
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustSigning` on signing or serialization failure.
+pub fn sign_policy_bytes(
+    content: &[u8],
+    filename: &str,
+    key_pair: &KeyPair,
+    key_id: &str,
+) -> Result<String> {
+    sign_bytes_inner(
+        content,
+        filename,
+        key_pair,
+        key_id,
+        dsse::NONO_POLICY_PREDICATE_TYPE,
+    )
+}
+
+/// Sign a trust policy file with a keyed signing key.
+///
+/// Reads the file, computes the SHA-256 digest, and builds a Sigstore
+/// bundle with the policy-specific predicate type.
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustSigning` on any failure.
+pub fn sign_policy_file(file_path: &Path, key_pair: &KeyPair, key_id: &str) -> Result<String> {
+    let content = std::fs::read(file_path).map_err(|e| NonoError::TrustSigning {
+        path: file_path.display().to_string(),
+        reason: format!("failed to read file: {e}"),
+    })?;
+
+    let filename = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    sign_policy_bytes(&content, &filename, key_pair, key_id).map_err(|e| match e {
+        NonoError::TrustSigning { reason, .. } => NonoError::TrustSigning {
+            path: file_path.display().to_string(),
+            reason,
+        },
+        other => other,
+    })
+}
+
+/// Shared signing logic for both instruction files and trust policies.
+fn sign_bytes_inner(
+    content: &[u8],
+    filename: &str,
+    key_pair: &KeyPair,
+    key_id: &str,
+    predicate_type: &str,
+) -> Result<String> {
     // Compute SHA-256 digest
     let digest_hash = sha256(content);
     let digest_hex = digest_hash.to_hex();
@@ -152,8 +220,8 @@ pub fn sign_bytes(
         }
     });
 
-    // Create the in-toto statement
-    let statement = dsse::new_instruction_statement(filename, &digest_hex, signer_predicate);
+    // Create the in-toto statement with the appropriate predicate type
+    let statement = dsse::new_statement(filename, &digest_hex, signer_predicate, predicate_type);
 
     // Serialize the statement to JSON (this becomes the DSSE payload)
     let statement_json =
@@ -462,6 +530,113 @@ mod tests {
         let pem = pub_key.to_pem();
         assert!(pem.contains("-----BEGIN PUBLIC KEY-----"));
         assert!(pem.contains("-----END PUBLIC KEY-----"));
+    }
+
+    // -----------------------------------------------------------------------
+    // sign_policy_bytes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sign_policy_bytes_uses_policy_predicate_type() {
+        let kp = generate_signing_key().unwrap();
+        let content = b"{\"publishers\":[]}";
+        let result = sign_policy_bytes(content, "trust-policy.json", &kp, "test-key").unwrap();
+
+        let bundle: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let payload_b64 = bundle["dsseEnvelope"]["payload"].as_str().unwrap();
+        let payload_bytes = base64_decode(payload_b64);
+        let statement: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+
+        assert_eq!(
+            statement["predicateType"].as_str().unwrap(),
+            dsse::NONO_POLICY_PREDICATE_TYPE
+        );
+        assert_eq!(
+            statement["subject"][0]["name"].as_str().unwrap(),
+            "trust-policy.json"
+        );
+    }
+
+    #[test]
+    fn sign_policy_bytes_differs_from_instruction_bytes() {
+        let kp = generate_signing_key().unwrap();
+        let content = b"same content";
+
+        let instruction_bundle = sign_bytes(content, "file.md", &kp, "key").unwrap();
+        let policy_bundle = sign_policy_bytes(content, "file.md", &kp, "key").unwrap();
+
+        // Bundles should differ because predicate types differ
+        let instr_val: serde_json::Value = serde_json::from_str(&instruction_bundle).unwrap();
+        let policy_val: serde_json::Value = serde_json::from_str(&policy_bundle).unwrap();
+
+        let instr_payload = base64_decode(instr_val["dsseEnvelope"]["payload"].as_str().unwrap());
+        let policy_payload = base64_decode(policy_val["dsseEnvelope"]["payload"].as_str().unwrap());
+
+        let instr_stmt: serde_json::Value = serde_json::from_slice(&instr_payload).unwrap();
+        let policy_stmt: serde_json::Value = serde_json::from_slice(&policy_payload).unwrap();
+
+        assert_ne!(
+            instr_stmt["predicateType"].as_str().unwrap(),
+            policy_stmt["predicateType"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn sign_policy_bytes_signature_verifies() {
+        use sigstore_verify::crypto::verification::VerificationKey;
+
+        let kp = generate_signing_key().unwrap();
+        let content = b"{\"publishers\":[],\"enforcement\":\"deny\"}";
+        let result = sign_policy_bytes(content, "trust-policy.json", &kp, "key").unwrap();
+
+        let bundle: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let sig_b64 = bundle["dsseEnvelope"]["signatures"][0]["sig"]
+            .as_str()
+            .unwrap();
+        let sig_bytes = SignatureBytes::from_base64(sig_b64).unwrap();
+
+        let payload_b64 = bundle["dsseEnvelope"]["payload"].as_str().unwrap();
+        let payload_bytes = base64_decode(payload_b64);
+        let pae_bytes = sigstore_verify::types::dsse::pae(IN_TOTO_PAYLOAD_TYPE, &payload_bytes);
+
+        let pub_key = kp.public_key_der().unwrap();
+        let vk = VerificationKey::from_spki(&pub_key, kp.default_scheme()).unwrap();
+        vk.verify(&pae_bytes, &sig_bytes).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // sign_policy_file
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sign_policy_file_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("trust-policy.json");
+        std::fs::write(&file_path, "{\"publishers\":[]}").unwrap();
+
+        let kp = generate_signing_key().unwrap();
+        let result = sign_policy_file(&file_path, &kp, "test-key").unwrap();
+
+        let bundle: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            bundle["dsseEnvelope"]["payloadType"].as_str().unwrap(),
+            IN_TOTO_PAYLOAD_TYPE
+        );
+
+        let payload_b64 = bundle["dsseEnvelope"]["payload"].as_str().unwrap();
+        let payload_bytes = base64_decode(payload_b64);
+        let statement: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        assert_eq!(
+            statement["predicateType"].as_str().unwrap(),
+            dsse::NONO_POLICY_PREDICATE_TYPE
+        );
+    }
+
+    #[test]
+    fn sign_policy_file_nonexistent_returns_error() {
+        let kp = generate_signing_key().unwrap();
+        let result = sign_policy_file(Path::new("/nonexistent/trust-policy.json"), &kp, "key");
+        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------

@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod exec_strategy;
 mod hooks;
+mod instruction_deny;
 mod learn;
 mod output;
 mod policy;
@@ -285,9 +286,6 @@ fn run_sandbox(
         return Ok(());
     }
 
-    #[cfg(not(target_os = "linux"))]
-    let prepared = prepare_sandbox(&args, silent)?;
-    #[cfg(target_os = "linux")]
     let mut prepared = prepare_sandbox(&args, silent)?;
 
     // Compute scan root for trust policy discovery and instruction file scanning.
@@ -299,7 +297,8 @@ fn run_sandbox(
 
     // Pre-exec trust scan: verify instruction files before the agent reads them.
     // Must run BEFORE sandbox application so we can still read bundles and policy.
-    if trust_override {
+    // The trust_policy and scan_result are preserved for macOS deny rule injection.
+    let scan_result = if trust_override {
         if !silent {
             eprintln!(
                 "  {}",
@@ -307,25 +306,38 @@ fn run_sandbox(
                     .yellow()
             );
         }
+        None
     } else {
-        let trust_policy = trust_scan::load_scan_policy(&scan_root)?;
-        let scan_result = trust_scan::run_pre_exec_scan(&scan_root, &trust_policy, silent)?;
-        if !scan_result.results.is_empty() {
+        let trust_policy = trust_scan::load_scan_policy(&scan_root, false)?;
+        let result = trust_scan::run_pre_exec_scan(&scan_root, &trust_policy, silent)?;
+        if !result.results.is_empty() {
             info!(
                 "Trust scan: {} verified, {} blocked, {} warned ({} total files)",
-                scan_result.verified,
-                scan_result.blocked,
-                scan_result.warned,
-                scan_result.results.len()
+                result.verified,
+                result.blocked,
+                result.warned,
+                result.results.len()
             );
         }
-        if !scan_result.should_proceed() {
+        if !result.should_proceed() {
             return Err(NonoError::TrustVerification {
                 path: String::new(),
                 reason: "instruction files failed trust verification".to_string(),
             });
         }
-    }
+
+        // Inject instruction file deny rules into the Seatbelt profile (macOS only).
+        // Deny-regex rules block reading any file matching instruction patterns.
+        // Literal allows re-enable reading for files that passed verification.
+        instruction_deny::inject_instruction_deny_rules(
+            &mut prepared.caps,
+            &trust_policy,
+            &result.verified_paths(),
+        )?;
+
+        Some(result)
+    };
+    let _ = &scan_result; // suppress unused warning on non-macOS
 
     // Enable sandbox extensions for transparent capability expansion in supervised mode.
     // On Linux, seccomp-notify intercepts syscalls at the kernel level -- this flag is
@@ -692,7 +704,7 @@ fn execute_sandboxed(
             });
 
             let trust_interceptor = if !flags.trust_override {
-                trust_scan::load_scan_policy(&flags.scan_root)
+                trust_scan::load_scan_policy(&flags.scan_root, false)
                     .ok()
                     .and_then(|p| {
                         trust_intercept::TrustInterceptor::new(p, flags.scan_root.clone()).ok()

@@ -12,30 +12,47 @@
 use colored::Colorize;
 use nono::trust::{self, Enforcement, TrustPolicy, VerificationOutcome, VerificationResult};
 use nono::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Load the trust policy for scanning, auto-discovering from the given root and user config.
 ///
 /// Checks `root` for `trust-policy.json`, then user config dir, merging if both
 /// exist. Falls back to default policy (deny enforcement) if none found.
 ///
+/// When `trust_override` is false, each discovered policy file must have a valid
+/// `.bundle` sidecar with a verified signature. Unsigned or tampered policies
+/// are rejected.
+///
 /// # Errors
 ///
-/// Returns `NonoError::TrustPolicy` if a found policy file is malformed.
-pub fn load_scan_policy(root: &Path) -> Result<TrustPolicy> {
+/// Returns `NonoError::TrustPolicy` if a found policy file is malformed, or
+/// `NonoError::TrustVerification` if signature verification fails.
+pub fn load_scan_policy(root: &Path, trust_override: bool) -> Result<TrustPolicy> {
     let cwd_policy = root.join("trust-policy.json");
 
     let project = if cwd_policy.exists() {
+        if !trust_override {
+            verify_policy_signature(&cwd_policy)?;
+        }
         Some(trust::load_policy_from_file(&cwd_policy)?)
     } else {
         None
     };
 
-    let user = dirs::config_dir()
-        .map(|d| d.join("nono").join("trust-policy.json"))
-        .filter(|p| p.exists())
-        .map(|p| trust::load_policy_from_file(&p))
-        .transpose()?;
+    let user_path = dirs::config_dir().map(|d| d.join("nono").join("trust-policy.json"));
+
+    let user = if let Some(ref path) = user_path {
+        if path.exists() {
+            if !trust_override {
+                verify_policy_signature(path)?;
+            }
+            Some(trust::load_policy_from_file(path)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     match (user, project) {
         (Some(u), Some(p)) => trust::merge_policies(&[u, p]),
@@ -43,6 +60,114 @@ pub fn load_scan_policy(root: &Path) -> Result<TrustPolicy> {
         (None, Some(p)) => Ok(p),
         (None, None) => Ok(TrustPolicy::default()),
     }
+}
+
+/// Verify that a trust policy file has a valid cryptographic signature.
+///
+/// Checks for a `.bundle` sidecar, loads and verifies it. For keyed bundles,
+/// the public key is looked up from the system keystore via the `key_id` in
+/// the bundle's predicate. For keyless bundles, the Sigstore trusted root is
+/// used.
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustVerification` if the policy is unsigned, tampered,
+/// or the signature fails verification.
+pub fn verify_policy_signature(policy_path: &Path) -> Result<()> {
+    let bundle_path = trust::bundle_path_for(policy_path);
+
+    if !bundle_path.exists() {
+        return Err(nono::NonoError::TrustVerification {
+            path: policy_path.display().to_string(),
+            reason: "trust policy is unsigned (no .bundle sidecar found)".to_string(),
+        });
+    }
+
+    // Load bundle
+    let bundle =
+        trust::load_bundle(&bundle_path).map_err(|e| nono::NonoError::TrustVerification {
+            path: policy_path.display().to_string(),
+            reason: format!("invalid policy bundle: {e}"),
+        })?;
+
+    // Compute file digest
+    let file_digest = trust::file_digest(policy_path)?;
+
+    // Verify digest matches bundle
+    let bundle_digest = crate::trust_cmd::extract_bundle_digest(&bundle).map_err(|e| {
+        nono::NonoError::TrustVerification {
+            path: policy_path.display().to_string(),
+            reason: format!("malformed policy bundle: {e}"),
+        }
+    })?;
+
+    if bundle_digest != file_digest {
+        return Err(nono::NonoError::TrustVerification {
+            path: policy_path.display().to_string(),
+            reason: "trust policy has been modified since signing (digest mismatch)".to_string(),
+        });
+    }
+
+    // Extract signer identity
+    let identity = trust::extract_signer_identity(&bundle, &bundle_path).map_err(|e| {
+        nono::NonoError::TrustVerification {
+            path: policy_path.display().to_string(),
+            reason: format!("no signer identity in policy bundle: {e}"),
+        }
+    })?;
+
+    // Cryptographic verification
+    match &identity {
+        trust::SignerIdentity::Keyed { key_id } => {
+            // Load public key from keystore
+            let key_pair = crate::trust_cmd::load_signing_key(key_id).map_err(|e| {
+                nono::NonoError::TrustVerification {
+                    path: policy_path.display().to_string(),
+                    reason: format!(
+                        "cannot load signing key '{key_id}' for policy verification: {e}"
+                    ),
+                }
+            })?;
+
+            let pub_key = trust::export_public_key(&key_pair).map_err(|e| {
+                nono::NonoError::TrustVerification {
+                    path: policy_path.display().to_string(),
+                    reason: format!("failed to export public key: {e}"),
+                }
+            })?;
+
+            trust::verify_keyed_signature(&bundle, pub_key.as_bytes(), &bundle_path).map_err(
+                |e| nono::NonoError::TrustVerification {
+                    path: policy_path.display().to_string(),
+                    reason: format!("policy signature verification failed: {e}"),
+                },
+            )?;
+        }
+        trust::SignerIdentity::Keyless { .. } => {
+            let trusted_root = trust::load_production_trusted_root().map_err(|e| {
+                nono::NonoError::TrustVerification {
+                    path: policy_path.display().to_string(),
+                    reason: format!("failed to load Sigstore trusted root: {e}"),
+                }
+            })?;
+
+            let sigstore_policy = trust::VerificationPolicy::default();
+
+            trust::verify_bundle_with_digest(
+                &file_digest,
+                &bundle,
+                &trusted_root,
+                &sigstore_policy,
+                policy_path,
+            )
+            .map_err(|e| nono::NonoError::TrustVerification {
+                path: policy_path.display().to_string(),
+                reason: format!("policy Sigstore verification failed: {e}"),
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Result of a pre-exec trust scan.
@@ -62,6 +187,19 @@ impl ScanResult {
     #[must_use]
     pub fn should_proceed(&self) -> bool {
         self.blocked == 0
+    }
+
+    /// Collect the absolute paths of all verified instruction files.
+    ///
+    /// These paths are used on macOS to inject literal `(allow file-read-data ...)`
+    /// rules that override the deny-regex for instruction file patterns.
+    #[must_use]
+    pub fn verified_paths(&self) -> Vec<PathBuf> {
+        self.results
+            .iter()
+            .filter(|r| r.outcome.is_verified())
+            .map(|r| r.path.clone())
+            .collect()
     }
 }
 
@@ -526,6 +664,84 @@ mod tests {
         let result = run_pre_exec_scan(dir.path(), &policy, true).unwrap();
         assert!(result.should_proceed());
         assert_eq!(result.warned, 2);
+    }
+
+    #[test]
+    fn verified_paths_returns_only_verified() {
+        let results = vec![
+            VerificationResult {
+                path: PathBuf::from("/tmp/SKILLS.md"),
+                digest: "abc".to_string(),
+                outcome: VerificationOutcome::Verified {
+                    publisher: "test (keyed)".to_string(),
+                },
+            },
+            VerificationResult {
+                path: PathBuf::from("/tmp/CLAUDE.md"),
+                digest: "def".to_string(),
+                outcome: VerificationOutcome::Unsigned,
+            },
+            VerificationResult {
+                path: PathBuf::from("/tmp/AGENT.MD"),
+                digest: "ghi".to_string(),
+                outcome: VerificationOutcome::Verified {
+                    publisher: "ci (keyless)".to_string(),
+                },
+            },
+        ];
+
+        let scan = ScanResult {
+            results,
+            verified: 2,
+            blocked: 0,
+            warned: 1,
+        };
+
+        let paths = scan.verified_paths();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], PathBuf::from("/tmp/SKILLS.md"));
+        assert_eq!(paths[1], PathBuf::from("/tmp/AGENT.MD"));
+    }
+
+    #[test]
+    fn verified_paths_empty_when_none_verified() {
+        let scan = ScanResult {
+            results: vec![VerificationResult {
+                path: PathBuf::from("/tmp/SKILLS.md"),
+                digest: "abc".to_string(),
+                outcome: VerificationOutcome::Unsigned,
+            }],
+            verified: 0,
+            blocked: 0,
+            warned: 1,
+        };
+        assert!(scan.verified_paths().is_empty());
+    }
+
+    #[test]
+    fn load_scan_policy_with_trust_override_skips_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a policy file with no .bundle — should still load with trust_override=true
+        std::fs::write(
+            dir.path().join("trust-policy.json"),
+            r#"{"version":1,"instruction_patterns":["SKILLS*","CLAUDE*"],"publishers":[],"blocklist":{"digests":[],"publishers":[]},"enforcement":"warn"}"#,
+        )
+        .unwrap();
+
+        let policy = load_scan_policy(dir.path(), true).unwrap();
+        assert_eq!(policy.enforcement, Enforcement::Warn);
+    }
+
+    #[test]
+    fn verify_policy_signature_missing_bundle_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("trust-policy.json");
+        std::fs::write(&policy_path, "{}").unwrap();
+
+        let result = verify_policy_signature(&policy_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unsigned"));
     }
 
     #[test]

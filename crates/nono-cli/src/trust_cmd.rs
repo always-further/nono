@@ -3,7 +3,8 @@
 //! Implements `nono trust sign|verify|list|keygen` subcommands.
 
 use crate::cli::{
-    TrustArgs, TrustCommands, TrustKeygenArgs, TrustListArgs, TrustSignArgs, TrustVerifyArgs,
+    TrustArgs, TrustCommands, TrustKeygenArgs, TrustListArgs, TrustSignArgs, TrustSignPolicyArgs,
+    TrustVerifyArgs,
 };
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
@@ -20,6 +21,7 @@ const TRUST_SERVICE: &str = "nono-trust";
 pub fn run_trust(args: TrustArgs) -> Result<()> {
     match args.command {
         TrustCommands::Sign(sign_args) => run_sign(sign_args),
+        TrustCommands::SignPolicy(sign_policy_args) => run_sign_policy(sign_policy_args),
         TrustCommands::Verify(verify_args) => run_verify(verify_args),
         TrustCommands::List(list_args) => run_list(list_args),
         TrustCommands::Keygen(keygen_args) => run_keygen(keygen_args),
@@ -145,6 +147,48 @@ fn run_sign(args: TrustSignArgs) -> Result<()> {
             reason: format!("{fail_count} file(s) failed to sign"),
         });
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// sign-policy
+// ---------------------------------------------------------------------------
+
+fn run_sign_policy(args: TrustSignPolicyArgs) -> Result<()> {
+    let key_id = args.key.as_deref().unwrap_or("default");
+
+    // Load the signing key from keystore
+    let key_pair = load_signing_key(key_id)?;
+
+    // Resolve the policy file path
+    let policy_path = match args.file {
+        Some(path) => path,
+        None => {
+            let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
+            let default_path = cwd.join("trust-policy.json");
+            if !default_path.exists() {
+                return Err(nono::NonoError::TrustSigning {
+                    path: default_path.display().to_string(),
+                    reason: "trust-policy.json not found in current directory".to_string(),
+                });
+            }
+            default_path
+        }
+    };
+
+    let bundle_json = trust::sign_policy_file(&policy_path, &key_pair, key_id)?;
+    trust::write_bundle(&policy_path, &bundle_json)?;
+    let bundle_path = trust::bundle_path_for(&policy_path);
+
+    eprintln!(
+        "  {} {} -> {}",
+        "SIGNED".green(),
+        policy_path.display(),
+        bundle_path.display()
+    );
+    eprintln!();
+    eprintln!("{}", "Trust policy signed successfully.".green());
 
     Ok(())
 }
@@ -285,7 +329,7 @@ fn verify_single_file(
     Ok(format_identity(&identity))
 }
 
-fn extract_bundle_digest(bundle: &trust::Bundle) -> std::result::Result<String, String> {
+pub(crate) fn extract_bundle_digest(bundle: &trust::Bundle) -> std::result::Result<String, String> {
     // Access the DSSE envelope content from the bundle
     let bundle_json = bundle
         .to_json()
@@ -392,7 +436,7 @@ fn run_list(args: TrustListArgs) -> Result<()> {
 // Key loading from system keystore
 // ---------------------------------------------------------------------------
 
-fn load_signing_key(key_id: &str) -> Result<trust::KeyPair> {
+pub(crate) fn load_signing_key(key_id: &str) -> Result<trust::KeyPair> {
     let entry = keyring::Entry::new(TRUST_SERVICE, key_id)
         .map_err(|e| nono::NonoError::KeystoreAccess(format!("failed to access keystore: {e}")))?;
 
@@ -410,7 +454,7 @@ fn load_signing_key(key_id: &str) -> Result<trust::KeyPair> {
     reconstruct_key_pair(&pkcs8_bytes)
 }
 
-fn reconstruct_key_pair(pkcs8_bytes: &[u8]) -> Result<trust::KeyPair> {
+pub(crate) fn reconstruct_key_pair(pkcs8_bytes: &[u8]) -> Result<trust::KeyPair> {
     let ecdsa_kp =
         EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8_bytes).map_err(|e| {
             nono::NonoError::TrustSigning {
@@ -537,7 +581,7 @@ fn base64_encode(data: &[u8]) -> String {
     result
 }
 
-fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
+pub(crate) fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
     let input = input.trim_end_matches('=');
     let mut buf = Vec::with_capacity(input.len() * 3 / 4);
     let mut accum: u32 = 0;

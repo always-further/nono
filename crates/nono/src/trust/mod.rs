@@ -45,8 +45,9 @@ pub use bundle::{
 };
 pub use digest::{bytes_digest, file_digest};
 pub use dsse::{
-    new_envelope, new_instruction_statement, pae, DsseEnvelope, DsseSignature, InTotoStatement,
-    InTotoSubject, IN_TOTO_PAYLOAD_TYPE, IN_TOTO_STATEMENT_TYPE, NONO_PREDICATE_TYPE,
+    new_envelope, new_instruction_statement, new_policy_statement, new_statement, pae,
+    DsseEnvelope, DsseSignature, InTotoStatement, InTotoSubject, IN_TOTO_PAYLOAD_TYPE,
+    IN_TOTO_STATEMENT_TYPE, NONO_POLICY_PREDICATE_TYPE, NONO_PREDICATE_TYPE,
 };
 pub use policy::{
     evaluate_file, find_instruction_files, load_policy_from_file, load_policy_from_str,
@@ -54,7 +55,7 @@ pub use policy::{
 };
 pub use signing::{
     export_public_key, generate_signing_key, key_id_hex, sign_bytes, sign_instruction_file,
-    write_bundle, KeyPair, SigningScheme,
+    sign_policy_bytes, sign_policy_file, write_bundle, KeyPair, SigningScheme,
 };
 pub use types::{
     BlockedPublisher, Blocklist, BlocklistEntry, Enforcement, InstructionPatterns, Publisher,

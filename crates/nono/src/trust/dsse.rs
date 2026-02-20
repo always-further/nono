@@ -23,6 +23,9 @@ pub const IN_TOTO_STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 /// The predicate type for nono instruction file attestations.
 pub const NONO_PREDICATE_TYPE: &str = "https://nono.dev/attestation/instruction-file/v1";
 
+/// The predicate type for nono trust policy attestations.
+pub const NONO_POLICY_PREDICATE_TYPE: &str = "https://nono.dev/attestation/trust-policy/v1";
+
 /// A DSSE (Dead Simple Signing Envelope).
 ///
 /// Contains a base64url-encoded payload, its type identifier, and one or
@@ -364,6 +367,31 @@ pub fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
 // In-toto statement construction helpers
 // ---------------------------------------------------------------------------
 
+/// Create a new in-toto statement with a custom predicate type.
+///
+/// Generic constructor used by both instruction file and trust policy
+/// attestation builders.
+#[must_use]
+pub fn new_statement(
+    subject_name: &str,
+    sha256_digest: &str,
+    predicate: serde_json::Value,
+    predicate_type: &str,
+) -> InTotoStatement {
+    let mut digest = HashMap::new();
+    digest.insert("sha256".to_string(), sha256_digest.to_string());
+
+    InTotoStatement {
+        statement_type: IN_TOTO_STATEMENT_TYPE.to_string(),
+        subject: vec![InTotoSubject {
+            name: subject_name.to_string(),
+            digest,
+        }],
+        predicate_type: predicate_type.to_string(),
+        predicate,
+    }
+}
+
 /// Create a new in-toto statement for a nono instruction file attestation.
 ///
 /// This is used during signing to build the statement that goes into the
@@ -374,18 +402,30 @@ pub fn new_instruction_statement(
     sha256_digest: &str,
     signer_predicate: serde_json::Value,
 ) -> InTotoStatement {
-    let mut digest = HashMap::new();
-    digest.insert("sha256".to_string(), sha256_digest.to_string());
+    new_statement(
+        filename,
+        sha256_digest,
+        signer_predicate,
+        NONO_PREDICATE_TYPE,
+    )
+}
 
-    InTotoStatement {
-        statement_type: IN_TOTO_STATEMENT_TYPE.to_string(),
-        subject: vec![InTotoSubject {
-            name: filename.to_string(),
-            digest,
-        }],
-        predicate_type: NONO_PREDICATE_TYPE.to_string(),
-        predicate: signer_predicate,
-    }
+/// Create a new in-toto statement for a nono trust policy attestation.
+///
+/// Uses the policy-specific predicate type to distinguish policy bundles
+/// from instruction file bundles.
+#[must_use]
+pub fn new_policy_statement(
+    filename: &str,
+    sha256_digest: &str,
+    signer_predicate: serde_json::Value,
+) -> InTotoStatement {
+    new_statement(
+        filename,
+        sha256_digest,
+        signer_predicate,
+        NONO_POLICY_PREDICATE_TYPE,
+    )
 }
 
 /// Create a DSSE envelope wrapping an in-toto statement.
@@ -922,6 +962,32 @@ mod tests {
         // Verify payload roundtrips
         let extracted = envelope.extract_statement().unwrap();
         assert_eq!(extracted.first_subject_name(), Some("SKILLS.md"));
+    }
+
+    #[test]
+    fn new_policy_statement_uses_policy_predicate_type() {
+        let predicate = serde_json::json!({
+            "version": 1,
+            "signer": { "kind": "keyed", "key_id": "test" }
+        });
+        let stmt = new_policy_statement("trust-policy.json", "abcdef", predicate);
+        assert_eq!(stmt.statement_type, IN_TOTO_STATEMENT_TYPE);
+        assert_eq!(stmt.predicate_type, NONO_POLICY_PREDICATE_TYPE);
+        assert_eq!(stmt.subject[0].name, "trust-policy.json");
+        assert_eq!(stmt.subject[0].digest["sha256"], "abcdef");
+    }
+
+    #[test]
+    fn new_statement_accepts_custom_predicate_type() {
+        let predicate = serde_json::json!({"version": 1});
+        let stmt = new_statement("file.txt", "digest", predicate, "custom/type/v1");
+        assert_eq!(stmt.predicate_type, "custom/type/v1");
+        assert_eq!(stmt.subject[0].name, "file.txt");
+    }
+
+    #[test]
+    fn instruction_and_policy_predicate_types_differ() {
+        assert_ne!(NONO_PREDICATE_TYPE, NONO_POLICY_PREDICATE_TYPE);
     }
 
     // -----------------------------------------------------------------------
