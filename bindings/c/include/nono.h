@@ -89,6 +89,10 @@ typedef enum NonoErrorCode {
      */
     NONO_ERROR_CODE_ERR_INVALID_ARG = -12,
     /**
+     * Trust/attestation verification error.
+     */
+    NONO_ERROR_CODE_ERR_TRUST_VERIFICATION = -13,
+    /**
      * Unknown or uncategorized error.
      */
     NONO_ERROR_CODE_ERR_UNKNOWN = -99,

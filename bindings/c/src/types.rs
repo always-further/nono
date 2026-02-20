@@ -144,6 +144,8 @@ pub enum NonoErrorCode {
     ErrIo = -11,
     /// Invalid argument (NULL pointer, invalid UTF-8).
     ErrInvalidArg = -12,
+    /// Trust/attestation verification error.
+    ErrTrustVerification = -13,
     /// Unknown or uncategorized error.
     ErrUnknown = -99,
 }

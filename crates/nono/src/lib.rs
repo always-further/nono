@@ -53,6 +53,7 @@ pub mod query;
 pub mod sandbox;
 pub mod state;
 pub mod supervisor;
+pub mod trust;
 pub mod undo;
 
 // Re-exports for convenience
@@ -64,4 +65,8 @@ pub use sandbox::{Sandbox, SupportInfo};
 pub use state::SandboxState;
 pub use supervisor::{
     ApprovalBackend, ApprovalDecision, CapabilityRequest, NeverGrantChecker, SupervisorSocket,
+};
+pub use trust::{
+    Enforcement, InstructionPatterns, Publisher, SignerIdentity, TrustPolicy, VerificationOutcome,
+    VerificationResult,
 };
