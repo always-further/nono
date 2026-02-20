@@ -75,6 +75,16 @@ impl TrustInterceptor {
     /// Returns `None` if the path is not an instruction file (let the normal
     /// approval flow handle it). Returns `Some(Ok(publisher))` if the file is
     /// verified, or `Some(Err(reason))` if verification fails.
+    ///
+    /// # Known limitation: TOCTOU gap
+    ///
+    /// Between this method returning `Ok(publisher)` and the supervisor opening
+    /// the file to pass the fd, an attacker with write access could atomically
+    /// replace the file (e.g., `rename()` on the same filesystem). The cache
+    /// invalidation checks (inode, mtime, size, digest) mitigate accidental
+    /// mismatches but cannot fully prevent a well-timed atomic swap. On Linux,
+    /// the seccomp-notify path can re-verify the digest at `open()` time for
+    /// stronger guarantees.
     pub fn check_path(&mut self, path: &Path) -> Option<std::result::Result<String, String>> {
         // Bundle sidecars are metadata for instruction files, not instruction files themselves.
         if path.to_string_lossy().ends_with(".bundle") {
@@ -307,12 +317,25 @@ fn load_signer(
 ) -> std::result::Result<trust::SignerIdentity, String> {
     let bundle = trust::load_bundle(bundle_path).map_err(|e| format!("invalid bundle: {e}"))?;
 
+    // Validate predicate type matches instruction file attestation
+    let predicate_type = trust::extract_predicate_type(&bundle, bundle_path)
+        .map_err(|e| format!("failed to extract predicate type: {e}"))?;
+    if predicate_type != trust::NONO_PREDICATE_TYPE {
+        return Err(format!(
+            "wrong bundle type: expected instruction file attestation, got {predicate_type}"
+        ));
+    }
+
+    // Verify subject name matches the file being verified
+    trust::verify_bundle_subject_name(&bundle, file_path)
+        .map_err(|e| format!("subject name mismatch: {e}"))?;
+
     let identity = trust::extract_signer_identity(&bundle, bundle_path)
         .map_err(|e| format!("no signer identity: {e}"))?;
 
     // Verify digest integrity (fail-closed: extraction failure = reject)
-    let bundle_digest =
-        extract_bundle_digest(&bundle).map_err(|e| format!("malformed bundle: {e}"))?;
+    let bundle_digest = trust::extract_bundle_digest(&bundle, bundle_path)
+        .map_err(|e| format!("malformed bundle: {e}"))?;
     if bundle_digest != file_digest {
         return Err("bundle digest does not match file content".to_string());
     }
@@ -323,7 +346,7 @@ fn load_signer(
             let matching = policy.matching_publishers(&identity);
             match matching.iter().find_map(|p| p.public_key.as_ref()) {
                 Some(b64) => {
-                    let key_bytes = base64_decode(b64)
+                    let key_bytes = nono::trust::base64::base64_decode(b64)
                         .map_err(|_| "invalid base64 in publisher public_key".to_string())?;
                     trust::verify_keyed_signature(&bundle, &key_bytes, bundle_path)
                         .map_err(|e| format!("signature verification failed: {e}"))?;
@@ -351,30 +374,6 @@ fn load_signer(
     Ok(identity)
 }
 
-/// Extract the SHA-256 digest from a bundle's DSSE envelope.
-fn extract_bundle_digest(bundle: &trust::Bundle) -> std::result::Result<String, String> {
-    let bundle_json = bundle
-        .to_json()
-        .map_err(|e| format!("failed to serialize bundle: {e}"))?;
-
-    let value: serde_json::Value =
-        serde_json::from_str(&bundle_json).map_err(|e| format!("invalid JSON: {e}"))?;
-
-    let payload_b64 = value["dsseEnvelope"]["payload"]
-        .as_str()
-        .ok_or("missing DSSE payload")?;
-
-    let payload_bytes = base64_decode(payload_b64)?;
-
-    let statement: serde_json::Value =
-        serde_json::from_slice(&payload_bytes).map_err(|e| format!("invalid statement: {e}"))?;
-
-    statement["subject"][0]["digest"]["sha256"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| "no sha256 digest in statement".to_string())
-}
-
 fn format_outcome(outcome: &VerificationOutcome) -> String {
     match outcome {
         VerificationOutcome::Verified { publisher } => format!("verified ({publisher})"),
@@ -388,34 +387,6 @@ fn format_outcome(outcome: &VerificationOutcome) -> String {
             "file content does not match bundle".to_string()
         }
     }
-}
-
-/// Decode standard base64 (with or without padding).
-fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
-    let input = input.trim_end_matches('=');
-    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
-    let mut accum: u32 = 0;
-    let mut bits: u32 = 0;
-
-    for ch in input.chars() {
-        let val = match ch {
-            'A'..='Z' => ch as u32 - b'A' as u32,
-            'a'..='z' => ch as u32 - b'a' as u32 + 26,
-            '0'..='9' => ch as u32 - b'0' as u32 + 52,
-            '+' | '-' => 62,
-            '/' | '_' => 63,
-            _ => return Err(format!("invalid base64 character: '{ch}'")),
-        };
-        accum = (accum << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            buf.push((accum >> bits) as u8);
-            accum &= (1 << bits) - 1;
-        }
-    }
-
-    Ok(buf)
 }
 
 #[cfg(test)]

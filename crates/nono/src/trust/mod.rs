@@ -29,6 +29,7 @@
 //! - Project-level policy cannot weaken user-level enforcement
 //! - No TOFU: files must have valid signatures from trusted publishers on first encounter
 
+pub mod base64;
 pub mod bundle;
 pub mod digest;
 pub mod dsse;
@@ -37,9 +38,10 @@ pub mod signing;
 pub mod types;
 
 pub use bundle::{
-    bundle_path_for, extract_signer_identity, load_bundle, load_bundle_from_str,
-    load_production_trusted_root, load_trusted_root, load_trusted_root_from_str, parse_cert_info,
-    verify_bundle, verify_bundle_keyed, verify_bundle_with_digest, verify_keyed_signature, Bundle,
+    bundle_path_for, extract_bundle_digest, extract_predicate_type, extract_signer_identity,
+    load_bundle, load_bundle_from_str, load_production_trusted_root, load_trusted_root,
+    load_trusted_root_from_str, parse_cert_info, verify_bundle, verify_bundle_keyed,
+    verify_bundle_subject_name, verify_bundle_with_digest, verify_keyed_signature, Bundle,
     CertificateInfo, DerPublicKey, Sha256Hash, SigstoreVerificationResult, TrustedRoot,
     VerificationPolicy,
 };
@@ -59,5 +61,5 @@ pub use signing::{
 };
 pub use types::{
     BlockedPublisher, Blocklist, BlocklistEntry, Enforcement, InstructionPatterns, Publisher,
-    SignerIdentity, TrustPolicy, VerificationOutcome, VerificationResult,
+    SignerIdentity, TrustPolicy, VerificationOutcome, VerificationResult, TRUST_POLICY_VERSION,
 };

@@ -90,16 +90,27 @@ pub fn verify_policy_signature(policy_path: &Path) -> Result<()> {
             reason: format!("invalid policy bundle: {e}"),
         })?;
 
+    // Validate predicate type matches trust policy attestation
+    let predicate_type = trust::extract_predicate_type(&bundle, &bundle_path).map_err(|e| {
+        nono::NonoError::TrustVerification {
+            path: policy_path.display().to_string(),
+            reason: format!("failed to extract predicate type: {e}"),
+        }
+    })?;
+    if predicate_type != trust::NONO_POLICY_PREDICATE_TYPE {
+        return Err(nono::NonoError::TrustVerification {
+            path: policy_path.display().to_string(),
+            reason: format!(
+                "wrong bundle type: expected trust policy attestation, got {predicate_type}"
+            ),
+        });
+    }
+
     // Compute file digest
     let file_digest = trust::file_digest(policy_path)?;
 
     // Verify digest matches bundle
-    let bundle_digest = crate::trust_cmd::extract_bundle_digest(&bundle).map_err(|e| {
-        nono::NonoError::TrustVerification {
-            path: policy_path.display().to_string(),
-            reason: format!("malformed policy bundle: {e}"),
-        }
-    })?;
+    let bundle_digest = trust::extract_bundle_digest(&bundle, &bundle_path)?;
 
     if bundle_digest != file_digest {
         return Err(nono::NonoError::TrustVerification {
@@ -119,29 +130,22 @@ pub fn verify_policy_signature(policy_path: &Path) -> Result<()> {
     // Cryptographic verification
     match &identity {
         trust::SignerIdentity::Keyed { key_id } => {
-            // Load public key from keystore
-            let key_pair = crate::trust_cmd::load_signing_key(key_id).map_err(|e| {
+            // Load only the public key from keystore (no private key in memory)
+            let pub_key_bytes = crate::trust_cmd::load_public_key_bytes(key_id).map_err(|e| {
                 nono::NonoError::TrustVerification {
                     path: policy_path.display().to_string(),
                     reason: format!(
-                        "cannot load signing key '{key_id}' for policy verification: {e}"
+                        "cannot load public key '{key_id}' for policy verification: {e}"
                     ),
                 }
             })?;
 
-            let pub_key = trust::export_public_key(&key_pair).map_err(|e| {
+            trust::verify_keyed_signature(&bundle, &pub_key_bytes, &bundle_path).map_err(|e| {
                 nono::NonoError::TrustVerification {
                     path: policy_path.display().to_string(),
-                    reason: format!("failed to export public key: {e}"),
+                    reason: format!("policy signature verification failed: {e}"),
                 }
             })?;
-
-            trust::verify_keyed_signature(&bundle, pub_key.as_bytes(), &bundle_path).map_err(
-                |e| nono::NonoError::TrustVerification {
-                    path: policy_path.display().to_string(),
-                    reason: format!("policy signature verification failed: {e}"),
-                },
-            )?;
         }
         trust::SignerIdentity::Keyless { .. } => {
             let trusted_root = trust::load_production_trusted_root().map_err(|e| {
@@ -332,6 +336,27 @@ fn load_and_extract_signer(
             detail: format!("invalid bundle: {e}"),
         })?;
 
+    // Validate predicate type matches instruction file attestation
+    let predicate_type = trust::extract_predicate_type(&bundle, bundle_path).map_err(|e| {
+        VerificationOutcome::InvalidSignature {
+            detail: format!("failed to extract predicate type: {e}"),
+        }
+    })?;
+    if predicate_type != trust::NONO_PREDICATE_TYPE {
+        return Err(VerificationOutcome::InvalidSignature {
+            detail: format!(
+                "wrong bundle type: expected instruction file attestation, got {predicate_type}"
+            ),
+        });
+    }
+
+    // Verify subject name matches the file being verified
+    trust::verify_bundle_subject_name(&bundle, file_path).map_err(|e| {
+        VerificationOutcome::InvalidSignature {
+            detail: format!("subject name mismatch: {e}"),
+        }
+    })?;
+
     // Extract signer identity
     let identity = trust::extract_signer_identity(&bundle, bundle_path).map_err(|e| {
         VerificationOutcome::InvalidSignature {
@@ -340,7 +365,11 @@ fn load_and_extract_signer(
     })?;
 
     // Verify bundle digest matches file content (fail-closed: extraction failure = reject)
-    let bundle_digest = extract_statement_digest(&bundle)?;
+    let bundle_digest = trust::extract_bundle_digest(&bundle, bundle_path).map_err(|e| {
+        VerificationOutcome::InvalidSignature {
+            detail: format!("{e}"),
+        }
+    })?;
     if bundle_digest != file_digest {
         return Err(VerificationOutcome::DigestMismatch {
             expected: bundle_digest,
@@ -415,48 +444,6 @@ fn verify_keyless_crypto(
 
     let _ = bundle_path; // used for context in caller
     Ok(())
-}
-
-/// Extract the SHA-256 digest from a bundle's DSSE envelope statement.
-fn extract_statement_digest(
-    bundle: &trust::Bundle,
-) -> std::result::Result<String, VerificationOutcome> {
-    let bundle_json = bundle
-        .to_json()
-        .map_err(|e| VerificationOutcome::InvalidSignature {
-            detail: format!("failed to serialize bundle: {e}"),
-        })?;
-
-    let value: serde_json::Value =
-        serde_json::from_str(&bundle_json).map_err(|_| VerificationOutcome::InvalidSignature {
-            detail: "invalid bundle JSON".to_string(),
-        })?;
-
-    // Decode base64 payload
-    let payload_b64 =
-        value["dsseEnvelope"]["payload"]
-            .as_str()
-            .ok_or(VerificationOutcome::InvalidSignature {
-                detail: "missing DSSE payload".to_string(),
-            })?;
-
-    let payload_bytes =
-        base64_decode(payload_b64).map_err(|_| VerificationOutcome::InvalidSignature {
-            detail: "invalid base64 in DSSE payload".to_string(),
-        })?;
-
-    let statement: serde_json::Value = serde_json::from_slice(&payload_bytes).map_err(|_| {
-        VerificationOutcome::InvalidSignature {
-            detail: "invalid statement JSON in payload".to_string(),
-        }
-    })?;
-
-    statement["subject"][0]["digest"]["sha256"]
-        .as_str()
-        .map(String::from)
-        .ok_or(VerificationOutcome::InvalidSignature {
-            detail: "no sha256 digest in statement subject".to_string(),
-        })
 }
 
 // ---------------------------------------------------------------------------
@@ -539,30 +526,7 @@ fn print_scan_summary(verified: u32, blocked: u32, warned: u32, enforcement: Enf
 
 /// Decode standard base64 (with or without padding).
 fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
-    let input = input.trim_end_matches('=');
-    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
-    let mut accum: u32 = 0;
-    let mut bits: u32 = 0;
-
-    for ch in input.chars() {
-        let val = match ch {
-            'A'..='Z' => ch as u32 - b'A' as u32,
-            'a'..='z' => ch as u32 - b'a' as u32 + 26,
-            '0'..='9' => ch as u32 - b'0' as u32 + 52,
-            '+' | '-' => 62,
-            '/' | '_' => 63,
-            _ => return Err(()),
-        };
-        accum = (accum << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            buf.push((accum >> bits) as u8);
-            accum &= (1 << bits) - 1;
-        }
-    }
-
-    Ok(buf)
+    nono::trust::base64::base64_decode(input).map_err(|_| ())
 }
 
 fn format_identity(identity: &trust::SignerIdentity) -> String {

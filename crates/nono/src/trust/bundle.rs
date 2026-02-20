@@ -294,6 +294,206 @@ pub fn verify_keyed_signature(
 }
 
 // ---------------------------------------------------------------------------
+// Bundle digest extraction
+// ---------------------------------------------------------------------------
+
+/// Extract the SHA-256 digest from a bundle's DSSE envelope payload.
+///
+/// Parses the bundle's DSSE envelope, decodes the base64 payload as an
+/// in-toto statement, and returns the `subject[0].digest.sha256` value.
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustVerification` if the bundle cannot be serialized,
+/// the DSSE payload is missing or malformed, or the statement lacks a digest.
+pub fn extract_bundle_digest(bundle: &Bundle, bundle_path: &Path) -> Result<String> {
+    let bundle_json = bundle.to_json().map_err(|e| NonoError::TrustVerification {
+        path: bundle_path.display().to_string(),
+        reason: format!("failed to serialize bundle: {e}"),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&bundle_json).map_err(|e| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: format!("invalid bundle JSON: {e}"),
+        })?;
+
+    let payload_b64 =
+        value["dsseEnvelope"]["payload"]
+            .as_str()
+            .ok_or_else(|| NonoError::TrustVerification {
+                path: bundle_path.display().to_string(),
+                reason: "missing DSSE payload".to_string(),
+            })?;
+
+    let payload_bytes =
+        sigstore_verify::types::PayloadBytes::from_base64(payload_b64).map_err(|e| {
+            NonoError::TrustVerification {
+                path: bundle_path.display().to_string(),
+                reason: format!("invalid DSSE payload encoding: {e}"),
+            }
+        })?;
+
+    let payload_str = std::str::from_utf8(payload_bytes.as_bytes()).map_err(|e| {
+        NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: format!("DSSE payload is not UTF-8: {e}"),
+        }
+    })?;
+
+    let statement: serde_json::Value =
+        serde_json::from_str(payload_str).map_err(|e| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: format!("invalid statement JSON: {e}"),
+        })?;
+
+    statement["subject"][0]["digest"]["sha256"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: "no sha256 digest in statement subject".to_string(),
+        })
+}
+
+/// Verify that the bundle's in-toto subject name matches the expected filename.
+///
+/// Extracts `subject[0].name` from the DSSE payload and compares it against
+/// the filename component of `expected_path`. This prevents bundle-swapping
+/// attacks where a valid bundle signed for file A is used to vouch for file B.
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustVerification` if the subject name cannot be extracted
+/// or does not match the expected filename.
+pub fn verify_bundle_subject_name(bundle: &Bundle, expected_path: &Path) -> Result<()> {
+    let bundle_json = bundle.to_json().map_err(|e| NonoError::TrustVerification {
+        path: expected_path.display().to_string(),
+        reason: format!("failed to serialize bundle: {e}"),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&bundle_json).map_err(|e| NonoError::TrustVerification {
+            path: expected_path.display().to_string(),
+            reason: format!("invalid bundle JSON: {e}"),
+        })?;
+
+    let payload_b64 =
+        value["dsseEnvelope"]["payload"]
+            .as_str()
+            .ok_or_else(|| NonoError::TrustVerification {
+                path: expected_path.display().to_string(),
+                reason: "missing DSSE payload".to_string(),
+            })?;
+
+    let payload_bytes =
+        sigstore_verify::types::PayloadBytes::from_base64(payload_b64).map_err(|e| {
+            NonoError::TrustVerification {
+                path: expected_path.display().to_string(),
+                reason: format!("invalid DSSE payload encoding: {e}"),
+            }
+        })?;
+
+    let payload_str = std::str::from_utf8(payload_bytes.as_bytes()).map_err(|e| {
+        NonoError::TrustVerification {
+            path: expected_path.display().to_string(),
+            reason: format!("DSSE payload is not UTF-8: {e}"),
+        }
+    })?;
+
+    let statement: serde_json::Value =
+        serde_json::from_str(payload_str).map_err(|e| NonoError::TrustVerification {
+            path: expected_path.display().to_string(),
+            reason: format!("invalid statement JSON: {e}"),
+        })?;
+
+    let subject_name =
+        statement["subject"][0]["name"]
+            .as_str()
+            .ok_or_else(|| NonoError::TrustVerification {
+                path: expected_path.display().to_string(),
+                reason: "no subject name in statement".to_string(),
+            })?;
+
+    let expected_name = expected_path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+
+    if subject_name != expected_name.as_ref() {
+        return Err(NonoError::TrustVerification {
+            path: expected_path.display().to_string(),
+            reason: format!(
+                "bundle subject name '{}' does not match expected filename '{}'",
+                subject_name, expected_name
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Predicate type extraction
+// ---------------------------------------------------------------------------
+
+/// Extract the `predicateType` from a bundle's DSSE envelope payload.
+///
+/// Returns the predicate type string (e.g., `nono.dev/attestation/instruction-file/v1`
+/// or `nono.dev/attestation/trust-policy/v1`).
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustVerification` if the bundle cannot be parsed or
+/// the predicate type is missing.
+pub fn extract_predicate_type(bundle: &Bundle, bundle_path: &Path) -> Result<String> {
+    let bundle_json = bundle.to_json().map_err(|e| NonoError::TrustVerification {
+        path: bundle_path.display().to_string(),
+        reason: format!("failed to serialize bundle: {e}"),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&bundle_json).map_err(|e| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: format!("invalid bundle JSON: {e}"),
+        })?;
+
+    let payload_b64 =
+        value["dsseEnvelope"]["payload"]
+            .as_str()
+            .ok_or_else(|| NonoError::TrustVerification {
+                path: bundle_path.display().to_string(),
+                reason: "missing DSSE payload".to_string(),
+            })?;
+
+    let payload_bytes =
+        sigstore_verify::types::PayloadBytes::from_base64(payload_b64).map_err(|e| {
+            NonoError::TrustVerification {
+                path: bundle_path.display().to_string(),
+                reason: format!("invalid DSSE payload encoding: {e}"),
+            }
+        })?;
+
+    let payload_str = std::str::from_utf8(payload_bytes.as_bytes()).map_err(|e| {
+        NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: format!("DSSE payload is not UTF-8: {e}"),
+        }
+    })?;
+
+    let statement: serde_json::Value =
+        serde_json::from_str(payload_str).map_err(|e| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: format!("invalid statement JSON: {e}"),
+        })?;
+
+    statement["predicateType"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: "missing predicateType in statement".to_string(),
+        })
+}
+
+// ---------------------------------------------------------------------------
 // Identity extraction
 // ---------------------------------------------------------------------------
 
@@ -403,9 +603,15 @@ fn extract_identity_from_cert(cert_der: &[u8], bundle_path: &Path) -> Result<Sig
     // Extract extended Fulcio OIDs from the raw certificate
     let extensions = extract_fulcio_extensions(cert_der, bundle_path)?;
 
+    let repository = extensions.repository.ok_or_else(|| NonoError::TrustVerification {
+        path: bundle_path.display().to_string(),
+        reason: "signing certificate missing source repository extension (OID 1.3.6.1.4.1.57264.1.8)"
+            .to_string(),
+    })?;
+
     Ok(SignerIdentity::Keyless {
         issuer,
-        repository: extensions.repository.unwrap_or_default(),
+        repository,
         workflow: extensions.workflow.unwrap_or_default(),
         git_ref: extensions.git_ref.unwrap_or_default(),
     })

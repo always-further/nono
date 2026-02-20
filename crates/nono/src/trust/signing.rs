@@ -103,7 +103,10 @@ pub fn sign_instruction_file(file_path: &Path, key_pair: &KeyPair, key_id: &str)
     let filename = file_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
+        .ok_or_else(|| NonoError::TrustSigning {
+            path: file_path.display().to_string(),
+            reason: "path has no filename component".to_string(),
+        })?;
 
     sign_bytes(&content, &filename, key_pair, key_id).map_err(|e| match e {
         NonoError::TrustSigning { reason, .. } => NonoError::TrustSigning {
@@ -188,7 +191,10 @@ pub fn sign_policy_file(file_path: &Path, key_pair: &KeyPair, key_id: &str) -> R
     let filename = file_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
+        .ok_or_else(|| NonoError::TrustSigning {
+            path: file_path.display().to_string(),
+            reason: "path has no filename component".to_string(),
+        })?;
 
     sign_policy_bytes(&content, &filename, key_pair, key_id).map_err(|e| match e {
         NonoError::TrustSigning { reason, .. } => NonoError::TrustSigning {
@@ -258,7 +264,12 @@ fn sign_bytes_inner(
     // Build the key hint from the public key hash
     let hint = key_id_hex(key_pair)?;
 
-    // Construct the Sigstore bundle
+    // Construct the Sigstore bundle.
+    // Keyed bundles omit tlog_entries because Rekor transparency log integration
+    // is only used for keyless (Fulcio/OIDC) workflows where the signing certificate
+    // is short-lived and the Rekor entry provides a signed timestamp proving the
+    // signature was created during the certificate's validity window. For keyed
+    // bundles, the long-lived key provides its own trust anchor.
     let bundle = Bundle {
         media_type: MediaType::Bundle0_3.as_str().to_string(),
         verification_material: VerificationMaterial {

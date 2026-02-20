@@ -117,6 +117,10 @@ pub fn glob_to_seatbelt_regex(pattern: &str) -> Result<String> {
                 regex.push_str("\\\\");
                 i += 1;
             }
+            '"' => {
+                regex.push_str("\\\"");
+                i += 1;
+            }
             '/' => {
                 regex.push('/');
                 i += 1;
@@ -183,9 +187,15 @@ pub fn inject_instruction_deny_rules(
 ///
 /// On macOS, if the path contains symlinks (e.g., `/tmp` -> `/private/tmp`),
 /// emits rules for both the original and resolved paths.
+///
+/// Rejects paths containing characters that would break Seatbelt literal syntax
+/// (`"` and `\`), since these are not legitimate instruction file path characters
+/// and could allow sandbox rule injection.
 #[cfg(target_os = "macos")]
 fn add_literal_allow(caps: &mut CapabilitySet, path: &Path) -> Result<()> {
     let path_str = path.display().to_string();
+    validate_seatbelt_path(&path_str)?;
+
     let allow_rule = format!("(allow file-read-data (literal \"{path_str}\"))");
     caps.add_platform_rule(allow_rule)?;
 
@@ -193,11 +203,27 @@ fn add_literal_allow(caps: &mut CapabilitySet, path: &Path) -> Result<()> {
     if let Ok(canonical) = std::fs::canonicalize(path) {
         if canonical != path {
             let canonical_str = canonical.display().to_string();
+            validate_seatbelt_path(&canonical_str)?;
             let canonical_rule = format!("(allow file-read-data (literal \"{canonical_str}\"))");
             caps.add_platform_rule(canonical_rule)?;
         }
     }
 
+    Ok(())
+}
+
+/// Reject paths containing characters that would break out of Seatbelt string literals.
+///
+/// On macOS/HFS+, `"` is legal in filenames but would terminate a Seatbelt `(literal "...")`
+/// string, allowing injection of arbitrary sandbox rules. `\` could be used for escape
+/// sequence injection. Both are rejected.
+#[cfg(target_os = "macos")]
+fn validate_seatbelt_path(path_str: &str) -> Result<()> {
+    if path_str.contains('"') || path_str.contains('\\') {
+        return Err(nono::NonoError::ConfigParse(format!(
+            "path contains characters not permitted in Seatbelt rules: {path_str}"
+        )));
+    }
     Ok(())
 }
 
@@ -264,6 +290,31 @@ mod tests {
     fn glob_double_star_at_start() {
         let rule = glob_to_seatbelt_regex("**/*.md").unwrap();
         assert_eq!(rule, "(deny file-read-data (regex #\"/.*/[^/]*\\.md$\"))");
+    }
+
+    #[test]
+    fn glob_quote_escaped_in_regex() {
+        let rule = glob_to_seatbelt_regex("test\"file.md").unwrap();
+        assert!(rule.contains("\\\""));
+        assert!(!rule.contains("\"test"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn literal_allow_rejects_path_with_quote() {
+        let mut caps = CapabilitySet::new();
+        let bad_path = Path::new("/tmp/SKILLS\") (allow file-write* (subpath \"/\")) ;.md");
+        let result = add_literal_allow(&mut caps, bad_path);
+        assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn literal_allow_rejects_path_with_backslash() {
+        let mut caps = CapabilitySet::new();
+        let bad_path = Path::new("/tmp/SKILLS\\.md");
+        let result = add_literal_allow(&mut caps, bad_path);
+        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------

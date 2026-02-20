@@ -451,62 +451,8 @@ pub fn new_envelope(statement: &InTotoStatement) -> Result<DsseEnvelope> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Base64url helpers (no padding, URL-safe alphabet)
-// ---------------------------------------------------------------------------
-
-/// Encode bytes as base64url (no padding).
-fn base64url_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        result.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
-        }
-        if chunk.len() > 2 {
-            result.push(ALPHABET[(triple & 0x3F) as usize] as char);
-        }
-    }
-    result
-}
-
-/// Decode base64url (no padding) to bytes.
-fn base64url_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
-    // Also accept standard base64 with + and / (some implementations use it)
-    let input = input.trim_end_matches('=');
-
-    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
-    let mut accum: u32 = 0;
-    let mut bits: u32 = 0;
-
-    for ch in input.chars() {
-        let val = match ch {
-            'A'..='Z' => ch as u32 - b'A' as u32,
-            'a'..='z' => ch as u32 - b'a' as u32 + 26,
-            '0'..='9' => ch as u32 - b'0' as u32 + 52,
-            '-' | '+' => 62,
-            '_' | '/' => 63,
-            _ => return Err(format!("invalid base64url character: '{ch}'")),
-        };
-        accum = (accum << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            buf.push((accum >> bits) as u8);
-            accum &= (1 << bits) - 1;
-        }
-    }
-
-    Ok(buf)
-}
+// Base64url helpers delegated to the shared base64 module
+use super::base64::{base64url_decode, base64url_encode};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -578,69 +524,6 @@ mod tests {
         let payload = vec![0x00, 0x01, 0xFF, 0xFE];
         let result = pae("binary", &payload);
         assert!(result.ends_with(&payload));
-    }
-
-    // -----------------------------------------------------------------------
-    // Base64url
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn base64url_roundtrip() {
-        let data = b"hello world";
-        let encoded = base64url_encode(data);
-        let decoded = base64url_decode(&encoded).unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn base64url_empty() {
-        let encoded = base64url_encode(b"");
-        assert_eq!(encoded, "");
-        let decoded = base64url_decode("").unwrap();
-        assert!(decoded.is_empty());
-    }
-
-    #[test]
-    fn base64url_known_value() {
-        // "hello" -> "aGVsbG8" in base64url without padding
-        let encoded = base64url_encode(b"hello");
-        assert_eq!(encoded, "aGVsbG8");
-    }
-
-    #[test]
-    fn base64url_no_padding() {
-        let encoded = base64url_encode(b"a");
-        assert!(!encoded.contains('='));
-    }
-
-    #[test]
-    fn base64url_url_safe_chars() {
-        // Bytes that would produce + and / in standard base64
-        let data = vec![0xFB, 0xFF, 0xFE];
-        let encoded = base64url_encode(&data);
-        assert!(!encoded.contains('+'));
-        assert!(!encoded.contains('/'));
-    }
-
-    #[test]
-    fn base64url_decode_with_padding() {
-        // Should handle padding gracefully
-        let decoded = base64url_decode("aGVsbG8=").unwrap();
-        assert_eq!(decoded, b"hello");
-    }
-
-    #[test]
-    fn base64url_decode_standard_alphabet() {
-        // Should accept + and / as well as - and _
-        let decoded_url = base64url_decode("a-b_").unwrap();
-        let decoded_std = base64url_decode("a+b/").unwrap();
-        assert_eq!(decoded_url, decoded_std);
-    }
-
-    #[test]
-    fn base64url_decode_invalid_char() {
-        let result = base64url_decode("invalid!");
-        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------

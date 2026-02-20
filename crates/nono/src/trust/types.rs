@@ -8,6 +8,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Current supported trust policy format version.
+pub const TRUST_POLICY_VERSION: u32 = 1;
+
 /// Trust policy for instruction file verification.
 ///
 /// Loaded from `trust-policy.json` files at embedded, user, and project levels.
@@ -45,6 +48,21 @@ impl Default for TrustPolicy {
 }
 
 impl TrustPolicy {
+    /// Validate the policy version is supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NonoError::TrustPolicy` if the version is not supported.
+    pub fn validate_version(&self) -> Result<()> {
+        if self.version != TRUST_POLICY_VERSION {
+            return Err(NonoError::TrustPolicy(format!(
+                "unsupported trust policy version {} (expected {})",
+                self.version, TRUST_POLICY_VERSION
+            )));
+        }
+        Ok(())
+    }
+
     /// Build an [`InstructionPatterns`] matcher from this policy's patterns.
     ///
     /// # Errors
@@ -152,19 +170,54 @@ impl Publisher {
     }
 }
 
-/// Simple wildcard matching for publisher patterns.
+/// Wildcard matching for publisher patterns.
 ///
-/// Supports `*` as a suffix wildcard (e.g., `org/*` matches `org/repo`)
-/// or a literal `*` to match anything. All other patterns require exact match.
+/// Supports `*` as a wildcard that matches any substring. Works for:
+/// - `*` matches anything
+/// - `org/*` matches `org/repo` (suffix wildcard)
+/// - `*.example.com` matches `sub.example.com` (prefix wildcard)
+/// - `org/*/repo` matches `org/team/repo` (interior wildcard)
+/// - Multiple wildcards: `org/*/sub/*` matches `org/a/sub/b`
+/// - No wildcard: exact string match
 fn wildcard_match(pattern: &str, value: &str) -> bool {
     if pattern == "*" {
         return true;
     }
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        value.starts_with(prefix)
-    } else {
-        pattern == value
+    if !pattern.contains('*') {
+        return pattern == value;
     }
+
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut pos = 0usize;
+
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            // First segment must match at the start
+            if !value[pos..].starts_with(part) {
+                return false;
+            }
+            pos = pos.saturating_add(part.len());
+        } else if i == parts.len().saturating_sub(1) {
+            // Last segment must match at the end
+            if !value[pos..].ends_with(part) {
+                return false;
+            }
+            pos = value.len();
+        } else {
+            // Interior segment: find anywhere after current position
+            match value[pos..].find(part) {
+                Some(found) => {
+                    pos = pos.saturating_add(found).saturating_add(part.len());
+                }
+                None => return false,
+            }
+        }
+    }
+
+    true
 }
 
 /// Known-malicious file digests.
@@ -194,10 +247,21 @@ pub struct BlocklistEntry {
 ///
 /// Any signature from a blocked publisher is rejected regardless of
 /// cryptographic validity.
+///
+/// For keyless publishers, `identity` is the OIDC issuer URL and `repository`
+/// optionally narrows the block to a specific repository. If `repository` is
+/// `None`, all identities from that issuer are blocked.
+///
+/// For keyed publishers, `identity` is the key ID.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockedPublisher {
-    /// OIDC issuer URL or key ID pattern
+    /// OIDC issuer URL or key ID
     pub identity: String,
+    /// Source repository pattern (keyless only, optional).
+    /// If present, only this repository from the issuer is blocked.
+    /// If absent, the entire issuer is blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     /// Human-readable reason for blocking
     pub reason: String,
     /// Date the entry was added (ISO 8601 date string)
@@ -553,6 +617,48 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_match_interior() {
+        // Interior wildcard: org/*/repo
+        assert!(wildcard_match("org/*/repo", "org/team/repo"));
+        assert!(!wildcard_match("org/*/repo", "org/team/other"));
+    }
+
+    #[test]
+    fn wildcard_match_prefix() {
+        // Prefix wildcard: *.example.com
+        assert!(wildcard_match("*.example.com", "sub.example.com"));
+        assert!(wildcard_match("*.example.com", "deep.sub.example.com"));
+        assert!(!wildcard_match("*.example.com", "example.org"));
+    }
+
+    #[test]
+    fn wildcard_match_multiple() {
+        // Multiple wildcards
+        assert!(wildcard_match("org/*/sub/*", "org/a/sub/b"));
+        assert!(wildcard_match("org/*/sub/*", "org/team/sub/anything"));
+        assert!(!wildcard_match("org/*/sub/*", "org/team/other/b"));
+    }
+
+    #[test]
+    fn wildcard_match_exact() {
+        assert!(wildcard_match("exact", "exact"));
+        assert!(!wildcard_match("exact", "other"));
+    }
+
+    #[test]
+    fn wildcard_match_all() {
+        assert!(wildcard_match("*", "anything"));
+        assert!(wildcard_match("*", ""));
+    }
+
+    #[test]
+    fn wildcard_match_suffix() {
+        assert!(wildcard_match("org/*", "org/repo"));
+        assert!(wildcard_match("org/*", "org/any/thing"));
+        assert!(!wildcard_match("org/*", "other/repo"));
+    }
+
+    #[test]
     fn enforcement_ordering() {
         assert!(Enforcement::Deny > Enforcement::Warn);
         assert!(Enforcement::Warn > Enforcement::Audit);
@@ -651,6 +757,22 @@ mod tests {
         };
         assert!(!keyless.is_keyed());
         assert!(keyless.is_keyless());
+    }
+
+    #[test]
+    fn validate_version_rejects_unsupported() {
+        let mut policy = sample_policy();
+        policy.version = 99;
+        let result = policy.validate_version();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unsupported trust policy version 99"));
+    }
+
+    #[test]
+    fn validate_version_accepts_current() {
+        let policy = sample_policy();
+        assert!(policy.validate_version().is_ok());
     }
 
     #[test]

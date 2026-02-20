@@ -704,11 +704,37 @@ fn execute_sandboxed(
             });
 
             let trust_interceptor = if !flags.trust_override {
-                trust_scan::load_scan_policy(&flags.scan_root, false)
-                    .ok()
-                    .and_then(|p| {
-                        trust_intercept::TrustInterceptor::new(p, flags.scan_root.clone()).ok()
-                    })
+                match trust_scan::load_scan_policy(&flags.scan_root, false) {
+                    Ok(p) => {
+                        match trust_intercept::TrustInterceptor::new(p, flags.scan_root.clone()) {
+                            Ok(interceptor) => Some(interceptor),
+                            Err(e) => {
+                                tracing::warn!("Trust interceptor pattern compilation failed: {e}");
+                                eprintln!(
+                                    "  {}",
+                                    format!(
+                                        "WARNING: Runtime instruction file verification disabled \
+                                     (pattern error: {e})"
+                                    )
+                                    .yellow()
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Trust policy load failed for interceptor: {e}");
+                        eprintln!(
+                            "  {}",
+                            format!(
+                                "WARNING: Runtime instruction file verification disabled \
+                                 (policy error: {e})"
+                            )
+                            .yellow()
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };

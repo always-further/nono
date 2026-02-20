@@ -14,8 +14,11 @@ use nono::Result;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-/// Keystore service name for signing keys
+/// Keystore service name for signing keys (private key material)
 const TRUST_SERVICE: &str = "nono-trust";
+
+/// Keystore service name for public keys (verification-only, no private key material)
+const TRUST_PUB_SERVICE: &str = "nono-trust-pub";
 
 /// Run a trust subcommand.
 pub fn run_trust(args: TrustArgs) -> Result<()> {
@@ -70,7 +73,13 @@ fn run_keygen(args: TrustKeygenArgs) -> Result<()> {
         .set_password(pkcs8_b64.as_str())
         .map_err(|e| nono::NonoError::KeystoreAccess(format!("failed to store key: {e}")))?;
 
+    // Store public key separately so verification never needs the private key
     let pub_key_b64 = base64_encode(pub_key.as_bytes());
+    let pub_entry = keyring::Entry::new(TRUST_PUB_SERVICE, key_id)
+        .map_err(|e| nono::NonoError::KeystoreAccess(format!("failed to access keystore: {e}")))?;
+    pub_entry
+        .set_password(&pub_key_b64)
+        .map_err(|e| nono::NonoError::KeystoreAccess(format!("failed to store public key: {e}")))?;
 
     eprintln!("{}", "Signing key generated successfully.".green());
     eprintln!("  Key ID:      {key_id}");
@@ -270,6 +279,19 @@ fn verify_single_file(
     // Load bundle
     let bundle = trust::load_bundle(&bundle_path).map_err(|e| format!("invalid bundle: {e}"))?;
 
+    // Validate predicate type matches instruction file attestation
+    let predicate_type = trust::extract_predicate_type(&bundle, &bundle_path)
+        .map_err(|e| format!("failed to extract predicate type: {e}"))?;
+    if predicate_type != trust::NONO_PREDICATE_TYPE {
+        return Err(format!(
+            "wrong bundle type: expected instruction file attestation, got {predicate_type}"
+        ));
+    }
+
+    // Verify subject name matches the file being verified
+    trust::verify_bundle_subject_name(&bundle, file_path)
+        .map_err(|e| format!("subject name mismatch: {e}"))?;
+
     // Extract signer identity from bundle
     let identity = trust::extract_signer_identity(&bundle, &bundle_path)
         .map_err(|e| format!("no signer identity: {e}"))?;
@@ -289,8 +311,8 @@ fn verify_single_file(
     let file_digest_hex = trust::bytes_digest(&content);
 
     // Verify digest from bundle (fail-closed: extraction failure = reject)
-    let statement_digest =
-        extract_bundle_digest(&bundle).map_err(|e| format!("malformed bundle: {e}"))?;
+    let statement_digest = trust::extract_bundle_digest(&bundle, file_path)
+        .map_err(|e| format!("malformed bundle: {e}"))?;
     if statement_digest != file_digest_hex {
         return Err("bundle digest does not match file content".to_string());
     }
@@ -327,30 +349,6 @@ fn verify_single_file(
     }
 
     Ok(format_identity(&identity))
-}
-
-pub(crate) fn extract_bundle_digest(bundle: &trust::Bundle) -> std::result::Result<String, String> {
-    // Access the DSSE envelope content from the bundle
-    let bundle_json = bundle
-        .to_json()
-        .map_err(|e| format!("failed to serialize bundle: {e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&bundle_json).map_err(|e| format!("invalid JSON: {e}"))?;
-
-    // Navigate to dsseEnvelope.payload, decode, extract subject digest
-    let payload_b64 = value["dsseEnvelope"]["payload"]
-        .as_str()
-        .ok_or("missing DSSE payload")?;
-
-    let payload_bytes = base64_decode(payload_b64).map_err(|e| format!("invalid base64: {e}"))?;
-
-    let statement: serde_json::Value =
-        serde_json::from_slice(&payload_bytes).map_err(|e| format!("invalid statement: {e}"))?;
-
-    statement["subject"][0]["digest"]["sha256"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| "no sha256 digest in statement".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +433,27 @@ fn run_list(args: TrustListArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Key loading from system keystore
 // ---------------------------------------------------------------------------
+
+/// Load only the public key bytes for a given key ID from the keystore.
+///
+/// Uses the `nono-trust-pub` service to avoid loading private key material
+/// into memory for verification-only operations.
+pub(crate) fn load_public_key_bytes(key_id: &str) -> Result<Vec<u8>> {
+    let entry = keyring::Entry::new(TRUST_PUB_SERVICE, key_id)
+        .map_err(|e| nono::NonoError::KeystoreAccess(format!("failed to access keystore: {e}")))?;
+
+    let b64 = entry.get_password().map_err(|e| match e {
+        keyring::Error::NoEntry => nono::NonoError::SecretNotFound(format!(
+            "public key '{key_id}' not found in keystore (run 'nono trust keygen' to regenerate)"
+        )),
+        other => nono::NonoError::KeystoreAccess(format!(
+            "failed to load public key '{key_id}': {other}"
+        )),
+    })?;
+
+    base64_decode(&b64)
+        .map_err(|e| nono::NonoError::KeystoreAccess(format!("corrupt public key data: {e}")))
+}
 
 pub(crate) fn load_signing_key(key_id: &str) -> Result<trust::KeyPair> {
     let entry = keyring::Entry::new(TRUST_SERVICE, key_id)
@@ -551,61 +570,13 @@ fn format_identity(identity: &trust::SignerIdentity) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Base64 helpers (standard alphabet with padding)
-// ---------------------------------------------------------------------------
-
+// Base64 helpers delegated to the library's shared module
 fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        result.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(ALPHABET[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
+    nono::trust::base64::base64_encode(data)
 }
 
 pub(crate) fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
-    let input = input.trim_end_matches('=');
-    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
-    let mut accum: u32 = 0;
-    let mut bits: u32 = 0;
-
-    for ch in input.chars() {
-        let val = match ch {
-            'A'..='Z' => ch as u32 - b'A' as u32,
-            'a'..='z' => ch as u32 - b'a' as u32 + 26,
-            '0'..='9' => ch as u32 - b'0' as u32 + 52,
-            '+' | '-' => 62,
-            '/' | '_' => 63,
-            _ => return Err(format!("invalid base64 character: '{ch}'")),
-        };
-        accum = (accum << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            buf.push((accum >> bits) as u8);
-            accum &= (1 << bits) - 1;
-        }
-    }
-
-    Ok(buf)
+    nono::trust::base64::base64_decode(input)
 }
 
 #[cfg(test)]

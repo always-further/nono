@@ -31,8 +31,10 @@ use std::path::{Path, PathBuf};
 /// Returns `NonoError::TrustPolicy` if the JSON is malformed or missing
 /// required fields.
 pub fn load_policy_from_str(json: &str) -> Result<TrustPolicy> {
-    serde_json::from_str(json)
-        .map_err(|e| NonoError::TrustPolicy(format!("failed to parse trust policy: {e}")))
+    let policy: TrustPolicy = serde_json::from_str(json)
+        .map_err(|e| NonoError::TrustPolicy(format!("failed to parse trust policy: {e}")))?;
+    policy.validate_version()?;
+    Ok(policy)
 }
 
 /// Parse a trust policy from a JSON file.
@@ -62,6 +64,10 @@ pub fn merge_policies(policies: &[TrustPolicy]) -> Result<TrustPolicy> {
         return Err(NonoError::TrustPolicy(
             "no trust policies to merge".to_string(),
         ));
+    }
+
+    for policy in policies {
+        policy.validate_version()?;
     }
 
     let mut merged_patterns: Vec<String> = Vec::new();
@@ -198,15 +204,26 @@ pub fn evaluate_file(
 
 /// Check if a signer identity is on the blocked publishers list.
 fn is_publisher_blocked(policy: &TrustPolicy, identity: &SignerIdentity) -> bool {
-    let identity_str = match identity {
-        SignerIdentity::Keyed { key_id } => key_id.as_str(),
-        SignerIdentity::Keyless { issuer, .. } => issuer.as_str(),
-    };
     policy
         .blocklist
         .publishers
         .iter()
-        .any(|blocked| blocked.identity == identity_str)
+        .any(|blocked| match identity {
+            SignerIdentity::Keyed { key_id } => blocked.identity == *key_id,
+            SignerIdentity::Keyless {
+                issuer, repository, ..
+            } => {
+                if blocked.identity != *issuer {
+                    return false;
+                }
+                // If the blocklist entry specifies a repository, match it.
+                // If no repository specified, the entire issuer is blocked.
+                match &blocked.repository {
+                    Some(blocked_repo) => blocked_repo == repository,
+                    None => true,
+                }
+            }
+        })
 }
 
 /// Scan a directory for files matching instruction patterns.
@@ -245,9 +262,15 @@ fn find_files_recursive(
     for entry in entries {
         let entry = entry.map_err(NonoError::Io)?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(NonoError::Io)?;
 
-        if file_type.is_dir() {
+        // Use std::fs::metadata (stat) instead of entry.file_type (lstat)
+        // to follow symlinks. A symlinked SKILLS.md must not be silently skipped.
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue, // dangling symlink or permission error
+        };
+
+        if meta.is_dir() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             // Skip hidden directories except .claude
@@ -255,7 +278,7 @@ fn find_files_recursive(
                 continue;
             }
             find_files_recursive(root, &path, matcher, results)?;
-        } else if file_type.is_file() {
+        } else if meta.is_file() {
             // Skip Sigstore sidecar bundles; only source instruction files should be scanned.
             if path.to_string_lossy().ends_with(".bundle") {
                 continue;
@@ -539,13 +562,14 @@ mod tests {
     }
 
     #[test]
-    fn merge_uses_highest_version() {
-        let mut p1 = make_policy(Enforcement::Audit, vec![], vec![]);
-        p1.version = 1;
+    fn merge_rejects_unsupported_version() {
+        let p1 = make_policy(Enforcement::Audit, vec![], vec![]);
         let mut p2 = make_policy(Enforcement::Audit, vec![], vec![]);
-        p2.version = 2;
-        let merged = merge_policies(&[p1, p2]).unwrap();
-        assert_eq!(merged.version, 2);
+        p2.version = 99;
+        let result = merge_policies(&[p1, p2]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unsupported trust policy version"));
     }
 
     // -----------------------------------------------------------------------
@@ -641,6 +665,7 @@ mod tests {
         );
         policy.blocklist.publishers.push(BlockedPublisher {
             identity: "https://evil.issuer".to_string(),
+            repository: None,
             reason: "compromised".to_string(),
             added: "2026-01-01".to_string(),
         });
@@ -654,6 +679,68 @@ mod tests {
         assert!(matches!(
             result.outcome,
             VerificationOutcome::UntrustedPublisher { .. }
+        ));
+    }
+
+    #[test]
+    fn evaluate_blocked_publisher_by_repository() {
+        let mut policy = make_policy(
+            Enforcement::Deny,
+            vec![
+                keyless_publisher(
+                    "ci",
+                    "https://token.actions.githubusercontent.com",
+                    "good/repo",
+                ),
+                keyless_publisher(
+                    "ci2",
+                    "https://token.actions.githubusercontent.com",
+                    "evil/repo",
+                ),
+            ],
+            vec![],
+        );
+        policy.blocklist.publishers.push(BlockedPublisher {
+            identity: "https://token.actions.githubusercontent.com".to_string(),
+            repository: Some("evil/repo".to_string()),
+            reason: "compromised repo".to_string(),
+            added: "2026-01-01".to_string(),
+        });
+
+        // evil/repo should be blocked
+        let evil_identity = SignerIdentity::Keyless {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            repository: "evil/repo".to_string(),
+            workflow: "*".to_string(),
+            git_ref: "*".to_string(),
+        };
+        let result = evaluate_file(
+            &policy,
+            Path::new("SKILLS.md"),
+            "abcd",
+            Some(&evil_identity),
+        );
+        assert!(matches!(
+            result.outcome,
+            VerificationOutcome::UntrustedPublisher { .. }
+        ));
+
+        // good/repo should NOT be blocked
+        let good_identity = SignerIdentity::Keyless {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            repository: "good/repo".to_string(),
+            workflow: "*".to_string(),
+            git_ref: "*".to_string(),
+        };
+        let result = evaluate_file(
+            &policy,
+            Path::new("SKILLS.md"),
+            "abcd",
+            Some(&good_identity),
+        );
+        assert!(matches!(
+            result.outcome,
+            VerificationOutcome::Verified { .. }
         ));
     }
 
@@ -746,6 +833,20 @@ mod tests {
         let policy = make_policy(Enforcement::Deny, vec![], vec![]);
         let files = find_instruction_files(&policy, dir.path()).unwrap();
         assert!(files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_instruction_files_follows_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real_skills.md");
+        std::fs::write(&target, "content").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("SKILLS.md")).unwrap();
+
+        let policy = make_policy(Enforcement::Deny, vec![], vec![]);
+        let files = find_instruction_files(&policy, dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().contains("SKILLS.md"));
     }
 
     #[test]
