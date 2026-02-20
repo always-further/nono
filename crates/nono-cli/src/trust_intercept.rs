@@ -15,10 +15,12 @@ use tracing::{debug, warn};
 struct CacheEntry {
     /// File inode at verification time
     inode: u64,
-    /// File modification time at verification time
-    mtime_secs: i64,
+    /// File modification time (nanoseconds since epoch) at verification time
+    mtime_nanos: u128,
     /// File size at verification time
     size: u64,
+    /// SHA-256 content digest at verification time
+    digest: String,
     /// Verification outcome
     outcome: CachedOutcome,
 }
@@ -74,6 +76,11 @@ impl TrustInterceptor {
     /// approval flow handle it). Returns `Some(Ok(publisher))` if the file is
     /// verified, or `Some(Err(reason))` if verification fails.
     pub fn check_path(&mut self, path: &Path) -> Option<std::result::Result<String, String>> {
+        // Bundle sidecars are metadata for instruction files, not instruction files themselves.
+        if path.to_string_lossy().ends_with(".bundle") {
+            return None;
+        }
+
         // Compute relative path from project root for pattern matching.
         // Patterns like ".claude/**/*.md" require relative path context.
         let relative = path.strip_prefix(&self.project_root).unwrap_or(path);
@@ -102,6 +109,9 @@ impl TrustInterceptor {
     }
 
     /// Check if the path has a valid cached verification result.
+    ///
+    /// Validates by inode + nanosecond mtime + size for fast path, then
+    /// falls back to content digest comparison to catch same-second modifications.
     fn check_cache(&self, path: &Path) -> Option<std::result::Result<String, String>> {
         let entry = self.cache.get(path)?;
 
@@ -116,26 +126,37 @@ impl TrustInterceptor {
         #[cfg(not(unix))]
         let inode = 0u64;
 
-        let mtime_secs = meta
+        let mtime_nanos = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_nanos())
             .unwrap_or(0);
         let size = meta.len();
 
-        if entry.inode == inode && entry.mtime_secs == mtime_secs && entry.size == size {
-            debug!("Trust interceptor: cache hit for {}", path.display());
-            match &entry.outcome {
-                CachedOutcome::Verified { publisher } => Some(Ok(publisher.clone())),
-                CachedOutcome::Failed { reason } => Some(Err(reason.clone())),
-            }
-        } else {
+        // Fast reject on metadata change
+        if entry.inode != inode || entry.mtime_nanos != mtime_nanos || entry.size != size {
             debug!(
                 "Trust interceptor: cache invalidated for {} (metadata changed)",
                 path.display()
             );
-            None
+            return None;
+        }
+
+        // Content digest check to catch same-timestamp modifications
+        let current_digest = trust::file_digest(path).ok()?;
+        if entry.digest != current_digest {
+            debug!(
+                "Trust interceptor: cache invalidated for {} (content digest changed)",
+                path.display()
+            );
+            return None;
+        }
+
+        debug!("Trust interceptor: cache hit for {}", path.display());
+        match &entry.outcome {
+            CachedOutcome::Verified { publisher } => Some(Ok(publisher.clone())),
+            CachedOutcome::Failed { reason } => Some(Err(reason.clone())),
         }
     }
 
@@ -156,6 +177,7 @@ impl TrustInterceptor {
             let reason = format!("blocked by trust policy: {}", entry.description);
             self.store_cache(
                 path,
+                &digest,
                 CachedOutcome::Failed {
                     reason: reason.clone(),
                 },
@@ -166,11 +188,12 @@ impl TrustInterceptor {
         // Load and verify bundle
         let bundle_path = trust::bundle_path_for(path);
         let signer = if bundle_path.exists() {
-            match load_signer(&bundle_path, &digest, &self.policy) {
+            match load_signer(path, &bundle_path, &digest, &self.policy) {
                 Ok(identity) => Some(identity),
                 Err(reason) => {
                     self.store_cache(
                         path,
+                        &digest,
                         CachedOutcome::Failed {
                             reason: reason.clone(),
                         },
@@ -190,6 +213,7 @@ impl TrustInterceptor {
                 let pub_name = publisher.clone();
                 self.store_cache(
                     path,
+                    &digest,
                     CachedOutcome::Verified {
                         publisher: pub_name.clone(),
                     },
@@ -206,6 +230,7 @@ impl TrustInterceptor {
                 let should_block = outcome.should_block(self.policy.enforcement);
                 self.store_cache(
                     path,
+                    &digest,
                     CachedOutcome::Failed {
                         reason: reason.clone(),
                     },
@@ -235,7 +260,7 @@ impl TrustInterceptor {
     }
 
     /// Store a verification result in the cache.
-    fn store_cache(&mut self, path: &Path, outcome: CachedOutcome) {
+    fn store_cache(&mut self, path: &Path, digest: &str, outcome: CachedOutcome) {
         let meta = match std::fs::metadata(path) {
             Ok(m) => m,
             Err(_) => return,
@@ -249,11 +274,11 @@ impl TrustInterceptor {
         #[cfg(not(unix))]
         let inode = 0u64;
 
-        let mtime_secs = meta
+        let mtime_nanos = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_nanos())
             .unwrap_or(0);
         let size = meta.len();
 
@@ -261,8 +286,9 @@ impl TrustInterceptor {
             path.to_path_buf(),
             CacheEntry {
                 inode,
-                mtime_secs,
+                mtime_nanos,
                 size,
+                digest: digest.to_string(),
                 outcome,
             },
         );
@@ -270,8 +296,11 @@ impl TrustInterceptor {
 }
 
 /// Load a bundle, extract the signer identity, verify digest integrity,
-/// and perform cryptographic signature verification for keyed bundles.
+/// and perform cryptographic signature verification.
+///
+/// Both keyed and keyless bundles undergo cryptographic verification.
 fn load_signer(
+    file_path: &Path,
     bundle_path: &Path,
     file_digest: &str,
     policy: &trust::TrustPolicy,
@@ -288,14 +317,34 @@ fn load_signer(
         return Err("bundle digest does not match file content".to_string());
     }
 
-    // Cryptographic signature verification for keyed bundles
-    if let trust::SignerIdentity::Keyed { .. } = &identity {
-        let matching = policy.matching_publishers(&identity);
-        if let Some(b64) = matching.iter().find_map(|p| p.public_key.as_ref()) {
-            let key_bytes = base64_decode(b64)
-                .map_err(|_| "invalid base64 in publisher public_key".to_string())?;
-            trust::verify_keyed_signature(&bundle, &key_bytes, bundle_path)
-                .map_err(|e| format!("signature verification failed: {e}"))?;
+    // Cryptographic signature verification (both keyed and keyless)
+    match &identity {
+        trust::SignerIdentity::Keyed { .. } => {
+            let matching = policy.matching_publishers(&identity);
+            match matching.iter().find_map(|p| p.public_key.as_ref()) {
+                Some(b64) => {
+                    let key_bytes = base64_decode(b64)
+                        .map_err(|_| "invalid base64 in publisher public_key".to_string())?;
+                    trust::verify_keyed_signature(&bundle, &key_bytes, bundle_path)
+                        .map_err(|e| format!("signature verification failed: {e}"))?;
+                }
+                None => {
+                    return Err("keyed bundle but no public_key in matching publisher".to_string());
+                }
+            }
+        }
+        trust::SignerIdentity::Keyless { .. } => {
+            let trusted_root = trust::load_production_trusted_root()
+                .map_err(|e| format!("failed to load Sigstore trusted root: {e}"))?;
+            let sigstore_policy = trust::VerificationPolicy::default();
+            trust::verify_bundle_with_digest(
+                file_digest,
+                &bundle,
+                &trusted_root,
+                &sigstore_policy,
+                file_path,
+            )
+            .map_err(|e| format!("Sigstore verification failed: {e}"))?;
         }
     }
 
@@ -385,6 +434,20 @@ mod tests {
             .is_none());
         assert!(interceptor
             .check_path(Path::new("/tmp/src/main.rs"))
+            .is_none());
+    }
+
+    #[test]
+    fn interceptor_ignores_bundle_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = TrustPolicy::default();
+        let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
+
+        assert!(interceptor
+            .check_path(Path::new("/tmp/SKILLS.md.bundle"))
+            .is_none());
+        assert!(interceptor
+            .check_path(Path::new("/tmp/CLAUDE.md.bundle"))
             .is_none());
     }
 

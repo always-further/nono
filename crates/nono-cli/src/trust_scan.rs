@@ -158,7 +158,7 @@ fn verify_instruction_file(file_path: &Path, policy: &TrustPolicy) -> Verificati
     // Try to load bundle and extract signer identity
     let bundle_path = trust::bundle_path_for(file_path);
     let signer = if bundle_path.exists() {
-        match load_and_extract_signer(&bundle_path, &digest, policy) {
+        match load_and_extract_signer(file_path, &bundle_path, &digest, policy) {
             Ok(identity) => Some(identity),
             Err(outcome) => {
                 return VerificationResult {
@@ -177,11 +177,13 @@ fn verify_instruction_file(file_path: &Path, policy: &TrustPolicy) -> Verificati
 }
 
 /// Load a bundle, extract signer identity, verify digest integrity, and
-/// perform cryptographic signature verification for keyed bundles.
+/// perform cryptographic signature verification.
 ///
+/// Both keyed and keyless bundles undergo cryptographic verification.
 /// Returns the signer identity on success, or a `VerificationOutcome`
 /// describing the failure.
 fn load_and_extract_signer(
+    file_path: &Path,
     bundle_path: &Path,
     file_digest: &str,
     policy: &TrustPolicy,
@@ -208,15 +210,23 @@ fn load_and_extract_signer(
         });
     }
 
-    // Cryptographic signature verification for keyed bundles
-    if let trust::SignerIdentity::Keyed { .. } = &identity {
-        verify_keyed_crypto(&bundle, &identity, policy, bundle_path)?;
+    // Cryptographic signature verification (both keyed and keyless)
+    match &identity {
+        trust::SignerIdentity::Keyed { .. } => {
+            verify_keyed_crypto(&bundle, &identity, policy, bundle_path)?;
+        }
+        trust::SignerIdentity::Keyless { .. } => {
+            verify_keyless_crypto(file_path, file_digest, &bundle, bundle_path)?;
+        }
     }
 
     Ok(identity)
 }
 
 /// Verify the ECDSA signature on a keyed bundle using the publisher's public key.
+///
+/// Fail-closed: if no `public_key` is configured for a matching publisher,
+/// verification fails rather than silently accepting.
 fn verify_keyed_crypto(
     bundle: &trust::Bundle,
     identity: &trust::SignerIdentity,
@@ -226,18 +236,46 @@ fn verify_keyed_crypto(
     let matching = policy.matching_publishers(identity);
     let pub_key_b64 = matching.iter().find_map(|p| p.public_key.as_ref());
 
-    if let Some(b64) = pub_key_b64 {
-        let key_bytes = base64_decode(b64).map_err(|_| VerificationOutcome::InvalidSignature {
-            detail: "invalid base64 in publisher public_key".to_string(),
-        })?;
-        trust::verify_keyed_signature(bundle, &key_bytes, bundle_path).map_err(|e| {
-            VerificationOutcome::InvalidSignature {
-                detail: format!("{e}"),
-            }
-        })?;
+    match pub_key_b64 {
+        Some(b64) => {
+            let key_bytes =
+                base64_decode(b64).map_err(|_| VerificationOutcome::InvalidSignature {
+                    detail: "invalid base64 in publisher public_key".to_string(),
+                })?;
+            trust::verify_keyed_signature(bundle, &key_bytes, bundle_path).map_err(|e| {
+                VerificationOutcome::InvalidSignature {
+                    detail: format!("{e}"),
+                }
+            })?;
+            Ok(())
+        }
+        None => Err(VerificationOutcome::InvalidSignature {
+            detail: "keyed bundle but no public_key in matching publisher".to_string(),
+        }),
     }
-    // If no public_key in policy, crypto verification is skipped — publisher match
-    // is still enforced by evaluate_file. Users should add public_key for full security.
+}
+
+/// Verify a keyless (Fulcio/Rekor) bundle using the Sigstore trusted root.
+fn verify_keyless_crypto(
+    file_path: &Path,
+    file_digest: &str,
+    bundle: &trust::Bundle,
+    bundle_path: &Path,
+) -> std::result::Result<(), VerificationOutcome> {
+    let trusted_root = trust::load_production_trusted_root().map_err(|e| {
+        VerificationOutcome::InvalidSignature {
+            detail: format!("failed to load Sigstore trusted root: {e}"),
+        }
+    })?;
+
+    let policy = trust::VerificationPolicy::default();
+
+    trust::verify_bundle_with_digest(file_digest, bundle, &trusted_root, &policy, file_path)
+        .map_err(|e| VerificationOutcome::InvalidSignature {
+            detail: format!("Sigstore verification failed: {e}"),
+        })?;
+
+    let _ = bundle_path; // used for context in caller
     Ok(())
 }
 

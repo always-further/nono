@@ -256,6 +256,11 @@ fn find_files_recursive(
             }
             find_files_recursive(root, &path, matcher, results)?;
         } else if file_type.is_file() {
+            // Skip Sigstore sidecar bundles; only source instruction files should be scanned.
+            if path.to_string_lossy().ends_with(".bundle") {
+                continue;
+            }
+
             // Match against relative path from root
             if let Ok(relative) = path.strip_prefix(root) {
                 if matcher.is_match(relative) {
@@ -741,5 +746,22 @@ mod tests {
         let policy = make_policy(Enforcement::Deny, vec![], vec![]);
         let files = find_instruction_files(&policy, dir.path()).unwrap();
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn find_instruction_files_skips_bundle_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("SKILLS.md"), "content").unwrap();
+        std::fs::write(dir.path().join("SKILLS.md.bundle"), "{}").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "content").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md.bundle"), "{}").unwrap();
+
+        let policy = make_policy(Enforcement::Deny, vec![], vec![]);
+        let files = find_instruction_files(&policy, dir.path()).unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert!(files
+            .iter()
+            .all(|path| !path.to_string_lossy().ends_with(".bundle")));
     }
 }

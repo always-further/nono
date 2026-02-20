@@ -251,13 +251,34 @@ fn verify_single_file(
         return Err("bundle digest does not match file content".to_string());
     }
 
-    // Cryptographic signature verification for keyed bundles
-    if let trust::SignerIdentity::Keyed { .. } = &identity {
-        if let Some(b64) = matching.iter().find_map(|p| p.public_key.as_ref()) {
-            let key_bytes = base64_decode(b64)
-                .map_err(|_| "invalid base64 in publisher public_key".to_string())?;
-            trust::verify_keyed_signature(&bundle, &key_bytes, file_path)
-                .map_err(|e| format!("signature verification failed: {e}"))?;
+    // Cryptographic signature verification (both keyed and keyless)
+    match &identity {
+        trust::SignerIdentity::Keyed { .. } => {
+            let pub_key_b64 = matching.iter().find_map(|p| p.public_key.as_ref());
+            match pub_key_b64 {
+                Some(b64) => {
+                    let key_bytes = base64_decode(b64)
+                        .map_err(|_| "invalid base64 in publisher public_key".to_string())?;
+                    trust::verify_keyed_signature(&bundle, &key_bytes, file_path)
+                        .map_err(|e| format!("signature verification failed: {e}"))?;
+                }
+                None => {
+                    return Err("keyed bundle but no public_key in matching publisher".to_string());
+                }
+            }
+        }
+        trust::SignerIdentity::Keyless { .. } => {
+            let trusted_root = trust::load_production_trusted_root()
+                .map_err(|e| format!("failed to load Sigstore trusted root: {e}"))?;
+            let sigstore_policy = trust::VerificationPolicy::default();
+            trust::verify_bundle_with_digest(
+                &file_digest_hex,
+                &bundle,
+                &trusted_root,
+                &sigstore_policy,
+                file_path,
+            )
+            .map_err(|e| format!("Sigstore verification failed: {e}"))?;
         }
     }
 
