@@ -59,22 +59,41 @@ pub fn validate_caps_against_protected_roots(
     caps: &CapabilitySet,
     protected_roots: &[PathBuf],
 ) -> Result<()> {
+    for cap in caps.fs_capabilities() {
+        validate_requested_path_against_protected_roots(
+            &cap.resolved,
+            cap.is_file,
+            &cap.source.to_string(),
+            protected_roots,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Validate an intended grant path before capability construction.
+///
+/// This catches protected-root overlaps even when requested paths don't exist
+/// yet and are later skipped during capability creation.
+pub fn validate_requested_path_against_protected_roots(
+    path: &Path,
+    is_file: bool,
+    source: &str,
+    protected_roots: &[PathBuf],
+) -> Result<()> {
+    let requested_path = resolve_path(path);
     let resolved_roots: Vec<PathBuf> = protected_roots.iter().map(|p| resolve_path(p)).collect();
 
-    for cap in caps.fs_capabilities() {
-        let cap_path = resolve_path(&cap.resolved);
-
-        for protected_root in &resolved_roots {
-            let inside_protected = cap_path.starts_with(protected_root);
-            let parent_of_protected = !cap.is_file && protected_root.starts_with(&cap_path);
-            if inside_protected || parent_of_protected {
-                return Err(NonoError::SandboxInit(format!(
-                    "Refusing to grant '{}' (source: {}) because it overlaps protected nono state root '{}'.",
-                    cap_path.display(),
-                    cap.source,
-                    protected_root.display(),
-                )));
-            }
+    for protected_root in &resolved_roots {
+        let inside_protected = requested_path.starts_with(protected_root);
+        let parent_of_protected = !is_file && protected_root.starts_with(&requested_path);
+        if inside_protected || parent_of_protected {
+            return Err(NonoError::SandboxInit(format!(
+                "Refusing to grant '{}' (source: {}) because it overlaps protected nono state root '{}'.",
+                requested_path.display(),
+                source,
+                protected_root.display(),
+            )));
         }
     }
 
@@ -163,6 +182,23 @@ mod tests {
         caps.add_fs(cap);
 
         validate_caps_against_protected_roots(&caps, &[protected]).expect("allowed");
+    }
+
+    #[test]
+    fn requested_path_blocks_nonexistent_child_under_protected_root() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let protected = tmp.path().join(".nono");
+        std::fs::create_dir_all(&protected).expect("mkdir");
+        let child = protected.join("rollbacks").join("future-session");
+
+        let err =
+            validate_requested_path_against_protected_roots(&child, false, "CLI", &[protected])
+                .expect_err("blocked");
+        assert!(
+            err.to_string()
+                .contains("overlaps protected nono state root"),
+            "unexpected error: {err}",
+        );
     }
 
     #[cfg(unix)]
