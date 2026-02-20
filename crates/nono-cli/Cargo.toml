@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", features = ["process", "signal", "fs", "user"] }
 landlock = "0.4"
+dns-lookup = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nix = { version = "0.31", features = ["process", "signal", "fs", "user"] }

@@ -403,6 +403,10 @@ pub struct LearnArgs {
     #[arg(long)]
     pub all: bool,
 
+    /// Skip reverse DNS lookups for discovered IPs
+    #[arg(long)]
+    pub no_rdns: bool,
+
     /// Enable verbose output
     #[arg(long, short = 'v', action = clap::ArgAction::Count)]
     pub verbose: u8,

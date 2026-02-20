@@ -109,7 +109,7 @@ fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
         eprintln!();
     }
 
-    eprintln!("nono learn - Tracing file accesses...\n");
+    eprintln!("nono learn - Tracing file accesses and network activity...\n");
 
     let result = learn::run_learn(&args)?;
 
@@ -123,6 +123,10 @@ fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
         eprintln!(
             "\nTo use these paths, add them to your profile or use --read/--write/--allow flags."
         );
+    }
+
+    if result.has_network_activity() {
+        eprintln!("Network activity detected. Use --net-block to restrict network access.");
     }
 
     Ok(())
