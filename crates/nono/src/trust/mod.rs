@@ -17,6 +17,7 @@
 //!
 //! - **Types** ([`types`]): Trust policy, publisher identity, blocklist, verification result
 //! - **Digest** ([`digest`]): SHA-256 digest computation for files and byte slices
+//! - **Policy** ([`policy`]): Loading, merging, and evaluation of trust policies
 //!
 //! # Security
 //!
@@ -26,9 +27,14 @@
 //! - No TOFU: files must have valid signatures from trusted publishers on first encounter
 
 pub mod digest;
+pub mod policy;
 pub mod types;
 
 pub use digest::{bytes_digest, file_digest};
+pub use policy::{
+    evaluate_file, find_instruction_files, load_policy_from_file, load_policy_from_str,
+    merge_policies,
+};
 pub use types::{
     BlockedPublisher, Blocklist, BlocklistEntry, Enforcement, InstructionPatterns, Publisher,
     SignerIdentity, TrustPolicy, VerificationOutcome, VerificationResult,
