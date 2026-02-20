@@ -19,6 +19,7 @@
 //! - **Digest** ([`digest`]): SHA-256 digest computation for files and byte slices
 //! - **Policy** ([`policy`]): Loading, merging, and evaluation of trust policies
 //! - **DSSE** ([`dsse`]): Dead Simple Signing Envelope parsing, PAE construction, in-toto statements
+//! - **Bundle** ([`bundle`]): Sigstore bundle loading, verification, and identity extraction
 //!
 //! # Security
 //!
@@ -27,11 +28,18 @@
 //! - Project-level policy cannot weaken user-level enforcement
 //! - No TOFU: files must have valid signatures from trusted publishers on first encounter
 
+pub mod bundle;
 pub mod digest;
 pub mod dsse;
 pub mod policy;
 pub mod types;
 
+pub use bundle::{
+    bundle_path_for, extract_signer_identity, load_bundle, load_bundle_from_str,
+    load_production_trusted_root, load_trusted_root, load_trusted_root_from_str, parse_cert_info,
+    verify_bundle, verify_bundle_keyed, verify_bundle_with_digest, Bundle, CertificateInfo,
+    DerPublicKey, Sha256Hash, SigstoreVerificationResult, TrustedRoot, VerificationPolicy,
+};
 pub use digest::{bytes_digest, file_digest};
 pub use dsse::{
     new_envelope, new_instruction_statement, pae, DsseEnvelope, DsseSignature, InTotoStatement,

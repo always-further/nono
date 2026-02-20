@@ -30,6 +30,11 @@ libc = "0.2"
 # Keychain access
 keyring = "3"
 
+# Sigstore bundle verification
+sigstore-verify = { version = "0.6", default-features = false }
+x509-cert = { version = "0.2", default-features = false }
+der = { version = "0.7", default-features = false }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 nix = { version = "0.31.1", features = ["fs", "user"] }
