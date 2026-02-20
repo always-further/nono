@@ -68,7 +68,7 @@ nono run --profile openclaw-strict --secrets -- openclaw gateway
 Custom profiles override built-in profiles of the same name. If you create `~/.config/nono/profiles/openclaw.toml`, it will be used instead of the built-in.
 </Note>
 
-See [Security Profiles](/cli/security/profiles) for the full profile format reference.
+See [Security Profiles](/cli/features/profiles-groups) for the full profile format reference.
 
 ## Security Tips
 
@@ -120,7 +120,7 @@ The secrets are loaded from the keystore and injected as `$TELEGRAM_BOT_TOKEN` a
 Secrets are loaded **before** the sandbox is applied, then zeroized from nono's memory after `exec()`. The sandboxed process cannot access the keystore directly - it only receives the specific secrets you authorized.
 </Note>
 
-See [Secrets Management](/cli/usage/secrets) for complete documentation on storing and managing secrets.
+See [Secrets Management](/cli/features/secrets) for complete documentation on storing and managing secrets.
 
 ### Limit Agent Filesystem Access
 
@@ -231,4 +231,4 @@ docker run -v $(pwd):/work my-openclaw-image \
   nono run --profile openclaw -- openclaw gateway
 ```
 
-See [nono vs Containers](/cli/security/containers) for a detailed comparison.
+See [nono vs Containers](/cli/internals/containers) for a detailed comparison.
