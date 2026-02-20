@@ -310,6 +310,12 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_rollback_prompt: bool,
 
+    /// Disable trust verification for instruction files.
+    /// For development and testing only. Logs a warning and skips the
+    /// pre-exec trust scan. Not recommended for production use.
+    #[arg(long)]
+    pub trust_override: bool,
+
     /// Command to run inside the sandbox
     #[arg(required = true)]
     pub command: Vec<String>,

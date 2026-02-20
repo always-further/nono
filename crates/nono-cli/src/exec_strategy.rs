@@ -506,6 +506,7 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
 pub fn execute_supervised(
     config: &ExecConfig<'_>,
     supervisor: Option<&SupervisorConfig<'_>>,
+    trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
 ) -> Result<i32> {
     let program = &config.command[0];
     let cmd_args = &config.command[1..];
@@ -864,11 +865,12 @@ pub fn execute_supervised(
                             sup_cfg,
                             seccomp_notify_fd.as_ref(),
                             &initial_caps,
+                            trust_interceptor,
                         )?
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
-                        run_supervisor_loop(child, &mut sup_sock, sup_cfg)?
+                        run_supervisor_loop(child, &mut sup_sock, sup_cfg, trust_interceptor)?
                     }
                 } else {
                     let status = wait_for_child(child)?;
@@ -1288,6 +1290,7 @@ fn run_supervisor_loop(
     child: Pid,
     sock: &mut SupervisorSocket,
     config: &SupervisorConfig<'_>,
+    mut trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
     let _ = config.session_id;
     let sock_fd = sock.as_raw_fd();
@@ -1318,6 +1321,7 @@ fn run_supervisor_loop(
                             config,
                             &mut denials,
                             &mut seen_request_ids,
+                            trust_interceptor.as_mut(),
                         ) {
                             warn!("Error handling supervisor message: {}", e);
                         }
@@ -1379,6 +1383,7 @@ fn run_supervisor_loop(
     config: &SupervisorConfig<'_>,
     seccomp_fd: Option<&OwnedFd>,
     initial_caps: &[(std::path::PathBuf, bool)],
+    mut trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
     let sock_fd = sock.as_raw_fd();
     let notify_raw_fd = seccomp_fd.map(|fd| fd.as_raw_fd());
@@ -1432,6 +1437,7 @@ fn run_supervisor_loop(
                             config,
                             &mut denials,
                             &mut seen_request_ids,
+                            trust_interceptor.as_mut(),
                         ) {
                             warn!("Error handling supervisor message: {}", e);
                         }
@@ -1504,6 +1510,7 @@ fn handle_supervisor_message(
     config: &SupervisorConfig<'_>,
     denials: &mut Vec<DenialRecord>,
     seen_request_ids: &mut HashSet<String>,
+    mut trust_interceptor: Option<&mut crate::trust_intercept::TrustInterceptor>,
 ) -> Result<()> {
     match msg {
         SupervisorMessage::Request(request) => {
@@ -1557,8 +1564,66 @@ fn handle_supervisor_message(
                         request.path.display()
                     ),
                 }
+            } else if let Some(trust_result) = trust_interceptor
+                .as_mut()
+                .and_then(|ti| ti.check_path(&request.path))
+            {
+                // 2. Trust verification for instruction files
+                match trust_result {
+                    Ok(_publisher) => {
+                        // Instruction file verified — proceed to approval backend
+                        match config.approval_backend.request_capability(&request) {
+                            Ok(d) => {
+                                if d.is_denied() {
+                                    record_denial(
+                                        denials,
+                                        DenialRecord {
+                                            path: request.path.clone(),
+                                            access: request.access,
+                                            reason: DenialReason::UserDenied,
+                                        },
+                                    );
+                                }
+                                d
+                            }
+                            Err(e) => {
+                                warn!("Approval backend error: {}", e);
+                                record_denial(
+                                    denials,
+                                    DenialRecord {
+                                        path: request.path.clone(),
+                                        access: request.access,
+                                        reason: DenialReason::BackendError,
+                                    },
+                                );
+                                ApprovalDecision::Denied {
+                                    reason: format!("Approval backend error: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        // Instruction file failed trust verification — auto-deny
+                        debug!(
+                            "Supervisor: instruction file {} failed trust verification: {}",
+                            request.path.display(),
+                            reason
+                        );
+                        record_denial(
+                            denials,
+                            DenialRecord {
+                                path: request.path.clone(),
+                                access: request.access,
+                                reason: DenialReason::PolicyBlocked,
+                            },
+                        );
+                        ApprovalDecision::Denied {
+                            reason: format!("Instruction file failed trust verification: {reason}"),
+                        }
+                    }
+                }
             } else {
-                // 2. Delegate to approval backend
+                // 3. Delegate to approval backend (non-instruction files)
                 match config.approval_backend.request_capability(&request) {
                     Ok(d) => {
                         if d.is_denied() {

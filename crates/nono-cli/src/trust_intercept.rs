@@ -1,0 +1,475 @@
+//! Trust verification integration for the supervisor IPC loop
+//!
+//! When the supervisor receives a capability request for a path matching
+//! an instruction file pattern, this module verifies the file before
+//! the approval backend is consulted. Failed verification results in
+//! automatic denial without prompting the user.
+
+use nono::trust::{self, TrustPolicy, VerificationOutcome};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use tracing::{debug, warn};
+
+/// Cached verification result for an instruction file.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    /// File inode at verification time
+    inode: u64,
+    /// File modification time at verification time
+    mtime_secs: i64,
+    /// File size at verification time
+    size: u64,
+    /// Verification outcome
+    outcome: CachedOutcome,
+}
+
+/// Cached verification outcome (simplified for storage).
+#[derive(Debug, Clone)]
+enum CachedOutcome {
+    /// Verified successfully
+    Verified { publisher: String },
+    /// Failed verification
+    Failed { reason: String },
+}
+
+/// Instruction file trust interceptor for the supervisor loop.
+///
+/// Checks incoming capability requests against instruction file patterns
+/// and verifies matching files before they reach the approval backend.
+/// Results are cached by (path, inode, mtime, size) to avoid repeated
+/// verification of the same file content.
+pub struct TrustInterceptor {
+    /// Trust policy for evaluation
+    policy: TrustPolicy,
+    /// Compiled instruction file pattern matcher
+    matcher: trust::InstructionPatterns,
+    /// Verification result cache keyed by canonical path
+    cache: HashMap<PathBuf, CacheEntry>,
+}
+
+impl TrustInterceptor {
+    /// Create a new trust interceptor from a trust policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the instruction patterns cannot be compiled.
+    pub fn new(policy: TrustPolicy) -> nono::Result<Self> {
+        let matcher = policy.instruction_matcher()?;
+        Ok(Self {
+            policy,
+            matcher,
+            cache: HashMap::new(),
+        })
+    }
+
+    /// Check if a requested path is an instruction file that requires verification.
+    ///
+    /// Returns `None` if the path is not an instruction file (let the normal
+    /// approval flow handle it). Returns `Some(Ok(publisher))` if the file is
+    /// verified, or `Some(Err(reason))` if verification fails.
+    pub fn check_path(&mut self, path: &Path) -> Option<std::result::Result<String, String>> {
+        // Only check files that match instruction patterns
+        let file_name = path.file_name()?.to_str()?;
+        if !self.matcher.is_match(file_name) {
+            // Also try matching with parent components for patterns like .claude/**/*.md
+            let relative = path
+                .file_name()
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new(""));
+            if !self.matcher.is_match(relative) {
+                return None;
+            }
+        }
+
+        debug!(
+            "Trust interceptor: checking instruction file {}",
+            path.display()
+        );
+
+        // Check cache first
+        if let Some(cached) = self.check_cache(path) {
+            return Some(cached);
+        }
+
+        // Verify the file
+        let result = self.verify_and_cache(path);
+        Some(result)
+    }
+
+    /// Check if the path has a valid cached verification result.
+    fn check_cache(&self, path: &Path) -> Option<std::result::Result<String, String>> {
+        let entry = self.cache.get(path)?;
+
+        // Validate cache by checking file metadata
+        let meta = std::fs::metadata(path).ok()?;
+
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            meta.ino()
+        };
+        #[cfg(not(unix))]
+        let inode = 0u64;
+
+        let mtime_secs = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let size = meta.len();
+
+        if entry.inode == inode && entry.mtime_secs == mtime_secs && entry.size == size {
+            debug!("Trust interceptor: cache hit for {}", path.display());
+            match &entry.outcome {
+                CachedOutcome::Verified { publisher } => Some(Ok(publisher.clone())),
+                CachedOutcome::Failed { reason } => Some(Err(reason.clone())),
+            }
+        } else {
+            debug!(
+                "Trust interceptor: cache invalidated for {} (metadata changed)",
+                path.display()
+            );
+            None
+        }
+    }
+
+    /// Verify a file and store the result in the cache.
+    fn verify_and_cache(&mut self, path: &Path) -> std::result::Result<String, String> {
+        // Compute digest
+        let digest = match trust::file_digest(path) {
+            Ok(d) => d,
+            Err(e) => {
+                let reason = format!("failed to compute digest: {e}");
+                warn!("Trust interceptor: {reason} for {}", path.display());
+                return Err(reason);
+            }
+        };
+
+        // Check blocklist
+        if let Some(entry) = self.policy.check_blocklist(&digest) {
+            let reason = format!("blocked by trust policy: {}", entry.description);
+            self.store_cache(
+                path,
+                CachedOutcome::Failed {
+                    reason: reason.clone(),
+                },
+            );
+            return Err(reason);
+        }
+
+        // Load and verify bundle
+        let bundle_path = trust::bundle_path_for(path);
+        let signer = if bundle_path.exists() {
+            match load_signer(&bundle_path, &digest) {
+                Ok(identity) => Some(identity),
+                Err(reason) => {
+                    self.store_cache(
+                        path,
+                        CachedOutcome::Failed {
+                            reason: reason.clone(),
+                        },
+                    );
+                    return Err(reason);
+                }
+            }
+        } else {
+            None
+        };
+
+        // Evaluate against policy
+        let result = trust::evaluate_file(&self.policy, path, &digest, signer.as_ref());
+
+        match &result.outcome {
+            VerificationOutcome::Verified { publisher } => {
+                let pub_name = publisher.clone();
+                self.store_cache(
+                    path,
+                    CachedOutcome::Verified {
+                        publisher: pub_name.clone(),
+                    },
+                );
+                debug!(
+                    "Trust interceptor: verified {} (publisher: {})",
+                    path.display(),
+                    pub_name
+                );
+                Ok(pub_name)
+            }
+            outcome => {
+                let reason = format_outcome(outcome);
+                let should_block = outcome.should_block(self.policy.enforcement);
+                self.store_cache(
+                    path,
+                    CachedOutcome::Failed {
+                        reason: reason.clone(),
+                    },
+                );
+
+                if should_block {
+                    warn!(
+                        "Trust interceptor: blocking {} ({})",
+                        path.display(),
+                        reason
+                    );
+                    Err(reason)
+                } else {
+                    debug!(
+                        "Trust interceptor: warning for {} ({}) - enforcement allows",
+                        path.display(),
+                        reason
+                    );
+                    // Non-blocking: return Ok with a warning note
+                    Ok(format!(
+                        "(unverified, enforcement={:?})",
+                        self.policy.enforcement
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Store a verification result in the cache.
+    fn store_cache(&mut self, path: &Path, outcome: CachedOutcome) {
+        let meta = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            meta.ino()
+        };
+        #[cfg(not(unix))]
+        let inode = 0u64;
+
+        let mtime_secs = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let size = meta.len();
+
+        self.cache.insert(
+            path.to_path_buf(),
+            CacheEntry {
+                inode,
+                mtime_secs,
+                size,
+                outcome,
+            },
+        );
+    }
+}
+
+/// Load a bundle and extract the signer identity, verifying digest integrity.
+fn load_signer(
+    bundle_path: &Path,
+    file_digest: &str,
+) -> std::result::Result<trust::SignerIdentity, String> {
+    let bundle = trust::load_bundle(bundle_path).map_err(|e| format!("invalid bundle: {e}"))?;
+
+    let identity = trust::extract_signer_identity(&bundle, bundle_path)
+        .map_err(|e| format!("no signer identity: {e}"))?;
+
+    // Verify digest integrity via JSON extraction
+    if let Ok(bundle_digest) = extract_bundle_digest(&bundle) {
+        if bundle_digest != file_digest {
+            return Err("bundle digest does not match file content".to_string());
+        }
+    }
+
+    Ok(identity)
+}
+
+/// Extract the SHA-256 digest from a bundle's DSSE envelope.
+fn extract_bundle_digest(bundle: &trust::Bundle) -> std::result::Result<String, String> {
+    let bundle_json = bundle
+        .to_json()
+        .map_err(|e| format!("failed to serialize bundle: {e}"))?;
+
+    let value: serde_json::Value =
+        serde_json::from_str(&bundle_json).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    let payload_b64 = value["dsseEnvelope"]["payload"]
+        .as_str()
+        .ok_or("missing DSSE payload")?;
+
+    let payload_bytes = base64_decode(payload_b64)?;
+
+    let statement: serde_json::Value =
+        serde_json::from_slice(&payload_bytes).map_err(|e| format!("invalid statement: {e}"))?;
+
+    statement["subject"][0]["digest"]["sha256"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "no sha256 digest in statement".to_string())
+}
+
+fn format_outcome(outcome: &VerificationOutcome) -> String {
+    match outcome {
+        VerificationOutcome::Verified { publisher } => format!("verified ({publisher})"),
+        VerificationOutcome::Blocked { reason } => format!("blocklisted: {reason}"),
+        VerificationOutcome::Unsigned => "unsigned (no .bundle file)".to_string(),
+        VerificationOutcome::InvalidSignature { detail } => format!("invalid signature: {detail}"),
+        VerificationOutcome::UntrustedPublisher { identity } => {
+            format!("untrusted publisher: {identity:?}")
+        }
+        VerificationOutcome::DigestMismatch { .. } => {
+            "file content does not match bundle".to_string()
+        }
+    }
+}
+
+/// Decode standard base64 (with or without padding).
+fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
+    let input = input.trim_end_matches('=');
+    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
+    let mut accum: u32 = 0;
+    let mut bits: u32 = 0;
+
+    for ch in input.chars() {
+        let val = match ch {
+            'A'..='Z' => ch as u32 - b'A' as u32,
+            'a'..='z' => ch as u32 - b'a' as u32 + 26,
+            '0'..='9' => ch as u32 - b'0' as u32 + 52,
+            '+' | '-' => 62,
+            '/' | '_' => 63,
+            _ => return Err(format!("invalid base64 character: '{ch}'")),
+        };
+        accum = (accum << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            buf.push((accum >> bits) as u8);
+            accum &= (1 << bits) - 1;
+        }
+    }
+
+    Ok(buf)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interceptor_ignores_non_instruction_files() {
+        let policy = TrustPolicy::default();
+        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+
+        assert!(interceptor
+            .check_path(Path::new("/tmp/README.md"))
+            .is_none());
+        assert!(interceptor
+            .check_path(Path::new("/tmp/src/main.rs"))
+            .is_none());
+    }
+
+    #[test]
+    fn interceptor_checks_instruction_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join("SKILLS.md");
+        std::fs::write(&skills, "# Skills").unwrap();
+
+        let policy = TrustPolicy::default();
+        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+
+        // Should return Some (it IS an instruction file)
+        let result = interceptor.check_path(&skills);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn interceptor_caches_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join("SKILLS.md");
+        std::fs::write(&skills, "# Skills").unwrap();
+
+        let policy = TrustPolicy {
+            enforcement: trust::Enforcement::Warn,
+            ..TrustPolicy::default()
+        };
+        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+
+        // First check populates cache
+        let _result1 = interceptor.check_path(&skills);
+        assert!(interceptor.cache.contains_key(&skills));
+
+        // Second check hits cache
+        let _result2 = interceptor.check_path(&skills);
+    }
+
+    #[test]
+    fn interceptor_cache_invalidates_on_modify() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join("SKILLS.md");
+        std::fs::write(&skills, "# Skills v1").unwrap();
+
+        let policy = TrustPolicy {
+            enforcement: trust::Enforcement::Warn,
+            ..TrustPolicy::default()
+        };
+        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+
+        // First check
+        let _ = interceptor.check_path(&skills);
+
+        // Modify the file
+        std::fs::write(&skills, "# Skills v2 with extra content").unwrap();
+
+        // Cache should be invalidated (metadata changed)
+        let cached = interceptor.check_cache(&skills);
+        // mtime or size changed, so cache miss
+        assert!(cached.is_none());
+    }
+
+    #[test]
+    fn interceptor_blocklist_blocks_regardless_of_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"evil content";
+        let skills = dir.path().join("SKILLS.md");
+        std::fs::write(&skills, content).unwrap();
+
+        let digest = trust::bytes_digest(content);
+
+        let policy = TrustPolicy {
+            enforcement: trust::Enforcement::Audit,
+            blocklist: trust::Blocklist {
+                digests: vec![trust::BlocklistEntry {
+                    sha256: digest,
+                    description: "malicious".to_string(),
+                    added: "2026-01-01".to_string(),
+                }],
+                publishers: Vec::new(),
+            },
+            ..TrustPolicy::default()
+        };
+        let mut interceptor = TrustInterceptor::new(policy).unwrap();
+
+        let result = interceptor.check_path(&skills);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn format_outcome_variants() {
+        assert!(format_outcome(&VerificationOutcome::Unsigned).contains("unsigned"));
+        assert!(format_outcome(&VerificationOutcome::Blocked {
+            reason: "test".to_string()
+        })
+        .contains("blocklisted"));
+        assert!(format_outcome(&VerificationOutcome::InvalidSignature {
+            detail: "bad sig".to_string()
+        })
+        .contains("bad sig"));
+        assert!(format_outcome(&VerificationOutcome::DigestMismatch {
+            expected: "a".to_string(),
+            actual: "b".to_string()
+        })
+        .contains("does not match"));
+    }
+}
