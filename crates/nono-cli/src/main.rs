@@ -12,6 +12,7 @@ mod learn;
 mod output;
 mod policy;
 mod profile;
+mod protected_paths;
 mod query_ext;
 mod rollback_commands;
 mod rollback_session;
@@ -611,7 +612,12 @@ fn execute_sandboxed(
             // --- Supervisor IPC setup (only when --supervised is active) ---
             let supervisor_cfg_data = if flags.supervised {
                 let policy_data = policy::load_embedded_policy()?;
-                let never_grant_checker = nono::NeverGrantChecker::new(&policy_data.never_grant)?;
+                let mut never_grant = policy_data.never_grant;
+                let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
+                never_grant.extend(protected_roots.as_strings()?);
+                never_grant.sort();
+                never_grant.dedup();
+                let never_grant_checker = nono::NeverGrantChecker::new(&never_grant)?;
                 let approval_backend = terminal_approval::TerminalApproval;
                 Some((never_grant_checker, approval_backend))
             } else {
@@ -879,6 +885,8 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     let loaded_policy = policy::load_embedded_policy()?;
     let deny_paths = policy::resolve_deny_paths_for_groups(&loaded_policy, &active_groups)?;
     policy::validate_deny_overlaps(&deny_paths, &caps)?;
+    let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
+    protected_paths::validate_caps_against_protected_roots(&caps, protected_roots.as_paths())?;
 
     // Apply deferred unlink overrides now that ALL writable paths are finalized
     // (groups + profile [filesystem] + CLI overrides + CWD).

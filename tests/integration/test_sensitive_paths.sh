@@ -254,6 +254,21 @@ else
 fi
 
 # =============================================================================
+# Internal State Protection
+# =============================================================================
+
+echo ""
+echo "--- Internal State Protection ---"
+
+expect_output_contains "--allow ~ is rejected when it overlaps protected nono state" \
+    "overlaps protected nono state root" \
+    "$NONO_BIN" run --allow ~ -- true
+
+expect_output_contains "explicit ~/.nono subtree grant is rejected" \
+    "overlaps protected nono state root" \
+    "$NONO_BIN" run --allow "$HOME/.nono/rollbacks" -- true
+
+# =============================================================================
 # Path Collision Bypass Prevention (Security Regression Tests)
 # =============================================================================
 
