@@ -20,6 +20,7 @@
 //! - **Policy** ([`policy`]): Loading, merging, and evaluation of trust policies
 //! - **DSSE** ([`dsse`]): Dead Simple Signing Envelope parsing, PAE construction, in-toto statements
 //! - **Bundle** ([`bundle`]): Sigstore bundle loading, verification, and identity extraction
+//! - **Signing** ([`signing`]): Keyed ECDSA P-256 signing and Sigstore bundle construction
 //!
 //! # Security
 //!
@@ -32,6 +33,7 @@ pub mod bundle;
 pub mod digest;
 pub mod dsse;
 pub mod policy;
+pub mod signing;
 pub mod types;
 
 pub use bundle::{
@@ -48,6 +50,10 @@ pub use dsse::{
 pub use policy::{
     evaluate_file, find_instruction_files, load_policy_from_file, load_policy_from_str,
     merge_policies,
+};
+pub use signing::{
+    export_public_key, generate_signing_key, key_id_hex, sign_bytes, sign_instruction_file,
+    write_bundle, KeyPair, SigningScheme,
 };
 pub use types::{
     BlockedPublisher, Blocklist, BlocklistEntry, Enforcement, InstructionPatterns, Publisher,

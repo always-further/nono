@@ -112,6 +112,7 @@ pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
         | nono::NonoError::HashMismatch { .. }
         | nono::NonoError::SessionNotFound(_) => NonoErrorCode::ErrIo,
         nono::NonoError::TrustVerification { .. }
+        | nono::NonoError::TrustSigning { .. }
         | nono::NonoError::TrustPolicy(_)
         | nono::NonoError::BlocklistBlocked { .. }
         | nono::NonoError::InstructionFileDenied { .. } => NonoErrorCode::ErrTrustVerification,

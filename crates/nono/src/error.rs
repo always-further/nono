@@ -141,6 +141,9 @@ pub enum NonoError {
     #[error("Trust verification failed for {path}: {reason}")]
     TrustVerification { path: String, reason: String },
 
+    #[error("Signing failed for {path}: {reason}")]
+    TrustSigning { path: String, reason: String },
+
     #[error("Trust policy error: {0}")]
     TrustPolicy(String),
 
