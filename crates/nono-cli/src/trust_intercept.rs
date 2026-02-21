@@ -26,10 +26,21 @@ struct CacheEntry {
 /// Cached verification outcome (simplified for storage).
 #[derive(Debug, Clone)]
 enum CachedOutcome {
-    /// Verified successfully
-    Verified { publisher: String },
+    /// Verified successfully (includes digest for TOCTOU re-check at open time)
+    Verified { publisher: String, digest: String },
     /// Failed verification
     Failed { reason: String },
+}
+
+/// Successful trust verification result returned from `check_path`.
+#[derive(Debug, Clone)]
+pub struct TrustVerified {
+    /// Publisher name that matched the trust policy
+    pub publisher: String,
+    /// SHA-256 digest of the file at verification time.
+    /// Used by `open_path_for_access` to re-verify the opened fd,
+    /// closing the TOCTOU gap between verification and open.
+    pub digest: String,
 }
 
 /// Instruction file trust interceptor for the supervisor loop.
@@ -74,16 +85,13 @@ impl TrustInterceptor {
     /// approval flow handle it). Returns `Some(Ok(publisher))` if the file is
     /// verified, or `Some(Err(reason))` if verification fails.
     ///
-    /// # Known limitation: TOCTOU gap
-    ///
-    /// Between this method returning `Ok(publisher)` and the supervisor opening
-    /// the file to pass the fd, an attacker with write access could atomically
-    /// replace the file (e.g., `rename()` on the same filesystem). The cache
-    /// invalidation checks (inode, mtime, size, digest) mitigate accidental
-    /// mismatches but cannot fully prevent a well-timed atomic swap. On Linux,
-    /// the seccomp-notify path can re-verify the digest at `open()` time for
-    /// stronger guarantees.
-    pub fn check_path(&mut self, path: &Path) -> Option<std::result::Result<String, String>> {
+    /// Returns the verified digest alongside the publisher name so that
+    /// `open_path_for_access` can re-verify the opened fd against it,
+    /// closing the TOCTOU window between verification and open.
+    pub fn check_path(
+        &mut self,
+        path: &Path,
+    ) -> Option<std::result::Result<TrustVerified, String>> {
         // Bundle sidecars are metadata for instruction files, not instruction files themselves.
         if path.to_string_lossy().ends_with(".bundle") {
             return None;
@@ -120,7 +128,7 @@ impl TrustInterceptor {
     ///
     /// Validates by inode + nanosecond mtime + size for fast path, then
     /// falls back to content digest comparison to catch same-second modifications.
-    fn check_cache(&self, path: &Path) -> Option<std::result::Result<String, String>> {
+    fn check_cache(&self, path: &Path) -> Option<std::result::Result<TrustVerified, String>> {
         let entry = self.cache.get(path)?;
 
         // Validate cache by checking file metadata
@@ -156,13 +164,16 @@ impl TrustInterceptor {
 
         debug!("Trust interceptor: cache hit for {}", path.display());
         match &entry.outcome {
-            CachedOutcome::Verified { publisher } => Some(Ok(publisher.clone())),
+            CachedOutcome::Verified { publisher, digest } => Some(Ok(TrustVerified {
+                publisher: publisher.clone(),
+                digest: digest.clone(),
+            })),
             CachedOutcome::Failed { reason } => Some(Err(reason.clone())),
         }
     }
 
     /// Verify a file and store the result in the cache.
-    fn verify_and_cache(&mut self, path: &Path) -> std::result::Result<String, String> {
+    fn verify_and_cache(&mut self, path: &Path) -> std::result::Result<TrustVerified, String> {
         // Compute digest
         let digest = match trust::file_digest(path) {
             Ok(d) => d,
@@ -214,6 +225,7 @@ impl TrustInterceptor {
                     path,
                     CachedOutcome::Verified {
                         publisher: pub_name.clone(),
+                        digest: digest.clone(),
                     },
                 );
                 debug!(
@@ -221,7 +233,10 @@ impl TrustInterceptor {
                     path.display(),
                     pub_name
                 );
-                Ok(pub_name)
+                Ok(TrustVerified {
+                    publisher: pub_name,
+                    digest,
+                })
             }
             outcome => {
                 let reason = format_outcome(outcome);
@@ -246,11 +261,15 @@ impl TrustInterceptor {
                         path.display(),
                         reason
                     );
-                    // Non-blocking: return Ok with a warning note
-                    Ok(format!(
-                        "(unverified, enforcement={:?})",
-                        self.policy.enforcement
-                    ))
+                    // Non-blocking: return Ok with a warning note.
+                    // Digest is still valid for TOCTOU re-check even for unverified files.
+                    Ok(TrustVerified {
+                        publisher: format!(
+                            "(unverified, enforcement={:?})",
+                            self.policy.enforcement
+                        ),
+                        digest,
+                    })
                 }
             }
         }

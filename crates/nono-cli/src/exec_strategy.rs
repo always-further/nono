@@ -1580,6 +1580,10 @@ fn handle_supervisor_message(
             // 1. Check never_grant list first (before consulting the backend)
             let never_grant_check = config.never_grant.check(&request.path);
 
+            // Digest from trust verification, used for TOCTOU re-check at open time.
+            // Set by the trust interceptor branch when an instruction file is verified.
+            let mut verified_digest: Option<String> = None;
+
             let decision = if never_grant_check.is_blocked() {
                 debug!(
                     "Supervisor: path {} blocked by never_grant",
@@ -1605,7 +1609,14 @@ fn handle_supervisor_message(
             {
                 // 2. Trust verification for instruction files
                 match trust_result {
-                    Ok(_publisher) => {
+                    Ok(verified) => {
+                        debug!(
+                            "Supervisor: instruction file {} verified (publisher: {})",
+                            request.path.display(),
+                            verified.publisher,
+                        );
+                        // Stash the verified digest for TOCTOU re-check at open time
+                        verified_digest = Some(verified.digest);
                         // Instruction file verified — proceed to approval backend
                         match config.approval_backend.request_capability(&request) {
                             Ok(d) => {
@@ -1692,7 +1703,12 @@ fn handle_supervisor_message(
 
             // 3. If granted, open the path and send fd before the response
             if decision.is_granted() {
-                match open_path_for_access(&request.path, &request.access, config.never_grant) {
+                match open_path_for_access(
+                    &request.path,
+                    &request.access,
+                    config.never_grant,
+                    verified_digest.as_deref(),
+                ) {
                     Ok(file) => {
                         if let Err(e) = sock.send_fd(file.as_raw_fd()) {
                             warn!("Failed to send fd: {}", e);
@@ -1777,6 +1793,7 @@ fn open_path_for_access(
     path: &std::path::Path,
     access: &nono::AccessMode,
     never_grant: &NeverGrantChecker,
+    trust_digest: Option<&str>,
 ) -> Result<std::fs::File> {
     // Canonicalize to resolve symlinks before opening. This ensures
     // we check and open the real target, not a symlink alias.
@@ -1844,14 +1861,51 @@ fn open_path_for_access(
         }
     }
 
-    open_canonical_path_no_symlinks(&canonical, access).map_err(|e| {
+    let file = open_canonical_path_no_symlinks(&canonical, access).map_err(|e| {
         NonoError::SandboxInit(format!(
             "Failed to open {} for {:?} access: {}",
             canonical.display(),
             access,
             e
         ))
-    })
+    })?;
+
+    // TOCTOU re-verification: if this file was trust-verified, re-compute the
+    // digest from the opened fd and compare against the verification-time digest.
+    // This closes the window between check_path() (which reads the file by path)
+    // and open (which opens a potentially different file if an attacker performed
+    // an atomic rename between the two operations).
+    if let Some(expected_digest) = trust_digest {
+        use std::io::{Read, Seek};
+        let mut content = Vec::new();
+        (&file).read_to_end(&mut content).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to read {} for digest re-check: {}",
+                canonical.display(),
+                e,
+            ))
+        })?;
+        let actual_digest = nono::trust::bytes_digest(&content);
+        if actual_digest != expected_digest {
+            return Err(NonoError::SandboxInit(format!(
+                "Instruction file {} was modified between trust verification and open \
+                 (expected digest {}, got {}). Possible TOCTOU attack.",
+                path.display(),
+                expected_digest,
+                actual_digest,
+            )));
+        }
+        // Seek back to start so the child reads from the beginning
+        (&file).seek(std::io::SeekFrom::Start(0)).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to seek {} after digest re-check: {}",
+                canonical.display(),
+                e,
+            ))
+        })?;
+    }
+
+    Ok(file)
 }
 
 /// Open a canonical absolute path by traversing path components using `openat`.

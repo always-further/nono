@@ -165,6 +165,15 @@ pub fn verify_policy_signature(policy_path: &Path) -> Result<()> {
             })?;
         }
         trust::SignerIdentity::Keyless { .. } => {
+            // Keyless verification uses Sigstore's public-good infrastructure as the
+            // trust anchor: Fulcio CA chain validates the signing certificate, and
+            // Rekor inclusion proof guarantees the signature was logged in the
+            // transparency log. Identity binding (matching OIDC claims against a
+            // specific publisher) is intentionally NOT required here -- the trust
+            // policy itself defines which publishers are trusted, and that policy is
+            // the document being verified. The Sigstore cryptographic chain (valid
+            // certificate + logged signature + digest match) is sufficient to prove
+            // the policy was signed by a Fulcio-authenticated identity.
             let trusted_root = trust::load_production_trusted_root().map_err(|e| {
                 nono::NonoError::TrustVerification {
                     path: policy_path.display().to_string(),

@@ -250,20 +250,32 @@ pub fn find_instruction_files<P: AsRef<Path>>(
     let root = root.as_ref();
     let matcher = policy.instruction_matcher()?;
     let mut results = Vec::new();
+    let mut visited = std::collections::HashSet::new();
 
-    find_files_recursive(root, root, &matcher, &mut results)?;
+    find_files_recursive(root, root, &matcher, &mut results, &mut visited, 0)?;
 
     results.sort();
     Ok(results)
 }
 
 /// Recursively walk a directory, collecting files matching instruction patterns.
+///
+/// Tracks visited directory inodes to prevent symlink cycle DoS, and enforces
+/// a maximum recursion depth of 16 levels.
 fn find_files_recursive(
     root: &Path,
     dir: &Path,
     matcher: &super::types::InstructionPatterns,
     results: &mut Vec<PathBuf>,
+    visited: &mut std::collections::HashSet<u64>,
+    depth: u32,
 ) -> Result<()> {
+    // Guard against deep recursion (legitimate instruction files live near the root)
+    const MAX_DEPTH: u32 = 16;
+    if depth > MAX_DEPTH {
+        return Ok(());
+    }
+
     let entries = std::fs::read_dir(dir).map_err(NonoError::Io)?;
 
     for entry in entries {
@@ -284,7 +296,25 @@ fn find_files_recursive(
             if name_str.starts_with('.') && name_str != ".claude" {
                 continue;
             }
-            find_files_recursive(root, &path, matcher, results)?;
+
+            // Track visited directory inodes to break symlink cycles.
+            // If we have already visited this inode, skip it entirely.
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                meta.ino()
+            };
+            #[cfg(not(unix))]
+            let inode = {
+                // On non-Unix, use depth limit as the sole cycle guard
+                0u64
+            };
+
+            if inode != 0 && !visited.insert(inode) {
+                continue;
+            }
+
+            find_files_recursive(root, &path, matcher, results, visited, depth + 1)?;
         } else if meta.is_file() {
             // Skip Sigstore sidecar bundles; only source instruction files should be scanned.
             if path.to_string_lossy().ends_with(".bundle") {
