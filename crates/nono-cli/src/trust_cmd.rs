@@ -702,8 +702,22 @@ fn load_trust_policy(explicit_path: Option<&Path>) -> Result<trust::TrustPolicy>
 /// Verify the trust policy signature if a `.bundle` sidecar exists.
 ///
 /// Uses the same verification as the pre-exec scan (`trust_scan::verify_policy_signature`).
-/// If no `.bundle` exists, returns an error — an unsigned policy cannot be trusted.
+/// If no `.bundle` exists, logs a warning but allows the policy to load — this supports
+/// development workflows where policies are unsigned. The pre-exec scan path enforces
+/// signature requirements independently via `trust_override`.
 fn verify_policy_if_exists(policy_path: &Path) -> Result<()> {
+    let bundle_path = nono::trust::bundle_path_for(policy_path);
+    if !bundle_path.exists() {
+        eprintln!(
+            "  {}",
+            format!(
+                "Warning: trust policy {} has no .bundle sidecar (unsigned).",
+                policy_path.display()
+            )
+            .yellow()
+        );
+        return Ok(());
+    }
     crate::trust_scan::verify_policy_signature(policy_path)
 }
 
@@ -821,14 +835,17 @@ mod tests {
 
     #[test]
     fn load_trust_policy_returns_default_when_no_file() {
-        // In a temp dir with no trust-policy.json, should return default
+        // CWD mutation with catch_unwind to guarantee cleanup even on panic.
         let dir = tempfile::tempdir().unwrap();
         let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
 
-        let policy = load_trust_policy(None).unwrap();
-        assert!(policy.publishers.is_empty());
+        let result = std::panic::catch_unwind(|| {
+            std::env::set_current_dir(dir.path()).unwrap();
+            let policy = load_trust_policy(None).unwrap();
+            assert!(policy.publishers.is_empty());
+        });
 
         std::env::set_current_dir(original).unwrap();
+        result.unwrap();
     }
 }

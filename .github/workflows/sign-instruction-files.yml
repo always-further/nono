@@ -61,5 +61,5 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore: update instruction file attestation bundles"
+          git commit -m "chore: update instruction file attestation bundles [skip ci]"
           git push

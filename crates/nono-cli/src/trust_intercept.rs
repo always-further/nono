@@ -19,8 +19,6 @@ struct CacheEntry {
     mtime_nanos: u128,
     /// File size at verification time
     size: u64,
-    /// SHA-256 content digest at verification time
-    digest: String,
     /// Verification outcome
     outcome: CachedOutcome,
 }
@@ -144,20 +142,13 @@ impl TrustInterceptor {
             .unwrap_or(0);
         let size = meta.len();
 
-        // Fast reject on metadata change
+        // Reject on metadata change (inode + nanosecond mtime + size).
+        // This triple is sufficient for cache invalidation — a content digest
+        // re-read on every check would make the hot path as expensive as a
+        // full verification, defeating the cache entirely.
         if entry.inode != inode || entry.mtime_nanos != mtime_nanos || entry.size != size {
             debug!(
                 "Trust interceptor: cache invalidated for {} (metadata changed)",
-                path.display()
-            );
-            return None;
-        }
-
-        // Content digest check to catch same-timestamp modifications
-        let current_digest = trust::file_digest(path).ok()?;
-        if entry.digest != current_digest {
-            debug!(
-                "Trust interceptor: cache invalidated for {} (content digest changed)",
                 path.display()
             );
             return None;
@@ -187,7 +178,6 @@ impl TrustInterceptor {
             let reason = format!("blocked by trust policy: {}", entry.description);
             self.store_cache(
                 path,
-                &digest,
                 CachedOutcome::Failed {
                     reason: reason.clone(),
                 },
@@ -203,7 +193,6 @@ impl TrustInterceptor {
                 Err(reason) => {
                     self.store_cache(
                         path,
-                        &digest,
                         CachedOutcome::Failed {
                             reason: reason.clone(),
                         },
@@ -223,7 +212,6 @@ impl TrustInterceptor {
                 let pub_name = publisher.clone();
                 self.store_cache(
                     path,
-                    &digest,
                     CachedOutcome::Verified {
                         publisher: pub_name.clone(),
                     },
@@ -240,7 +228,6 @@ impl TrustInterceptor {
                 let should_block = outcome.should_block(self.policy.enforcement);
                 self.store_cache(
                     path,
-                    &digest,
                     CachedOutcome::Failed {
                         reason: reason.clone(),
                     },
@@ -270,7 +257,7 @@ impl TrustInterceptor {
     }
 
     /// Store a verification result in the cache.
-    fn store_cache(&mut self, path: &Path, digest: &str, outcome: CachedOutcome) {
+    fn store_cache(&mut self, path: &Path, outcome: CachedOutcome) {
         let meta = match std::fs::metadata(path) {
             Ok(m) => m,
             Err(_) => return,
@@ -298,7 +285,6 @@ impl TrustInterceptor {
                 inode,
                 mtime_nanos,
                 size,
-                digest: digest.to_string(),
                 outcome,
             },
         );

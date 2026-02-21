@@ -92,9 +92,16 @@ pub fn merge_policies(policies: &[TrustPolicy]) -> Result<TrustPolicy> {
             }
         }
 
-        // Merge publishers (deduplicate by name)
+        // Merge publishers (deduplicate by name, first-occurrence wins).
+        // Callers pass policies in precedence order (user-level first),
+        // so user publishers take priority over project publishers.
         for publisher in &policy.publishers {
-            if seen_publisher_names.insert(publisher.name.clone()) {
+            if !seen_publisher_names.insert(publisher.name.clone()) {
+                tracing::warn!(
+                    "trust policy merge: publisher '{}' already defined in a higher-precedence policy, skipping duplicate",
+                    publisher.name
+                );
+            } else {
                 merged_publishers.push(publisher.clone());
             }
         }

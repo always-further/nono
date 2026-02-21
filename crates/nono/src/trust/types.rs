@@ -48,16 +48,45 @@ impl Default for TrustPolicy {
 }
 
 impl TrustPolicy {
-    /// Validate the policy version is supported.
+    /// Maximum number of blocklist entries to prevent resource exhaustion.
+    const MAX_BLOCKLIST_ENTRIES: usize = 10_000;
+    /// Maximum number of instruction patterns to prevent regex compilation exhaustion.
+    const MAX_INSTRUCTION_PATTERNS: usize = 100;
+    /// Maximum number of publishers.
+    const MAX_PUBLISHERS: usize = 1_000;
+
+    /// Validate the policy version and structural bounds.
     ///
     /// # Errors
     ///
-    /// Returns `NonoError::TrustPolicy` if the version is not supported.
+    /// Returns `NonoError::TrustPolicy` if the version is unsupported or
+    /// collection sizes exceed safe bounds.
     pub fn validate_version(&self) -> Result<()> {
         if self.version != TRUST_POLICY_VERSION {
             return Err(NonoError::TrustPolicy(format!(
                 "unsupported trust policy version {} (expected {})",
                 self.version, TRUST_POLICY_VERSION
+            )));
+        }
+        if self.blocklist.digests.len() > Self::MAX_BLOCKLIST_ENTRIES {
+            return Err(NonoError::TrustPolicy(format!(
+                "blocklist has {} entries (max {})",
+                self.blocklist.digests.len(),
+                Self::MAX_BLOCKLIST_ENTRIES
+            )));
+        }
+        if self.instruction_patterns.len() > Self::MAX_INSTRUCTION_PATTERNS {
+            return Err(NonoError::TrustPolicy(format!(
+                "instruction_patterns has {} entries (max {})",
+                self.instruction_patterns.len(),
+                Self::MAX_INSTRUCTION_PATTERNS
+            )));
+        }
+        if self.publishers.len() > Self::MAX_PUBLISHERS {
+            return Err(NonoError::TrustPolicy(format!(
+                "publishers has {} entries (max {})",
+                self.publishers.len(),
+                Self::MAX_PUBLISHERS
             )));
         }
         Ok(())
@@ -137,6 +166,10 @@ impl Publisher {
     }
 
     /// Check if a signer identity matches this publisher.
+    ///
+    /// Empty identity fields (issuer, repository, workflow, git_ref) never match
+    /// any pattern. This prevents a certificate with missing extensions from
+    /// accidentally matching a wildcard publisher.
     #[must_use]
     pub fn matches(&self, identity: &SignerIdentity) -> bool {
         match identity {
@@ -147,6 +180,15 @@ impl Publisher {
                 workflow,
                 git_ref,
             } => {
+                // Reject empty identity fields — they must never match any pattern
+                if issuer.is_empty()
+                    || repository.is_empty()
+                    || workflow.is_empty()
+                    || git_ref.is_empty()
+                {
+                    return false;
+                }
+
                 let issuer_match = self.issuer.as_deref().is_some_and(|i| i == issuer);
 
                 let repo_match = self
@@ -648,7 +690,59 @@ mod tests {
     #[test]
     fn wildcard_match_all() {
         assert!(wildcard_match("*", "anything"));
+        // wildcard_match("*", "") is true at the function level, but
+        // Publisher::matches() rejects empty identity fields before
+        // calling wildcard_match, so this case is unreachable in practice.
         assert!(wildcard_match("*", ""));
+    }
+
+    #[test]
+    fn publisher_rejects_empty_identity_fields() {
+        let publisher = Publisher {
+            name: "wildcard-all".to_string(),
+            issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+            repository: Some("*".to_string()),
+            workflow: Some("*".to_string()),
+            ref_pattern: Some("*".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+
+        // Empty issuer
+        let empty_issuer = SignerIdentity::Keyless {
+            issuer: String::new(),
+            repository: "org/repo".to_string(),
+            workflow: "wf.yml".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        assert!(!publisher.matches(&empty_issuer));
+
+        // Empty repository
+        let empty_repo = SignerIdentity::Keyless {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            repository: String::new(),
+            workflow: "wf.yml".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        assert!(!publisher.matches(&empty_repo));
+
+        // Empty workflow
+        let empty_wf = SignerIdentity::Keyless {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            repository: "org/repo".to_string(),
+            workflow: String::new(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        assert!(!publisher.matches(&empty_wf));
+
+        // Empty git_ref
+        let empty_ref = SignerIdentity::Keyless {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            repository: "org/repo".to_string(),
+            workflow: "wf.yml".to_string(),
+            git_ref: String::new(),
+        };
+        assert!(!publisher.matches(&empty_ref));
     }
 
     #[test]
