@@ -31,26 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-sign-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build nono CLI
-        run: cargo build --release -p nono-cli
+      - name: Install nono
+        run: |
+          curl -fsSL https://github.com/always-further/nono/releases/download/v0.6.0-alpha.2/nono-v0.6.0-alpha.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv nono /usr/local/bin/
 
       - name: Sign instruction files
-        run: ./target/release/nono trust sign --keyless --all
+        run: nono trust sign --keyless --all
 
       - name: Commit bundles
         run: |

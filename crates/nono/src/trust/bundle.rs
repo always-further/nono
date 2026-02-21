@@ -14,14 +14,14 @@
 //! # Fulcio Certificate Extensions
 //!
 //! Keyless bundles contain a Fulcio-issued certificate with OIDC identity
-//! claims encoded as X.509 extensions:
+//! claims encoded as X.509 extensions. We read v2 OIDs with v1 fallbacks:
 //!
-//! | OID | Field | Description |
-//! |-----|-------|-------------|
-//! | 1.3.6.1.4.1.57264.1.1 | Issuer | OIDC issuer URL |
-//! | 1.3.6.1.4.1.57264.1.8 | Source Repository | Repository URI |
-//! | 1.3.6.1.4.1.57264.1.10 | Source Repository Ref | Git ref at signing time |
-//! | 1.3.6.1.4.1.57264.1.11 | Build Config URI | Workflow file path |
+//! | OID (v2) | OID (v1) | Field | Description |
+//! |----------|----------|-------|-------------|
+//! | .1.1 | — | Issuer | OIDC issuer URL |
+//! | .1.12 | .1.5 | Source Repository | `org/repo` (v2 URI normalized) |
+//! | .1.14 | .1.6 | Source Repository Ref | Git ref at signing time |
+//! | .1.18 | — | Build Config URI | Workflow path (v2 URI normalized) |
 
 use crate::error::{NonoError, Result};
 use crate::trust::types::SignerIdentity;
@@ -38,17 +38,33 @@ use sigstore_verify::crypto::parse_certificate_info;
 use sigstore_verify::types::bundle::VerificationMaterialContent;
 
 // ---------------------------------------------------------------------------
-// Fulcio certificate extension OIDs (v2 extensions)
+// Fulcio certificate extension OIDs
 // ---------------------------------------------------------------------------
+//
+// Fulcio v2 extensions (1.3.6.1.4.1.57264.1.x) changed semantics from v1.
+// The OIDs below are the correct v2 mappings for GitHub Actions OIDC certs.
+//
+// Reference: https://github.com/sigstore/fulcio/blob/main/docs/oid-info.md
 
-/// Fulcio OID for source repository URI: 1.3.6.1.4.1.57264.1.8
-const OID_SOURCE_REPOSITORY: &str = "1.3.6.1.4.1.57264.1.8";
+/// Fulcio OID for source repository URI: 1.3.6.1.4.1.57264.1.12
+/// Value: `https://github.com/<org>/<repo>` (full URI, not just `org/repo`)
+const OID_SOURCE_REPOSITORY_URI: &str = "1.3.6.1.4.1.57264.1.12";
 
-/// Fulcio OID for source repository ref (git ref): 1.3.6.1.4.1.57264.1.10
-const OID_SOURCE_REPOSITORY_REF: &str = "1.3.6.1.4.1.57264.1.10";
+/// Fulcio OID for source repository ref: 1.3.6.1.4.1.57264.1.14
+/// Value: `refs/heads/main` (git ref at signing time)
+const OID_SOURCE_REPOSITORY_REF: &str = "1.3.6.1.4.1.57264.1.14";
 
-/// Fulcio OID for build config URI (workflow): 1.3.6.1.4.1.57264.1.11
-const OID_BUILD_CONFIG_URI: &str = "1.3.6.1.4.1.57264.1.11";
+/// Fulcio OID for build config URI (workflow): 1.3.6.1.4.1.57264.1.18
+/// Value: `https://github.com/<org>/<repo>/.github/workflows/<file>@<ref>`
+const OID_BUILD_CONFIG_URI: &str = "1.3.6.1.4.1.57264.1.18";
+
+/// Fulcio v1 OID for source repository (short form): 1.3.6.1.4.1.57264.1.5
+/// Value: `<org>/<repo>` (v1 fallback, no URI prefix)
+const OID_SOURCE_REPOSITORY_V1: &str = "1.3.6.1.4.1.57264.1.5";
+
+/// Fulcio v1 OID for source repository ref: 1.3.6.1.4.1.57264.1.6
+/// Value: `refs/heads/main` (same semantics as v2 .1.14)
+const OID_SOURCE_REPOSITORY_REF_V1: &str = "1.3.6.1.4.1.57264.1.6";
 
 // ---------------------------------------------------------------------------
 // Bundle loading
@@ -447,10 +463,10 @@ pub fn extract_predicate_type(bundle: &Bundle, bundle_path: &Path) -> Result<Str
 /// Extract the signer identity from a Sigstore bundle's verification material.
 ///
 /// For bundles with a Fulcio certificate (keyless), extracts:
-/// - OIDC issuer (OID 1.3.6.1.4.1.57264.1.1)
-/// - Source repository (OID 1.3.6.1.4.1.57264.1.8)
-/// - Build config / workflow (OID 1.3.6.1.4.1.57264.1.11)
-/// - Source repository ref (OID 1.3.6.1.4.1.57264.1.10)
+/// - OIDC issuer (OID .1.1)
+/// - Source repository (OID .1.12, v1 fallback .1.5)
+/// - Build config / workflow (OID .1.18)
+/// - Source repository ref (OID .1.14, v1 fallback .1.6)
 ///
 /// For bundles with a public key hint (keyed), extracts the human key ID
 /// from the DSSE predicate's `signer.key_id` field. Falls back to the
@@ -522,23 +538,27 @@ fn extract_identity_from_cert(cert_der: &[u8], bundle_path: &Path) -> Result<Sig
     // Extract extended Fulcio OIDs from the raw certificate
     let extensions = extract_fulcio_extensions(cert_der, bundle_path)?;
 
-    let repository = extensions.repository.ok_or_else(|| NonoError::TrustVerification {
-        path: bundle_path.display().to_string(),
-        reason: "signing certificate missing source repository extension (OID 1.3.6.1.4.1.57264.1.8)"
-            .to_string(),
-    })?;
+    let repository = extensions
+        .repository
+        .ok_or_else(|| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: "signing certificate missing source repository extension (OID .1.12 or .1.5)"
+                .to_string(),
+        })?;
 
-    let workflow = extensions.workflow.ok_or_else(|| NonoError::TrustVerification {
-        path: bundle_path.display().to_string(),
-        reason: "signing certificate missing build config/workflow extension (OID 1.3.6.1.4.1.57264.1.11)"
-            .to_string(),
-    })?;
+    let workflow = extensions
+        .workflow
+        .ok_or_else(|| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: "signing certificate missing build config/workflow extension (OID .1.18)"
+                .to_string(),
+        })?;
 
     let git_ref = extensions
         .git_ref
         .ok_or_else(|| NonoError::TrustVerification {
             path: bundle_path.display().to_string(),
-            reason: "signing certificate missing source ref extension (OID 1.3.6.1.4.1.57264.1.10)"
+            reason: "signing certificate missing source ref extension (OID .1.14 or .1.6)"
                 .to_string(),
         })?;
 
@@ -581,15 +601,20 @@ fn extract_fulcio_extensions(cert_der: &[u8], bundle_path: &Path) -> Result<Fulc
         }
     };
 
-    let mut repository = None;
+    let mut repository_uri = None; // v2: full URI
+    let mut repository_v1 = None; // v1: org/repo
     let mut workflow = None;
     let mut git_ref = None;
+    let mut git_ref_v1 = None;
 
     for ext in extensions.iter() {
         let oid_str = ext.extn_id.to_string();
         match oid_str.as_str() {
-            OID_SOURCE_REPOSITORY => {
-                repository = decode_utf8_extension(ext.extn_value.as_bytes());
+            OID_SOURCE_REPOSITORY_URI => {
+                repository_uri = decode_utf8_extension(ext.extn_value.as_bytes());
+            }
+            OID_SOURCE_REPOSITORY_V1 => {
+                repository_v1 = decode_utf8_extension(ext.extn_value.as_bytes());
             }
             OID_BUILD_CONFIG_URI => {
                 workflow = decode_utf8_extension(ext.extn_value.as_bytes());
@@ -597,15 +622,68 @@ fn extract_fulcio_extensions(cert_der: &[u8], bundle_path: &Path) -> Result<Fulc
             OID_SOURCE_REPOSITORY_REF => {
                 git_ref = decode_utf8_extension(ext.extn_value.as_bytes());
             }
+            OID_SOURCE_REPOSITORY_REF_V1 => {
+                git_ref_v1 = decode_utf8_extension(ext.extn_value.as_bytes());
+            }
             _ => {}
         }
     }
 
+    // Normalize v2 repository URI to org/repo form for policy matching.
+    // v2 value: "https://github.com/org/repo" -> "org/repo"
+    // v1 value: "org/repo" (already correct)
+    let repository = repository_uri
+        .map(|uri| normalize_github_uri(&uri))
+        .or(repository_v1);
+
+    // Normalize v2 build config URI to relative workflow path.
+    // v2 value: "https://github.com/org/repo/.github/workflows/file.yml@refs/heads/main"
+    //        -> ".github/workflows/file.yml"
+    // No v1 fallback for workflow — it's a v2-only OID.
+    let workflow = workflow.map(|uri| normalize_workflow_uri(&uri));
+
     Ok(FulcioExtensions {
         repository,
         workflow,
-        git_ref,
+        git_ref: git_ref.or(git_ref_v1),
     })
+}
+
+/// Normalize a GitHub repository URI to `org/repo` form.
+///
+/// Strips the `https://github.com/` prefix if present. Falls back to the
+/// original value if the prefix is absent (e.g., v1 certs or non-GitHub issuers).
+fn normalize_github_uri(uri: &str) -> String {
+    uri.strip_prefix("https://github.com/")
+        .unwrap_or(uri)
+        .to_string()
+}
+
+/// Normalize a Fulcio v2 build config URI to a relative workflow path.
+///
+/// v2 value: `https://github.com/org/repo/.github/workflows/file.yml@refs/heads/main`
+/// Result:   `.github/workflows/file.yml`
+///
+/// Strips the `https://github.com/<org>/<repo>/` prefix and the `@<ref>` suffix.
+/// Falls back to the original value if the format is unexpected.
+fn normalize_workflow_uri(uri: &str) -> String {
+    // Strip the @ref suffix first
+    let without_ref = uri.split('@').next().unwrap_or(uri);
+
+    // Strip the https://github.com/org/repo/ prefix to get relative path
+    if let Some(rest) = without_ref.strip_prefix("https://github.com/") {
+        // rest = "org/repo/.github/workflows/file.yml"
+        // Skip org/repo (first two path segments) to get ".github/..."
+        let mut segments = rest.splitn(3, '/');
+        let _org = segments.next();
+        let _repo = segments.next();
+        if let Some(relative) = segments.next() {
+            return relative.to_string();
+        }
+    }
+
+    // Fallback: return as-is
+    without_ref.to_string()
 }
 
 /// Decode an X.509 extension value as a UTF-8 string.
@@ -825,6 +903,128 @@ mod tests {
                 }}
             }}"#
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_github_uri
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_github_uri_strips_prefix() {
+        assert_eq!(
+            normalize_github_uri("https://github.com/always-further/test-sk-prov"),
+            "always-further/test-sk-prov"
+        );
+    }
+
+    #[test]
+    fn normalize_github_uri_passthrough_v1() {
+        assert_eq!(
+            normalize_github_uri("always-further/test-sk-prov"),
+            "always-further/test-sk-prov"
+        );
+    }
+
+    #[test]
+    fn normalize_github_uri_non_github() {
+        assert_eq!(
+            normalize_github_uri("https://gitlab.com/org/repo"),
+            "https://gitlab.com/org/repo"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_workflow_uri
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_workflow_uri_full_v2() {
+        assert_eq!(
+            normalize_workflow_uri(
+                "https://github.com/always-further/test-sk-prov/.github/workflows/sign-skills.yml@refs/heads/main"
+            ),
+            ".github/workflows/sign-skills.yml"
+        );
+    }
+
+    #[test]
+    fn normalize_workflow_uri_no_ref_suffix() {
+        assert_eq!(
+            normalize_workflow_uri("https://github.com/org/repo/.github/workflows/ci.yml"),
+            ".github/workflows/ci.yml"
+        );
+    }
+
+    #[test]
+    fn normalize_workflow_uri_relative_passthrough() {
+        assert_eq!(
+            normalize_workflow_uri(".github/workflows/sign.yml"),
+            ".github/workflows/sign.yml"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Real Fulcio cert identity extraction (always-further/test-sk-prov)
+    // -----------------------------------------------------------------------
+
+    /// Base64-encoded Fulcio certificate from a real GitHub Actions keyless
+    /// signing run on always-further/test-sk-prov (2026-02-21).
+    const REAL_FULCIO_CERT_B64: &str = "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";
+
+    #[test]
+    fn extract_identity_from_real_fulcio_cert() {
+        let cert_der = crate::trust::base64::base64_decode(REAL_FULCIO_CERT_B64).unwrap();
+
+        let identity =
+            extract_identity_from_cert(&cert_der, Path::new("SKILLS.md.bundle")).unwrap();
+
+        match identity {
+            SignerIdentity::Keyless {
+                issuer,
+                repository,
+                workflow,
+                git_ref,
+            } => {
+                assert_eq!(
+                    issuer, "https://token.actions.githubusercontent.com",
+                    "issuer mismatch"
+                );
+                assert_eq!(
+                    repository, "always-further/test-sk-prov",
+                    "repository mismatch — should be normalized from full URI"
+                );
+                assert_eq!(
+                    workflow, ".github/workflows/sign-skills.yml",
+                    "workflow mismatch — should be normalized from full URI"
+                );
+                assert_eq!(git_ref, "refs/heads/main", "git_ref mismatch");
+            }
+            SignerIdentity::Keyed { .. } => panic!("expected keyless identity"),
+        }
+    }
+
+    #[test]
+    fn real_fulcio_cert_matches_trust_policy() {
+        let cert_der = crate::trust::base64::base64_decode(REAL_FULCIO_CERT_B64).unwrap();
+
+        let identity =
+            extract_identity_from_cert(&cert_der, Path::new("SKILLS.md.bundle")).unwrap();
+
+        // Simulate a trust-policy.json publisher entry
+        let publisher = crate::trust::types::Publisher {
+            name: "test-sk-prov".to_string(),
+            issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+            repository: Some("always-further/test-sk-prov".to_string()),
+            workflow: Some(".github/workflows/sign-skills.yml".to_string()),
+            ref_pattern: Some("refs/heads/main".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+
+        assert!(
+            publisher.matches(&identity),
+            "publisher should match extracted identity"
+        );
     }
 
     fn make_empty_cert_chain_bundle_json() -> String {
