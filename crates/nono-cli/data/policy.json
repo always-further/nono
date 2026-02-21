@@ -481,7 +481,7 @@
         "allow": ["$HOME/.claude"],
         "read": [],
         "allow_file": ["$HOME/.claude.json"],
-        "read_file": ["$HOME/Library/Keychains/login.keychain-db", "$HOME/.gitconfig", "$HOME/.gitignore_global"]
+        "read_file": ["$HOME/Library/Keychains/login.keychain-db", "$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
       },
       "network": { "block": false },
       "workdir": { "access": "readwrite" },
