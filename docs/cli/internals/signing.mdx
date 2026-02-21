@@ -1,3 +1,239 @@
-# Policy Signing
+---
+title: Attestation Internals
+description: Sigstore-based cryptographic attestation format and verification pipeline
+---
 
-[WIP holder]
+This page covers the internal design of nono's instruction file attestation system. For usage instructions, see [Instruction File Trust](/cli/features/trust).
+
+## Attestation Format
+
+Signatures use three nested layers, following the same standards as SLSA provenance.
+
+### DSSE Envelope
+
+The outermost layer is a [DSSE](https://github.com/secure-systems-lab/dsse) (Dead Simple Signing Envelope):
+
+```json
+{
+  "payloadType": "application/vnd.in-toto+json",
+  "payload": "<base64url of Statement>",
+  "signatures": [
+    {
+      "keyid": "",
+      "sig": "<base64url signature over PAE(payloadType, payload)>"
+    }
+  ]
+}
+```
+
+The signature is computed over the Pre-Authentication Encoding (PAE) of the payload type and payload, preventing type confusion attacks.
+
+### In-Toto Statement
+
+The DSSE payload is an [in-toto v1 attestation statement](https://github.com/in-toto/attestation):
+
+```json
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "SKILLS.md",
+      "digest": {
+        "sha256": "a1b2c3d4e5f6..."
+      }
+    }
+  ],
+  "predicateType": "https://nono.dev/attestation/instruction-file/v1",
+  "predicate": {
+    "version": 1,
+    "signer": {
+      "kind": "keyed",
+      "key_id": "nono-keystore:default"
+    }
+  }
+}
+```
+
+The `subject` binds the statement to a specific file by name and SHA-256 digest. The `predicateType` identifies this as a nono instruction file attestation. Trust policy signatures use a separate predicate type: `https://nono.dev/attestation/trust-policy/v1`.
+
+For keyless signing, the predicate carries OIDC provenance:
+
+```json
+{
+  "signer": {
+    "kind": "keyless",
+    "issuer": "https://token.actions.githubusercontent.com",
+    "subject": "repo:org/repo:ref:refs/heads/main",
+    "repository": "org/repo",
+    "workflow_ref": ".github/workflows/sign-skills.yml@refs/heads/main"
+  }
+}
+```
+
+### Sigstore Bundle
+
+The DSSE envelope is wrapped in a [Sigstore bundle v0.3](https://github.com/sigstore/protobuf-specs):
+
+```json
+{
+  "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+  "verificationMaterial": {
+    "certificate": { "rawBytes": "<base64 DER>" },
+    "tlogEntries": [{ ... }]
+  },
+  "dsseEnvelope": { ... }
+}
+```
+
+For keyed signing, `verificationMaterial` contains a `publicKey` hint instead of a certificate. For keyless signing, it contains the Fulcio certificate chain and Rekor transparency log inclusion proof, making the bundle fully self-contained for offline verification.
+
+## Verification Pipeline
+
+When nono encounters an instruction file (pre-exec scan or runtime interception), verification proceeds through these stages:
+
+![pre-exec scan or runtime interception flow chart- verification proceeds through these stages](/assets/attest-flow.png)
+
+attest-flow.png
+
+
+### Keyless Verification
+
+For keyless bundles, cryptographic verification includes:
+
+1. **Fulcio certificate chain** -- The signing certificate was issued by the Sigstore Fulcio CA
+2. **Certificate validity** -- The Rekor timestamp proves the signature was created while the short-lived certificate was valid (certificates typically expire after 10-20 minutes)
+3. **Rekor inclusion proof** -- The signature was logged in the Rekor transparency log
+4. **ECDSA signature** -- The signature over the DSSE PAE is valid under the certificate's public key
+
+Signer identity is extracted from Fulcio certificate extensions:
+
+| OID | Field |
+|-----|-------|
+| `1.3.6.1.4.1.57264.1.1` | OIDC Issuer |
+| `1.3.6.1.4.1.57264.1.8` | Source Repository |
+| `1.3.6.1.4.1.57264.1.9` | Source Repository Ref |
+| `1.3.6.1.4.1.57264.1.11` | Build Config URI (workflow) |
+
+### Keyed Verification
+
+For keyed bundles, the public key is loaded from the system keystore and the ECDSA P-256 signature is verified directly. No Fulcio or Rekor is involved. Signer identity is extracted from the predicate's `key_id` field.
+
+## Interception Points
+
+### Pre-exec Scan
+
+Before fork/exec, nono scans the working directory for files matching `instruction_patterns`. This is the baseline -- it catches instruction files present at session start. If any file fails verification and enforcement is `deny`, the process never starts.
+
+The pre-exec scan also verifies the trust policy's own signature before trusting it.
+
+### Seccomp-Notify (Linux Runtime)
+
+On Linux in [Supervised mode](/cli/features/supervisor), the seccomp-notify supervisor already traps `openat`/`openat2` syscalls for capability expansion. When the target path matches an instruction file pattern, the trust interceptor runs verification before the normal approval flow.
+
+The interceptor:
+1. Reads the file content from disk (the supervisor has unrestricted access)
+2. Computes the SHA-256 digest and checks the blocklist
+3. Locates and verifies the `.bundle` file
+4. On success: injects the file descriptor via `SECCOMP_IOCTL_NOTIF_ADDFD`
+5. On failure: returns `EPERM` to the sandboxed process
+
+A TOCTOU re-verification step ensures the digest of the opened file descriptor matches the digest verified during the trust check. This prevents a race where the file is swapped between verification and the fd injection.
+
+### Seatbelt Deny Rules (macOS Runtime)
+
+On macOS, instruction file patterns are enforced at the kernel level using Seatbelt rule specificity. During sandbox profile generation:
+
+1. Each instruction pattern is converted to a Seatbelt regex (e.g., `SKILLS*` becomes `#"/SKILLS[^/]*$"`)
+2. A `(deny file-read-data (regex ...))` rule is emitted for each pattern
+3. For each file that passed the pre-exec trust scan, a `(allow file-read-data (literal "/full/path"))` rule is emitted
+
+Seatbelt literal-allow rules override regex-deny rules (more specific wins). Files that were not present or did not pass the pre-exec scan have no literal-allow rule and remain blocked by the deny-regex.
+
+Glob-to-regex conversion:
+
+| Glob | Seatbelt Regex |
+|------|---------------|
+| `SKILLS*` | `/SKILLS[^/]*$` |
+| `CLAUDE*` | `/CLAUDE[^/]*$` |
+| `AGENT.MD` | `/AGENT\.MD$` |
+| `.claude/**/*.md` | `/\.claude/.*/[^/]*\.md$` |
+
+## Verification Cache
+
+To avoid re-computing signatures on every file access:
+
+```
+Cache key:   (canonical_path, inode, mtime, file_size)
+Cache value: (sha256_digest, verification_result, publisher_name)
+TTL:         Session lifetime (cleared on nono exit)
+```
+
+If any component of the cache key changes (file modified, replaced, moved), the cache entry is invalidated and verification re-runs.
+
+## Signed Trust Policy
+
+The trust policy itself must be signed to establish a root of trust. Without this, an attacker who can write to the project directory can modify `trust-policy.json` to add themselves as a publisher or weaken enforcement.
+
+Policy bundles use the predicate type `https://nono.dev/attestation/trust-policy/v1` to distinguish them from instruction file bundles.
+
+During pre-exec scan, policy signature verification runs first:
+
+1. Locate `trust-policy.json` in the scan root
+2. Check for `.bundle` sidecar
+3. Verify the bundle (keyed or keyless)
+4. Extract and validate the policy content
+
+If policy verification fails and enforcement is `deny`, the sandbox refuses to start.
+
+### Trust Model
+
+Policy signature proves provenance and tamper-resistance, not signer allowlisting. There is no higher-level document that defines who may author trust policy -- the policy itself is that document. Operator acceptance of the initial policy is the trust bootstrap step, analogous to SSH's `known_hosts` or TLS's root CA store.
+
+## Policy Merging
+
+Multiple trust policies merge with additive-only semantics:
+
+| Field | Merge Strategy |
+|-------|---------------|
+| `instruction_patterns` | Union |
+| `publishers` | Union |
+| `blocklist.digests` | Union |
+| `enforcement` | Strictest wins (`deny` > `warn` > `audit`) |
+
+Project-level policy cannot weaken user-level or embedded policy. A malicious project's `trust-policy.json` can add publishers but cannot remove blocklist entries, remove instruction patterns, or downgrade enforcement.
+
+## Codebase Layout
+
+### Library (`crates/nono/src/trust/`)
+
+Attestation primitives reusable by all language bindings.
+
+| File | Contents |
+|------|----------|
+| `types.rs` | `TrustPolicy`, `Publisher`, `Blocklist`, `Enforcement`, `SignerIdentity`, `VerificationOutcome` |
+| `digest.rs` | SHA-256 digest computation (file and bytes) |
+| `dsse.rs` | DSSE envelope parsing/construction, PAE, in-toto statements |
+| `bundle.rs` | Sigstore bundle verification, Fulcio cert identity extraction |
+| `policy.rs` | Trust policy loading, merging, evaluation, instruction file discovery |
+| `signing.rs` | ECDSA P-256 key generation, keyed signing, bundle construction |
+
+### CLI (`crates/nono-cli/src/`)
+
+| File | Contents |
+|------|----------|
+| `trust_cmd.rs` | `nono trust` subcommand handlers |
+| `trust_scan.rs` | Pre-exec scan, policy signature verification |
+| `trust_intercept.rs` | Runtime trust interceptor (cache, verification dispatch) |
+| `instruction_deny.rs` | macOS Seatbelt deny rule generation (glob-to-regex) |
+
+## Security Properties
+
+**Verification before ingestion.** The pre-exec scan and runtime interception both ensure the agent never sees content that failed verification. If the agent reads the file before verification completes, the injection has already succeeded.
+
+**No trust-on-first-use.** A file must have a valid signature from a trusted publisher on first encounter. TOFU creates a window where the first encounter is untrusted, which is the supply chain attack scenario this defends against.
+
+**Blocklist before crypto.** A known-malicious file is denied even if it has a valid signature. This handles the case of a legitimately-signed file that is later discovered to be malicious.
+
+**Private key protection.** For keyed signing, the private key lives in the system keystore (macOS Keychain / Linux Secret Service). It is never written to disk in plaintext.
+
+**Short-lived certificates.** Keyless signatures use short-lived Fulcio certificates (typically 10-20 minutes). The Rekor timestamp proves the signature was created while the certificate was valid, not against the current time.

@@ -43,7 +43,8 @@
           "cli/features/audit",
           "cli/features/supervisor",
           "cli/features/execution-modes",
-          "cli/features/learn"
+          "cli/features/learn",
+          "cli/features/trust"
         ]
       },
       {

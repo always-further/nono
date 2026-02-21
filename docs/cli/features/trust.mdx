@@ -1,0 +1,456 @@
+---
+title: Agent Instruction Attestation
+description: Cryptographic verification of AI agent instruction files
+---
+
+AI agent instruction files (`SKILLS.md`, `CLAUDE.md`, `AGENT.MD`) are natural language files, formatted in markdown - that an LLM will use as a context source for orientation on the project, its structure, and how to execute commands. Because they are natural language based, they are vulnerable to prompt injection attacks - an attacker could modify an instruction file to trick the agent into executing harmful commands.
+
+One of the areas where Large Language Models (LLMs) are most vulnerable to prompt injection is in reading their own instruction files. Unlike traditional software, LLM's do not differentiate a control plane vs data plane - instruction and data are loaded into the same channel: the prompt. This means that if an attacker can modify an instruction file, they can inject malicious instructions that the LLM will execute with the same privileges as the original file.
+
+Nono's sandbox neutralizes the *effects* of prompt injection - dangerous actions are blocked at the kernel. Instruction file trust adds a second layer: verifying the *provenance* and *integrity* of instruction files before the agent can read them. Unsigned or tampered files are hard-denied.
+
+## What Signing Proves (and What It Does Not)
+
+As with any Sigstore-based attestation, signing an instruction file proves two things:
+
+1. **Provenance** -- The file was signed by a specific identity (a key you control, or a CI/CD pipeline you trust). You can verify *who* produced the file.
+2. **Integrity** -- The file has not been modified since it was signed. Any tampering -- even a single byte -- breaks the cryptographic digest and the signature is rejected.
+
+Signing does **not** prove that the content is safe, correct, or free of malicious instructions. A legitimately signed file could still contain harmful directives if the signer intended it, or if the signer's own environment was compromised before signing. The signature attests to *who signed it* and *that it has not changed*, not to the quality or safety of the content itself.
+
+This is the same trust model as code signing, package signing, or any other supply chain attestation: you decide which signers you trust (via the trust policy's `publishers` list), and the cryptography guarantees that only those signers can produce files that pass verification. The blocklist provides an additional layer for revoking trust in specific file contents after the fact, even if the signature is valid.
+
+## How It Works
+
+Instruction files are signed at time of authoring or amendment using a Sigstore-compatible cryptographic attestation. Before the agent launches, nono scans the working directory for instruction files and verifies each one against a trust policy. Files that fail verification are blocked.
+
+There are two signing modes supported:
+
+**Keyed signing** -- A private key(s) is stored in the system keystore (macOS Keychain / Linux Secret Service). Suitable for individual developers and local workflows. Plans are in place to extend the key store to support more backends (e.g., HashiCorp Vault, AWS KMS) in the future.
+
+**Keyless signing** -- Ephemeral key + OIDC identity + Fulcio certificate + Rekor transparency log. Suitable for CI/CD pipelines and organizations. The signer's identity is cryptographically bound to the signature via the OIDC token.
+
+Both modes produce [Sigstore bundle](https://docs.sigstore.dev/about/bundle/) v0.3 files, recognizable by the `.bundle` extension, stored alongside the signed file (e.g., `SKILLS.md.bundle`). Each bundle contains the signature, signing certificate, and metadata needed for verification.
+
+## Quick Start
+
+### 1. Generate a signing key
+
+```bash
+nono trust keygen -id [key-identifier]
+```
+
+This creates an ECDSA P-256 key pair and stores the private key in the system keystore.
+
+### 2. Sign instruction files
+
+```bash
+nono trust sign SKILLS.md
+# or sign all instruction files at once
+nono trust sign --all
+```
+
+Each signed file gets a `.bundle` sidecar (e.g., `SKILLS.md.bundle`). Commit these alongside the instruction files.
+
+### 3. Create a trust policy
+
+Signing files is only half the equation - you must also define a trust policy that declares which keys are trusted to sign instruction files.
+
+Create `trust-policy.json` in the project root:
+
+```json
+{
+  "version": 1,
+  "instruction_patterns": [
+    "SKILLS*",
+    "CLAUDE*",
+    "AGENT*",
+    ".claude/**/*.md"
+  ],
+  "publishers": [
+    {
+      "name": "local-dev",
+      "key_id": "default"
+    }
+  ],
+  "blocklist": {
+    "digests": []
+  },
+  "enforcement": "deny"
+}
+```
+
+### 4. Sign the trust policy
+
+The trust policy itself must be signed - an unsigned policy could be modified by an attacker to add themselves as a publisher.
+
+```bash
+nono trust sign-policy
+```
+
+### 5. Verification
+
+```bash
+nono trust verify --all
+```
+
+When you run `nono run`, the pre-exec scan automatically verifies all instruction files before the agent launches.
+
+## Trust Policy
+
+Trust policy is defined in `trust-policy.json`, separate from the sandbox policy (`policy.json`). This keeps concerns separated: `policy.json` defines sandbox rules, `trust-policy.json` defines attestation trust.
+
+### instruction_patterns
+
+Glob patterns that identify instruction files. Any file matching these patterns is subject to attestation verification, regardless of directory depth.
+
+```json
+{
+  "instruction_patterns": [
+    "SKILLS*",
+    "CLAUDE*",
+    "AGENT*",
+    ".claude/**/*.md"
+  ]
+}
+```
+
+A `SKILLS.md` in a subdirectory or unpacked from a dependency is caught by `SKILLS*`.
+
+### publishers
+
+Trusted publisher identities. A file's signature must match at least one publisher entry to be trusted.
+
+**Keyed publishers** match by key ID:
+
+```json
+{
+  "name": "local-dev",
+  "key_id": "default"
+}
+```
+
+**Keyless (OIDC) publishers** match by identity claims from the Fulcio certificate:
+
+```json
+{
+  "name": "my-org-ci",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "repository": "my-org/my-repo",
+  "workflow": ".github/workflows/sign-skills.yml",
+  "ref_pattern": "refs/heads/main"
+}
+```
+
+| Field | Description | Wildcards |
+|-------|-------------|-----------|
+| `name` | Human-readable identifier | No |
+| `issuer` | OIDC issuer URL | No |
+| `repository` | Source repository (e.g., `org/repo`) | Yes (`org/*`) |
+| `workflow` | Workflow file that signed | Yes (`*`) |
+| `ref_pattern` | Git ref pattern | Yes (`refs/tags/v*`) |
+
+### blocklist
+
+Known-malicious file digests. Checked before any other verification. A file matching a blocklist digest is hard-denied regardless of signature validity.
+
+```json
+{
+  "blocklist": {
+    "digests": [
+      {
+        "sha256": "a1b2c3d4...",
+        "description": "Known malicious SKILLS.md variant",
+        "added": "2026-02-20"
+      }
+    ]
+  }
+}
+```
+
+Blocklist entries are always hard-denied, even in `warn` or `audit` enforcement modes.
+
+### enforcement
+
+| Mode | Behavior |
+|------|----------|
+| `deny` | Hard deny unsigned/invalid/untrusted files. The agent does not start. |
+| `warn` | Log warnings but allow the agent to proceed. |
+| `audit` | Allow access, log verification results for post-hoc review. |
+
+### Policy Composition
+
+Trust policies are composable across three levels:
+
+| Level | Location | Purpose |
+|-------|----------|---------|
+| Embedded | Built into nono binary | Baseline instruction patterns |
+| User | `$XDG_CONFIG_HOME/nono/trust-policy.json` | Personal trusted publishers |
+| Project | `<project-root>/trust-policy.json` | Project-specific publishers |
+
+Merging rules:
+- Publishers: union (all levels combined)
+- Blocklist digests: union (all levels combined)
+- Instruction patterns: union (all levels combined)
+- Enforcement: strictest wins (`deny` > `warn` > `audit`)
+
+Project-level policy **cannot** weaken user-level or embedded policy. A project cannot remove a blocklist entry or downgrade enforcement from `deny` to `warn`.
+
+### Policy Hierarchy and Trust Anchoring
+
+The user-level policy (`~/.config/nono/trust-policy.json`) acts as your personal trust anchor. It defines your baseline expectations: which publishers you trust, which file digests are blocked, and the minimum enforcement level. Project-level policies compose on top of this baseline -- they can add publishers and blocklist entries, but cannot remove or weaken anything from the user level.
+
+When only a project-level policy exists with no user-level policy, nono warns:
+
+```
+Warning: project-level trust-policy.json found but no user-level policy exists.
+Project policies are not authoritative without a user-level policy to anchor trust.
+Create a signed policy at ~/.config/nono/trust-policy.json to enforce verification.
+```
+
+This is because without a user-level policy, the project defines its own trust entirely -- there is no independent authority constraining what the project declares. The project policy still works, but the trust model is weaker: you are trusting whatever publishers and enforcement the project author chose.
+
+For stronger guarantees, create a user-level policy that defines your trusted publishers and enforcement floor:
+
+```bash
+mkdir -p ~/.config/nono
+```
+
+```json
+// ~/.config/nono/trust-policy.json
+{
+  "version": 1,
+  "instruction_patterns": ["SKILLS*", "CLAUDE*", "AGENT*"],
+  "publishers": [
+    {
+      "name": "my-key",
+      "key_id": "default"
+    }
+  ],
+  "blocklist": { "digests": [] },
+  "enforcement": "deny"
+}
+```
+
+```bash
+nono trust sign-policy ~/.config/nono/trust-policy.json
+```
+
+With a user-level policy in place, project policies merge additively on top. A project can declare additional publishers (e.g., its CI signing identity), but your user-level enforcement of `deny` cannot be downgraded to `warn` by the project, and your blocklist entries cannot be removed.
+
+## CLI Commands
+
+### nono trust sign
+
+Sign instruction files, producing `.bundle` sidecars.
+
+```bash
+nono trust sign SKILLS.md                  # keyed (default key)
+nono trust sign SKILLS.md --key my-key     # keyed (specific key)
+nono trust sign SKILLS.md --keyless        # keyless (OIDC + Fulcio + Rekor)
+nono trust sign SKILLS.md CLAUDE.md        # multiple files
+nono trust sign --all                      # all instruction files in CWD
+```
+
+### nono trust verify
+
+Verify instruction files against the trust policy.
+
+```bash
+nono trust verify SKILLS.md                # single file
+nono trust verify --all                    # all instruction files in CWD
+nono trust verify SKILLS.md --policy path  # specific trust policy
+```
+
+### nono trust list
+
+List all instruction files and their verification status.
+
+```bash
+nono trust list
+```
+
+```
+  File                               Status       Publisher
+  -------------------------------------------------------------------
+  SKILLS.md                          VERIFIED     local-dev (keyed)
+  CLAUDE.md                          VERIFIED     local-dev (keyed)
+  .claude/commands/deploy.md         UNSIGNED     no .bundle file found
+```
+
+### nono trust keygen
+
+Generate a signing key and store it in the system keystore.
+
+```bash
+nono trust keygen                          # default key ID
+nono trust keygen --id my-signing-key      # named key
+```
+
+### nono trust sign-policy
+
+Sign the trust policy file.
+
+```bash
+nono trust sign-policy                     # sign trust-policy.json in CWD
+nono trust sign-policy --key my-key        # specific key
+```
+
+Every time you modify `trust-policy.json`, you must re-sign it.
+
+## Pre-exec Scanning
+
+When `nono run` launches a command, it scans the working directory for instruction files before applying the sandbox:
+
+```
+nono run --profile claude-code -- claude
+  -> Scan CWD for instruction file patterns
+  -> For each match:
+     -> Compute SHA-256 digest
+     -> Check blocklist
+     -> Load and verify .bundle
+     -> Check publisher identity against trust policy
+  -> All pass: proceed with sandbox and exec
+  -> Any fail (enforcement=deny): abort with diagnostic
+```
+
+```
+  Scanning 3 instruction file(s) for trust verification...
+    PASS SKILLS.md (publisher: local-dev)
+    PASS CLAUDE.md (publisher: local-dev)
+    PASS .claude/commands/deploy.md (publisher: local-dev)
+
+  Trust scan: 3 file(s) verified.
+```
+
+## Runtime Interception
+
+The pre-exec scan catches instruction files present at startup. For files that appear or change during the session, nono provides runtime interception.
+
+### Linux (seccomp-notify)
+
+In [Supervised mode](/cli/features/supervisor), the seccomp-notify supervisor traps every `openat()` syscall. When the target path matches an instruction file pattern, the supervisor verifies the file's bundle before allowing the read. Unsigned, tampered, or blocklisted files are denied with `EPERM`.
+
+The verification result is cached by (path, inode, mtime, size) to avoid re-verifying on repeated opens. If any metadata changes, the cache entry is invalidated and verification re-runs.
+
+### macOS (Seatbelt)
+
+On macOS, instruction file patterns are enforced at the kernel level using Seatbelt deny/allow rule specificity:
+
+1. Deny-regex rules block reads of all files matching instruction patterns
+2. Literal-allow rules re-enable reading for files that passed the pre-exec trust scan
+3. Files created at runtime have no literal-allow rule and are blocked by the deny-regex
+
+This means a new instruction file introduced after sandbox application (e.g., by `curl` or `git pull`) cannot be read by the agent.
+
+## GitHub Actions Integration
+
+Keyless signing integrates with GitHub Actions OIDC for automated CI/CD signing.
+
+### Signing Workflow
+
+```yaml
+name: Sign instruction files
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'SKILLS.md'
+      - 'CLAUDE.md'
+      - 'AGENT*'
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nono
+        run: cargo install nono-cli
+
+      - name: Sign instruction files
+        run: |
+          for f in SKILLS.md CLAUDE.md; do
+            [ -f "$f" ] && nono trust sign "$f" --keyless
+          done
+
+      - name: Commit bundles
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add '*.bundle'
+          git diff --staged --quiet || git commit -m "Update instruction file signatures"
+          git push
+```
+
+The `id-token: write` permission enables the GitHub Actions OIDC provider. Nono's `--keyless` flag detects the GitHub Actions environment, requests a Fulcio certificate binding the OIDC identity to an ephemeral key, signs the file, and logs the signature to Rekor for transparency.
+
+### Trust Policy for CI-Signed Files
+
+```json
+{
+  "version": 1,
+  "instruction_patterns": ["SKILLS*", "CLAUDE*", "AGENT*"],
+  "publishers": [
+    {
+      "name": "my-org-ci",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "repository": "my-org/my-repo",
+      "workflow": ".github/workflows/sign-skills.yml",
+      "ref_pattern": "refs/heads/main"
+    }
+  ],
+  "blocklist": { "digests": [] },
+  "enforcement": "deny"
+}
+```
+
+This policy declares: only trust instruction files signed by a GitHub Actions workflow in `my-org/my-repo`, from the `main` branch. A fork, manual edit, or compromised developer workstation cannot produce a matching signature.
+
+## Development Override
+
+For development and testing, the `--trust-override` flag disables attestation enforcement:
+
+```bash
+nono run --profile claude-code --trust-override -- claude
+```
+
+When active, verification still runs and results are logged, but failures produce warnings instead of hard denies. This flag is a CLI argument only -- it cannot be set in a profile or trust policy (a project cannot disable its own verification).
+
+The `NONO_TRUST_OVERRIDE=1` environment variable is also supported for CI/CD convenience.
+
+## Signature Storage
+
+Bundles are stored as `<filename>.bundle` alongside the signed file:
+
+```
+project/
+  SKILLS.md
+  SKILLS.md.bundle
+  CLAUDE.md
+  CLAUDE.md.bundle
+  .claude/
+    commands/
+      deploy.md
+      deploy.md.bundle
+  trust-policy.json
+  trust-policy.json.bundle
+```
+
+Bundles are checked into version control. A missing bundle for a file that matches instruction patterns triggers verification failure.
+
+## Why File Name Patterns?
+
+Nono identifies instruction files by matching against configurable file name patterns (e.g., `SKILLS*`, `CLAUDE*`, `AGENT*`, `.claude/**/*.md`). This is a deliberate design choice rooted in how agent frameworks work in practice.
+
+Agent clients are purpose-built to discover and ingest files with these naming conventions. Claude Code reads `CLAUDE.md` and files under `.claude/`. Other frameworks look for `SKILLS.md`, `AGENT.MD`, or similar well-known names. The agent's system prompt or client code directs it to seek out these specific files and treat their contents as trusted instructions. An attacker exploiting this vector will name their payload to match the conventions the agent is already looking for -- there is no advantage to using an arbitrary filename, because the agent would not ingest it as instructions.
+
+Pattern matching is also what makes the system practical. It avoids requiring every file in the working directory to be signed, and it aligns the verification boundary with the actual attack surface: the files the agent will treat as authoritative.
+
+The default patterns cover the major agent frameworks. They are configurable via the `instruction_patterns` field in the trust policy, so organizations can extend them to match custom instruction file conventions.
+
+This of course means that any file not matching the patterns is outside the scope of trust verification. If an attacker can get the agent to read from a file with an unprotected name, that is a separate attack vector. However, by defaulting to well-known patterns, we cover the most common and high-value targets for prompt injection in agent contexts. Over time, we may explore additional controls for non-pattern files (e.g., monitoring file access patterns, sandboxing all file reads with a more permissive fallback policy, classification, intent analysis, etc.) but pattern-based verification is the most effective and user-friendly approach for the initial release. Perfect should not be the enemy of good.

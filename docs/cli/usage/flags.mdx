@@ -365,6 +365,18 @@ Increase logging verbosity. Can be specified multiple times.
 nono run -vvv --allow-cwd -- command
 ```
 
+#### `--trust-override`
+
+Disable trust verification for instruction files. Skips the pre-exec trust scan that verifies cryptographic signatures on instruction files (SKILLS*, CLAUDE*, AGENT*, .claude/**/*.md). For development and testing only.
+
+```bash
+nono run --trust-override --allow-cwd -- my-agent
+```
+
+<Note>
+  Using `--trust-override` in production is not recommended. It disables the entire instruction file attestation pipeline, allowing unsigned or tampered instruction files to be read by the sandboxed process.
+</Note>
+
 #### `--config`, `-c`
 
 Specify a configuration file path.
