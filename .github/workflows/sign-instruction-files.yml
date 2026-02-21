@@ -1,0 +1,65 @@
+# Sign instruction files with Sigstore keyless attestation.
+#
+# Produces .bundle sidecar files containing DSSE envelopes with in-toto
+# statements that nono's trust pipeline can verify. Uses GitHub Actions
+# OIDC for identity — Fulcio issues a short-lived certificate carrying
+# the repository, workflow, and ref claims.
+#
+# Consumer-side verification: nono's pre-exec trust scan validates bundles
+# against the user's local trust-policy.json (keyed, signed by the user).
+
+name: Sign instruction files
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "SKILLS*"
+      - "CLAUDE*"
+      - "AGENT.MD"
+      - ".claude/**/*.md"
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # Sigstore keyless OIDC token
+  contents: write   # Commit .bundle sidecars
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sign-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build nono CLI
+        run: cargo build --release -p nono-cli
+
+      - name: Sign instruction files
+        run: ./target/release/nono trust sign --keyless --all
+
+      - name: Commit bundles
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A '*.bundle'
+
+          if git diff --cached --quiet; then
+            echo "No bundle changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update instruction file attestation bundles"
+          git push

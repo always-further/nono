@@ -647,8 +647,12 @@ pub struct TrustSignArgs {
     pub all: bool,
 
     /// Key ID to use from the system keystore (default: "default")
-    #[arg(long, value_name = "KEY_ID")]
+    #[arg(long, value_name = "KEY_ID", conflicts_with = "keyless")]
     pub key: Option<String>,
+
+    /// Use Sigstore keyless signing (Fulcio + Rekor via ambient OIDC)
+    #[arg(long)]
+    pub keyless: bool,
 
     /// Trust policy file (default: auto-discover)
     #[arg(long, value_name = "FILE")]

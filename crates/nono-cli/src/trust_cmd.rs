@@ -101,6 +101,10 @@ fn run_keygen(args: TrustKeygenArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_sign(args: TrustSignArgs) -> Result<()> {
+    if args.keyless {
+        return run_sign_keyless(args);
+    }
+
     let key_id = args.key.as_deref().unwrap_or("default");
 
     // Load the signing key from keystore
@@ -158,6 +162,159 @@ fn run_sign(args: TrustSignArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// keyless sign (Sigstore Fulcio + Rekor)
+// ---------------------------------------------------------------------------
+
+fn run_sign_keyless(args: TrustSignArgs) -> Result<()> {
+    let files = resolve_files(&args.files, args.all, args.policy.as_deref())?;
+
+    if files.is_empty() {
+        eprintln!("No instruction files found to sign.");
+        return Ok(());
+    }
+
+    // Build a tokio runtime for the async Fulcio/Rekor calls
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| nono::NonoError::TrustSigning {
+            path: String::new(),
+            reason: format!("failed to create async runtime: {e}"),
+        })?;
+
+    // Discover OIDC token from ambient environment (GitHub Actions, etc.)
+    let token = discover_oidc_token(&rt)?;
+
+    let context = sigstore_sign::SigningContext::production();
+    let signer = context.signer(token);
+
+    let mut success_count = 0u32;
+    let mut fail_count = 0u32;
+
+    for file_path in &files {
+        match rt.block_on(sign_file_keyless(file_path, &signer)) {
+            Ok(()) => {
+                let bundle_path = trust::bundle_path_for(file_path);
+                eprintln!(
+                    "  {} {} -> {}",
+                    "SIGNED".green(),
+                    file_path.display(),
+                    bundle_path.display()
+                );
+                success_count = success_count.saturating_add(1);
+            }
+            Err(e) => {
+                eprintln!("  {} {}: {e}", "FAILED".red(), file_path.display());
+                fail_count = fail_count.saturating_add(1);
+            }
+        }
+    }
+
+    eprintln!();
+    if fail_count == 0 {
+        eprintln!(
+            "{}",
+            format!("Signed {success_count} file(s) successfully (keyless).").green()
+        );
+    } else {
+        eprintln!(
+            "{}",
+            format!("Signed {success_count}, failed {fail_count}.").yellow()
+        );
+    }
+
+    if fail_count > 0 {
+        return Err(nono::NonoError::TrustSigning {
+            path: String::new(),
+            reason: format!("{fail_count} file(s) failed to sign"),
+        });
+    }
+
+    Ok(())
+}
+
+/// Sign a single file using Sigstore keyless signing.
+///
+/// Constructs an in-toto attestation with the nono instruction file predicate
+/// type, signs it via Fulcio + Rekor, and writes the bundle v0.3 sidecar.
+async fn sign_file_keyless(
+    file_path: &Path,
+    signer: &sigstore_sign::Signer,
+) -> std::result::Result<(), String> {
+    let content = std::fs::read(file_path).map_err(|e| format!("failed to read file: {e}"))?;
+
+    let filename = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or_else(|| "path has no filename component".to_string())?;
+
+    let digest_hex = trust::bytes_digest(&content);
+
+    let digest_hash = sigstore_sign::types::Sha256Hash::from_hex(&digest_hex)
+        .map_err(|e| format!("failed to parse digest: {e}"))?;
+
+    // Build the signer predicate with OIDC metadata from environment
+    let signer_predicate = build_keyless_predicate();
+
+    // Build the attestation using sigstore-sign's Attestation type
+    let attestation = sigstore_sign::Attestation::new(trust::NONO_PREDICATE_TYPE, signer_predicate)
+        .add_subject(filename, digest_hash);
+
+    let bundle = signer
+        .sign_attestation(attestation)
+        .await
+        .map_err(|e| format!("keyless signing failed: {e}"))?;
+
+    let bundle_json = bundle
+        .to_json_pretty()
+        .map_err(|e| format!("failed to serialize bundle: {e}"))?;
+
+    trust::write_bundle(file_path, &bundle_json)
+        .map_err(|e| format!("failed to write bundle: {e}"))?;
+
+    Ok(())
+}
+
+/// Build the keyless signer predicate from ambient OIDC environment variables.
+fn build_keyless_predicate() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "signer": {
+            "kind": "keyless",
+            "oidc_issuer": std::env::var("ACTIONS_ID_TOKEN_ISSUER")
+                .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string()),
+            "repository": std::env::var("GITHUB_REPOSITORY").unwrap_or_default(),
+            "workflow": std::env::var("GITHUB_WORKFLOW_REF").unwrap_or_default(),
+            "ref": std::env::var("GITHUB_REF").unwrap_or_default()
+        }
+    })
+}
+
+/// Discover an OIDC identity token from the ambient environment.
+///
+/// Uses the `ambient-id` crate (via `sigstore-oidc`) to automatically detect
+/// OIDC credentials from GitHub Actions, GitLab CI, Buildkite, and other CI
+/// providers. Requests a token with the `sigstore` audience for Fulcio
+/// certificate issuance.
+fn discover_oidc_token(rt: &tokio::runtime::Runtime) -> Result<sigstore_sign::oidc::IdentityToken> {
+    rt.block_on(async {
+        sigstore_sign::oidc::IdentityToken::detect_ambient()
+            .await
+            .map_err(|e| nono::NonoError::TrustSigning {
+                path: String::new(),
+                reason: format!("failed to detect ambient OIDC credentials: {e}"),
+            })?
+            .ok_or_else(|| nono::NonoError::TrustSigning {
+                path: String::new(),
+                reason: "no ambient OIDC credentials found. \
+                         Keyless signing requires a CI environment with OIDC support \
+                         (e.g., GitHub Actions with `permissions: id-token: write`)."
+                    .to_string(),
+            })
+    })
 }
 
 // ---------------------------------------------------------------------------

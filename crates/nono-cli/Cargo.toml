@@ -35,6 +35,10 @@ aws-lc-rs = "1"
 # Keystore access for trust signing keys
 keyring = "3"
 
+# Keyless (Sigstore/Fulcio/Rekor) signing for instruction file attestation
+sigstore-sign = "0.6"
+tokio = { version = "1", features = ["rt"] }
+
 zeroize.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
