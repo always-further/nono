@@ -347,6 +347,8 @@ fn run_sandbox(
         prepared.caps.set_extensions_enabled(true);
     }
 
+    let trust_scan_verified = scan_result.as_ref().is_some_and(|r| r.verified > 0);
+
     execute_sandboxed(
         program,
         cmd_args,
@@ -362,6 +364,7 @@ fn run_sandbox(
             trust_override,
             silent,
             scan_root,
+            trust_scan_verified,
             rollback_exclude_patterns: prepared.rollback_exclude_patterns,
             rollback_exclude_globs: prepared.rollback_exclude_globs,
         },
@@ -419,6 +422,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             trust_override: false,
             silent,
             scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            trust_scan_verified: false,
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
         },
@@ -437,6 +441,8 @@ struct ExecutionFlags {
     silent: bool,
     /// Root directory for trust policy discovery and scanning
     scan_root: std::path::PathBuf,
+    /// Whether trust scan ran and verified at least one file (crypto threads may linger)
+    trust_scan_verified: bool,
     /// Profile-specific rollback exclusion patterns (additive on base)
     rollback_exclude_patterns: Vec<String>,
     /// Profile-specific rollback exclusion globs (filename matching)
@@ -543,9 +549,14 @@ fn execute_sandboxed(
         .map(|s| (s.env_var.as_str(), s.value.as_str()))
         .collect();
 
-    // Determine threading context for fork safety
+    // Determine threading context for fork safety.
+    // Secret loading uses the keyring backend which may hold allocator locks.
+    // Trust scan crypto verification (aws-lc-rs ECDSA) spawns idle pool workers
+    // parked on condvars — safe even for supervised mode's post-fork allocation.
     let threading = if !loaded_secrets.is_empty() {
         exec_strategy::ThreadingContext::KeyringExpected
+    } else if flags.trust_scan_verified {
+        exec_strategy::ThreadingContext::CryptoExpected
     } else {
         exec_strategy::ThreadingContext::Strict
     };

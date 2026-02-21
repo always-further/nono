@@ -57,7 +57,24 @@ pub fn load_scan_policy(root: &Path, trust_override: bool) -> Result<TrustPolicy
     match (user, project) {
         (Some(u), Some(p)) => trust::merge_policies(&[u, p]),
         (Some(u), None) => Ok(u),
-        (None, Some(p)) => Ok(p),
+        (None, Some(p)) => {
+            eprintln!(
+                "  {}",
+                "Warning: project-level trust-policy.json found but no user-level policy exists."
+                    .yellow()
+            );
+            eprintln!(
+                "  {}",
+                "Project policies are not authoritative without a user-level policy to anchor trust."
+                    .yellow()
+            );
+            eprintln!(
+                "  {}",
+                "Create a signed policy at ~/.config/nono/trust-policy.json to enforce verification."
+                    .yellow()
+            );
+            Ok(p)
+        }
         (None, None) => Ok(TrustPolicy::default()),
     }
 }
@@ -403,23 +420,31 @@ fn verify_keyed_crypto(
     let matching = policy.matching_publishers(identity);
     let pub_key_b64 = matching.iter().find_map(|p| p.public_key.as_ref());
 
-    match pub_key_b64 {
-        Some(b64) => {
-            let key_bytes =
-                base64_decode(b64).map_err(|_| VerificationOutcome::InvalidSignature {
-                    detail: "invalid base64 in publisher public_key".to_string(),
-                })?;
-            trust::verify_keyed_signature(bundle, &key_bytes, bundle_path).map_err(|e| {
-                VerificationOutcome::InvalidSignature {
-                    detail: format!("{e}"),
-                }
-            })?;
-            Ok(())
-        }
-        None => Err(VerificationOutcome::InvalidSignature {
+    // Try inline public_key from publisher first, fall back to system keystore
+    let key_bytes = if let Some(b64) = pub_key_b64 {
+        base64_decode(b64).map_err(|_| VerificationOutcome::InvalidSignature {
+            detail: "invalid base64 in publisher public_key".to_string(),
+        })?
+    } else if let trust::SignerIdentity::Keyed { key_id } = identity {
+        crate::trust_cmd::load_public_key_bytes(key_id).map_err(|e| {
+            VerificationOutcome::InvalidSignature {
+                detail: format!(
+                    "no public_key in publisher and keystore lookup failed for '{key_id}': {e}"
+                ),
+            }
+        })?
+    } else {
+        return Err(VerificationOutcome::InvalidSignature {
             detail: "keyed bundle but no public_key in matching publisher".to_string(),
-        }),
-    }
+        });
+    };
+
+    trust::verify_keyed_signature(bundle, &key_bytes, bundle_path).map_err(|e| {
+        VerificationOutcome::InvalidSignature {
+            detail: format!("{e}"),
+        }
+    })?;
+    Ok(())
 }
 
 /// Verify a keyless (Fulcio/Rekor) bundle using the Sigstore trusted root.

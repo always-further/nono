@@ -319,19 +319,21 @@ fn verify_single_file(
 
     // Cryptographic signature verification (both keyed and keyless)
     match &identity {
-        trust::SignerIdentity::Keyed { .. } => {
+        trust::SignerIdentity::Keyed { key_id } => {
             let pub_key_b64 = matching.iter().find_map(|p| p.public_key.as_ref());
-            match pub_key_b64 {
-                Some(b64) => {
-                    let key_bytes = base64_decode(b64)
-                        .map_err(|_| "invalid base64 in publisher public_key".to_string())?;
-                    trust::verify_keyed_signature(&bundle, &key_bytes, file_path)
-                        .map_err(|e| format!("signature verification failed: {e}"))?;
-                }
-                None => {
-                    return Err("keyed bundle but no public_key in matching publisher".to_string());
-                }
-            }
+            // Try inline public_key from publisher first, fall back to system keystore
+            let key_bytes = if let Some(b64) = pub_key_b64 {
+                base64_decode(b64)
+                    .map_err(|_| "invalid base64 in publisher public_key".to_string())?
+            } else {
+                load_public_key_bytes(key_id).map_err(|e| {
+                    format!(
+                        "no public_key in publisher and keystore lookup failed for '{key_id}': {e}"
+                    )
+                })?
+            };
+            trust::verify_keyed_signature(&bundle, &key_bytes, file_path)
+                .map_err(|e| format!("signature verification failed: {e}"))?;
         }
         trust::SignerIdentity::Keyless { .. } => {
             let trusted_root = trust::load_production_trusted_root()
@@ -492,6 +494,7 @@ pub(crate) fn reconstruct_key_pair(pkcs8_bytes: &[u8]) -> Result<trust::KeyPair>
 
 fn load_trust_policy(explicit_path: Option<&Path>) -> Result<trust::TrustPolicy> {
     if let Some(path) = explicit_path {
+        verify_policy_if_exists(path)?;
         return trust::load_policy_from_file(path);
     }
 
@@ -499,26 +502,52 @@ fn load_trust_policy(explicit_path: Option<&Path>) -> Result<trust::TrustPolicy>
     let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
     let cwd_policy = cwd.join("trust-policy.json");
     if cwd_policy.exists() {
+        verify_policy_if_exists(&cwd_policy)?;
         let project_policy = trust::load_policy_from_file(&cwd_policy)?;
         // Try to load user-level policy and merge
         if let Some(user_policy_path) = user_trust_policy_path() {
             if user_policy_path.exists() {
+                verify_policy_if_exists(&user_policy_path)?;
                 let user_policy = trust::load_policy_from_file(&user_policy_path)?;
                 return trust::merge_policies(&[user_policy, project_policy]);
             }
         }
+        eprintln!(
+            "  {}",
+            "Warning: project-level trust-policy.json found but no user-level policy exists."
+                .yellow()
+        );
+        eprintln!(
+            "  {}",
+            "Project policies are not authoritative without a user-level policy to anchor trust."
+                .yellow()
+        );
+        eprintln!(
+            "  {}",
+            "Create a signed policy at ~/.config/nono/trust-policy.json to enforce verification."
+                .yellow()
+        );
         return Ok(project_policy);
     }
 
     // User-level only
     if let Some(user_path) = user_trust_policy_path() {
         if user_path.exists() {
+            verify_policy_if_exists(&user_path)?;
             return trust::load_policy_from_file(&user_path);
         }
     }
 
     // No policy found — return a default empty policy
     Ok(trust::TrustPolicy::default())
+}
+
+/// Verify the trust policy signature if a `.bundle` sidecar exists.
+///
+/// Uses the same verification as the pre-exec scan (`trust_scan::verify_policy_signature`).
+/// If no `.bundle` exists, returns an error — an unsigned policy cannot be trusted.
+fn verify_policy_if_exists(policy_path: &Path) -> Result<()> {
+    crate::trust_scan::verify_policy_signature(policy_path)
 }
 
 fn user_trust_policy_path() -> Option<PathBuf> {

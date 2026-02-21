@@ -58,6 +58,9 @@ pub fn resolve_program(program: &str) -> Result<PathBuf> {
 /// Maximum threads allowed when keyring backend is active.
 /// Main thread (1) + up to 3 keyring threads for D-Bus/Security.framework.
 const MAX_KEYRING_THREADS: usize = 4;
+/// Maximum threads allowed when crypto library thread pool is active.
+/// Main thread (1) + up to 3 aws-lc-rs ECDSA worker threads (idle on condvar).
+const MAX_CRYPTO_THREADS: usize = 4;
 /// Hard cap on retained denial records to prevent memory exhaustion.
 const MAX_DENIAL_RECORDS: usize = 1000;
 /// Hard cap on request IDs tracked for replay detection.
@@ -67,10 +70,11 @@ const MAX_TRACKED_REQUEST_IDS: usize = 4096;
 ///
 /// After loading secrets from the system keystore, the keyring crate may leave
 /// background threads running (for D-Bus/Security.framework communication).
-/// These threads are benign for our fork+exec pattern because:
+/// Similarly, cryptographic verification (aws-lc-rs ECDSA) spawns idle thread
+/// pool workers. These threads are benign for our fork+exec pattern because:
 /// - They don't hold locks that the main thread or child process needs
 /// - The child immediately calls exec(), clearing all thread state
-/// - The parent's keyring threads continue independently
+/// - The parent's threads continue independently
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadingContext {
     /// Enforce single-threaded execution (default).
@@ -80,7 +84,15 @@ pub enum ThreadingContext {
 
     /// Allow elevated thread count for known-safe keyring backends.
     /// Fork proceeds if thread count <= MAX_KEYRING_THREADS.
+    /// NOT allowed in supervised mode (keyring may hold allocator locks).
     KeyringExpected,
+
+    /// Allow elevated thread count for crypto library thread pools.
+    /// Spawned by trust scan's ECDSA verification (aws-lc-rs) and keystore
+    /// public key lookup. These are idle pool workers parked on condvars,
+    /// NOT holding allocator locks — safe for supervised mode's post-fork
+    /// Sandbox::apply() allocation.
+    CryptoExpected,
 }
 
 /// Execution strategy for running sandboxed commands.
@@ -344,6 +356,12 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
                 n
             );
         }
+        (ThreadingContext::CryptoExpected, n) if n <= MAX_CRYPTO_THREADS => {
+            debug!(
+                "Proceeding with fork despite {} threads (crypto pool threads expected, idle on condvar)",
+                n
+            );
+        }
         (ThreadingContext::Strict, n) => {
             return Err(NonoError::SandboxInit(format!(
                 "Cannot fork: process has {} threads (expected 1). \
@@ -356,6 +374,13 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
                 "Cannot fork: process has {} threads (max {} with keyring). \
                  Unexpected threading detected.",
                 n, MAX_KEYRING_THREADS
+            )));
+        }
+        (ThreadingContext::CryptoExpected, n) => {
+            return Err(NonoError::SandboxInit(format!(
+                "Cannot fork: process has {} threads (max {} with crypto pool). \
+                 Unexpected threading detected.",
+                n, MAX_CRYPTO_THREADS
             )));
         }
     }
@@ -610,17 +635,27 @@ pub fn execute_supervised(
         ));
     }
 
-    // Validate single-threaded execution before fork.
-    // Supervised mode applies sandbox in child (allocates), so extra threads
-    // would risk deadlock from contended allocator locks.
+    // Validate threading before fork.
+    // Supervised mode applies sandbox in child (allocates), so threads holding
+    // allocator locks would cause deadlock. CryptoExpected threads are safe:
+    // they are idle aws-lc-rs pool workers parked on condvars.
     let thread_count = get_thread_count()?;
-    if thread_count != 1 {
-        return Err(NonoError::SandboxInit(format!(
-            "Cannot fork in supervised mode: process has {} threads (expected 1). \
-             Supervised mode requires single-threaded execution because the child \
-             calls Sandbox::apply() after fork, which allocates.",
-            thread_count
-        )));
+    match (config.threading, thread_count) {
+        (_, 1) => {}
+        (ThreadingContext::CryptoExpected, n) if n <= MAX_CRYPTO_THREADS => {
+            debug!(
+                "Supervised fork with {} threads (crypto pool workers, idle on condvar)",
+                n
+            );
+        }
+        (_, n) => {
+            return Err(NonoError::SandboxInit(format!(
+                "Cannot fork in supervised mode: process has {} threads (expected 1). \
+                 Supervised mode requires single-threaded execution because the child \
+                 calls Sandbox::apply() after fork, which allocates.",
+                n
+            )));
+        }
     }
 
     // NOTE: In supervised mode with IPC (--supervised), we do NOT set
