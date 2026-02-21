@@ -86,6 +86,16 @@ pub fn load_scan_policy(root: &Path, trust_override: bool) -> Result<TrustPolicy
 /// the bundle's predicate. For keyless bundles, the Sigstore trusted root is
 /// used.
 ///
+/// # Trust model
+///
+/// Policy signature proves provenance and tamper-resistance, not signer
+/// allowlisting. This function verifies that the policy content has a valid
+/// cryptographic signature (authenticity + integrity + auditability via Rekor)
+/// but does NOT check which identity signed it. There is no higher-level
+/// document that defines who may author trust policy — the policy itself is
+/// that document. Operator/user acceptance of the initial policy is the trust
+/// bootstrap step, analogous to SSH's known_hosts or TLS's root CA store.
+///
 /// # Errors
 ///
 /// Returns `NonoError::TrustVerification` if the policy is unsigned, tampered,
@@ -165,15 +175,13 @@ pub fn verify_policy_signature(policy_path: &Path) -> Result<()> {
             })?;
         }
         trust::SignerIdentity::Keyless { .. } => {
-            // Keyless verification uses Sigstore's public-good infrastructure as the
-            // trust anchor: Fulcio CA chain validates the signing certificate, and
-            // Rekor inclusion proof guarantees the signature was logged in the
-            // transparency log. Identity binding (matching OIDC claims against a
-            // specific publisher) is intentionally NOT required here -- the trust
-            // policy itself defines which publishers are trusted, and that policy is
-            // the document being verified. The Sigstore cryptographic chain (valid
-            // certificate + logged signature + digest match) is sufficient to prove
-            // the policy was signed by a Fulcio-authenticated identity.
+            // Policy signature proves provenance and tamper-resistance, not signer
+            // allowlisting. VerificationPolicy::default() verifies the Sigstore
+            // cryptographic chain (Fulcio CA chain + Rekor inclusion proof + digest
+            // match) without pinning to a specific OIDC identity. This is correct:
+            // the trust policy is the root document that defines which identities
+            // are trusted, so there is no higher-level document to check against.
+            // Operator/user acceptance of the initial policy is the bootstrap step.
             let trusted_root = trust::load_production_trusted_root().map_err(|e| {
                 nono::NonoError::TrustVerification {
                     path: policy_path.display().to_string(),

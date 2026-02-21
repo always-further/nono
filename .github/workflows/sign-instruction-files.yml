@@ -16,7 +16,7 @@ on:
     paths:
       - "SKILLS*"
       - "CLAUDE*"
-      - "AGENT.MD"
+      - "AGENT*"
       - ".claude/**/*.md"
   workflow_dispatch:
 
