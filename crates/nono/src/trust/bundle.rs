@@ -629,12 +629,12 @@ fn extract_fulcio_extensions(cert_der: &[u8], bundle_path: &Path) -> Result<Fulc
         }
     }
 
-    // Normalize v2 repository URI to org/repo form for policy matching.
+    // Normalize repository URI to org/repo form for policy matching.
     // v2 value: "https://github.com/org/repo" -> "org/repo"
-    // v1 value: "org/repo" (already correct)
+    // v1 value: "org/repo" (already correct, but normalization handles edge cases)
     let repository = repository_uri
-        .map(|uri| normalize_github_uri(&uri))
-        .or(repository_v1);
+        .or(repository_v1)
+        .map(|uri| normalize_github_uri(&uri));
 
     // Normalize v2 build config URI to relative workflow path.
     // v2 value: "https://github.com/org/repo/.github/workflows/file.yml@refs/heads/main"
@@ -656,6 +656,7 @@ fn extract_fulcio_extensions(cert_der: &[u8], bundle_path: &Path) -> Result<Fulc
 fn normalize_github_uri(uri: &str) -> String {
     uri.strip_prefix("https://github.com/")
         .unwrap_or(uri)
+        .trim_end_matches('/')
         .to_string()
 }
 
@@ -667,8 +668,12 @@ fn normalize_github_uri(uri: &str) -> String {
 /// Strips the `https://github.com/<org>/<repo>/` prefix and the `@<ref>` suffix.
 /// Falls back to the original value if the format is unexpected.
 fn normalize_workflow_uri(uri: &str) -> String {
-    // Strip the @ref suffix first
-    let without_ref = uri.split('@').next().unwrap_or(uri);
+    // Strip the @ref suffix first (take everything before the last @)
+    let without_ref = if let Some(idx) = uri.rfind('@') {
+        &uri[..idx]
+    } else {
+        uri
+    };
 
     // Strip the https://github.com/org/repo/ prefix to get relative path
     if let Some(rest) = without_ref.strip_prefix("https://github.com/") {
@@ -678,12 +683,12 @@ fn normalize_workflow_uri(uri: &str) -> String {
         let _org = segments.next();
         let _repo = segments.next();
         if let Some(relative) = segments.next() {
-            return relative.to_string();
+            return relative.trim_end_matches('/').to_string();
         }
     }
 
     // Fallback: return as-is
-    without_ref.to_string()
+    without_ref.trim_end_matches('/').to_string()
 }
 
 /// Decode an X.509 extension value as a UTF-8 string.
