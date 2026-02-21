@@ -138,7 +138,7 @@ impl FsCapability {
         })?;
 
         // Verify type on the already-resolved path (no TOCTOU: same inode)
-        if !resolved.is_file() {
+        if resolved.is_dir() {
             return Err(NonoError::ExpectedFile(path.to_path_buf()));
         }
 
