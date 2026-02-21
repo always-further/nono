@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "nono"
-version = "0.6.0-alpha.1"
+version = "0.6.0-alpha.2"
 dependencies = [
  "der",
  "getrandom 0.4.1",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "nono-cli"
-version = "0.6.0-alpha.1"
+version = "0.6.0-alpha.2"
 dependencies = [
  "aws-lc-rs",
  "chrono",
