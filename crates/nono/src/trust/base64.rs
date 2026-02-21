@@ -72,6 +72,9 @@ fn encode_with_alphabet(data: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
 
 /// Shared decoding logic that accepts both standard and URL-safe alphabets.
 fn decode_impl(input: &str) -> Result<Vec<u8>, String> {
+    // Strip trailing whitespace first, then padding, to handle PEM-style line
+    // wrapped input where trailing whitespace precedes or follows padding chars.
+    let input = input.trim_end();
     let input = input.trim_end_matches('=');
 
     let mut buf = Vec::with_capacity(input.len() * 3 / 4);
@@ -79,6 +82,9 @@ fn decode_impl(input: &str) -> Result<Vec<u8>, String> {
     let mut bits: u32 = 0;
 
     for ch in input.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
         let val = match ch {
             'A'..='Z' => ch as u32 - b'A' as u32,
             'a'..='z' => ch as u32 - b'a' as u32 + 26,
@@ -165,6 +171,15 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn base64url_decode_skips_whitespace() {
+        // base64url with embedded newlines and spaces (as found in PEM/JSON)
+        let encoded_clean = base64url_encode(b"hello world");
+        let encoded_with_ws = format!("  {}\n", encoded_clean);
+        let decoded = base64url_decode(&encoded_with_ws).unwrap();
+        assert_eq!(decoded, b"hello world");
+    }
+
     // -----------------------------------------------------------------------
     // Standard base64
     // -----------------------------------------------------------------------
@@ -199,6 +214,15 @@ mod tests {
     fn base64_decode_without_padding() {
         let decoded = base64_decode("aGVsbG8").unwrap();
         assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn base64_decode_skips_whitespace() {
+        // standard base64 with embedded newlines (PEM line wrapping at 76 chars)
+        let encoded_clean = base64_encode(b"hello world");
+        let encoded_with_ws = format!("{}\n", encoded_clean);
+        let decoded = base64_decode(&encoded_with_ws).unwrap();
+        assert_eq!(decoded, b"hello world");
     }
 
     #[test]

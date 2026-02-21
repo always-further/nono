@@ -530,11 +530,9 @@ mod tests {
         let policy = sample_policy();
         let matcher = policy.instruction_matcher().unwrap();
         assert!(matcher.is_match("SKILLS.md"));
-        assert!(matcher.is_match("SKILLS.MD"));
-        assert!(matcher.is_match("SKILL.md"));
-        assert!(matcher.is_match("SKILL.MD"));
+        assert!(matcher.is_match("SKILLS-custom.md"));
         assert!(matcher.is_match("CLAUDE.md"));
-        assert!(matcher.is_match("CLAUDE.MD"));
+        assert!(matcher.is_match("CLAUDErc"));
         assert!(matcher.is_match("AGENT.MD"));
         assert!(matcher.is_match("AGENTS.md"));
         assert!(matcher.is_match("AGENTS.MD"));

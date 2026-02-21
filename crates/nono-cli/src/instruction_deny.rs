@@ -17,6 +17,7 @@
 use nono::trust::TrustPolicy;
 use nono::CapabilitySet;
 use nono::Result;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 /// Convert a glob pattern to a Seatbelt regex string.
@@ -34,6 +35,7 @@ use std::path::Path;
 /// - `SKILLS*` -> `#"/SKILLS[^/]*$"`
 /// - `CLAUDE*` -> `#"/CLAUDE[^/]*$"`
 /// - `.claude/**/*.md` -> `#"/\\.claude/.*/[^/]*\\.md$"`
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn glob_to_seatbelt_regex(pattern: &str) -> Result<String> {
     if pattern.is_empty() {
         return Err(nono::NonoError::ConfigParse(
@@ -42,7 +44,9 @@ pub fn glob_to_seatbelt_regex(pattern: &str) -> Result<String> {
     }
 
     let mut regex = String::with_capacity(pattern.len().saturating_mul(2));
-    regex.push('/');
+    if !pattern.starts_with('/') {
+        regex.push('/');
+    }
 
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
@@ -275,6 +279,14 @@ mod tests {
     #[test]
     fn glob_empty_returns_error() {
         assert!(glob_to_seatbelt_regex("").is_err());
+    }
+
+    #[test]
+    fn glob_pattern_with_leading_slash_no_double_slash() {
+        // A pattern that already starts with '/' must not produce a double slash
+        let rule = glob_to_seatbelt_regex("/SKILLS*").unwrap();
+        assert_eq!(rule, "(deny file-read-data (regex #\"/SKILLS[^/]*$\"))");
+        assert!(!rule.contains("//"));
     }
 
     #[test]

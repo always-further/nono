@@ -1876,16 +1876,33 @@ fn open_path_for_access(
     // and open (which opens a potentially different file if an attacker performed
     // an atomic rename between the two operations).
     if let Some(expected_digest) = trust_digest {
+        use sha2::Digest as _;
         use std::io::{Read, Seek};
-        let mut content = Vec::new();
-        (&file).read_to_end(&mut content).map_err(|e| {
-            NonoError::SandboxInit(format!(
-                "Failed to read {} for digest re-check: {}",
-                canonical.display(),
-                e,
-            ))
-        })?;
-        let actual_digest = nono::trust::bytes_digest(&content);
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = (&file).read(&mut buf).map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Failed to read {} for digest re-check: {}",
+                    canonical.display(),
+                    e,
+                ))
+            })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let hash = hasher.finalize();
+        let actual_digest: String = hash
+            .iter()
+            .flat_map(|b| {
+                [
+                    char::from_digit((u32::from(*b) >> 4) & 0xF, 16).unwrap_or('0'),
+                    char::from_digit(u32::from(*b) & 0xF, 16).unwrap_or('0'),
+                ]
+            })
+            .collect();
         if actual_digest != expected_digest {
             return Err(NonoError::SandboxInit(format!(
                 "Instruction file {} was modified between trust verification and open \
