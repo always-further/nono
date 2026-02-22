@@ -1,6 +1,6 @@
 [package]
 name = "nono-cli"
-version = "0.6.0-alpha.2"
+version = "0.6.0-alpha.3"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
