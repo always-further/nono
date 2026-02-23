@@ -54,7 +54,16 @@ pub struct NetworkConfig {
     /// Block network access (network allowed by default; true = blocked)
     #[serde(default)]
     pub block: bool,
-    // Future: dns_only, proxy_allow
+    /// Network proxy profile name (from network-policy.json).
+    /// When set, outbound traffic is filtered through the proxy.
+    #[serde(default)]
+    pub network_profile: Option<String>,
+    /// Additional hosts to allow through the proxy (on top of profile hosts)
+    #[serde(default)]
+    pub proxy_allow: Vec<String>,
+    /// Credential services to enable via reverse proxy
+    #[serde(default)]
+    pub proxy_credentials: Vec<String>,
 }
 
 /// Secrets configuration in a profile
@@ -165,8 +174,8 @@ pub struct Profile {
     pub filesystem: FilesystemConfig,
     #[serde(default)]
     pub network: NetworkConfig,
-    #[serde(default)]
-    pub secrets: SecretsConfig,
+    #[serde(default, alias = "secrets")]
+    pub env_credentials: SecretsConfig,
     #[serde(default)]
     pub workdir: WorkdirConfig,
     #[serde(default)]
@@ -534,33 +543,51 @@ mod tests {
     }
 
     #[test]
-    fn test_secrets_config_parsing() {
+    fn test_env_credentials_config_parsing() {
         let json_str = r#"{
             "meta": { "name": "test-profile" },
-            "secrets": {
+            "env_credentials": {
                 "openai_api_key": "OPENAI_API_KEY",
                 "anthropic_api_key": "ANTHROPIC_API_KEY"
             }
         }"#;
 
         let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
-        assert_eq!(profile.secrets.mappings.len(), 2);
+        assert_eq!(profile.env_credentials.mappings.len(), 2);
         assert_eq!(
-            profile.secrets.mappings.get("openai_api_key"),
+            profile.env_credentials.mappings.get("openai_api_key"),
             Some(&"OPENAI_API_KEY".to_string())
         );
         assert_eq!(
-            profile.secrets.mappings.get("anthropic_api_key"),
+            profile.env_credentials.mappings.get("anthropic_api_key"),
             Some(&"ANTHROPIC_API_KEY".to_string())
         );
     }
 
     #[test]
-    fn test_empty_secrets_config() {
+    fn test_secrets_alias_backward_compat() {
+        // "secrets" should still work as an alias for "env_credentials"
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "secrets": {
+                "openai_api_key": "OPENAI_API_KEY"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        assert_eq!(profile.env_credentials.mappings.len(), 1);
+        assert_eq!(
+            profile.env_credentials.mappings.get("openai_api_key"),
+            Some(&"OPENAI_API_KEY".to_string())
+        );
+    }
+
+    #[test]
+    fn test_empty_env_credentials_config() {
         let json_str = r#"{ "meta": { "name": "test-profile" } }"#;
 
         let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
-        assert!(profile.secrets.mappings.is_empty());
+        assert!(profile.env_credentials.mappings.is_empty());
     }
 
     #[test]

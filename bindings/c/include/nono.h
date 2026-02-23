@@ -30,6 +30,18 @@
 #define NONO_ACCESS_MODE_INVALID UINT32_MAX
 
 /**
+ * Network mode for sandbox capabilities.
+ *
+ * Constants: `NONO_NETWORK_MODE_BLOCKED` (0), `NONO_NETWORK_MODE_ALLOW_ALL` (1),
+ * `NONO_NETWORK_MODE_PROXY_ONLY` (2).
+ */
+#define NONO_NETWORK_MODE_BLOCKED 0
+
+#define NONO_NETWORK_MODE_ALLOW_ALL 1
+
+#define NONO_NETWORK_MODE_PROXY_ONLY 2
+
+/**
  * Error codes returned by nono FFI functions.
  *
  * Zero means success. Negative values indicate error categories.
@@ -88,6 +100,10 @@ typedef enum NonoErrorCode {
      * Invalid argument (NULL pointer, invalid UTF-8).
      */
     NONO_ERROR_CODE_ERR_INVALID_ARG = -12,
+    /**
+     * Trust/attestation verification error.
+     */
+    NONO_ERROR_CODE_ERR_TRUST_VERIFICATION = -13,
     /**
      * Unknown or uncategorized error.
      */
@@ -300,6 +316,55 @@ enum NonoErrorCode nono_capability_set_allow_file(struct NonoCapabilitySet *caps
  */
 enum NonoErrorCode nono_capability_set_set_network_blocked(struct NonoCapabilitySet *caps,
                                                            bool blocked);
+
+/**
+ * Set the network mode.
+ *
+ * Use `NONO_NETWORK_MODE_BLOCKED`, `NONO_NETWORK_MODE_ALLOW_ALL`, or
+ * `NONO_NETWORK_MODE_PROXY_ONLY`. For proxy mode, also call
+ * `nono_capability_set_set_proxy_port()` to set the port.
+ *
+ * # Safety
+ *
+ * `caps` must be a valid pointer from `nono_capability_set_new()`.
+ */
+enum NonoErrorCode nono_capability_set_set_network_mode(struct NonoCapabilitySet *caps,
+                                                        uint32_t mode);
+
+/**
+ * Get the current network mode.
+ *
+ * Returns the raw mode constant. For `NONO_NETWORK_MODE_PROXY_ONLY`,
+ * use `nono_capability_set_proxy_port()` to get the port.
+ *
+ * # Safety
+ *
+ * `caps` must be a valid pointer or NULL.
+ */
+uint32_t nono_capability_set_network_mode(const struct NonoCapabilitySet *caps);
+
+/**
+ * Set the proxy port for `ProxyOnly` mode.
+ *
+ * Only meaningful when network mode is `NONO_NETWORK_MODE_PROXY_ONLY`.
+ *
+ * # Safety
+ *
+ * `caps` must be a valid pointer from `nono_capability_set_new()`.
+ */
+enum NonoErrorCode nono_capability_set_set_proxy_port(struct NonoCapabilitySet *caps,
+                                                      uint16_t port);
+
+/**
+ * Get the proxy port if network mode is `ProxyOnly`.
+ *
+ * Returns 0 if mode is not `ProxyOnly` or `caps` is NULL.
+ *
+ * # Safety
+ *
+ * `caps` must be a valid pointer or NULL.
+ */
+uint16_t nono_capability_set_proxy_port(const struct NonoCapabilitySet *caps);
 
 /**
  * Add a command to the allow list (overrides block lists).

@@ -138,7 +138,7 @@ impl FsCapability {
         })?;
 
         // Verify type on the already-resolved path (no TOCTOU: same inode)
-        if !resolved.is_file() {
+        if resolved.is_dir() {
             return Err(NonoError::ExpectedFile(path.to_path_buf()));
         }
 
@@ -334,6 +334,37 @@ fn tokenize_sexp(input: &str) -> Result<Vec<String>> {
     Ok(tokens)
 }
 
+/// Network access mode for the sandbox.
+///
+/// Determines how network traffic is filtered at the OS level.
+/// `ProxyOnly` restricts outbound connections to a single localhost port,
+/// forcing all traffic through the nono proxy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkMode {
+    /// All network access blocked (Landlock deny-all TCP, Seatbelt deny network*)
+    Blocked,
+    /// All network access allowed (no filtering)
+    #[default]
+    AllowAll,
+    /// Only localhost TCP to the specified port is allowed.
+    /// On macOS: `(allow network-outbound (remote tcp "localhost:PORT"))`.
+    /// On Linux: Landlock `NetPort` rule for the specified port only.
+    ProxyOnly {
+        /// The localhost port the proxy listens on
+        port: u16,
+    },
+}
+
+impl std::fmt::Display for NetworkMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetworkMode::Blocked => write!(f, "blocked"),
+            NetworkMode::AllowAll => write!(f, "allowed"),
+            NetworkMode::ProxyOnly { port } => write!(f, "proxy-only (localhost:{})", port),
+        }
+    }
+}
+
 /// The complete set of capabilities granted to the sandbox
 ///
 /// Use the builder pattern to construct a capability set:
@@ -351,8 +382,13 @@ fn tokenize_sexp(input: &str) -> Result<Vec<String>> {
 pub struct CapabilitySet {
     /// Filesystem capabilities
     fs: Vec<FsCapability>,
-    /// Network access blocked (network allowed by default; true = blocked)
-    net_block: bool,
+    /// Network access mode (default: AllowAll)
+    network_mode: NetworkMode,
+    /// Per-port TCP connect allowlist (Linux Landlock V4+ only).
+    /// Adding any entry implies Blocked base with specific port exceptions.
+    tcp_connect_ports: Vec<u16>,
+    /// Per-port TCP bind allowlist (Linux Landlock V4+ only).
+    tcp_bind_ports: Vec<u16>,
     /// Commands explicitly allowed (overrides blocklists - for CLI use)
     allowed_commands: Vec<String>,
     /// Additional commands to block (extends blocklists - for CLI use)
@@ -398,11 +434,55 @@ impl CapabilitySet {
 
     /// Block network access (builder pattern)
     ///
-    /// By default, network access is allowed. Call this to block it.
+    /// By default, network access is allowed. Call this to block all network.
     #[must_use]
     pub fn block_network(mut self) -> Self {
-        self.net_block = true;
+        self.network_mode = NetworkMode::Blocked;
         self
+    }
+
+    /// Set network mode (builder pattern)
+    #[must_use]
+    pub fn set_network_mode(mut self, mode: NetworkMode) -> Self {
+        self.network_mode = mode;
+        self
+    }
+
+    /// Restrict network to localhost proxy port only (builder pattern)
+    ///
+    /// On macOS: `(allow network-outbound (remote tcp "localhost:PORT"))`.
+    /// On Linux: Landlock `NetPort` rule for the specified port.
+    #[must_use]
+    pub fn proxy_only(mut self, port: u16) -> Self {
+        self.network_mode = NetworkMode::ProxyOnly { port };
+        self
+    }
+
+    /// Allow TCP connect to a specific port (builder pattern)
+    ///
+    /// Linux Landlock V4+ only. Adding any port rule automatically blocks
+    /// all other network access (allowlist model). Returns an error on macOS.
+    #[must_use]
+    pub fn allow_tcp_connect(mut self, port: u16) -> Self {
+        self.tcp_connect_ports.push(port);
+        self
+    }
+
+    /// Allow TCP bind on a specific port (builder pattern)
+    ///
+    /// Linux Landlock V4+ only. Returns an error on macOS.
+    #[must_use]
+    pub fn allow_tcp_bind(mut self, port: u16) -> Self {
+        self.tcp_bind_ports.push(port);
+        self
+    }
+
+    /// Allow TCP connect to standard HTTPS ports (443, 8443)
+    ///
+    /// Convenience method. Linux Landlock V4+ only.
+    #[must_use]
+    pub fn allow_https(self) -> Self {
+        self.allow_tcp_connect(443).allow_tcp_connect(8443)
     }
 
     /// Enable sandbox extensions for runtime capability expansion (builder pattern)
@@ -458,8 +538,30 @@ impl CapabilitySet {
     }
 
     /// Set network blocking state
+    ///
+    /// `true` sets `NetworkMode::Blocked`, `false` sets `NetworkMode::AllowAll`.
+    /// For finer control, use `set_network_mode_mut()`.
     pub fn set_network_blocked(&mut self, blocked: bool) {
-        self.net_block = blocked;
+        self.network_mode = if blocked {
+            NetworkMode::Blocked
+        } else {
+            NetworkMode::AllowAll
+        };
+    }
+
+    /// Set network mode (mutable)
+    pub fn set_network_mode_mut(&mut self, mode: NetworkMode) {
+        self.network_mode = mode;
+    }
+
+    /// Add a TCP connect port to the allowlist (mutable)
+    pub fn add_tcp_connect_port(&mut self, port: u16) {
+        self.tcp_connect_ports.push(port);
+    }
+
+    /// Add a TCP bind port to the allowlist (mutable)
+    pub fn add_tcp_bind_port(&mut self, port: u16) {
+        self.tcp_bind_ports.push(port);
     }
 
     /// Set sandbox extensions state
@@ -496,9 +598,33 @@ impl CapabilitySet {
     }
 
     /// Check if network access is blocked
+    ///
+    /// Returns `true` for both `Blocked` and `ProxyOnly` modes, since both
+    /// restrict general outbound network access at the OS level.
     #[must_use]
     pub fn is_network_blocked(&self) -> bool {
-        self.net_block
+        matches!(
+            self.network_mode,
+            NetworkMode::Blocked | NetworkMode::ProxyOnly { .. }
+        )
+    }
+
+    /// Get the network mode
+    #[must_use]
+    pub fn network_mode(&self) -> &NetworkMode {
+        &self.network_mode
+    }
+
+    /// Get per-port TCP connect allowlist
+    #[must_use]
+    pub fn tcp_connect_ports(&self) -> &[u16] {
+        &self.tcp_connect_ports
+    }
+
+    /// Get per-port TCP bind allowlist
+    #[must_use]
+    pub fn tcp_bind_ports(&self) -> &[u16] {
+        &self.tcp_bind_ports
     }
 
     /// Check if sandbox extensions are enabled for runtime capability expansion
@@ -663,10 +789,18 @@ impl CapabilitySet {
         }
 
         lines.push("Network:".to_string());
-        if self.net_block {
-            lines.push("  outbound: blocked".to_string());
-        } else {
-            lines.push("  outbound: allowed".to_string());
+        lines.push(format!("  outbound: {}", self.network_mode));
+        if !self.tcp_connect_ports.is_empty() {
+            let ports: Vec<String> = self
+                .tcp_connect_ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect();
+            lines.push(format!("  tcp connect ports: {}", ports.join(", ")));
+        }
+        if !self.tcp_bind_ports.is_empty() {
+            let ports: Vec<String> = self.tcp_bind_ports.iter().map(|p| p.to_string()).collect();
+            lines.push(format!("  tcp bind ports: {}", ports.join(", ")));
         }
 
         lines.join("\n")
@@ -1051,5 +1185,113 @@ mod tests {
         assert!(caps
             .add_platform_rule("(deny file-read* (subpath \"/usr))")
             .is_err());
+    }
+
+    // NetworkMode tests
+
+    #[test]
+    fn test_network_mode_default_is_allow_all() {
+        let caps = CapabilitySet::new();
+        assert_eq!(*caps.network_mode(), NetworkMode::AllowAll);
+        assert!(!caps.is_network_blocked());
+    }
+
+    #[test]
+    fn test_block_network_sets_blocked_mode() {
+        let caps = CapabilitySet::new().block_network();
+        assert_eq!(*caps.network_mode(), NetworkMode::Blocked);
+        assert!(caps.is_network_blocked());
+    }
+
+    #[test]
+    fn test_proxy_only_mode() {
+        let caps = CapabilitySet::new().proxy_only(8080);
+        assert_eq!(*caps.network_mode(), NetworkMode::ProxyOnly { port: 8080 });
+        // ProxyOnly counts as blocked for general network access
+        assert!(caps.is_network_blocked());
+    }
+
+    #[test]
+    fn test_set_network_mode_builder() {
+        let caps = CapabilitySet::new().set_network_mode(NetworkMode::ProxyOnly { port: 54321 });
+        assert_eq!(*caps.network_mode(), NetworkMode::ProxyOnly { port: 54321 });
+    }
+
+    #[test]
+    fn test_set_network_blocked_backward_compat() {
+        let mut caps = CapabilitySet::new();
+        caps.set_network_blocked(true);
+        assert_eq!(*caps.network_mode(), NetworkMode::Blocked);
+        assert!(caps.is_network_blocked());
+
+        caps.set_network_blocked(false);
+        assert_eq!(*caps.network_mode(), NetworkMode::AllowAll);
+        assert!(!caps.is_network_blocked());
+    }
+
+    #[test]
+    fn test_tcp_connect_ports() {
+        let caps = CapabilitySet::new()
+            .allow_tcp_connect(443)
+            .allow_tcp_connect(8443);
+        assert_eq!(caps.tcp_connect_ports(), &[443, 8443]);
+    }
+
+    #[test]
+    fn test_tcp_bind_ports() {
+        let caps = CapabilitySet::new()
+            .allow_tcp_bind(8080)
+            .allow_tcp_bind(3000);
+        assert_eq!(caps.tcp_bind_ports(), &[8080, 3000]);
+    }
+
+    #[test]
+    fn test_allow_https_convenience() {
+        let caps = CapabilitySet::new().allow_https();
+        assert_eq!(caps.tcp_connect_ports(), &[443, 8443]);
+    }
+
+    #[test]
+    fn test_tcp_ports_mutable() {
+        let mut caps = CapabilitySet::new();
+        caps.add_tcp_connect_port(443);
+        caps.add_tcp_bind_port(8080);
+        assert_eq!(caps.tcp_connect_ports(), &[443]);
+        assert_eq!(caps.tcp_bind_ports(), &[8080]);
+    }
+
+    #[test]
+    fn test_network_mode_display() {
+        assert_eq!(format!("{}", NetworkMode::Blocked), "blocked");
+        assert_eq!(format!("{}", NetworkMode::AllowAll), "allowed");
+        assert_eq!(
+            format!("{}", NetworkMode::ProxyOnly { port: 8080 }),
+            "proxy-only (localhost:8080)"
+        );
+    }
+
+    #[test]
+    fn test_network_mode_serialization() {
+        let mode = NetworkMode::ProxyOnly { port: 54321 };
+        let json = serde_json::to_string(&mode).unwrap();
+        let deserialized: NetworkMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, deserialized);
+    }
+
+    #[test]
+    fn test_summary_includes_network_mode() {
+        let caps = CapabilitySet::new().proxy_only(8080);
+        let summary = caps.summary();
+        assert!(summary.contains("proxy-only (localhost:8080)"));
+    }
+
+    #[test]
+    fn test_summary_includes_tcp_ports() {
+        let caps = CapabilitySet::new()
+            .allow_tcp_connect(443)
+            .allow_tcp_bind(8080);
+        let summary = caps.summary();
+        assert!(summary.contains("tcp connect ports: 443"));
+        assert!(summary.contains("tcp bind ports: 8080"));
     }
 }

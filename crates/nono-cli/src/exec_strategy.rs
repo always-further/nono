@@ -58,6 +58,9 @@ pub fn resolve_program(program: &str) -> Result<PathBuf> {
 /// Maximum threads allowed when keyring backend is active.
 /// Main thread (1) + up to 3 keyring threads for D-Bus/Security.framework.
 const MAX_KEYRING_THREADS: usize = 4;
+/// Maximum threads allowed when crypto library thread pool is active.
+/// Main thread (1) + up to 3 aws-lc-rs ECDSA worker threads (idle on condvar).
+const MAX_CRYPTO_THREADS: usize = 4;
 /// Hard cap on retained denial records to prevent memory exhaustion.
 const MAX_DENIAL_RECORDS: usize = 1000;
 /// Hard cap on request IDs tracked for replay detection.
@@ -67,10 +70,11 @@ const MAX_TRACKED_REQUEST_IDS: usize = 4096;
 ///
 /// After loading secrets from the system keystore, the keyring crate may leave
 /// background threads running (for D-Bus/Security.framework communication).
-/// These threads are benign for our fork+exec pattern because:
+/// Similarly, cryptographic verification (aws-lc-rs ECDSA) spawns idle thread
+/// pool workers. These threads are benign for our fork+exec pattern because:
 /// - They don't hold locks that the main thread or child process needs
 /// - The child immediately calls exec(), clearing all thread state
-/// - The parent's keyring threads continue independently
+/// - The parent's threads continue independently
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadingContext {
     /// Enforce single-threaded execution (default).
@@ -80,7 +84,15 @@ pub enum ThreadingContext {
 
     /// Allow elevated thread count for known-safe keyring backends.
     /// Fork proceeds if thread count <= MAX_KEYRING_THREADS.
+    /// NOT allowed in supervised mode (keyring may hold allocator locks).
     KeyringExpected,
+
+    /// Allow elevated thread count for crypto library thread pools.
+    /// Spawned by trust scan's ECDSA verification (aws-lc-rs) and keystore
+    /// public key lookup. These are idle pool workers parked on condvars,
+    /// NOT holding allocator locks — safe for supervised mode's post-fork
+    /// Sandbox::apply() allocation.
+    CryptoExpected,
 }
 
 /// Execution strategy for running sandboxed commands.
@@ -344,6 +356,12 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
                 n
             );
         }
+        (ThreadingContext::CryptoExpected, n) if n <= MAX_CRYPTO_THREADS => {
+            debug!(
+                "Proceeding with fork despite {} threads (crypto pool threads expected, idle on condvar)",
+                n
+            );
+        }
         (ThreadingContext::Strict, n) => {
             return Err(NonoError::SandboxInit(format!(
                 "Cannot fork: process has {} threads (expected 1). \
@@ -356,6 +374,13 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
                 "Cannot fork: process has {} threads (max {} with keyring). \
                  Unexpected threading detected.",
                 n, MAX_KEYRING_THREADS
+            )));
+        }
+        (ThreadingContext::CryptoExpected, n) => {
+            return Err(NonoError::SandboxInit(format!(
+                "Cannot fork: process has {} threads (max {} with crypto pool). \
+                 Unexpected threading detected.",
+                n, MAX_CRYPTO_THREADS
             )));
         }
     }
@@ -506,6 +531,7 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
 pub fn execute_supervised(
     config: &ExecConfig<'_>,
     supervisor: Option<&SupervisorConfig<'_>>,
+    trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
 ) -> Result<i32> {
     let program = &config.command[0];
     let cmd_args = &config.command[1..];
@@ -609,17 +635,27 @@ pub fn execute_supervised(
         ));
     }
 
-    // Validate single-threaded execution before fork.
-    // Supervised mode applies sandbox in child (allocates), so extra threads
-    // would risk deadlock from contended allocator locks.
+    // Validate threading before fork.
+    // Supervised mode applies sandbox in child (allocates), so threads holding
+    // allocator locks would cause deadlock. CryptoExpected threads are safe:
+    // they are idle aws-lc-rs pool workers parked on condvars.
     let thread_count = get_thread_count()?;
-    if thread_count != 1 {
-        return Err(NonoError::SandboxInit(format!(
-            "Cannot fork in supervised mode: process has {} threads (expected 1). \
-             Supervised mode requires single-threaded execution because the child \
-             calls Sandbox::apply() after fork, which allocates.",
-            thread_count
-        )));
+    match (config.threading, thread_count) {
+        (_, 1) => {}
+        (ThreadingContext::CryptoExpected, n) if n <= MAX_CRYPTO_THREADS => {
+            debug!(
+                "Supervised fork with {} threads (crypto pool workers, idle on condvar)",
+                n
+            );
+        }
+        (_, n) => {
+            return Err(NonoError::SandboxInit(format!(
+                "Cannot fork in supervised mode: process has {} threads (expected 1). \
+                 Supervised mode requires single-threaded execution because the child \
+                 calls Sandbox::apply() after fork, which allocates.",
+                n
+            )));
+        }
     }
 
     // NOTE: In supervised mode with IPC (--supervised), we do NOT set
@@ -864,11 +900,12 @@ pub fn execute_supervised(
                             sup_cfg,
                             seccomp_notify_fd.as_ref(),
                             &initial_caps,
+                            trust_interceptor,
                         )?
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
-                        run_supervisor_loop(child, &mut sup_sock, sup_cfg)?
+                        run_supervisor_loop(child, &mut sup_sock, sup_cfg, trust_interceptor)?
                     }
                 } else {
                     let status = wait_for_child(child)?;
@@ -1288,6 +1325,7 @@ fn run_supervisor_loop(
     child: Pid,
     sock: &mut SupervisorSocket,
     config: &SupervisorConfig<'_>,
+    mut trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
     let _ = config.session_id;
     let sock_fd = sock.as_raw_fd();
@@ -1318,6 +1356,7 @@ fn run_supervisor_loop(
                             config,
                             &mut denials,
                             &mut seen_request_ids,
+                            trust_interceptor.as_mut(),
                         ) {
                             warn!("Error handling supervisor message: {}", e);
                         }
@@ -1379,6 +1418,7 @@ fn run_supervisor_loop(
     config: &SupervisorConfig<'_>,
     seccomp_fd: Option<&OwnedFd>,
     initial_caps: &[(std::path::PathBuf, bool)],
+    mut trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
     let sock_fd = sock.as_raw_fd();
     let notify_raw_fd = seccomp_fd.map(|fd| fd.as_raw_fd());
@@ -1432,6 +1472,7 @@ fn run_supervisor_loop(
                             config,
                             &mut denials,
                             &mut seen_request_ids,
+                            trust_interceptor.as_mut(),
                         ) {
                             warn!("Error handling supervisor message: {}", e);
                         }
@@ -1504,6 +1545,7 @@ fn handle_supervisor_message(
     config: &SupervisorConfig<'_>,
     denials: &mut Vec<DenialRecord>,
     seen_request_ids: &mut HashSet<String>,
+    mut trust_interceptor: Option<&mut crate::trust_intercept::TrustInterceptor>,
 ) -> Result<()> {
     match msg {
         SupervisorMessage::Request(request) => {
@@ -1538,6 +1580,10 @@ fn handle_supervisor_message(
             // 1. Check never_grant list first (before consulting the backend)
             let never_grant_check = config.never_grant.check(&request.path);
 
+            // Digest from trust verification, used for TOCTOU re-check at open time.
+            // Set by the trust interceptor branch when an instruction file is verified.
+            let mut verified_digest: Option<String> = None;
+
             let decision = if never_grant_check.is_blocked() {
                 debug!(
                     "Supervisor: path {} blocked by never_grant",
@@ -1557,8 +1603,73 @@ fn handle_supervisor_message(
                         request.path.display()
                     ),
                 }
+            } else if let Some(trust_result) = trust_interceptor
+                .as_mut()
+                .and_then(|ti| ti.check_path(&request.path))
+            {
+                // 2. Trust verification for instruction files
+                match trust_result {
+                    Ok(verified) => {
+                        debug!(
+                            "Supervisor: instruction file {} verified (publisher: {})",
+                            request.path.display(),
+                            verified.publisher,
+                        );
+                        // Stash the verified digest for TOCTOU re-check at open time
+                        verified_digest = Some(verified.digest);
+                        // Instruction file verified — proceed to approval backend
+                        match config.approval_backend.request_capability(&request) {
+                            Ok(d) => {
+                                if d.is_denied() {
+                                    record_denial(
+                                        denials,
+                                        DenialRecord {
+                                            path: request.path.clone(),
+                                            access: request.access,
+                                            reason: DenialReason::UserDenied,
+                                        },
+                                    );
+                                }
+                                d
+                            }
+                            Err(e) => {
+                                warn!("Approval backend error: {}", e);
+                                record_denial(
+                                    denials,
+                                    DenialRecord {
+                                        path: request.path.clone(),
+                                        access: request.access,
+                                        reason: DenialReason::BackendError,
+                                    },
+                                );
+                                ApprovalDecision::Denied {
+                                    reason: format!("Approval backend error: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        // Instruction file failed trust verification — auto-deny
+                        debug!(
+                            "Supervisor: instruction file {} failed trust verification: {}",
+                            request.path.display(),
+                            reason
+                        );
+                        record_denial(
+                            denials,
+                            DenialRecord {
+                                path: request.path.clone(),
+                                access: request.access,
+                                reason: DenialReason::PolicyBlocked,
+                            },
+                        );
+                        ApprovalDecision::Denied {
+                            reason: format!("Instruction file failed trust verification: {reason}"),
+                        }
+                    }
+                }
             } else {
-                // 2. Delegate to approval backend
+                // 3. Delegate to approval backend (non-instruction files)
                 match config.approval_backend.request_capability(&request) {
                     Ok(d) => {
                         if d.is_denied() {
@@ -1592,7 +1703,12 @@ fn handle_supervisor_message(
 
             // 3. If granted, open the path and send fd before the response
             if decision.is_granted() {
-                match open_path_for_access(&request.path, &request.access, config.never_grant) {
+                match open_path_for_access(
+                    &request.path,
+                    &request.access,
+                    config.never_grant,
+                    verified_digest.as_deref(),
+                ) {
                     Ok(file) => {
                         if let Err(e) = sock.send_fd(file.as_raw_fd()) {
                             warn!("Failed to send fd: {}", e);
@@ -1677,6 +1793,7 @@ fn open_path_for_access(
     path: &std::path::Path,
     access: &nono::AccessMode,
     never_grant: &NeverGrantChecker,
+    trust_digest: Option<&str>,
 ) -> Result<std::fs::File> {
     // Canonicalize to resolve symlinks before opening. This ensures
     // we check and open the real target, not a symlink alias.
@@ -1744,14 +1861,68 @@ fn open_path_for_access(
         }
     }
 
-    open_canonical_path_no_symlinks(&canonical, access).map_err(|e| {
+    let file = open_canonical_path_no_symlinks(&canonical, access).map_err(|e| {
         NonoError::SandboxInit(format!(
             "Failed to open {} for {:?} access: {}",
             canonical.display(),
             access,
             e
         ))
-    })
+    })?;
+
+    // TOCTOU re-verification: if this file was trust-verified, re-compute the
+    // digest from the opened fd and compare against the verification-time digest.
+    // This closes the window between check_path() (which reads the file by path)
+    // and open (which opens a potentially different file if an attacker performed
+    // an atomic rename between the two operations).
+    if let Some(expected_digest) = trust_digest {
+        use sha2::Digest as _;
+        use std::io::{Read, Seek};
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = (&file).read(&mut buf).map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Failed to read {} for digest re-check: {}",
+                    canonical.display(),
+                    e,
+                ))
+            })?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let hash = hasher.finalize();
+        let actual_digest: String = hash
+            .iter()
+            .flat_map(|b| {
+                [
+                    char::from_digit((u32::from(*b) >> 4) & 0xF, 16).unwrap_or('0'),
+                    char::from_digit(u32::from(*b) & 0xF, 16).unwrap_or('0'),
+                ]
+            })
+            .collect();
+        if actual_digest != expected_digest {
+            return Err(NonoError::SandboxInit(format!(
+                "Instruction file {} was modified between trust verification and open \
+                 (expected digest {}, got {}). Possible TOCTOU attack.",
+                path.display(),
+                expected_digest,
+                actual_digest,
+            )));
+        }
+        // Seek back to start so the child reads from the beginning
+        (&file).seek(std::io::SeekFrom::Start(0)).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to seek {} after digest re-check: {}",
+                canonical.display(),
+                e,
+            ))
+        })?;
+    }
+
+    Ok(file)
 }
 
 /// Open a canonical absolute path by traversing path components using `openat`.

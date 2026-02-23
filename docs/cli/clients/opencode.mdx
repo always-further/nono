@@ -59,7 +59,7 @@ openai_api_key = "OPENAI_API_KEY"
 
 **Usage:**
 ```bash
-nono run --profile opencode --secrets -- opencode
+nono run --profile opencode --env-credential -- opencode
 ```
 
 ## Security Tips
@@ -80,7 +80,7 @@ secret-tool store --label="nono: openai_api_key" service nono username openai_ap
 
 Then run:
 ```bash
-nono run --profile opencode --secrets openai_api_key -- opencode
+nono run --profile opencode --env-credential openai_api_key -- opencode
 ```
 
 See [Secrets Management](/cli/features/secrets) for full documentation.

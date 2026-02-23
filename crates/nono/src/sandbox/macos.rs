@@ -5,7 +5,7 @@
 //! - Adding system paths (e.g., /usr, /lib, /System/Library) if executables need to run
 //! - Implementing any security policy (sensitive path blocking, etc.)
 
-use crate::capability::{AccessMode, CapabilitySet};
+use crate::capability::{AccessMode, CapabilitySet, NetworkMode};
 use crate::error::{NonoError, Result};
 use crate::sandbox::SupportInfo;
 use std::ffi::{CStr, CString};
@@ -443,12 +443,43 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     }
 
     // Network rules
-    if caps.is_network_blocked() {
-        profile.push_str("(deny network*)\n");
-    } else {
-        profile.push_str("(allow network-outbound)\n");
-        profile.push_str("(allow network-inbound)\n");
-        profile.push_str("(allow network-bind)\n");
+    match caps.network_mode() {
+        NetworkMode::Blocked => {
+            profile.push_str("(deny network*)\n");
+        }
+        NetworkMode::ProxyOnly { port } => {
+            // Block all network, then allow only localhost TCP to the proxy port.
+            // system-socket is required for TCP connect to function.
+            profile.push_str("(deny network*)\n");
+            profile.push_str(&format!(
+                "(allow network-outbound (remote tcp \"localhost:{}\"))\n",
+                port
+            ));
+            // Scope system-socket to TCP only. Without this restriction,
+            // the child could create Unix domain sockets for local IPC.
+            profile.push_str(
+                "(allow system-socket (socket-domain AF_INET) (socket-type SOCK_STREAM))\n",
+            );
+            profile.push_str(
+                "(allow system-socket (socket-domain AF_INET6) (socket-type SOCK_STREAM))\n",
+            );
+        }
+        NetworkMode::AllowAll => {
+            profile.push_str("(allow network-outbound)\n");
+            profile.push_str("(allow network-inbound)\n");
+            profile.push_str("(allow network-bind)\n");
+        }
+    }
+
+    // Per-port TCP rules are not supported on macOS (Seatbelt cannot filter by port alone).
+    // ProxyOnly mode IS supported via `(remote tcp "localhost:PORT")`.
+    if !caps.tcp_connect_ports().is_empty() || !caps.tcp_bind_ports().is_empty() {
+        return Err(NonoError::NetworkFilterUnsupported {
+            platform: "macOS".to_string(),
+            reason: "Seatbelt cannot filter by TCP port. Use --proxy-allow for host-level \
+                     filtering or ProxyOnly mode instead."
+                .to_string(),
+        });
     }
 
     Ok(profile)
@@ -841,5 +872,52 @@ mod tests {
 
         assert!(profile.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"));
         assert!(profile.contains("(deny mach-lookup (global-name \"com.apple.securityd\"))"));
+    }
+
+    #[test]
+    fn test_generate_profile_proxy_only_mode() {
+        let caps = CapabilitySet::new().proxy_only(54321);
+        let profile = generate_profile(&caps).unwrap();
+
+        // Should deny all network
+        assert!(profile.contains("(deny network*)"));
+        // Should allow only localhost TCP to proxy port
+        assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:54321\"))"));
+        // Should allow system-socket for TCP connect
+        assert!(profile.contains("(allow system-socket)"));
+        // Should NOT have general outbound allow
+        assert!(!profile.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn test_generate_profile_allow_all_network() {
+        let caps = CapabilitySet::new();
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(profile.contains("(allow network-outbound)"));
+        assert!(profile.contains("(allow network-inbound)"));
+        assert!(profile.contains("(allow network-bind)"));
+        assert!(!profile.contains("(deny network*)"));
+    }
+
+    #[test]
+    fn test_generate_profile_rejects_per_port_rules() {
+        let caps = CapabilitySet::new().allow_tcp_connect(443);
+        let result = generate_profile(&caps);
+        assert!(result.is_err());
+
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("macOS"),
+            "error should mention macOS: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_generate_profile_rejects_per_port_bind_rules() {
+        let caps = CapabilitySet::new().allow_tcp_bind(8080);
+        let result = generate_profile(&caps);
+        assert!(result.is_err());
     }
 }

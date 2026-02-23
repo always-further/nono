@@ -1,0 +1,41 @@
+[package]
+name = "nono-proxy"
+version = "0.6.0-alpha.3"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Network filtering proxy for the nono sandbox"
+keywords = ["sandbox", "security", "proxy", "network"]
+categories = ["network-programming", "web-programming"]
+
+[dependencies]
+nono = { version = "0.6.0-alpha.1", path = "../nono" }
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+ipnet.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+sha2.workspace = true
+getrandom = "0.4"
+keyring = "3"
+base64 = "0.22"
+subtle = "2"
+url = "2"
+
+# TLS for upstream connections (reverse proxy mode)
+hyper-rustls = { version = "0.27", features = ["http1", "ring", "webpki-tokio"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["test-util", "rt-multi-thread", "macros"] }

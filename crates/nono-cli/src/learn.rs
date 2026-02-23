@@ -397,16 +397,16 @@ fn run_strace(
             match access {
                 TracedAccess::File(fa) => file_accesses.push(fa),
                 TracedAccess::Network(mut na) => {
-                    na.queried_hostname = pid
-                        .and_then(|p| pid_hostnames.get(&p).cloned())
-                        .or_else(|| {
-                            // Fallback for single-process traces (no PID prefix)
-                            if pid.is_none() && pid_hostnames.len() == 1 {
-                                pid_hostnames.values().next().cloned()
-                            } else {
-                                None
-                            }
-                        });
+                    na.queried_hostname =
+                        pid.and_then(|p| pid_hostnames.get(&p).cloned())
+                            .or_else(|| {
+                                // Fallback for single-process traces (no PID prefix)
+                                if pid.is_none() && pid_hostnames.len() == 1 {
+                                    pid_hostnames.values().next().cloned()
+                                } else {
+                                    None
+                                }
+                            });
                     network_accesses.push(na);
                 }
                 TracedAccess::DnsQuery(hostname) => {
@@ -1715,8 +1715,7 @@ mod tests {
 
     #[test]
     fn test_extract_strace_pid_with_prefix() {
-        let line =
-            r#"[pid 12345] sendto(5, "data", 4, 0, {sa_family=AF_INET, ...}, 16) = 4"#;
+        let line = r#"[pid 12345] sendto(5, "data", 4, 0, {sa_family=AF_INET, ...}, 16) = 4"#;
         assert_eq!(extract_strace_pid(line), Some(12345));
     }
 
@@ -1729,8 +1728,7 @@ mod tests {
     #[test]
     fn test_extract_strace_pid_padded() {
         // strace sometimes pads PID with spaces
-        let line =
-            r#"[pid  1234] openat(AT_FDCWD, "/etc/passwd", O_RDONLY) = 3"#;
+        let line = r#"[pid  1234] openat(AT_FDCWD, "/etc/passwd", O_RDONLY) = 3"#;
         assert_eq!(extract_strace_pid(line), Some(1234));
     }
 

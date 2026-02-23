@@ -21,6 +21,14 @@ There are three trust domains:
 
 The supervisor is trusted but constrained. It can only grant access to files it can open itself (standard Unix permissions apply), and `never_grant` paths are checked before any approval backend is consulted.
 
+When proxy mode is active, a fourth domain exists:
+
+| Domain | Trust Level | Role |
+|--------|-------------|------|
+| Network proxy | Trusted (runs in supervisor) | Filters outbound connections by host, injects credentials, enforces deny CIDRs |
+
+The proxy runs in the unsandboxed parent process alongside the supervisor. The sandboxed child can only reach `localhost:<port>` — all other outbound TCP is blocked at the kernel level. A session token (256-bit random) prevents other localhost processes from using the proxy.
+
 ## The Two-Layer Architecture
 
 ### Layer 1: Landlock (the floor)
@@ -118,7 +126,7 @@ The seccomp filter traps only `openat` and `openat2`. All other syscalls pass th
 | `read` / `write` / `close` | No | Hot path; operates on already-granted fds |
 | `stat` / `access` | No | Information leak, but agents handle failures gracefully; not a data exfiltration vector |
 | `unlink` / `rename` | No | Governed by Landlock; cannot affect paths outside the allowed set |
-| `connect` / `bind` | No | Governed by Landlock ABI v4+ network filtering |
+| `connect` / `bind` | No | Governed by Landlock ABI v4+ network filtering; in proxy mode, restricted to localhost proxy port |
 
 The 3-10 microsecond overhead on file opens is negligible for agent workloads. Agents open files infrequently relative to reading and writing them.
 
@@ -171,7 +179,7 @@ The supervisor's external attack surface is minimal:
 | IPC socket | Anonymous `socketpair()` — no filesystem path, no way for external processes to connect |
 | seccomp notif fd | Owned solely by the supervisor; no other process holds it |
 | Approval input | Reads from `/dev/tty`; requires access to the user's terminal session |
-| Network | None — the supervisor does not listen on any port |
+| Network | Minimal — in proxy mode, the supervisor listens on a random localhost port protected by a session token; otherwise none |
 
 There is no network-exposed surface, no filesystem-visible socket, and no way to interact with the supervisor without already having the user's terminal session or the ability to inject code into the supervisor's address space.
 
@@ -199,6 +207,60 @@ The risk is not zero — nothing is. But Rust's memory safety guarantees make th
 ### The key distinction
 
 The supervisor is not a privilege escalation target because it does not hold privileges the user does not already have. This is a deliberate design choice. nono runs entirely unprivileged — no root, no `CAP_SYS_ADMIN`, no setuid. An architecture where the supervisor ran with elevated privileges (as some container runtimes do) would make supervisor compromise a serious escalation vector. nono avoids this by design.
+
+## Network Proxy Security Model
+
+When `--network-profile` or `--proxy-allow` is used, nono starts an HTTP proxy in the supervisor process and restricts the child to `ProxyOnly` mode — only `localhost:<port>` is reachable from inside the sandbox.
+
+### Enforcement Layers
+
+| Platform | Mechanism | What It Restricts |
+|----------|-----------|-------------------|
+| Linux | Landlock ABI v4+ per-port TCP rules | `connect()` limited to proxy port only |
+| macOS | Seatbelt `(allow network-outbound (remote tcp "localhost:PORT"))` | All other outbound denied |
+
+The kernel enforcement ensures the child cannot bypass the proxy by connecting directly to upstream hosts, even if it knows the IP address. There is no userspace workaround — `connect()` to any address other than `127.0.0.1:<port>` returns `EPERM`.
+
+### Session Token Authentication
+
+Every proxy session generates a 256-bit random token (via `getrandom`). The child receives it as `NONO_PROXY_TOKEN`. Every request must include this token:
+
+- CONNECT mode: `Proxy-Authorization: Bearer <token>`
+- Reverse proxy mode: `X-Nono-Token: <token>`
+
+Tokens are compared using constant-time equality to prevent timing attacks. This prevents other localhost processes from using the proxy even if they discover the port number.
+
+### DNS Rebinding Protection
+
+The proxy resolves DNS itself and checks all resolved IP addresses against the deny list before connecting. This prevents attacks where:
+
+1. An attacker controls DNS for an allowed hostname
+2. DNS returns an RFC1918 address (e.g., `10.0.0.1`) or cloud metadata (`169.254.169.254`)
+3. The proxy would connect to an internal host thinking it's an allowed external API
+
+The deny list (cloud metadata, RFC1918, link-local, loopback) is hardcoded and cannot be overridden by configuration.
+
+### Credential Isolation
+
+In reverse proxy mode, API credentials are loaded from the system keyring at proxy startup and stored in the supervisor's memory as `Zeroizing<String>`. They are never passed to the sandboxed child:
+
+- The child sees `OPENAI_BASE_URL=http://127.0.0.1:<port>/openai` — a local HTTP URL with no key
+- The proxy injects `Authorization: Bearer sk-...` when forwarding to the upstream over TLS
+- The child cannot read the credential from the proxy's memory (separate process, no shared memory, no `ptrace`)
+
+If the child's traffic is captured (e.g., by a rogue library logging HTTP requests), only the local proxy URL is visible. The real API key never appears in the child's address space.
+
+### Proxy Failure Modes
+
+| Failure | Behavior | Safety Property |
+|---------|----------|-----------------|
+| Proxy crashes | Child loses all network access (only proxy port was allowed) | Safe — fail-closed |
+| Invalid token | Proxy returns 403 | Safe — authentication enforced |
+| Host not in allowlist | Proxy returns 403 | Safe — deny by default |
+| DNS resolves to denied CIDR | Proxy returns 403 | Safe — rebinding protection |
+| Upstream TLS failure | Proxy returns 502 | Safe — no fallback to plaintext |
+
+The invariant matches the filesystem model: **if anything goes wrong, the child does not get access**.
 
 ## macOS Model
 

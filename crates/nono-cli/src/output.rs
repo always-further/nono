@@ -1,7 +1,7 @@
 //! CLI output styling for nono
 
 use colored::Colorize;
-use nono::{AccessMode, CapabilitySet, NonoError, Result};
+use nono::{AccessMode, CapabilitySet, NetworkMode, NonoError, Result};
 use rand::prelude::IndexedRandom;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, IsTerminal, Write};
@@ -116,10 +116,16 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
 
     // Network status
     eprintln!("  {}", "Network:".white());
-    if caps.is_network_blocked() {
-        eprintln!("    outbound: {}", "blocked".red());
-    } else {
-        eprintln!("    outbound: {}", "allowed".green());
+    match caps.network_mode() {
+        NetworkMode::Blocked => {
+            eprintln!("    outbound: {}", "blocked".red());
+        }
+        NetworkMode::ProxyOnly { port } => {
+            eprintln!("    outbound: {} (localhost:{})", "proxy".yellow(), port);
+        }
+        NetworkMode::AllowAll => {
+            eprintln!("    outbound: {}", "allowed".green());
+        }
     }
 
     eprintln!();

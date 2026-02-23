@@ -61,7 +61,7 @@ openai_api_key = "OPENAI_API_KEY"
 
 **Usage:**
 ```bash
-nono run --profile openclaw-strict --secrets -- openclaw gateway
+nono run --profile openclaw-strict --env-credential -- openclaw gateway
 ```
 
 <Note>
@@ -111,7 +111,7 @@ secret-tool store --label="nono: openai_api_key" service nono username openai_ap
 **Step 2: Run OpenClaw with secrets loaded**
 
 ```bash
-nono run --profile openclaw --secrets telegram_bot_token,openai_api_key -- openclaw gateway
+nono run --profile openclaw --env-credential telegram_bot_token,openai_api_key -- openclaw gateway
 ```
 
 The secrets are loaded from the keystore and injected as `$TELEGRAM_BOT_TOKEN` and `$OPENAI_API_KEY` environment variables. OpenClaw reads these automatically.
@@ -188,7 +188,7 @@ nono run \
   --read ~/.openclaw \
   --read ~/agents/my-agent \
   --allow ~/agents/my-agent/workspace \
-  --secrets telegram_bot_token,openai_api_key \
+  --env-credential telegram_bot_token,openai_api_key \
   -- openclaw gateway
 ```
 

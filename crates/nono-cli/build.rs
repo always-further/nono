@@ -28,6 +28,19 @@ fn main() {
         println!("cargo:rustc-env=POLICY_JSON_EMBEDDED=0");
     }
 
+    // === Embed network policy JSON ===
+    let net_policy_path = Path::new("data/network-policy.json");
+    if net_policy_path.exists() {
+        let content =
+            fs::read_to_string(net_policy_path).expect("Failed to read network-policy.json");
+        fs::write(out_path.join("network-policy.json"), &content)
+            .expect("Failed to write network-policy.json to OUT_DIR");
+        println!("cargo:rustc-env=NETWORK_POLICY_JSON_EMBEDDED=1");
+    } else {
+        println!("cargo:warning=data/network-policy.json not found");
+        println!("cargo:rustc-env=NETWORK_POLICY_JSON_EMBEDDED=0");
+    }
+
     // === Embed hook script ===
     let hook_path = Path::new("data/hooks/nono-hook.sh");
     if hook_path.exists() {

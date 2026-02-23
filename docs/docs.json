@@ -42,8 +42,11 @@
           "cli/features/atomic-rollbacks",
           "cli/features/audit",
           "cli/features/supervisor",
+          "cli/features/network-proxy",
+          "cli/features/credential-injection",
           "cli/features/execution-modes",
-          "cli/features/learn"
+          "cli/features/learn",
+          "cli/features/trust"
         ]
       },
       {

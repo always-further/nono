@@ -1,0 +1,149 @@
+{
+  "meta": {
+    "version": 1,
+    "schema_version": "1.0"
+  },
+  "groups": {
+    "llm_apis": {
+      "description": "LLM provider API endpoints",
+      "hosts": [
+        "api.openai.com",
+        "api.anthropic.com",
+        "generativelanguage.googleapis.com",
+        "aiplatform.googleapis.com",
+        "api.groq.com",
+        "api.mistral.ai",
+        "api.cohere.com",
+        "api.together.xyz",
+        "api.fireworks.ai",
+        "api.deepseek.com",
+        "api.perplexity.ai",
+        "inference.cerebras.ai",
+        "openrouter.ai",
+        "api.x.ai"
+      ]
+    },
+    "package_registries": {
+      "description": "Package manager registries and CDNs",
+      "hosts": [
+        "registry.npmjs.org",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "crates.io",
+        "static.crates.io",
+        "index.crates.io",
+        "rubygems.org",
+        "packagist.org",
+        "repo.maven.apache.org",
+        "repo1.maven.org",
+        "plugins.gradle.org",
+        "registry.yarnpkg.com",
+        "cdn.jsdelivr.net",
+        "unpkg.com",
+        "esm.sh"
+      ]
+    },
+    "github": {
+      "description": "GitHub API and content delivery",
+      "hosts": [
+        "github.com",
+        "api.github.com",
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com",
+        "github-releases.githubusercontent.com",
+        "ghcr.io",
+        "pkg-containers.githubusercontent.com"
+      ]
+    },
+    "sigstore": {
+      "description": "Sigstore transparency and signing infrastructure",
+      "hosts": [
+        "rekor.sigstore.dev",
+        "fulcio.sigstore.dev",
+        "tuf-repo-cdn.sigstore.dev",
+        "oauth2.sigstore.dev"
+      ]
+    },
+    "documentation": {
+      "description": "Documentation and knowledge bases",
+      "hosts": [
+        "docs.python.org",
+        "docs.rs",
+        "doc.rust-lang.org",
+        "developer.mozilla.org",
+        "nodejs.org",
+        "go.dev",
+        "pkg.go.dev",
+        "learn.microsoft.com"
+      ]
+    },
+    "google_cloud": {
+      "description": "Google Cloud APIs (for Vertex AI and related services)",
+      "suffixes": [
+        ".googleapis.com"
+      ]
+    },
+    "azure": {
+      "description": "Azure OpenAI and related services",
+      "suffixes": [
+        ".openai.azure.com",
+        ".cognitiveservices.azure.com"
+      ]
+    },
+    "aws_bedrock": {
+      "description": "AWS Bedrock endpoints",
+      "suffixes": [
+        ".bedrock.amazonaws.com",
+        ".bedrock-runtime.amazonaws.com"
+      ]
+    }
+  },
+  "profiles": {
+    "claude-code": {
+      "groups": [
+        "llm_apis",
+        "package_registries",
+        "github",
+        "sigstore",
+        "documentation"
+      ]
+    },
+    "minimal": {
+      "groups": [
+        "llm_apis"
+      ]
+    },
+    "enterprise": {
+      "groups": [
+        "llm_apis",
+        "package_registries",
+        "github",
+        "sigstore",
+        "documentation",
+        "google_cloud",
+        "azure",
+        "aws_bedrock"
+      ]
+    }
+  },
+  "credentials": {
+    "openai": {
+      "upstream": "https://api.openai.com",
+      "credential_key": "openai_api_key",
+      "inject_header": "Authorization",
+      "credential_format": "Bearer {}"
+    },
+    "anthropic": {
+      "upstream": "https://api.anthropic.com",
+      "credential_key": "anthropic_api_key",
+      "inject_header": "x-api-key",
+      "credential_format": "{}"
+    },
+    "gemini": {
+      "upstream": "https://generativelanguage.googleapis.com",
+      "credential_key": "gemini_api_key",
+      "inject_header": "x-goog-api-key",
+      "credential_format": "{}"
+    }
+  }
+}

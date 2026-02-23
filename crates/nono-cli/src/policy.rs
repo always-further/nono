@@ -112,8 +112,8 @@ pub struct ProfileDef {
     pub filesystem: profile::FilesystemConfig,
     #[serde(default)]
     pub network: profile::NetworkConfig,
-    #[serde(default)]
-    pub secrets: profile::SecretsConfig,
+    #[serde(default, alias = "secrets")]
+    pub env_credentials: profile::SecretsConfig,
     #[serde(default)]
     pub workdir: profile::WorkdirConfig,
     #[serde(default)]
@@ -148,7 +148,7 @@ impl ProfileDef {
             },
             filesystem: self.filesystem.clone(),
             network: self.network.clone(),
-            secrets: self.secrets.clone(),
+            env_credentials: self.env_credentials.clone(),
             workdir: self.workdir.clone(),
             hooks: self.hooks.clone(),
             rollback: self.rollback.clone(),

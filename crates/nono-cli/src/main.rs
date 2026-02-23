@@ -8,7 +8,9 @@ mod cli;
 mod config;
 mod exec_strategy;
 mod hooks;
+mod instruction_deny;
 mod learn;
+mod network_policy;
 mod output;
 mod policy;
 mod profile;
@@ -20,6 +22,9 @@ mod rollback_ui;
 mod sandbox_state;
 mod setup;
 mod terminal_approval;
+mod trust_cmd;
+mod trust_intercept;
+mod trust_scan;
 
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
@@ -62,6 +67,7 @@ fn run() -> Result<()> {
                 args.rollback,
                 args.supervised,
                 args.no_rollback_prompt,
+                args.trust_override,
                 cli.silent,
             )
         }
@@ -72,6 +78,7 @@ fn run() -> Result<()> {
         Commands::Why(args) => run_why(*args),
         Commands::Setup(args) => run_setup(args),
         Commands::Rollback(args) => rollback_commands::run_rollback(args),
+        Commands::Trust(args) => trust_cmd::run_trust(args),
         Commands::Audit(args) => audit_commands::run_audit(args),
     }
 }
@@ -176,9 +183,13 @@ fn run_why(args: WhyArgs) -> Result<()> {
             read_file: args.read_file.clone(),
             write_file: args.write_file.clone(),
             net_block: args.net_block,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
             allow_command: vec![],
             block_command: vec![],
-            secrets: None,
+            env_credential: None,
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
@@ -202,9 +213,13 @@ fn run_why(args: WhyArgs) -> Result<()> {
             read_file: args.read_file.clone(),
             write_file: args.write_file.clone(),
             net_block: args.net_block,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
             allow_command: vec![],
             block_command: vec![],
-            secrets: None,
+            env_credential: None,
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
@@ -259,6 +274,7 @@ fn run_sandbox(
     rollback: bool,
     supervised: bool,
     no_rollback_prompt: bool,
+    trust_override: bool,
     silent: bool,
 ) -> Result<()> {
     // Check if we have a command to run
@@ -275,7 +291,7 @@ fn run_sandbox(
         let prepared = prepare_sandbox(&args, silent)?;
         if !prepared.secrets.is_empty() && !silent {
             eprintln!(
-                "  Would inject {} secret(s) as environment variables",
+                "  Would inject {} credential(s) as environment variables",
                 prepared.secrets.len()
             );
         }
@@ -283,10 +299,58 @@ fn run_sandbox(
         return Ok(());
     }
 
-    #[cfg(not(target_os = "linux"))]
-    let prepared = prepare_sandbox(&args, silent)?;
-    #[cfg(target_os = "linux")]
     let mut prepared = prepare_sandbox(&args, silent)?;
+
+    // Compute scan root for trust policy discovery and instruction file scanning.
+    let scan_root = args
+        .workdir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Pre-exec trust scan: verify instruction files before the agent reads them.
+    // Must run BEFORE sandbox application so we can still read bundles and policy.
+    // The trust_policy and scan_result are preserved for macOS deny rule injection.
+    let scan_result = if trust_override {
+        if !silent {
+            eprintln!(
+                "  {}",
+                "WARNING: --trust-override active, skipping instruction file verification."
+                    .yellow()
+            );
+        }
+        None
+    } else {
+        let trust_policy = trust_scan::load_scan_policy(&scan_root, false)?;
+        let result = trust_scan::run_pre_exec_scan(&scan_root, &trust_policy, silent)?;
+        if !result.results.is_empty() {
+            info!(
+                "Trust scan: {} verified, {} blocked, {} warned ({} total files)",
+                result.verified,
+                result.blocked,
+                result.warned,
+                result.results.len()
+            );
+        }
+        if !result.should_proceed() {
+            return Err(NonoError::TrustVerification {
+                path: String::new(),
+                reason: "instruction files failed trust verification".to_string(),
+            });
+        }
+
+        // Inject instruction file deny rules into the Seatbelt profile (macOS only).
+        // Deny-regex rules block reading any file matching instruction patterns.
+        // Literal allows re-enable reading for files that passed verification.
+        instruction_deny::inject_instruction_deny_rules(
+            &mut prepared.caps,
+            &trust_policy,
+            &result.verified_paths(),
+        )?;
+
+        Some(result)
+    };
+    let _ = &scan_result; // suppress unused warning on non-macOS
 
     // Enable sandbox extensions for transparent capability expansion in supervised mode.
     // On Linux, seccomp-notify intercepts syscalls at the kernel level -- this flag is
@@ -296,10 +360,27 @@ fn run_sandbox(
         prepared.caps.set_extensions_enabled(true);
     }
 
+    let trust_scan_verified = scan_result.as_ref().is_some_and(|r| r.verified > 0);
+
+    let proxy_active = matches!(
+        prepared.caps.network_mode(),
+        nono::NetworkMode::ProxyOnly { .. }
+    );
+
+    // Merge network profile from CLI args and profile config
+    let network_profile = args
+        .network_profile
+        .clone()
+        .or_else(|| prepared.network_profile.clone());
+    let mut proxy_allow_hosts = prepared.proxy_allow_hosts.clone();
+    proxy_allow_hosts.extend(args.proxy_allow.clone());
+    let mut proxy_credentials = prepared.proxy_credentials.clone();
+    proxy_credentials.extend(args.proxy_credential.clone());
+
     execute_sandboxed(
         program,
         cmd_args,
-        &prepared.caps,
+        prepared.caps,
         prepared.secrets,
         ExecutionFlags {
             interactive: prepared.interactive,
@@ -308,9 +389,17 @@ fn run_sandbox(
             rollback,
             supervised,
             no_rollback_prompt,
+            trust_override,
             silent,
+            scan_root,
+            trust_scan_verified,
             rollback_exclude_patterns: prepared.rollback_exclude_patterns,
             rollback_exclude_globs: prepared.rollback_exclude_globs,
+            proxy_active,
+            network_profile,
+            proxy_allow_hosts,
+            proxy_credentials,
+            external_proxy: args.external_proxy.clone(),
         },
     )
 }
@@ -332,7 +421,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         let prepared = prepare_sandbox(&args.sandbox, silent)?;
         if !prepared.secrets.is_empty() && !silent {
             eprintln!(
-                "  Would inject {} secret(s) as environment variables",
+                "  Would inject {} credential(s) as environment variables",
                 prepared.secrets.len()
             );
         }
@@ -354,7 +443,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
     execute_sandboxed(
         shell_path.into_os_string(),
         vec![],
-        &prepared.caps,
+        prepared.caps,
         prepared.secrets,
         ExecutionFlags {
             interactive: true,
@@ -363,9 +452,17 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             rollback: false,
             supervised: false,
             no_rollback_prompt: false,
+            trust_override: false,
             silent,
+            scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            trust_scan_verified: false,
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
+            proxy_active: false,
+            network_profile: None,
+            proxy_allow_hosts: Vec::new(),
+            proxy_credentials: Vec::new(),
+            external_proxy: None,
         },
     )
 }
@@ -378,11 +475,26 @@ struct ExecutionFlags {
     rollback: bool,
     supervised: bool,
     no_rollback_prompt: bool,
+    trust_override: bool,
     silent: bool,
+    /// Root directory for trust policy discovery and scanning
+    scan_root: std::path::PathBuf,
+    /// Whether trust scan ran and verified at least one file (crypto threads may linger)
+    trust_scan_verified: bool,
     /// Profile-specific rollback exclusion patterns (additive on base)
     rollback_exclude_patterns: Vec<String>,
     /// Profile-specific rollback exclusion globs (filename matching)
     rollback_exclude_globs: Vec<String>,
+    /// Whether proxy-based network filtering is active (forces Supervised mode)
+    proxy_active: bool,
+    /// Network profile name for proxy filtering (from --network-profile or profile config)
+    network_profile: Option<String>,
+    /// Additional hosts to allow through the proxy (from --proxy-allow or profile config)
+    proxy_allow_hosts: Vec<String>,
+    /// Credential services for reverse proxy (from --proxy-credential or profile config)
+    proxy_credentials: Vec<String>,
+    /// External proxy address (from --external-proxy)
+    external_proxy: Option<String>,
 }
 
 /// Select execution strategy from user/runtime flags.
@@ -393,7 +505,7 @@ struct ExecutionFlags {
 /// - `Direct` is used for interactive/direct-exec paths.
 /// - `Monitor` is the default safer parent-sandboxed mode.
 fn select_execution_strategy(flags: &ExecutionFlags) -> exec_strategy::ExecStrategy {
-    if flags.rollback || flags.supervised {
+    if flags.rollback || flags.supervised || flags.proxy_active {
         exec_strategy::ExecStrategy::Supervised
     } else if flags.interactive || flags.direct_exec {
         exec_strategy::ExecStrategy::Direct
@@ -416,6 +528,45 @@ fn apply_pre_fork_sandbox(
     Ok(())
 }
 
+/// Build a `ProxyConfig` from execution flags and network policy.
+///
+/// Resolves the network profile (if set), merges extra hosts from CLI/profile,
+/// and includes credential routes.
+fn build_proxy_config_from_flags(
+    flags: &ExecutionFlags,
+) -> Result<nono_proxy::config::ProxyConfig> {
+    let net_policy_json = config::embedded::embedded_network_policy_json();
+    let net_policy = network_policy::load_network_policy(net_policy_json)?;
+
+    // Resolve network profile groups into flat host lists
+    let mut resolved = if let Some(ref profile_name) = flags.network_profile {
+        network_policy::resolve_network_profile(&net_policy, profile_name)?
+    } else {
+        network_policy::ResolvedNetworkPolicy {
+            hosts: Vec::new(),
+            suffixes: Vec::new(),
+            routes: Vec::new(),
+        }
+    };
+
+    // Resolve credential routes
+    let routes = network_policy::resolve_credentials(&net_policy, &flags.proxy_credentials);
+    resolved.routes = routes;
+
+    // Build the proxy config with extra hosts from CLI/profile
+    let mut proxy_config = network_policy::build_proxy_config(&resolved, &flags.proxy_allow_hosts);
+
+    // Wire in external proxy if specified
+    if let Some(ref addr) = flags.external_proxy {
+        proxy_config.external_proxy = Some(nono_proxy::config::ExternalProxyConfig {
+            address: addr.clone(),
+            auth: None,
+        });
+    }
+
+    Ok(proxy_config)
+}
+
 fn cleanup_capability_state_file(cap_file_path: &std::path::Path) {
     if cap_file_path.exists() {
         let _ = std::fs::remove_file(cap_file_path);
@@ -425,7 +576,7 @@ fn cleanup_capability_state_file(cap_file_path: &std::path::Path) {
 fn execute_sandboxed(
     program: OsString,
     cmd_args: Vec<OsString>,
-    caps: &CapabilitySet,
+    mut caps: CapabilitySet,
     loaded_secrets: Vec<nono::LoadedSecret>,
     flags: ExecutionFlags,
 ) -> Result<()> {
@@ -454,7 +605,7 @@ fn execute_sandboxed(
     let resolved_program = exec_strategy::resolve_program(&command[0])?;
 
     // Write capability state file BEFORE applying sandbox
-    let cap_file = write_capability_state_file(caps, flags.silent);
+    let cap_file = write_capability_state_file(&caps, flags.silent);
     let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
     // Validate that secret env var names are not dangerous (e.g. LD_PRELOAD).
@@ -476,18 +627,83 @@ fn execute_sandboxed(
         output::print_supervised_info(flags.silent, flags.rollback, flags.supervised);
     }
 
+    // Start network proxy if proxy mode is active.
+    // The proxy runs in the parent process (unsandboxed) and binds to a random
+    // ephemeral port on localhost. The child is sandboxed to only connect to
+    // that port via ProxyOnly mode.
+    let mut proxy_env_vars: Vec<(String, String)> = Vec::new();
+    let _proxy_handle: Option<nono_proxy::server::ProxyHandle> = if flags.proxy_active {
+        let proxy_config = build_proxy_config_from_flags(&flags)?;
+
+        // Use multi-thread runtime so the accept loop and connection handlers
+        // are driven by background worker threads. A current_thread runtime
+        // would only drive tasks inside block_on() — once block_on() returns
+        // after start(), the spawned accept loop would be orphaned and never
+        // poll, making the proxy a dead listener.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| NonoError::SandboxInit(format!("Failed to start proxy runtime: {}", e)))?;
+        let handle = rt
+            .block_on(async { nono_proxy::server::start(proxy_config.clone()).await })
+            .map_err(|e| NonoError::SandboxInit(format!("Failed to start proxy: {}", e)))?;
+
+        // Update the sandbox capability port to the actual bound port
+        let port = handle.port;
+        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly { port });
+        info!("Network proxy started on localhost:{}", port);
+
+        // Collect proxy env vars for the child process
+        for (k, v) in handle.env_vars() {
+            proxy_env_vars.push((k, v));
+        }
+
+        // Add SDK base URL overrides for credential routes
+        // (e.g., OPENAI_BASE_URL=http://127.0.0.1:<port>/openai)
+        for (k, v) in handle.credential_env_vars(&proxy_config) {
+            proxy_env_vars.push((k, v));
+        }
+
+        // Leak the runtime so it keeps running in the parent after fork.
+        // The multi-thread runtime's worker threads continue polling the
+        // accept loop and connection handlers after block_on returns.
+        std::mem::forget(rt);
+        Some(handle)
+    } else {
+        None
+    };
+
     // Apply sandbox BEFORE fork for Direct and Monitor modes.
-    apply_pre_fork_sandbox(strategy, caps, flags.silent)?;
+    apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 
     // Build environment variables for the command
-    let env_vars: Vec<(&str, &str)> = loaded_secrets
+    let mut env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()
         .map(|s| (s.env_var.as_str(), s.value.as_str()))
         .collect();
 
-    // Determine threading context for fork safety
-    let threading = if !loaded_secrets.is_empty() {
+    // Add proxy env vars (HTTP_PROXY, HTTPS_PROXY, NONO_PROXY_TOKEN)
+    for (k, v) in &proxy_env_vars {
+        env_vars.push((k.as_str(), v.as_str()));
+    }
+
+    // Determine threading context for fork safety.
+    // Secret loading uses the keyring backend which may spawn background threads
+    // (macOS Security framework XPC dispatch). However, get_password() is synchronous
+    // — by the time we reach here, the keyring call is complete and any spawned
+    // threads are idle dispatch workers (not holding allocator locks).
+    //
+    // When proxy mode is active (forces Supervised), keyring threads are safe to
+    // fork over because: (1) the synchronous call completed, (2) idle XPC workers
+    // behave like idle tokio workers (parked on kqueue), (3) the child applies
+    // sandbox then immediately calls execve which replaces the address space.
+    let threading = if !loaded_secrets.is_empty() && !flags.proxy_active {
         exec_strategy::ThreadingContext::KeyringExpected
+    } else if flags.trust_scan_verified || flags.proxy_active || !loaded_secrets.is_empty() {
+        // Proxy uses tokio threads (parked on epoll/kqueue, safe for fork+exec).
+        // Keyring threads are idle XPC dispatch workers when proxy is also active.
+        exec_strategy::ThreadingContext::CryptoExpected
     } else {
         exec_strategy::ThreadingContext::Strict
     };
@@ -501,7 +717,7 @@ fn execute_sandboxed(
     let config = exec_strategy::ExecConfig {
         command: &command,
         resolved_program: &resolved_program,
-        caps,
+        caps: &caps,
         env_vars,
         cap_file: &cap_file_path,
         no_diagnostics: flags.no_diagnostics || flags.silent,
@@ -645,8 +861,48 @@ fn execute_sandboxed(
                 }
             });
 
+            let trust_interceptor = if !flags.trust_override {
+                match trust_scan::load_scan_policy(&flags.scan_root, false) {
+                    Ok(p) => {
+                        match trust_intercept::TrustInterceptor::new(p, flags.scan_root.clone()) {
+                            Ok(interceptor) => Some(interceptor),
+                            Err(e) => {
+                                tracing::warn!("Trust interceptor pattern compilation failed: {e}");
+                                eprintln!(
+                                    "  {}",
+                                    format!(
+                                        "WARNING: Runtime instruction file verification disabled \
+                                     (pattern error: {e})"
+                                    )
+                                    .yellow()
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Trust policy load failed for interceptor: {e}");
+                        eprintln!(
+                            "  {}",
+                            format!(
+                                "WARNING: Runtime instruction file verification disabled \
+                                 (policy error: {e})"
+                            )
+                            .yellow()
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             let started = chrono::Local::now().to_rfc3339();
-            let exit_code = exec_strategy::execute_supervised(&config, supervisor_cfg.as_ref())?;
+            let exit_code = exec_strategy::execute_supervised(
+                &config,
+                supervisor_cfg.as_ref(),
+                trust_interceptor,
+            )?;
             let ended = chrono::Local::now().to_rfc3339();
 
             // Post-exit: take final snapshot and offer restore
@@ -729,6 +985,12 @@ struct PreparedSandbox {
     rollback_exclude_patterns: Vec<String>,
     /// Profile-specific rollback exclusion globs (filename matching)
     rollback_exclude_globs: Vec<String>,
+    /// Network profile name from profile config (if any)
+    network_profile: Option<String>,
+    /// Additional proxy-allowed hosts from profile config
+    proxy_allow_hosts: Vec<String>,
+    /// Credential services from profile config
+    proxy_credentials: Vec<String>,
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
@@ -818,6 +1080,17 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .as_ref()
         .map(|p| p.rollback.exclude_globs.clone())
         .unwrap_or_default();
+    let profile_network_profile = loaded_profile
+        .as_ref()
+        .and_then(|p| p.network.network_profile.clone());
+    let profile_proxy_allow = loaded_profile
+        .as_ref()
+        .map(|p| p.network.proxy_allow.clone())
+        .unwrap_or_default();
+    let profile_proxy_credentials = loaded_profile
+        .as_ref()
+        .map(|p| p.network.proxy_credentials.clone())
+        .unwrap_or_default();
 
     // Build capabilities from profile or arguments.
     // Unlink overrides are deferred so they can cover the CWD path added below.
@@ -905,23 +1178,35 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
 
     // Build secret mappings from profile and/or CLI
     let profile_secrets = loaded_profile
-        .map(|p| p.secrets.mappings)
+        .map(|p| p.env_credentials.mappings)
         .unwrap_or_default();
 
     let secret_mappings =
-        nono::keystore::build_secret_mappings(args.secrets.as_deref(), &profile_secrets);
+        nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets);
 
-    // Load secrets from keystore BEFORE sandbox is applied
+    // Load credentials from keystore BEFORE sandbox is applied
     let loaded_secrets = if !secret_mappings.is_empty() {
         info!(
-            "Loading {} secret(s) from system keystore",
+            "Loading {} credential(s) from system keystore",
             secret_mappings.len()
         );
         if !silent {
             eprintln!(
-                "  Loading {} secret(s) from keystore...",
+                "  Loading {} credential(s) from keystore...",
                 secret_mappings.len()
             );
+            // Warn that env credentials are visible to the sandboxed process
+            for account in secret_mappings.keys() {
+                eprintln!(
+                    "  {}: --env-credential '{}' exposes the API key to the sandboxed process.",
+                    "warning".yellow(),
+                    account,
+                );
+                eprintln!(
+                    "           Use --proxy-credential '{}' instead for credential isolation with network API keys.",
+                    account,
+                );
+            }
         }
         nono::keystore::load_secrets(nono::keystore::DEFAULT_SERVICE, &secret_mappings)?
     } else {
@@ -944,6 +1229,9 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         interactive: profile_interactive,
         rollback_exclude_patterns: profile_rollback_patterns,
         rollback_exclude_globs: profile_rollback_globs,
+        network_profile: profile_network_profile,
+        proxy_allow_hosts: profile_proxy_allow,
+        proxy_credentials: profile_proxy_credentials,
     })
 }
 

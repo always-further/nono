@@ -75,7 +75,7 @@ nono forks first, then sandboxes only the child. The parent remains unsandboxed 
 
 **Trade-offs:**
 - Larger attack surface (unsandboxed parent, mitigated by ptrace hardening)
-- Incompatible with `--secrets` (keyring threads deadlock across fork)
+- Incompatible with `--env-credential` (keyring threads deadlock across fork)
 
 **Features:**
 - Rollback snapshots (baseline + final) with `--rollback`

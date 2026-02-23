@@ -187,11 +187,60 @@ Block all network access. Network is **allowed by default**.
 nono run --allow-cwd --net-block -- cargo build
 ```
 
-<Note>
-  Network access is currently binary - either all outbound connections are allowed, or all are blocked. There is no per-host or per-domain filtering.
+#### `--network-profile`
 
-  Granular network filtering (e.g., allowing only specific domains like `api.anthropic.com`) is a desired feature but not yet supported. Apple Seatbelt has technical limitations that make per-host filtering challenging and would require significant experimentation to implement correctly. This feature may be added in a future release.
+Use a predefined network profile for host-level filtering. When set, outbound traffic is routed through a localhost proxy that only allows connections to hosts in the profile.
+
+```bash
+# Use the claude-code network profile
+nono run --allow-cwd --network-profile claude-code -- claude
+
+# Use minimal profile (LLM APIs only)
+nono run --allow-cwd --network-profile minimal -- my-agent
+```
+
+Available profiles: `claude-code`, `minimal`, `enterprise`. See [Network Proxy](/cli/features/network-proxy) for details.
+
+<Note>
+  `--network-profile` and `--proxy-allow` activate proxy mode, which forces supervised execution. The proxy runs in the unsandboxed parent process.
 </Note>
+
+#### `--proxy-allow`
+
+Allow a specific host through the network proxy. Can be specified multiple times. Activates proxy mode if not already active.
+
+```bash
+# Allow specific hosts
+nono run --allow-cwd --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+
+# Combine with a network profile for additional hosts
+nono run --allow-cwd --network-profile minimal --proxy-allow custom-api.example.com -- my-agent
+```
+
+#### `--proxy-credential`
+
+Enable credential injection for a named service via the reverse proxy. The service must be defined in `network-policy.json`. Credentials are loaded from the system keyring under the `nono-proxy` service name.
+
+```bash
+# Inject OpenAI credentials (loads from keyring account "openai")
+nono run --allow-cwd --network-profile claude-code --proxy-credential openai -- my-agent
+
+# Multiple credentials
+nono run --allow-cwd --network-profile claude-code \
+  --proxy-credential openai --proxy-credential anthropic -- my-agent
+```
+
+The proxy sets `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, etc. in the child environment so SDKs route through the proxy automatically.
+
+See [Network Proxy - Credential Injection](/cli/features/network-proxy#credential-injection) for storing credentials.
+
+#### `--external-proxy`
+
+Chain outbound connections through an external (enterprise) proxy. The default deny list (cloud metadata, private networks) is still enforced.
+
+```bash
+nono run --allow-cwd --network-profile enterprise --external-proxy squid.corp:3128 -- my-agent
+```
 
 ## `nono shell` Options
 
@@ -236,27 +285,29 @@ Block an additional command beyond the default blocklist.
 nono run --allow-cwd --block-command my-dangerous-tool -- my-script.sh
 ```
 
-### Secrets Options
+### Credential Options
 
-#### `--secrets`
+#### `--env-credential`
 
-Load secrets from the system keystore (macOS Keychain / Linux Secret Service) and inject them as environment variables.
+Load credentials from the system keystore (macOS Keychain / Linux Secret Service) and inject them as environment variables. The sandboxed process can read these credentials directly.
 
 ```bash
-# Load specific secrets by account name
-nono run --allow-cwd --secrets openai_api_key,anthropic_api_key -- my-agent
+# Load specific credentials by account name
+nono run --allow-cwd --env-credential openai_api_key,anthropic_api_key -- my-agent
 
-# Use with profile (loads secrets defined in profile's [secrets] section)
-nono run --profile claude-code --secrets -- claude
+# Use with profile (loads credentials defined in profile's [env_credentials] section)
+nono run --profile claude-code --env-credential -- claude
 ```
 
-Secrets are:
+Credentials are:
 
 - Loaded **before** the sandbox is applied (keystore access blocked after)
 - Auto-named by uppercasing: `openai_api_key` becomes `$OPENAI_API_KEY`
 - Zeroized from memory after `exec()`
 
-See [Secrets Management](/cli/features/secrets) for full documentation on storing and using secrets.
+For network API keys, prefer `--proxy-credential` instead for credential isolation — the agent never sees the real API key.
+
+See [Secrets Management](/cli/features/secrets) for full documentation on storing and using credentials.
 
 ### Profile Options
 
@@ -330,6 +381,14 @@ Use direct execution mode. nono applies the sandbox and then `exec()`s directly 
 nono run --exec --allow-cwd -- my-command
 ```
 
+#### `--no-diagnostics`
+
+Suppress the diagnostic footer when the command exits non-zero. Useful for scripts that parse stderr and need stable output.
+
+```bash
+nono run --no-diagnostics --allow-cwd -- my-command
+```
+
 ### Operational Flags
 
 #### `--dry-run`
@@ -364,6 +423,18 @@ Increase logging verbosity. Can be specified multiple times.
 ```bash
 nono run -vvv --allow-cwd -- command
 ```
+
+#### `--trust-override`
+
+Disable trust verification for instruction files. Skips the pre-exec trust scan that verifies cryptographic signatures on instruction files (SKILLS*, CLAUDE*, AGENT*, .claude/**/*.md). For development and testing only.
+
+```bash
+nono run --trust-override --allow-cwd -- my-agent
+```
+
+<Note>
+  Using `--trust-override` in production is not recommended. It disables the entire instruction file attestation pipeline, allowing unsigned or tampered instruction files to be read by the sandboxed process.
+</Note>
 
 #### `--config`, `-c`
 

@@ -142,9 +142,12 @@ impl CapabilitySetExt for CapabilitySet {
             }
         }
 
-        // Network blocking
+        // Network blocking or proxy mode
         if args.net_block {
             caps.set_network_blocked(true);
+        } else if args.network_profile.is_some() || !args.proxy_allow.is_empty() {
+            // Proxy mode: port 0 is a placeholder, updated when proxy starts
+            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly { port: 0 });
         }
 
         // Command allow/block lists
@@ -263,9 +266,14 @@ impl CapabilitySetExt for CapabilitySet {
             }
         }
 
-        // Network blocking from profile
+        // Network blocking or proxy mode from profile
         if profile.network.block {
             caps.set_network_blocked(true);
+        } else if profile.network.network_profile.is_some()
+            || !profile.network.proxy_allow.is_empty()
+        {
+            // Profile requests proxy mode; port 0 is a placeholder
+            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly { port: 0 });
         }
 
         // Apply CLI overrides (CLI args take precedence)
@@ -347,6 +355,9 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
     // CLI network blocking overrides profile
     if args.net_block {
         caps.set_network_blocked(true);
+    } else if args.network_profile.is_some() || !args.proxy_allow.is_empty() {
+        // CLI proxy flags override profile network settings
+        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly { port: 0 });
     }
 
     // Command allow/block from CLI
@@ -378,9 +389,13 @@ mod tests {
             read_file: vec![],
             write_file: vec![],
             net_block: false,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
             allow_command: vec![],
             block_command: vec![],
-            secrets: None,
+            env_credential: None,
             profile: None,
             allow_cwd: false,
             workdir: None,
@@ -404,9 +419,13 @@ mod tests {
             read_file: vec![],
             write_file: vec![],
             net_block: true,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
             allow_command: vec![],
             block_command: vec![],
-            secrets: None,
+            env_credential: None,
             profile: None,
             allow_cwd: false,
             workdir: None,
@@ -431,7 +450,11 @@ mod tests {
             net_block: false,
             allow_command: vec!["rm".to_string()],
             block_command: vec!["custom".to_string()],
-            secrets: None,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
+            env_credential: None,
             profile: None,
             allow_cwd: false,
             workdir: None,
@@ -458,9 +481,13 @@ mod tests {
             read_file: vec![],
             write_file: vec![],
             net_block: false,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
             allow_command: vec![],
             block_command: vec![],
-            secrets: None,
+            env_credential: None,
             profile: None,
             allow_cwd: false,
             workdir: None,
@@ -491,9 +518,13 @@ mod tests {
             read_file: vec![],
             write_file: vec![],
             net_block: false,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
             allow_command: vec![],
             block_command: vec![],
-            secrets: None,
+            env_credential: None,
             profile: None,
             allow_cwd: false,
             workdir: None,

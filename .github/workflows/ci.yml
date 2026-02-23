@@ -138,3 +138,30 @@ jobs:
           else
             echo "No integration tests found, skipping"
           fi
+
+  docs-checks:
+    name: Docs Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Verify docs routes are canonical
+        run: |
+          if rg -n -P 'href="/(?!cli/|assets/)|\]\(/(?!cli/|assets/)' docs/cli; then
+            echo "Found non-canonical absolute docs links in docs/cli."
+            exit 1
+          fi
+
+      - name: Verify docs nav pages exist
+        run: |
+          jq -r '.navigation.groups[].pages[]' docs/docs.json | while read -r page; do
+            if [[ ! -f "docs/${page}.mdx" ]]; then
+              echo "Missing page from docs.json navigation: docs/${page}.mdx"
+              exit 1
+            fi
+          done
+
+      - name: Verify CLI run flags are documented
+        run: |
+          chmod +x .github/scripts/check-cli-doc-flags.sh
+          .github/scripts/check-cli-doc-flags.sh

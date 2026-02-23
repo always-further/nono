@@ -204,7 +204,7 @@ pub(super) fn handle_seccomp_notification(
     });
 
     if in_initial_set {
-        match open_path_for_access(&canonicalized, &access, config.never_grant) {
+        match open_path_for_access(&canonicalized, &access, config.never_grant, None) {
             Ok(file) => {
                 if notif_id_valid(notify_fd, notif.id)? {
                     inject_fd(notify_fd, notif.id, file.as_raw_fd())?;
@@ -280,7 +280,7 @@ pub(super) fn handle_seccomp_notification(
 
     // 9. Act on the decision
     if decision.is_granted() {
-        match open_path_for_access(&canonicalized, &access, config.never_grant) {
+        match open_path_for_access(&canonicalized, &access, config.never_grant, None) {
             Ok(file) => {
                 inject_fd(notify_fd, notif.id, file.as_raw_fd())?;
             }

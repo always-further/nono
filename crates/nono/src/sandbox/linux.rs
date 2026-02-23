@@ -1,10 +1,10 @@
 //! Linux sandbox implementation using Landlock LSM
 
-use crate::capability::{AccessMode, CapabilitySet};
+use crate::capability::{AccessMode, CapabilitySet, NetworkMode};
 use crate::error::{NonoError, Result};
 use crate::sandbox::SupportInfo;
 use landlock::{
-    Access, AccessFs, AccessNet, BitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr,
+    Access, AccessFs, AccessNet, BitFlags, NetPort, PathBeneath, PathFd, Ruleset, RulesetAttr,
     RulesetCreatedAttr, ABI,
 };
 use tracing::{debug, info};
@@ -98,17 +98,21 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
         .handle_access(handled_fs)
         .map_err(|e| NonoError::SandboxInit(format!("Failed to handle fs access: {}", e)))?;
 
-    // Add network access handling if blocking network (ABI V4+ required)
-    let ruleset_builder = if caps.is_network_blocked() {
+    // Determine if we need network handling (any mode besides AllowAll)
+    let needs_network_handling = !matches!(caps.network_mode(), NetworkMode::AllowAll)
+        || !caps.tcp_connect_ports().is_empty()
+        || !caps.tcp_bind_ports().is_empty();
+
+    let ruleset_builder = if needs_network_handling {
         let handled_net = AccessNet::from_all(TARGET_ABI);
         if !handled_net.is_empty() {
-            debug!("Handling network access (blocking): {:?}", handled_net);
+            debug!("Handling network access: {:?}", handled_net);
             ruleset_builder.handle_access(handled_net).map_err(|e| {
                 NonoError::SandboxInit(format!("Failed to handle net access: {}", e))
             })?
         } else {
             return Err(NonoError::SandboxInit(
-                "Network blocking requested but kernel Landlock ABI doesn't support it \
+                "Network filtering requested but kernel Landlock ABI doesn't support it \
                  (requires V4+). Refusing to start without network restrictions."
                     .to_string(),
             ));
@@ -120,6 +124,38 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
     let mut ruleset = ruleset_builder
         .create()
         .map_err(|e| NonoError::SandboxInit(format!("Failed to create ruleset: {}", e)))?;
+
+    // Add per-port TCP connect rules (ProxyOnly port + explicit tcp_connect_ports)
+    if let NetworkMode::ProxyOnly { port } = caps.network_mode() {
+        debug!("Adding ProxyOnly TCP connect rule for port {}", port);
+        ruleset = ruleset
+            .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+            .map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Cannot add TCP connect rule for proxy port {}: {}",
+                    port, e
+                ))
+            })?;
+    }
+    for port in caps.tcp_connect_ports() {
+        debug!("Adding TCP connect rule for port {}", port);
+        ruleset = ruleset
+            .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+            .map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Cannot add TCP connect rule for port {}: {}",
+                    port, e
+                ))
+            })?;
+    }
+    for port in caps.tcp_bind_ports() {
+        debug!("Adding TCP bind rule for port {}", port);
+        ruleset = ruleset
+            .add_rule(NetPort::new(*port, AccessNet::BindTcp))
+            .map_err(|e| {
+                NonoError::SandboxInit(format!("Cannot add TCP bind rule for port {}: {}", port, e))
+            })?;
+    }
 
     // Add rules for each filesystem capability
     // These MUST succeed - caller explicitly requested these capabilities

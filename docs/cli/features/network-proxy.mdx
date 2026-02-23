@@ -1,0 +1,197 @@
+---
+title: Network Filtering
+description: Host-level network filtering for sandboxed processes
+---
+
+nono's network proxy provides host-level filtering for outbound connections, letting you specify exactly which hosts the sandboxed process can reach.
+
+## Why a Proxy?
+
+Originally nono used OS-level sandboxing (Landlock on Linux, Seatbelt on macOS) to provide a binary "switch" for outbound network access. The child process was either allowed to connect to any host on any port, or blocked from making any outbound connections at all.
+
+```bash
+# Everything allowed (default)
+nono run --allow-cwd -- my-agent
+
+# Everything blocked
+nono run --allow-cwd --net-block -- my-agent
+```
+
+However, AI agents need something in between. They need to reach specific APIs (OpenAI, Anthropic, GitHub) while being blocked from:
+
+- **Cloud metadata endpoints** (169.254.169.254) - credential theft
+- **Internal networks** (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) - lateral movement
+- **Arbitrary hosts** - data exfiltration
+
+The proxy provides this granular control.
+
+## Quick Start
+
+### Allow Specific Hosts
+
+```bash
+nono run --allow-cwd --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+```
+
+### Using a Network Profile
+
+```bash
+# Use a predefined set of allowed hosts
+nono run --allow-cwd --network-profile claude-code -- claude
+```
+
+## How It Works
+
+When proxy mode is active, nono:
+
+1. Starts an HTTP proxy on a random localhost port
+2. Sandboxes the child to only connect to `localhost:<port>` (all other outbound blocked)
+3. Sets `HTTP_PROXY` and `HTTPS_PROXY` in the child's environment
+4. Filters all connections through the proxy
+
+![Proxy architecture flow](/assets/proxy-flow.png)
+
+The proxy runs in the unsandboxed parent process. The sandbox is applied only to the child, which is restricted to `ProxyOnly` mode (only `localhost:<port>` is reachable).
+
+### Session Token
+
+Every proxy session generates a random 256-bit token. The child must include this token in every request (`Proxy-Authorization` header). This prevents other localhost processes from using the proxy.
+
+### DNS Rebinding Protection
+
+The proxy resolves DNS itself and checks all resolved IP addresses against the deny list before connecting. This prevents attacks where a malicious DNS server maps an allowed hostname to an internal IP address.
+
+## Proxy Modes
+
+### Mode 1: CONNECT Tunnel (Host Filtering)
+
+Standard HTTP CONNECT proxying. The proxy validates the target host and establishes a raw TCP tunnel. TLS is end-to-end between the client and upstream -- the proxy never sees plaintext.
+
+This is what `HTTP_PROXY`/`HTTPS_PROXY` uses. Most HTTP libraries, curl, and language runtimes support it natively.
+
+```bash
+nono run --allow-cwd --proxy-allow api.openai.com -- curl https://api.openai.com/v1/models
+```
+
+### Mode 2: External Proxy Passthrough (Enterprise)
+
+For corporate environments with a mandatory outbound proxy:
+
+```bash
+nono run --allow-cwd --network-profile enterprise --external-proxy squid.corp:3128 -- my-agent
+```
+
+CONNECT requests are chained through the corporate proxy. The default deny list (cloud metadata, RFC1918) is still enforced as a floor.
+
+## Network Profiles
+
+Network profiles are composable groups of allowed hosts, similar to filesystem policy groups. They're defined in `network-policy.json` (embedded in the binary).
+
+### Built-in Profiles
+
+| Profile | Groups | Use Case |
+|---------|--------|----------|
+| `claude-code` | LLM APIs, package registries, GitHub, Sigstore, docs | Claude Code agent |
+| `minimal` | LLM APIs only | Minimal API access |
+| `enterprise` | All groups + cloud provider suffixes | Corporate environments |
+
+### Groups
+
+| Group | Hosts |
+|-------|-------|
+| `llm_apis` | api.openai.com, api.anthropic.com, generativelanguage.googleapis.com, ... |
+| `package_registries` | registry.npmjs.org, pypi.org, crates.io, ... |
+| `github` | github.com, api.github.com, raw.githubusercontent.com, ... |
+| `sigstore` | fulcio.sigstore.dev, rekor.sigstore.dev, tuf-repo-cdn.sigstore.dev |
+| `documentation` | docs.python.org, developer.mozilla.org, doc.rust-lang.org, ... |
+| `google_cloud` | *.googleapis.com, *.google.com |
+| `azure` | *.azure.com, *.microsoft.com |
+| `aws_bedrock` | *.amazonaws.com |
+
+### Custom Profiles
+
+User profiles can specify a network profile in the `network` section:
+
+```json
+{
+  "meta": { "name": "my-agent" },
+  "filesystem": {
+    "allow": ["$WORKDIR"]
+  },
+  "network": {
+    "network_profile": "claude-code",
+    "proxy_allow": ["my-internal-api.example.com"]
+  }
+}
+```
+
+## Default Deny List
+
+The following destinations are always blocked, regardless of configuration. These cannot be overridden.
+
+### Cloud Metadata
+
+| Host/CIDR | Service |
+|-----------|---------|
+| 169.254.169.254 | AWS/GCP/Azure instance metadata |
+| metadata.google.internal | GCP metadata alias |
+
+### Private Networks
+
+| CIDR | Range |
+|------|-------|
+| 10.0.0.0/8 | RFC1918 Class A |
+| 172.16.0.0/12 | RFC1918 Class B |
+| 192.168.0.0/16 | RFC1918 Class C |
+| 169.254.0.0/16 | Link-local |
+| 127.0.0.0/8 | Loopback (except proxy port) |
+| ::1/128 | IPv6 loopback |
+| fc00::/7 | IPv6 unique local |
+| fe80::/10 | IPv6 link-local |
+
+## Platform Behavior
+
+### Linux
+
+Network filtering uses Landlock V4+ per-port TCP rules. The sandbox restricts `connect()` to only the proxy port. All other outbound TCP is blocked at the kernel level.
+
+**Requirements:** Landlock ABI v4+ (Linux 6.7+)
+
+### macOS
+
+Network filtering uses Seatbelt rules. The sandbox allows only `(remote tcp "localhost:PORT")` and denies all other network operations.
+
+```scheme
+(deny network*)
+(allow network-outbound (remote tcp "localhost:PORT"))
+(allow system-socket (socket-domain AF_INET) (socket-type SOCK_STREAM))
+(allow system-socket (socket-domain AF_INET6) (socket-type SOCK_STREAM))
+```
+
+## Audit Logging
+
+All proxy decisions are logged via `tracing`:
+
+```
+ALLOW CONNECT api.openai.com:443
+DENY  CONNECT 169.254.169.254:80 reason=denied_cidr
+```
+
+Enable verbose logging to see proxy decisions:
+
+```bash
+nono run -vv --network-profile claude-code --allow-cwd -- my-agent
+```
+
+## Limitations
+
+- **HTTP/1.1 only** - The CONNECT tunnel passes raw bytes (HTTP/2 works end-to-end), but the reverse proxy mode speaks HTTP/1.1 to upstream
+- **No per-port filtering on macOS** - Seatbelt cannot filter outbound by destination port (only ProxyOnly mode is supported, not arbitrary per-port rules)
+- **Proxy mode requires supervised execution** - The proxy runs in the unsandboxed parent process, so `--exec` mode is incompatible
+
+## Next Steps
+
+- [Credential Injection](/cli/features/credential-injection) - Keep API keys out of the sandbox
+- [Supervisor Mode](/cli/features/supervisor) - How supervised execution works
+- [CLI Reference](/cli/usage/flags) - Complete flag documentation including network flags
+- [Security Model](/cli/internals/security-model) - Platform sandbox internals

@@ -146,6 +146,29 @@ pub enum Commands {
 ")]
     Rollback(RollbackArgs),
 
+    /// Manage instruction file trust and attestation
+    #[command(after_help = "EXAMPLES:
+    # Sign an instruction file with the default keystore key
+    nono trust sign SKILLS.md
+
+    # Sign with a specific key ID
+    nono trust sign SKILLS.md --key my-signing-key
+
+    # Verify an instruction file against the trust policy
+    nono trust verify SKILLS.md
+
+    # Verify all instruction files in the current directory
+    nono trust verify --all
+
+    # List instruction files and their verification status
+    nono trust list
+
+    # Generate a new signing key pair
+    nono trust keygen
+    nono trust keygen --id my-signing-key
+")]
+    Trust(TrustArgs),
+
     /// View audit trail of sandboxed commands
     #[command(after_help = "EXAMPLES:
     # List all sessions (including read-only commands)
@@ -206,6 +229,28 @@ pub struct SandboxArgs {
     #[arg(long)]
     pub net_block: bool,
 
+    // === Network proxy filtering ===
+    /// Enable network proxy filtering with a named profile (e.g., claude-code, minimal, enterprise).
+    /// When set, outbound network is restricted to hosts in the profile's allowlist.
+    #[arg(long, value_name = "PROFILE")]
+    pub network_profile: Option<String>,
+
+    /// Allow additional hosts through the proxy (on top of network profile).
+    /// Can be specified multiple times.
+    #[arg(long, value_name = "HOST")]
+    pub proxy_allow: Vec<String>,
+
+    /// Enable credential injection via reverse proxy for a service.
+    /// Service names map to entries in network-policy.json credentials section.
+    /// Can be specified multiple times.
+    #[arg(long, value_name = "SERVICE")]
+    pub proxy_credential: Vec<String>,
+
+    /// Chain through an external (enterprise) proxy.
+    /// Format: host:port (e.g., squid.corp.internal:3128)
+    #[arg(long, value_name = "HOST:PORT")]
+    pub external_proxy: Option<String>,
+
     // === Command blocking ===
     /// Allow a normally-blocked dangerous command (use with caution).
     /// By default, destructive commands like rm, dd, chmod are blocked.
@@ -216,13 +261,13 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "CMD")]
     pub block_command: Vec<String>,
 
-    // === Secrets options ===
-    /// Load secrets from system keystore and inject as environment variables.
-    /// Use with --profile to load secrets defined in the profile's [secrets] section,
-    /// or specify comma-separated account names to load from the 'nono' service.
-    /// Secrets are loaded before sandbox is applied and zeroized from memory after exec.
+    // === Credential options ===
+    /// Load credentials from system keystore and inject as environment variables.
+    /// The sandboxed process can read these credentials directly.
+    /// For network API keys, prefer --proxy-credential for credential isolation.
+    /// Specify comma-separated account names to load from the 'nono' keyring service.
     #[arg(long, value_name = "ACCOUNTS")]
-    pub secrets: Option<String>,
+    pub env_credential: Option<String>,
 
     // === Profile options ===
     /// Use a profile by name or file path.
@@ -286,6 +331,12 @@ pub struct RunArgs {
     /// restore UI is suppressed.
     #[arg(long)]
     pub no_rollback_prompt: bool,
+
+    /// Disable trust verification for instruction files.
+    /// For development and testing only. Logs a warning and skips the
+    /// pre-exec trust scan. Not recommended for production use.
+    #[arg(long)]
+    pub trust_override: bool,
 
     /// Command to run inside the sandbox
     #[arg(required = true)]
@@ -587,6 +638,100 @@ pub struct AuditShowArgs {
     pub json: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Trust command args
+// ---------------------------------------------------------------------------
+
+#[derive(Parser, Debug)]
+pub struct TrustArgs {
+    #[command(subcommand)]
+    pub command: TrustCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TrustCommands {
+    /// Sign an instruction file, producing a .bundle alongside it
+    Sign(TrustSignArgs),
+    /// Sign a trust policy file, producing a .bundle alongside it
+    SignPolicy(TrustSignPolicyArgs),
+    /// Verify an instruction file's bundle against the trust policy
+    Verify(TrustVerifyArgs),
+    /// List instruction files and their verification status
+    List(TrustListArgs),
+    /// Generate a new ECDSA P-256 signing key pair
+    Keygen(TrustKeygenArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustSignArgs {
+    /// Instruction file(s) to sign
+    #[arg(required_unless_present = "all")]
+    pub files: Vec<PathBuf>,
+
+    /// Sign all instruction files matching trust policy patterns in CWD
+    #[arg(long)]
+    pub all: bool,
+
+    /// Key ID to use from the system keystore (default: "default")
+    #[arg(long, value_name = "KEY_ID", conflicts_with = "keyless")]
+    pub key: Option<String>,
+
+    /// Use Sigstore keyless signing (Fulcio + Rekor via ambient OIDC)
+    #[arg(long)]
+    pub keyless: bool,
+
+    /// Trust policy file (default: auto-discover)
+    #[arg(long, value_name = "FILE")]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustSignPolicyArgs {
+    /// Trust policy file to sign (default: trust-policy.json in CWD)
+    pub file: Option<PathBuf>,
+
+    /// Key ID to use from the system keystore (default: "default")
+    #[arg(long, value_name = "KEY_ID")]
+    pub key: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustVerifyArgs {
+    /// Instruction file(s) to verify
+    #[arg(required_unless_present = "all")]
+    pub files: Vec<PathBuf>,
+
+    /// Verify all instruction files matching trust policy patterns in CWD
+    #[arg(long)]
+    pub all: bool,
+
+    /// Trust policy file (default: auto-discover)
+    #[arg(long, value_name = "FILE")]
+    pub policy: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustListArgs {
+    /// Trust policy file (default: auto-discover)
+    #[arg(long, value_name = "FILE")]
+    pub policy: Option<PathBuf>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustKeygenArgs {
+    /// Key identifier (stored in system keystore under this name)
+    #[arg(long, value_name = "NAME", default_value = "default")]
+    pub id: String,
+
+    /// Overwrite existing key with the same ID
+    #[arg(long)]
+    pub force: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,6 +995,110 @@ mod tests {
                 _ => panic!("Expected Cleanup subcommand"),
             },
             _ => panic!("Expected Rollback command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_sign() {
+        let cli = Cli::parse_from(["nono", "trust", "sign", "SKILLS.md"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Sign(sign_args) => {
+                    assert_eq!(sign_args.files, vec![PathBuf::from("SKILLS.md")]);
+                    assert!(!sign_args.all);
+                    assert!(sign_args.key.is_none());
+                }
+                _ => panic!("Expected Sign subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_sign_with_key() {
+        let cli = Cli::parse_from(["nono", "trust", "sign", "SKILLS.md", "--key", "my-key"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Sign(sign_args) => {
+                    assert_eq!(sign_args.key, Some("my-key".to_string()));
+                }
+                _ => panic!("Expected Sign subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_sign_all() {
+        let cli = Cli::parse_from(["nono", "trust", "sign", "--all"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Sign(sign_args) => {
+                    assert!(sign_args.all);
+                    assert!(sign_args.files.is_empty());
+                }
+                _ => panic!("Expected Sign subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_verify() {
+        let cli = Cli::parse_from(["nono", "trust", "verify", "SKILLS.md"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Verify(verify_args) => {
+                    assert_eq!(verify_args.files, vec![PathBuf::from("SKILLS.md")]);
+                    assert!(!verify_args.all);
+                }
+                _ => panic!("Expected Verify subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_list() {
+        let cli = Cli::parse_from(["nono", "trust", "list"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::List(list_args) => {
+                    assert!(!list_args.json);
+                }
+                _ => panic!("Expected List subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_keygen() {
+        let cli = Cli::parse_from(["nono", "trust", "keygen"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Keygen(keygen_args) => {
+                    assert_eq!(keygen_args.id, "default");
+                    assert!(!keygen_args.force);
+                }
+                _ => panic!("Expected Keygen subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_keygen_with_id() {
+        let cli = Cli::parse_from(["nono", "trust", "keygen", "--id", "my-key", "--force"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Keygen(keygen_args) => {
+                    assert_eq!(keygen_args.id, "my-key");
+                    assert!(keygen_args.force);
+                }
+                _ => panic!("Expected Keygen subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
         }
     }
 }

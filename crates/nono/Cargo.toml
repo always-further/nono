@@ -1,6 +1,6 @@
 [package]
 name = "nono"
-version = "0.6.0-alpha.1"
+version = "0.6.0-alpha.3"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -24,11 +24,19 @@ walkdir.workspace = true
 ignore.workspace = true
 globset.workspace = true
 
+# CIDR network filtering
+ipnet = "2"
+
 # Unix socket IPC for supervisor
 libc = "0.2"
 
 # Keychain access
 keyring = "3"
+
+# Sigstore bundle verification
+sigstore-verify = { version = "0.6", default-features = false }
+x509-cert = { version = "0.2", default-features = false }
+der = { version = "0.7", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"

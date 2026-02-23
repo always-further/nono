@@ -165,6 +165,94 @@ pub unsafe extern "C" fn nono_capability_set_set_network_blocked(
     NonoErrorCode::Ok
 }
 
+/// Set the network mode.
+///
+/// Use `NONO_NETWORK_MODE_BLOCKED`, `NONO_NETWORK_MODE_ALLOW_ALL`, or
+/// `NONO_NETWORK_MODE_PROXY_ONLY`. For proxy mode, also call
+/// `nono_capability_set_set_proxy_port()` to set the port.
+///
+/// # Safety
+///
+/// `caps` must be a valid pointer from `nono_capability_set_new()`.
+#[no_mangle]
+pub unsafe extern "C" fn nono_capability_set_set_network_mode(
+    caps: *mut NonoCapabilitySet,
+    mode: u32,
+) -> NonoErrorCode {
+    if caps.is_null() {
+        set_last_error("caps pointer is NULL");
+        return NonoErrorCode::ErrInvalidArg;
+    }
+    let network_mode = match crate::types::validate_network_mode(mode) {
+        Some(m) => m,
+        None => {
+            set_last_error(&format!("invalid network mode: {mode}"));
+            return NonoErrorCode::ErrInvalidArg;
+        }
+    };
+    let caps = unsafe { &mut *caps };
+    caps.inner.set_network_mode_mut(network_mode);
+    NonoErrorCode::Ok
+}
+
+/// Get the current network mode.
+///
+/// Returns the raw mode constant. For `NONO_NETWORK_MODE_PROXY_ONLY`,
+/// use `nono_capability_set_proxy_port()` to get the port.
+///
+/// # Safety
+///
+/// `caps` must be a valid pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn nono_capability_set_network_mode(caps: *const NonoCapabilitySet) -> u32 {
+    if caps.is_null() {
+        return crate::types::NONO_NETWORK_MODE_ALLOW_ALL;
+    }
+    let caps = unsafe { &*caps };
+    crate::types::network_mode_to_raw(caps.inner.network_mode())
+}
+
+/// Set the proxy port for `ProxyOnly` mode.
+///
+/// Only meaningful when network mode is `NONO_NETWORK_MODE_PROXY_ONLY`.
+///
+/// # Safety
+///
+/// `caps` must be a valid pointer from `nono_capability_set_new()`.
+#[no_mangle]
+pub unsafe extern "C" fn nono_capability_set_set_proxy_port(
+    caps: *mut NonoCapabilitySet,
+    port: u16,
+) -> NonoErrorCode {
+    if caps.is_null() {
+        set_last_error("caps pointer is NULL");
+        return NonoErrorCode::ErrInvalidArg;
+    }
+    let caps = unsafe { &mut *caps };
+    caps.inner
+        .set_network_mode_mut(nono::NetworkMode::ProxyOnly { port });
+    NonoErrorCode::Ok
+}
+
+/// Get the proxy port if network mode is `ProxyOnly`.
+///
+/// Returns 0 if mode is not `ProxyOnly` or `caps` is NULL.
+///
+/// # Safety
+///
+/// `caps` must be a valid pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn nono_capability_set_proxy_port(caps: *const NonoCapabilitySet) -> u16 {
+    if caps.is_null() {
+        return 0;
+    }
+    let caps = unsafe { &*caps };
+    match caps.inner.network_mode() {
+        nono::NetworkMode::ProxyOnly { port } => *port,
+        _ => 0,
+    }
+}
+
 /// Add a command to the allow list (overrides block lists).
 ///
 /// # Safety
@@ -482,6 +570,84 @@ mod tests {
         unsafe {
             let summary = nono_capability_set_summary(std::ptr::null());
             assert!(summary.is_null());
+        }
+    }
+
+    #[test]
+    fn test_network_mode() {
+        let caps = nono_capability_set_new();
+        // SAFETY: caps is valid.
+        unsafe {
+            // Default is AllowAll
+            assert_eq!(
+                nono_capability_set_network_mode(caps),
+                crate::types::NONO_NETWORK_MODE_ALLOW_ALL,
+            );
+
+            // Set to Blocked
+            assert_eq!(
+                nono_capability_set_set_network_mode(caps, crate::types::NONO_NETWORK_MODE_BLOCKED),
+                NonoErrorCode::Ok,
+            );
+            assert_eq!(
+                nono_capability_set_network_mode(caps),
+                crate::types::NONO_NETWORK_MODE_BLOCKED,
+            );
+            assert!(nono_capability_set_is_network_blocked(caps));
+
+            // Set to ProxyOnly with port
+            assert_eq!(
+                nono_capability_set_set_proxy_port(caps, 8080),
+                NonoErrorCode::Ok,
+            );
+            assert_eq!(
+                nono_capability_set_network_mode(caps),
+                crate::types::NONO_NETWORK_MODE_PROXY_ONLY,
+            );
+            assert_eq!(nono_capability_set_proxy_port(caps), 8080);
+            assert!(nono_capability_set_is_network_blocked(caps));
+
+            // Set back to AllowAll
+            assert_eq!(
+                nono_capability_set_set_network_mode(
+                    caps,
+                    crate::types::NONO_NETWORK_MODE_ALLOW_ALL
+                ),
+                NonoErrorCode::Ok,
+            );
+            assert!(!nono_capability_set_is_network_blocked(caps));
+            assert_eq!(nono_capability_set_proxy_port(caps), 0);
+
+            // Invalid mode
+            assert_eq!(
+                nono_capability_set_set_network_mode(caps, 99),
+                NonoErrorCode::ErrInvalidArg,
+            );
+
+            nono_capability_set_free(caps);
+        }
+    }
+
+    #[test]
+    fn test_network_mode_null_safe() {
+        // SAFETY: deliberately passing NULL.
+        unsafe {
+            assert_eq!(
+                nono_capability_set_set_network_mode(
+                    std::ptr::null_mut(),
+                    crate::types::NONO_NETWORK_MODE_BLOCKED
+                ),
+                NonoErrorCode::ErrInvalidArg,
+            );
+            assert_eq!(
+                nono_capability_set_network_mode(std::ptr::null()),
+                crate::types::NONO_NETWORK_MODE_ALLOW_ALL,
+            );
+            assert_eq!(
+                nono_capability_set_set_proxy_port(std::ptr::null_mut(), 8080),
+                NonoErrorCode::ErrInvalidArg,
+            );
+            assert_eq!(nono_capability_set_proxy_port(std::ptr::null()), 0);
         }
     }
 

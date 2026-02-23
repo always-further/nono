@@ -111,6 +111,37 @@ pub struct NonoSupportInfo {
     pub details: *mut c_char,
 }
 
+/// Network mode for sandbox capabilities.
+///
+/// Constants: `NONO_NETWORK_MODE_BLOCKED` (0), `NONO_NETWORK_MODE_ALLOW_ALL` (1),
+/// `NONO_NETWORK_MODE_PROXY_ONLY` (2).
+pub const NONO_NETWORK_MODE_BLOCKED: u32 = 0;
+pub const NONO_NETWORK_MODE_ALLOW_ALL: u32 = 1;
+pub const NONO_NETWORK_MODE_PROXY_ONLY: u32 = 2;
+
+/// Validate a raw network mode value from C and convert to `nono::NetworkMode`.
+///
+/// For `ProxyOnly`, the port must be set separately via the dedicated setter.
+/// This function creates `ProxyOnly { port: 0 }` as a placeholder.
+pub fn validate_network_mode(raw: u32) -> Option<nono::NetworkMode> {
+    match raw {
+        NONO_NETWORK_MODE_BLOCKED => Some(nono::NetworkMode::Blocked),
+        NONO_NETWORK_MODE_ALLOW_ALL => Some(nono::NetworkMode::AllowAll),
+        NONO_NETWORK_MODE_PROXY_ONLY => Some(nono::NetworkMode::ProxyOnly { port: 0 }),
+        _ => None,
+    }
+}
+
+/// Convert a `nono::NetworkMode` to its FFI constant value.
+#[must_use]
+pub fn network_mode_to_raw(mode: &nono::NetworkMode) -> u32 {
+    match mode {
+        nono::NetworkMode::Blocked => NONO_NETWORK_MODE_BLOCKED,
+        nono::NetworkMode::AllowAll => NONO_NETWORK_MODE_ALLOW_ALL,
+        nono::NetworkMode::ProxyOnly { .. } => NONO_NETWORK_MODE_PROXY_ONLY,
+    }
+}
+
 /// Error codes returned by nono FFI functions.
 ///
 /// Zero means success. Negative values indicate error categories.
@@ -144,6 +175,8 @@ pub enum NonoErrorCode {
     ErrIo = -11,
     /// Invalid argument (NULL pointer, invalid UTF-8).
     ErrInvalidArg = -12,
+    /// Trust/attestation verification error.
+    ErrTrustVerification = -13,
     /// Unknown or uncategorized error.
     ErrUnknown = -99,
 }

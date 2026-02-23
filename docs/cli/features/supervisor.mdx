@@ -107,6 +107,6 @@ In both Monitor and Supervised modes, when the child exits with a non-zero exit 
 
 ## Limitations
 
-- `--supervised` and `--rollback` are incompatible with `--secrets` (keyring threads cause a deadlock across fork)
+- `--supervised` and `--rollback` are incompatible with `--env-credential` (keyring threads cause a deadlock across fork)
 - The unsandboxed parent represents a larger attack surface than Monitor mode. The parent applies ptrace hardening to mitigate this.
 - Capability expansion is Linux-only. macOS supervised mode provides rollback snapshots and diagnostics only.

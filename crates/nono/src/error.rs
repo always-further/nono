@@ -137,6 +137,26 @@ pub enum NonoError {
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 
+    // Trust/attestation errors
+    #[error("Trust verification failed for {path}: {reason}")]
+    TrustVerification { path: String, reason: String },
+
+    #[error("Signing failed for {path}: {reason}")]
+    TrustSigning { path: String, reason: String },
+
+    #[error("Trust policy error: {0}")]
+    TrustPolicy(String),
+
+    #[error("Blocked by trust policy: {path} matches blocklist entry: {reason}")]
+    BlocklistBlocked { path: String, reason: String },
+
+    #[error("Instruction file denied: {path}: {reason}")]
+    InstructionFileDenied { path: String, reason: String },
+
+    // Network errors
+    #[error("Per-port network filtering not supported on {platform}: {reason}")]
+    NetworkFilterUnsupported { platform: String, reason: String },
+
     // I/O errors
     #[error("I/O error: {0}")]
     Io(std::io::Error),

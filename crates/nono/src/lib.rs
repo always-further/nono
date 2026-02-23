@@ -49,19 +49,26 @@ pub mod capability;
 pub mod diagnostic;
 pub mod error;
 pub mod keystore;
+pub mod net_filter;
 pub mod query;
 pub mod sandbox;
 pub mod state;
 pub mod supervisor;
+pub mod trust;
 pub mod undo;
 
 // Re-exports for convenience
-pub use capability::{AccessMode, CapabilitySet, CapabilitySource, FsCapability};
+pub use capability::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NetworkMode};
 pub use diagnostic::{DenialReason, DenialRecord, DiagnosticFormatter, DiagnosticMode};
 pub use error::{NonoError, Result};
 pub use keystore::{load_secrets, LoadedSecret};
+pub use net_filter::{FilterResult, HostFilter};
 pub use sandbox::{Sandbox, SupportInfo};
 pub use state::SandboxState;
 pub use supervisor::{
     ApprovalBackend, ApprovalDecision, CapabilityRequest, NeverGrantChecker, SupervisorSocket,
+};
+pub use trust::{
+    Enforcement, InstructionPatterns, Publisher, SignerIdentity, TrustPolicy, VerificationOutcome,
+    VerificationResult,
 };
