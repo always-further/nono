@@ -24,6 +24,10 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
+/// Maximum total size of HTTP headers (64 KiB). Prevents OOM from
+/// malicious clients sending unbounded header data.
+const MAX_HEADER_SIZE: usize = 64 * 1024;
+
 /// Handle returned when the proxy server starts.
 ///
 /// Contains the assigned port, session token, and a shutdown channel.
@@ -90,6 +94,9 @@ struct ProxyState {
     session_token: Zeroizing<String>,
     credential_store: CredentialStore,
     config: ProxyConfig,
+    /// Shared TLS connector for upstream connections (reverse proxy mode).
+    /// Created once at startup to avoid rebuilding the root cert store per request.
+    tls_connector: tokio_rustls::TlsConnector,
     /// Active connection count for connection limiting.
     active_connections: AtomicUsize,
 }
@@ -136,6 +143,20 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         ProxyFilter::new(&config.allowed_hosts)
     };
 
+    // Build shared TLS connector (root cert store is expensive to construct).
+    // Use the ring provider explicitly to avoid ambiguity when multiple
+    // crypto providers are in the dependency tree.
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| ProxyError::Config(format!("TLS config error: {}", e)))?
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+    let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+
     // Shutdown channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -144,6 +165,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         session_token: session_token.clone(),
         credential_store,
         config,
+        tls_connector,
         active_connections: AtomicUsize::new(0),
     });
 
@@ -224,7 +246,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
         return Ok(()); // Client disconnected
     }
 
-    // Read remaining headers (up to empty line)
+    // Read remaining headers (up to empty line), with size limit to prevent OOM.
     let mut header_bytes = Vec::new();
     loop {
         let mut line = String::new();
@@ -233,26 +255,19 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             break;
         }
         header_bytes.extend_from_slice(line.as_bytes());
+        if header_bytes.len() > MAX_HEADER_SIZE {
+            drop(buf_reader);
+            let response = "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n";
+            stream.write_all(response.as_bytes()).await?;
+            return Ok(());
+        }
     }
 
-    // Consume the BufReader and get back the underlying stream.
-    // Any data buffered by BufReader beyond the headers is preserved
-    // in the BufReader's internal buffer. We use into_inner() which
-    // gives back the &mut TcpStream. The BufReader is dropped here,
-    // but since we read exactly up to the empty line (end of headers),
-    // the body hasn't been read into the BufReader's buffer yet for
-    // CONNECT requests (which have no body). For reverse proxy requests,
-    // the body is read from `stream` directly after this point based on
-    // Content-Length, so any buffered data would be lost.
-    //
-    // To handle this correctly, we drop buf_reader and note that for
-    // reverse proxy, the client typically sends headers in one packet
-    // and body in subsequent packets. If the BufReader did buffer body
-    // bytes, they're lost — but this is mitigated by the fact that the
-    // sandboxed child is our only client and sends requests sequentially.
-    //
-    // A more robust fix would be to pass the BufReader through to handlers,
-    // but the handler signatures expect TcpStream for bidirectional copy.
+    // Extract any data buffered beyond headers before dropping BufReader.
+    // BufReader may have read ahead into the request body. We capture
+    // those bytes and pass them to the reverse proxy handler so no body
+    // data is lost. For CONNECT requests this is always empty (no body).
+    let buffered = buf_reader.buffer().to_vec();
     drop(buf_reader);
 
     let first_line = first_line.trim_end();
@@ -282,15 +297,13 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
         }
     } else if !state.credential_store.is_empty() {
         // Non-CONNECT request with credential routes -> reverse proxy
-        reverse::handle_reverse_proxy(
-            first_line,
-            &mut stream,
-            &header_bytes,
-            &state.credential_store,
-            &state.session_token,
-            &state.filter,
-        )
-        .await
+        let ctx = reverse::ReverseProxyCtx {
+            credential_store: &state.credential_store,
+            session_token: &state.session_token,
+            filter: &state.filter,
+            tls_connector: &state.tls_connector,
+        };
+        reverse::handle_reverse_proxy(first_line, &mut stream, &header_bytes, &ctx, &buffered).await
     } else {
         // No credential routes configured, reject non-CONNECT requests
         let response = "HTTP/1.1 400 Bad Request\r\n\r\n";

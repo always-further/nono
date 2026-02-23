@@ -14,10 +14,10 @@ use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
 use crate::token;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -31,26 +31,43 @@ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// Reads the full HTTP request from the client, matches path prefix to
 /// a configured route, injects credentials, and forwards to the upstream.
+/// Shared context passed from the server to the reverse proxy handler.
+pub struct ReverseProxyCtx<'a> {
+    /// Credential store for service lookups
+    pub credential_store: &'a CredentialStore,
+    /// Session token for authentication
+    pub session_token: &'a Zeroizing<String>,
+    /// Host filter for upstream validation
+    pub filter: &'a ProxyFilter,
+    /// Shared TLS connector
+    pub tls_connector: &'a TlsConnector,
+}
+
+/// Handle a non-CONNECT HTTP request (reverse proxy mode).
+///
+/// `buffered_body` contains any bytes the BufReader read ahead beyond the
+/// headers. These are prepended to the body read from the stream to prevent
+/// data loss.
 pub async fn handle_reverse_proxy(
     first_line: &str,
     stream: &mut TcpStream,
     remaining_header: &[u8],
-    credential_store: &CredentialStore,
-    session_token: &Zeroizing<String>,
-    filter: &ProxyFilter,
+    ctx: &ReverseProxyCtx<'_>,
+    buffered_body: &[u8],
 ) -> Result<()> {
     // Parse method, path, and HTTP version
     let (method, path, version) = parse_request_line(first_line)?;
     debug!("Reverse proxy: {} {}", method, path);
 
     // Validate session token from X-Nono-Token header
-    validate_nono_token(remaining_header, session_token)?;
+    validate_nono_token(remaining_header, ctx.session_token)?;
 
     // Extract service prefix from path (e.g., "/openai/v1/chat" -> ("openai", "/v1/chat"))
     let (service, upstream_path) = parse_service_prefix(&path)?;
 
     // Look up credential for service
-    let cred = credential_store
+    let cred = ctx
+        .credential_store
         .get(&service)
         .ok_or_else(|| ProxyError::UnknownService {
             prefix: service.clone(),
@@ -63,7 +80,7 @@ pub async fn handle_reverse_proxy(
     let (upstream_host, upstream_port, upstream_path_full) = parse_upstream_url(&upstream_url)?;
 
     // DNS resolve + CIDR check via the filter (prevents rebinding TOCTOU)
-    let check = filter.check_host(&upstream_host, upstream_port).await?;
+    let check = ctx.filter.check_host(&upstream_host, upstream_port).await?;
     if !check.result.is_allowed() {
         let reason = check.result.reason();
         warn!("Upstream host denied by filter: {}", reason);
@@ -76,22 +93,36 @@ pub async fn handle_reverse_proxy(
     let filtered_headers = filter_headers(remaining_header);
     let content_length = extract_content_length(remaining_header);
 
-    // Read request body if present, with size limit
+    // Read request body if present, with size limit.
+    // `buffered_body` may contain bytes the BufReader read ahead beyond
+    // headers; we prepend those to avoid data loss.
     let body = if let Some(len) = content_length {
         if len > MAX_REQUEST_BODY {
             send_error(stream, 413, "Payload Too Large").await?;
             return Ok(());
         }
-        let mut buf = vec![0u8; len];
-        stream.read_exact(&mut buf).await?;
+        let mut buf = Vec::with_capacity(len);
+        let pre = buffered_body.len().min(len);
+        buf.extend_from_slice(&buffered_body[..pre]);
+        let remaining = len - pre;
+        if remaining > 0 {
+            let mut rest = vec![0u8; remaining];
+            stream.read_exact(&mut rest).await?;
+            buf.extend_from_slice(&rest);
+        }
         buf
     } else {
         Vec::new()
     };
 
     // Connect to upstream over TLS using pre-resolved addresses
-    let upstream_result =
-        connect_upstream_tls(&upstream_host, upstream_port, &check.resolved_addrs).await;
+    let upstream_result = connect_upstream_tls(
+        &upstream_host,
+        upstream_port,
+        &check.resolved_addrs,
+        ctx.tls_connector,
+    )
+    .await;
     let mut tls_stream = match upstream_result {
         Ok(s) => s,
         Err(e) => {
@@ -150,13 +181,11 @@ pub async fn handle_reverse_proxy(
             }
         };
 
-        // Parse status from first chunk
+        // Parse status from first chunk. The HTTP status line format is:
+        // "HTTP/1.1 200 OK\r\n..." — we need the 3-digit code after the
+        // first space. We scan up to 32 bytes (enough for any valid status line).
         if first_chunk {
-            if let Ok(s) = std::str::from_utf8(&response_buf[..n.min(20)]) {
-                if let Some(code_str) = s.split_whitespace().nth(1) {
-                    status_code = code_str.parse().unwrap_or(502);
-                }
-            }
+            status_code = parse_response_status(&response_buf[..n]);
             first_chunk = false;
         }
 
@@ -259,32 +288,31 @@ fn extract_content_length(header_bytes: &[u8]) -> Option<usize> {
 }
 
 /// Parse an upstream URL into (host, port, path).
-fn parse_upstream_url(url: &str) -> Result<(String, u16, String)> {
-    let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
-        ("https", rest)
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        ("http", rest)
-    } else {
+fn parse_upstream_url(url_str: &str) -> Result<(String, u16, String)> {
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| ProxyError::HttpParse(format!("invalid upstream URL '{}': {}", url_str, e)))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
         return Err(ProxyError::HttpParse(format!(
             "unsupported URL scheme: {}",
-            url
+            url_str
         )));
-    };
+    }
 
-    let (authority, path) = if let Some((auth, p)) = rest.split_once('/') {
-        (auth, format!("/{}", p))
-    } else {
-        (rest, "/".to_string())
-    };
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ProxyError::HttpParse(format!("missing host in URL: {}", url_str)))?
+        .to_string();
 
-    let (host, port) = if let Some((h, p)) = authority.rsplit_once(':') {
-        let port = p
-            .parse::<u16>()
-            .map_err(|_| ProxyError::HttpParse(format!("invalid port in URL: {}", url)))?;
-        (h.to_string(), port)
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    let port = parsed.port().unwrap_or(default_port);
+
+    let path = parsed.path().to_string();
+    let path = if path.is_empty() {
+        "/".to_string()
     } else {
-        let default_port = if scheme == "https" { 443 } else { 80 };
-        (authority.to_string(), default_port)
+        path
     };
 
     Ok((host, port, path))
@@ -295,10 +323,14 @@ fn parse_upstream_url(url: &str) -> Result<(String, u16, String)> {
 /// Uses the pre-resolved `SocketAddr`s from the filter check to prevent
 /// DNS rebinding TOCTOU. Falls back to hostname resolution only if no
 /// pre-resolved addresses are available.
+///
+/// The `TlsConnector` is shared across all connections (created once at
+/// server startup with the system root certificate store).
 async fn connect_upstream_tls(
     host: &str,
     port: u16,
     resolved_addrs: &[SocketAddr],
+    connector: &TlsConnector,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let tcp = if resolved_addrs.is_empty() {
         // Fallback: no pre-resolved addresses (shouldn't happen in practice)
@@ -322,14 +354,6 @@ async fn connect_upstream_tls(
         connect_to_resolved(resolved_addrs, host).await?
     };
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| {
         ProxyError::UpstreamConnect {
             host: host.to_string(),
@@ -369,6 +393,35 @@ async fn connect_to_resolved(addrs: &[SocketAddr], host: &str) -> Result<TcpStre
         host: host.to_string(),
         reason: last_err.unwrap_or_else(|| "no addresses to connect to".to_string()),
     })
+}
+
+/// Parse HTTP status code from the first response chunk.
+///
+/// Looks for the "HTTP/x.y NNN" pattern in the first line. Returns 502
+/// if the response doesn't contain a valid status line (upstream sent
+/// garbage or incomplete data).
+fn parse_response_status(data: &[u8]) -> u16 {
+    // Find the end of the first line (or use full data if no newline)
+    let line_end = data
+        .iter()
+        .position(|&b| b == b'\r' || b == b'\n')
+        .unwrap_or(data.len());
+    let first_line = &data[..line_end.min(64)];
+
+    if let Ok(line) = std::str::from_utf8(first_line) {
+        // Split on whitespace: ["HTTP/1.1", "200", "OK"]
+        let mut parts = line.split_whitespace();
+        if let Some(version) = parts.next() {
+            if version.starts_with("HTTP/") {
+                if let Some(code_str) = parts.next() {
+                    if code_str.len() == 3 {
+                        return code_str.parse().unwrap_or(502);
+                    }
+                }
+            }
+        }
+    }
+    502
 }
 
 /// Send an HTTP error response.
@@ -496,5 +549,34 @@ mod tests {
     #[test]
     fn test_parse_upstream_url_invalid_scheme() {
         assert!(parse_upstream_url("ftp://example.com").is_err());
+    }
+
+    #[test]
+    fn test_parse_response_status_200() {
+        let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
+        assert_eq!(parse_response_status(data), 200);
+    }
+
+    #[test]
+    fn test_parse_response_status_404() {
+        let data = b"HTTP/1.1 404 Not Found\r\n\r\n";
+        assert_eq!(parse_response_status(data), 404);
+    }
+
+    #[test]
+    fn test_parse_response_status_garbage() {
+        let data = b"not an http response";
+        assert_eq!(parse_response_status(data), 502);
+    }
+
+    #[test]
+    fn test_parse_response_status_empty() {
+        assert_eq!(parse_response_status(b""), 502);
+    }
+
+    #[test]
+    fn test_parse_response_status_partial() {
+        let data = b"HTTP/1.1 ";
+        assert_eq!(parse_response_status(data), 502);
     }
 }

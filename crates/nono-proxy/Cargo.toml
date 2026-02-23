@@ -27,11 +27,13 @@ sha2.workspace = true
 getrandom = "0.4"
 keyring = "3"
 base64 = "0.22"
+subtle = "2"
+url = "2"
 
 # TLS for upstream connections (reverse proxy mode)
 hyper-rustls = { version = "0.27", features = ["http1", "ring", "webpki-tokio"] }
 tokio-rustls = "0.26"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "1"
 
 [dev-dependencies]

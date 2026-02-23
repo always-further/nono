@@ -6,6 +6,7 @@
 //! the proxy.
 
 use crate::error::{ProxyError, Result};
+use subtle::ConstantTimeEq;
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -28,18 +29,15 @@ pub fn generate_session_token() -> Result<Zeroizing<String>> {
 
 /// Constant-time comparison of two token strings.
 ///
-/// Prevents timing side-channel attacks where an attacker could determine
-/// the correct token prefix by measuring response times.
+/// Uses the `subtle` crate's `ConstantTimeEq` to prevent timing
+/// side-channel attacks where an attacker could determine the correct
+/// token prefix by measuring response times.
 #[must_use]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    a.ct_eq(b).into()
 }
 
 /// Hex-encode bytes to a lowercase string.
