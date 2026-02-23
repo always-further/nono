@@ -337,7 +337,7 @@ fn run_strace(
         "-s".to_string(),  // Increase max string size for DNS packet capture
         "256".to_string(),
         "-e".to_string(),  // Trace these syscalls
-        "openat,open,access,stat,lstat,readlink,execve,creat,mkdir,rename,unlink,connect,bind,sendto"
+        "openat,open,access,stat,lstat,readlink,execve,creat,mkdir,rename,unlink,connect,bind,sendto,sendmsg"
             .to_string(),
         "-o".to_string(),
         "/dev/stderr".to_string(), // Output to stderr so we can capture it
@@ -365,11 +365,11 @@ fn run_strace(
     let mut file_accesses = Vec::new();
     let mut network_accesses = Vec::new();
     let mut dns_queries = Vec::new();
-    // Track the most recently queried hostname for timing-based correlation.
-    // When a DNS query precedes a connect(), we attach the hostname directly
-    // to the NetworkAccess. This handles DNS round-robin (where forward DNS
-    // after the fact may resolve to different IPs than the traced program got).
-    let mut last_queried_hostname: Option<String> = None;
+    // Track the most recently queried hostname per PID for timing-based
+    // correlation. strace -f interleaves output from multiple PIDs, so a
+    // global "last hostname" would incorrectly pair a DNS query from one
+    // thread with a connect() from another.
+    let mut pid_hostnames: HashMap<u32, String> = HashMap::new();
     let reader = BufReader::new(stderr);
 
     for line in reader.lines() {
@@ -390,16 +390,32 @@ fn run_strace(
             }
         };
 
+        let pid = extract_strace_pid(&line);
+
         // Parse strace output
         if let Some(access) = parse_strace_line(&line) {
             match access {
                 TracedAccess::File(fa) => file_accesses.push(fa),
                 TracedAccess::Network(mut na) => {
-                    na.queried_hostname = last_queried_hostname.clone();
+                    na.queried_hostname = pid
+                        .and_then(|p| pid_hostnames.get(&p).cloned())
+                        .or_else(|| {
+                            // Fallback for single-process traces (no PID prefix)
+                            if pid.is_none() && pid_hostnames.len() == 1 {
+                                pid_hostnames.values().next().cloned()
+                            } else {
+                                None
+                            }
+                        });
                     network_accesses.push(na);
                 }
                 TracedAccess::DnsQuery(hostname) => {
-                    last_queried_hostname = Some(hostname.clone());
+                    if let Some(p) = pid {
+                        pid_hostnames.insert(p, hostname.clone());
+                    } else if pid_hostnames.is_empty() {
+                        // Single-process trace with no PID prefix: use PID 0 as sentinel
+                        pid_hostnames.insert(0, hostname.clone());
+                    }
                     dns_queries.push(hostname);
                 }
             }
@@ -410,6 +426,18 @@ fn run_strace(
     let _ = child.wait();
 
     Ok((file_accesses, network_accesses, dns_queries))
+}
+
+/// Extract the PID from a strace line with `-f` (follow forks).
+///
+/// strace prefixes multi-process lines with `[pid NNNNN] `. Returns None
+/// for single-process traces (no prefix).
+#[cfg(target_os = "linux")]
+fn extract_strace_pid(line: &str) -> Option<u32> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix("[pid ")?;
+    let end = rest.find(']')?;
+    rest[..end].trim().parse().ok()
 }
 
 /// Parse a single strace line to extract file or network access
@@ -425,8 +453,8 @@ fn parse_strace_line(line: &str) -> Option<TracedAccess> {
     // bind(3, {sa_family=AF_INET, sin_port=htons(8080), sin_addr=inet_addr("0.0.0.0")}, 16) = 0
     // sendto(5, "\xab\x12...\7example\3com\0...", 29, 0, {sa_family=AF_INET, sin_port=htons(53), ...}, 16) = 29
 
-    // DNS/resolver query detection via sendto
-    if line.contains("sendto(") {
+    // DNS/resolver query detection via sendto or sendmsg
+    if line.contains("sendto(") || line.contains("sendmsg(") {
         if let Some(hostname) = parse_dns_sendto(line) {
             return Some(TracedAccess::DnsQuery(hostname));
         }
@@ -844,7 +872,7 @@ fn parse_dns_sendto(line: &str) -> Option<String> {
 /// `{"method":"io.systemd.Resolve.ResolveHostname","parameters":{"name":"example.com",...}}`
 ///
 /// In strace output, quotes inside the buffer are C-escaped as `\"`, so we
-/// must extract and unescape the buffer before searching for the hostname.
+/// must extract and unescape the buffer before parsing the JSON.
 #[cfg(target_os = "linux")]
 fn parse_resolved_sendto(line: &str) -> Option<String> {
     // Quick filter: ResolveHostname is plain ASCII, visible in raw strace output
@@ -856,8 +884,13 @@ fn parse_resolved_sendto(line: &str) -> Option<String> {
     let buf_str = extract_sendto_buffer(line)?;
     let unescaped = unescape_strace_string(&buf_str);
 
-    // Extract hostname from "name":"HOSTNAME" in the unescaped JSON
-    let name_str = extract_between(&unescaped, "\"name\":\"", "\"")?;
+    // The unescaped buffer may contain a trailing null byte from the Varlink
+    // protocol. Strip it before parsing as JSON.
+    let json_str = unescaped.trim_end_matches('\0');
+
+    // Parse with serde_json for robust handling of whitespace and escaping
+    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let name_str = parsed.pointer("/parameters/name")?.as_str()?;
 
     // Validate: must look like a hostname (not empty, contains a dot, ASCII only)
     if name_str.is_empty() || !name_str.contains('.') {
@@ -873,13 +906,25 @@ fn parse_resolved_sendto(line: &str) -> Option<String> {
     Some(name_str.to_string())
 }
 
-/// Extract the buffer string from a sendto syscall line.
+/// Extract the buffer string from a sendto or sendmsg syscall line.
 ///
-/// Given `sendto(fd, "BUFFER", len, ...)`, returns the content between quotes.
+/// For `sendto(fd, "BUFFER", len, ...)`, extracts BUFFER from the second arg.
+/// For `sendmsg(fd, {msg_name=..., msg_iov=[{iov_base="BUFFER", ...}], ...})`,
+/// extracts BUFFER from the iov_base field.
 #[cfg(target_os = "linux")]
 fn extract_sendto_buffer(line: &str) -> Option<String> {
-    let start = line.find("sendto(")?;
-    let after = &line[start..];
+    // Determine where to start looking for the quoted buffer
+    let search_start = if let Some(pos) = line.find("iov_base=") {
+        // sendmsg: buffer is in iov_base="..."
+        pos
+    } else if let Some(pos) = line.find("sendto(") {
+        // sendto: buffer is the second argument
+        pos
+    } else {
+        return None;
+    };
+
+    let after = &line[search_start..];
 
     // Find first '"' — start of buffer
     let q_start = after.find('"')? + 1;
@@ -1664,5 +1709,53 @@ mod tests {
             outbound[0].endpoint.hostname,
             Some("example.com".to_string())
         );
+    }
+
+    // --- PID extraction tests ---
+
+    #[test]
+    fn test_extract_strace_pid_with_prefix() {
+        let line =
+            r#"[pid 12345] sendto(5, "data", 4, 0, {sa_family=AF_INET, ...}, 16) = 4"#;
+        assert_eq!(extract_strace_pid(line), Some(12345));
+    }
+
+    #[test]
+    fn test_extract_strace_pid_without_prefix() {
+        let line = r#"sendto(5, "data", 4, 0, {sa_family=AF_INET, ...}, 16) = 4"#;
+        assert_eq!(extract_strace_pid(line), None);
+    }
+
+    #[test]
+    fn test_extract_strace_pid_padded() {
+        // strace sometimes pads PID with spaces
+        let line =
+            r#"[pid  1234] openat(AT_FDCWD, "/etc/passwd", O_RDONLY) = 3"#;
+        assert_eq!(extract_strace_pid(line), Some(1234));
+    }
+
+    // --- sendmsg buffer extraction tests ---
+
+    #[test]
+    fn test_extract_sendmsg_buffer() {
+        let line = r#"sendmsg(5, {msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("8.8.8.8")}, msg_namelen=16, msg_iov=[{iov_base="\7example\3com\0", iov_len=13}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 13"#;
+        let buf = extract_sendto_buffer(line).expect("should extract from sendmsg");
+        assert_eq!(buf, r#"\7example\3com\0"#);
+    }
+
+    #[test]
+    fn test_parse_resolved_sendto_json() {
+        // systemd-resolved Varlink protocol with proper JSON parsing
+        let line = r#"sendto(5, "{\"method\":\"io.systemd.Resolve.ResolveHostname\",\"parameters\":{\"name\":\"example.com\",\"flags\":0}}\0", 94, MSG_DONTWAIT|MSG_NOSIGNAL, NULL, 0) = 94"#;
+        let hostname = parse_resolved_sendto(line).expect("should parse resolved JSON");
+        assert_eq!(hostname, "example.com");
+    }
+
+    #[test]
+    fn test_parse_sendmsg_dns_query() {
+        // DNS query sent via sendmsg instead of sendto
+        let line = r#"sendmsg(5, {msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("8.8.8.8")}, msg_namelen=16, msg_iov=[{iov_base="\xab\x12\1\0\0\1\0\0\0\0\0\0\7example\3com\0\0\1\0\1", iov_len=29}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 29"#;
+        let hostname = parse_dns_sendto(line).expect("should parse DNS query from sendmsg");
+        assert_eq!(hostname, "example.com");
     }
 }
