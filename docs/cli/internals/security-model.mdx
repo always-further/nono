@@ -1,0 +1,222 @@
+---
+title: Security Model
+description: Trust boundaries, Landlock + seccomp-notify layering, and the rationale behind nono's supervisor architecture
+---
+
+nono's security model is built on a single premise: **the sandboxed process is untrusted**. Every architectural decision follows from this. The sandbox must be enforced by the kernel, must be irreversible once applied, and must not depend on the cooperation of the sandboxed process.
+
+This page explains the layered enforcement architecture, the trust boundaries between components, and why specific mechanisms were chosen.
+
+## Trust Boundaries
+
+![Trust boundaries: kernel space (Landlock, seccomp, Seatbelt), sandboxed child (untrusted), and supervisor (trusted)](/assets/kernel-space.png)
+
+There are three trust domains:
+
+| Domain | Trust Level | Role |
+|--------|-------------|------|
+| Kernel | Fully trusted | Enforces Landlock rules, delivers seccomp notifications, blocks unauthorized syscalls |
+| Supervisor (parent) | Trusted | Receives trapped syscalls, consults approval backend, opens files, injects file descriptors |
+| Sandboxed child | Untrusted | Runs the agent command under full kernel enforcement |
+
+The supervisor is trusted but constrained. It can only grant access to files it can open itself (standard Unix permissions apply), and `never_grant` paths are checked before any approval backend is consulted.
+
+## The Two-Layer Architecture
+
+### Layer 1: Landlock (the floor)
+
+Landlock LSM provides the hard security floor. Once `restrict_self()` is called, the child process is permanently restricted to its initial capability set. No API exists to expand or remove the restrictions. Child processes inherit them. The only escape is a kernel exploit.
+
+Landlock is:
+- **Unprivileged** — any process can sandbox itself without `CAP_SYS_ADMIN` or root
+- **Irreversible** — the kernel provides no undo mechanism
+- **Inherited** — all child processes and threads inherit the ruleset
+- **Available** — present on any kernel 5.13+ (Ubuntu 22.04+, Fedora 35+, Debian 12+)
+
+This layer alone provides a complete sandbox. A process restricted by Landlock cannot access paths outside its allowed set, period. The second layer exists to make the sandbox more usable, not more secure.
+
+### Layer 2: seccomp-notify (the gate)
+
+seccomp user notification (`SECCOMP_RET_USER_NOTIF`) provides dynamic capability expansion on top of the Landlock floor. A BPF filter traps `openat` and `openat2` syscalls before they reach Landlock and routes them to the supervisor for a decision.
+
+The critical property: **seccomp runs before Landlock**. When the child calls `open()`, the seccomp filter fires first, suspending the syscall and notifying the supervisor. The supervisor can then:
+
+1. **Deny** — return `EPERM` to the child (the syscall never reaches Landlock)
+2. **Approve** — open the file itself and inject the fd into the child via `SECCOMP_IOCTL_NOTIF_ADDFD`
+
+On approval, the child's `open()` call returns a valid file descriptor. The child never executes its own `openat` — the supervisor's `open()` is the single point of truth. The agent does not need to know nono exists; its standard file operations succeed after a brief pause during approval.
+
+### Why This Ordering Matters
+
+![Child open() flow: seccomp BPF traps openat, supervisor decides, fd injected or Landlock enforces](/assets/child-flow.png)
+
+If the supervisor has a bug and fails to inject an fd, the child's syscall falls through to Landlock, which denies it. The Landlock floor catches supervisor failures. This is defense in depth: the dynamic layer can only grant access within what the supervisor can open; the static layer ensures the child never exceeds its baseline even if the dynamic layer breaks.
+
+## Why Not Other Mechanisms
+
+### Why not `SECCOMP_USER_NOTIF_FLAG_CONTINUE`?
+
+`CONTINUE` tells the kernel to let the child's original syscall proceed. For syscalls that take pointer arguments (like `openat`, which takes a path string), this creates a TOCTOU race: the child can change the path in memory between the supervisor's check and the kernel's execution. The child could get the supervisor to approve `/tmp/harmless` and then swap the pointer to `/etc/shadow` before the kernel reads it.
+
+fd injection via `SECCOMP_IOCTL_NOTIF_ADDFD` eliminates this entirely. The supervisor opens the file itself — whatever path it read from the child's memory is what gets opened. The child's memory contents after that point are irrelevant.
+
+### Why not mount namespaces?
+
+A mount namespace with a minimal filesystem view would eliminate the information leak surface (the child could not `stat` paths outside the namespace). However:
+
+- `unshare(CLONE_NEWUSER | CLONE_NEWNS)` requires unprivileged user namespaces
+- Unprivileged user namespaces are disabled by default on Debian, restricted by AppArmor on Ubuntu 23.10+, and turned off in many enterprise configurations
+- Building a core security boundary on a mechanism that distro maintainers are actively restricting is fragile
+
+Landlock + seccomp are both available to unprivileged processes on any kernel 5.14+, which covers the vast majority of active Linux installations. A sandbox that requires kernel configuration flags or elevated privileges is a sandbox that gets disabled in practice.
+
+Mount namespaces remain a potential future hardening layer: detect availability at runtime, use them opportunistically when present, fall back to pure Landlock + seccomp when they are not. The security properties of the base architecture remain identical either way.
+
+### Why not DYLD interposition on macOS?
+
+Transparent capability expansion on macOS would require intercepting `open()` calls via `DYLD_INSERT_LIBRARIES`. This fails for three reasons:
+
+1. **SIP strips the variable** — Apple's System Integrity Protection removes `DYLD_INSERT_LIBRARIES` from Apple Platform Binaries (`/usr/bin/env`, `/bin/bash`, `/bin/sh`). Any command that routes through these interpreters loses the interposition.
+2. **Version manager shims break the chain** — Tools like `pyenv` and `rbenv` use shims that exec through SIP-protected interpreters.
+3. **Calling convention mismatch** — The variadic `open(const char*, int, ...)` function cannot be safely interposed on arm64 without matching the exact register layout, which causes crashes.
+
+macOS supervised mode provides rollback snapshots and diagnostic output, but does not attempt capability expansion. Seatbelt (`sandbox_init()`) provides the kernel enforcement layer on macOS, with the same irreversibility guarantees as Landlock on Linux.
+
+## The fd Injection Model
+
+When the supervisor approves a request, it does not tell the child "go ahead and open it yourself." It opens the file and hands the child a file descriptor. This distinction is fundamental to the security model.
+
+### What the supervisor does on approval
+
+1. Reads the requested path from `/proc/CHILD/mem`
+2. Validates the notification is still live (`SECCOMP_IOCTL_NOTIF_ID_VALID`)
+3. Checks the path against `never_grant`
+4. Canonicalizes the path to resolve symlinks
+5. Re-checks `never_grant` on the canonical path (a symlink from an innocuous path could point to a blocked target)
+6. Walks the canonical path component-by-component using `openat` with `O_NOFOLLOW` at each step (prevents symlink substitution between canonicalization and open)
+7. Injects the resulting fd into the child via `SECCOMP_IOCTL_NOTIF_ADDFD` with `SECCOMP_ADDFD_FLAG_SEND`
+
+The `SECCOMP_ADDFD_FLAG_SEND` flag is critical: it atomically injects the fd and completes the child's syscall in one operation. The child's `open()` returns the injected fd directly.
+
+### What the supervisor does NOT do
+
+- **Does not pass `O_CREAT`** — the supervisor cannot be tricked into creating files that do not exist
+- **Does not pass `O_TRUNC`** — the child cannot use the supervisor as a proxy to truncate files; it receives a plain writable fd and can seek/write within the file, but truncation is an explicit operation on an fd the user approved
+- **Does not use `SECCOMP_USER_NOTIF_FLAG_CONTINUE`** — the child never executes its own `openat`
+
+### Scope of an approved fd
+
+Once injected, the child holds the fd until it closes it. There is no revocation mechanism — this is an inherent property of Unix file descriptors. The approval grants access for the remainder of the session.
+
+## Syscall Scope
+
+The seccomp filter traps only `openat` and `openat2`. All other syscalls pass through at full speed with zero overhead.
+
+| Syscall | Trapped | Rationale |
+|---------|---------|-----------|
+| `openat` / `openat2` | Yes | File access is the capability boundary |
+| `read` / `write` / `close` | No | Hot path; operates on already-granted fds |
+| `stat` / `access` | No | Information leak, but agents handle failures gracefully; not a data exfiltration vector |
+| `unlink` / `rename` | No | Governed by Landlock; cannot affect paths outside the allowed set |
+| `connect` / `bind` | No | Governed by Landlock ABI v4+ network filtering |
+
+The 3-10 microsecond overhead on file opens is negligible for agent workloads. Agents open files infrequently relative to reading and writing them.
+
+### Information leak surface
+
+Because `stat` and `access` are not trapped, the sandboxed child can enumerate filesystem structure — file existence, types, permissions — without triggering a supervisor notification. For cooperative agents (the target use case), this is acceptable. For adversarial code, this could enable reconnaissance. The optional mount namespace layer (when available) would close this gap.
+
+## Failure Modes
+
+| Failure | Behavior | Safety Property |
+|---------|----------|-----------------|
+| Supervisor crashes | Notif fd closes; pending syscalls get `ENOSYS`; child falls back to Landlock | Safe — Landlock denies the access |
+| Supervisor denies request | Child receives `EPERM` | Safe — explicit denial |
+| `never_grant` match | Request rejected before approval backend is consulted | Safe — hard policy boundary |
+| Rate limit exceeded | Request automatically denied | Safe — prevents prompt flooding |
+| Child exits during approval | `SECCOMP_IOCTL_NOTIF_ID_VALID` check fails; supervisor discards the request | Safe — no orphaned state |
+| Path canonicalization fails | Supervisor returns error to child | Safe — fail-closed |
+
+The invariant is: **if anything goes wrong, the child does not get access**. The system fails closed at every decision point.
+
+## What If the Supervisor Is Compromised?
+
+A reasonable question: the supervisor can open any file and inject it into the child. If an attacker compromises the supervisor, can they use it as a proxy to feed arbitrary files to the sandboxed agent?
+
+The answer depends on where the attacker is.
+
+### From the child (inside the sandbox)
+
+The child cannot compromise the supervisor because the supervisor never runs untrusted code. The agent runs in the child. The supervisor is nono's own Rust binary — the parent process after `fork()`.
+
+The child's communication channels to the supervisor are:
+
+- **seccomp notification fd** — kernel-mediated. The child cannot forge or manipulate these; the kernel generates them from trapped syscalls.
+- **Unix socket** — length-prefixed JSON parsed by serde in memory-safe Rust. Malformed messages are rejected. Valid messages are checked against `never_grant`, rate-limited, and require user approval.
+
+The child cannot `ptrace` the parent (blocked by yama `ptrace_scope` on most distributions, and the child's own seccomp filter restricts its syscalls). There is no shared memory, no signal-based control channel, and no way to inject code into the supervisor process.
+
+Compromising the supervisor from the child would require a memory corruption bug in nono's Rust code (memory-safe by default, no `unsafe` in the IPC path) or a kernel exploit.
+
+### From outside (an external attacker)
+
+The supervisor runs as the same user who invoked `nono run`. It is not setuid, does not run as root, and holds no elevated capabilities. It can only open files the invoking user can already open.
+
+If an external attacker can compromise the supervisor process, they already have user-level code execution on the host. At that point, they can open the same files directly — the supervisor grants them nothing they do not already have. The supervisor is a privilege boundary in the **downward** direction (restricting the child), not the upward direction.
+
+The supervisor's external attack surface is minimal:
+
+| Surface | Exposure |
+|---------|----------|
+| IPC socket | Anonymous `socketpair()` — no filesystem path, no way for external processes to connect |
+| seccomp notif fd | Owned solely by the supervisor; no other process holds it |
+| Approval input | Reads from `/dev/tty`; requires access to the user's terminal session |
+| Network | None — the supervisor does not listen on any port |
+
+There is no network-exposed surface, no filesystem-visible socket, and no way to interact with the supervisor without already having the user's terminal session or the ability to inject code into the supervisor's address space.
+
+### What if the supervisor has a vulnerability?
+
+Even in an unprivileged supervisor, a memory corruption vulnerability could allow the child to escape the sandbox by hijacking the supervisor's control flow. The question is how realistic this is.
+
+**Rust eliminates the most common vulnerability classes.** Buffer overflows, use-after-free, double-free, and format string attacks are structurally impossible in safe Rust. The compiler prevents them, not programmer discipline. The IPC message parsing uses serde JSON with no manual buffer management — there is no `sprintf` into a stack buffer, no `memcpy` with an attacker-controlled length.
+
+**The `unsafe` surface is small and does not parse complex input.** The `unsafe` blocks in the supervisor path are limited to libc FFI calls: `openat`, `poll`, seccomp ioctls, and `SCM_RIGHTS` fd passing. These are thin wrappers around syscalls with fixed-size arguments, not parsing routines operating on attacker-controlled data.
+
+**The child can only deliver a payload through two narrow channels:**
+
+| Channel | Data Format | Parser |
+|---------|-------------|--------|
+| Unix socket | Length-prefixed JSON | serde (memory-safe, widely audited) |
+| `/proc/CHILD/mem` | Bounded-length path string | `canonicalize` + `openat` (standard libc) |
+
+There is no complex protocol, no nested binary format, and no state machine with edge cases. A serde deserialization vulnerability would be a CVE affecting the entire Rust ecosystem, not a nono-specific bug.
+
+**Even a successful exploit has limited blast radius.** If an attacker chains together a hypothetical memory corruption in an `unsafe` FFI block with a delivery mechanism from the child, they achieve user-level code execution in the supervisor. This is the same privilege level the invoking user already has — the attacker has escaped the sandbox but has not escalated privileges. This is meaningful (a sandbox escape is a real security event) but it is not the catastrophic outcome of compromising a root-level supervisor.
+
+The risk is not zero — nothing is. But Rust's memory safety guarantees make the traditional exploit classes structurally impossible across the vast majority of the codebase, the remaining `unsafe` surface is small and constrained, and the worst-case outcome is lateral movement to the user's own privilege level rather than privilege escalation.
+
+### The key distinction
+
+The supervisor is not a privilege escalation target because it does not hold privileges the user does not already have. This is a deliberate design choice. nono runs entirely unprivileged — no root, no `CAP_SYS_ADMIN`, no setuid. An architecture where the supervisor ran with elevated privileges (as some container runtimes do) would make supervisor compromise a serious escalation vector. nono avoids this by design.
+
+## macOS Model
+
+On macOS, Seatbelt provides the kernel enforcement layer via `sandbox_init()`. The security properties are equivalent to Landlock:
+
+- Irreversible once applied
+- Enforced by the XNU kernel
+- Inherited by child processes
+- No userspace escape mechanism
+
+Supervised mode on macOS provides rollback snapshots (content-addressable filesystem snapshots for restoring pre-session state) and the diagnostic footer, but does not provide capability expansion. The Seatbelt sandbox is the single enforcement layer.
+
+## Summary
+
+The architecture optimizes for three properties simultaneously:
+
+1. **Unprivileged deployment** — no root, no `CAP_SYS_ADMIN`, no kernel configuration changes. Works on any kernel 5.14+ out of the box.
+2. **Defense in depth** — Landlock provides a hard floor that catches failures in the dynamic layer. The supervisor can only grant what it can open. `never_grant` provides a policy ceiling that no approval can override.
+3. **Transparency** — the sandboxed agent does not need to know about nono. Standard `open()` calls succeed after supervisor approval. No retries, no special APIs, no agent modifications.
+
+The result is a sandbox that is both strong (kernel-enforced, irreversible, fail-closed) and usable (agents work unmodified, users approve access interactively, the hot path has zero overhead).

@@ -44,7 +44,7 @@ nono run --allow-cwd --net-block -- command
 nono run --profile claude-code -- claude
 
 # Start an interactive shell inside the sandbox
-nono shell --allow .
+nono shell --allow-cwd
 
 # Check why a path would be blocked
 nono why --path ~/.ssh/id_rsa --op read

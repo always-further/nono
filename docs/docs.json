@@ -58,6 +58,7 @@
         "group": "Platform Internals",
         "pages": [
           "cli/internals/index",
+          "cli/internals/security-model",
           "cli/internals/landlock",
           "cli/internals/seatbelt",
           "cli/internals/application",
