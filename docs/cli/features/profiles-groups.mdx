@@ -99,6 +99,54 @@ nono run --profile my-agent --env-credential -- my-command
 
 See [Secrets Management](/cli/features/secrets) for details on storing secrets in the keystore.
 
+<Note>
+  For API keys, prefer [Credential Injection](/cli/features/credential-injection) over environment variable injection. Credential injection routes API calls through a reverse proxy that injects credentials transparently - the API key never enters the sandbox, even as an environment variable.
+</Note>
+
+### Network Configuration
+
+The `network` section controls network access and credential injection:
+
+```json
+{
+  "network": {
+    "block": false,
+    "network_profile": "claude-code",
+    "proxy_allow": ["my-internal-api.example.com"],
+    "proxy_credentials": ["openai", "anthropic"],
+    "custom_credentials": {
+      "telegram": {
+        "upstream": "https://api.telegram.org",
+        "credential_key": "telegram_bot_token",
+        "inject_header": "Authorization",
+        "credential_format": "Bearer {}"
+      }
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `block` | Block all network access (default: `false`) |
+| `network_profile` | Network profile name for host filtering (e.g., `minimal`, `claude-code`, `enterprise`) |
+| `proxy_allow` | Additional hosts to allow through the proxy |
+| `proxy_credentials` | Credential services to enable via reverse proxy (e.g., `openai`, `anthropic`) |
+| `custom_credentials` | Custom credential service definitions for APIs not in the built-in list |
+
+#### Custom Credentials
+
+The `custom_credentials` field lets you define credential services for any API:
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `upstream` | Yes | - | Upstream URL (must be HTTPS, or HTTP for localhost) |
+| `credential_key` | Yes | - | Keystore account name |
+| `inject_header` | No | `Authorization` | Header to inject credential into |
+| `credential_format` | No | `Bearer {}` | Format string (`{}` replaced with credential) |
+
+See [Credential Injection](/cli/features/credential-injection#custom-credential-definitions) for complete documentation.
+
 ### Hooks
 
 The `hooks` section defines hooks that nono will automatically install for specific applications.

@@ -235,10 +235,10 @@ nono run --allow-cwd --network-profile minimal --proxy-allow custom-api.example.
 
 #### `--proxy-credential`
 
-Enable credential injection for a named service via the reverse proxy. The service must be defined in `network-policy.json`. Credentials are loaded from the system keyring under the `nono-proxy` service name.
+Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name.
 
 ```bash
-# Inject OpenAI credentials (loads from keyring account "openai")
+# Inject OpenAI credentials (loads from keyring account "openai_api_key")
 nono run --allow-cwd --network-profile claude-code --proxy-credential openai -- my-agent
 
 # Multiple credentials
@@ -248,7 +248,22 @@ nono run --allow-cwd --network-profile claude-code \
 
 The proxy sets `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, etc. in the child environment so SDKs route through the proxy automatically.
 
-See [Network Proxy - Credential Injection](/cli/features/network-proxy#credential-injection) for storing credentials.
+Custom credentials can be defined in profiles for APIs not covered by the built-in services:
+
+```json
+{
+  "network": {
+    "custom_credentials": {
+      "my-api": {
+        "upstream": "https://api.example.com",
+        "credential_key": "my_api_key"
+      }
+    }
+  }
+}
+```
+
+See [Credential Injection](/cli/features/credential-injection) for complete documentation including custom credential definitions.
 
 #### `--external-proxy`
 

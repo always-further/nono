@@ -48,6 +48,165 @@ pub struct FilesystemConfig {
     pub write_file: Vec<String>,
 }
 
+/// Custom credential route definition for reverse proxy.
+///
+/// Allows users to define their own credential services in profiles,
+/// enabling `--proxy-credential` to work with any API without requiring
+/// changes to the built-in `network-policy.json`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomCredentialDef {
+    /// Upstream URL to proxy requests to (e.g., "https://api.telegram.org")
+    pub upstream: String,
+    /// Keystore account name for the credential (e.g., "telegram_bot_token")
+    pub credential_key: String,
+    /// HTTP header to inject the credential into (default: "Authorization")
+    #[serde(default = "default_inject_header")]
+    pub inject_header: String,
+    /// Format string for the credential value (default: "Bearer {}")
+    /// Use {} as placeholder for the credential value.
+    #[serde(default = "default_credential_format")]
+    pub credential_format: String,
+}
+
+fn default_inject_header() -> String {
+    "Authorization".to_string()
+}
+
+fn default_credential_format() -> String {
+    "Bearer {}".to_string()
+}
+
+/// Check if a character is a valid HTTP token character per RFC 7230.
+fn is_http_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '!' | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~'
+        )
+}
+
+/// Validate a custom credential definition for security issues.
+///
+/// Checks:
+/// - `inject_header` must be a valid HTTP token (RFC 7230)
+/// - `credential_format` must not contain CRLF sequences
+/// - `credential_key` must be alphanumeric + underscores only
+/// - `upstream` must be HTTPS (or HTTP for loopback only)
+fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<()> {
+    // Validate inject_header (RFC 7230 token)
+    if cred.inject_header.is_empty() {
+        return Err(NonoError::ProfileParse(format!(
+            "inject_header for custom credential '{}' cannot be empty",
+            name
+        )));
+    }
+    if !cred.inject_header.chars().all(is_http_token_char) {
+        return Err(NonoError::ProfileParse(format!(
+            "inject_header '{}' for custom credential '{}' contains invalid characters; \
+             header names must be valid HTTP tokens (alphanumeric and !#$%&'*+-.^_`|~)",
+            cred.inject_header, name
+        )));
+    }
+
+    // Validate credential_format (no CRLF injection)
+    if cred.credential_format.contains('\r') || cred.credential_format.contains('\n') {
+        return Err(NonoError::ProfileParse(format!(
+            "credential_format for custom credential '{}' contains invalid CRLF characters; \
+             this could enable header injection attacks",
+            name
+        )));
+    }
+
+    // Validate credential_key (alphanumeric + underscore)
+    if cred.credential_key.is_empty() {
+        return Err(NonoError::ProfileParse(format!(
+            "credential_key for custom credential '{}' cannot be empty",
+            name
+        )));
+    }
+    if !cred
+        .credential_key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(NonoError::ProfileParse(format!(
+            "credential_key '{}' for custom credential '{}' must contain only \
+             alphanumeric characters and underscores",
+            cred.credential_key, name
+        )));
+    }
+
+    // Validate upstream URL (HTTPS required, HTTP only for loopback)
+    validate_upstream_url(&cred.upstream, name)?;
+
+    Ok(())
+}
+
+/// Check if a host string represents a loopback address.
+fn is_loopback_host(host: &str) -> bool {
+    if host == "localhost" || host == "::1" || host == "0.0.0.0" {
+        return true;
+    }
+    if let Some(rest) = host.strip_prefix("127.") {
+        let parts: Vec<&str> = rest.split('.').collect();
+        if parts.len() == 3 {
+            return parts.iter().all(|p| p.parse::<u8>().is_ok());
+        }
+    }
+    false
+}
+
+/// Validate an upstream URL for security.
+fn validate_upstream_url(url: &str, service_name: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).map_err(|e| {
+        NonoError::ProfileParse(format!(
+            "Invalid upstream URL for custom credential '{}': {}",
+            service_name, e
+        ))
+    })?;
+
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host = parsed.host_str().unwrap_or("");
+            if is_loopback_host(host) {
+                Ok(())
+            } else {
+                Err(NonoError::ProfileParse(format!(
+                    "Upstream URL for custom credential '{}' must use HTTPS \
+                     (HTTP only allowed for loopback addresses): {}",
+                    service_name, url
+                )))
+            }
+        }
+        scheme => Err(NonoError::ProfileParse(format!(
+            "Upstream URL for custom credential '{}' must use HTTPS, got scheme '{}': {}",
+            service_name, scheme, url
+        ))),
+    }
+}
+
+/// Validate all custom credentials in a profile.
+fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
+    for (name, cred) in &profile.network.custom_credentials {
+        validate_custom_credential(name, cred)?;
+    }
+    Ok(())
+}
+
 /// Network configuration in a profile
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NetworkConfig {
@@ -64,6 +223,11 @@ pub struct NetworkConfig {
     /// Credential services to enable via reverse proxy
     #[serde(default)]
     pub proxy_credentials: Vec<String>,
+    /// Custom credential definitions for services not in network-policy.json.
+    /// Keys are service names (used with --proxy-credential), values define
+    /// how to route and inject credentials for that service.
+    #[serde(default)]
+    pub custom_credentials: HashMap<String, CustomCredentialDef>,
 }
 
 /// Secrets configuration in a profile
@@ -278,7 +442,13 @@ fn load_from_file(path: &Path) -> Result<Profile> {
         source: e,
     })?;
 
-    serde_json::from_str(&content).map_err(|e| NonoError::ProfileParse(e.to_string()))
+    let profile: Profile =
+        serde_json::from_str(&content).map_err(|e| NonoError::ProfileParse(e.to_string()))?;
+
+    // Validate custom credentials for security issues
+    validate_profile_custom_credentials(&profile)?;
+
+    Ok(profile)
 }
 
 /// Get the path to a user profile

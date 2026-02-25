@@ -1405,6 +1405,7 @@ dependencies = [
  "toml 1.0.3+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "url",
  "walkdir",
  "which",
  "xdg-home",

@@ -427,6 +427,7 @@ fn run_sandbox(
             network_profile,
             proxy_allow_hosts,
             proxy_credentials,
+            custom_credentials: prepared.custom_credentials,
             external_proxy: args.external_proxy.clone(),
         },
     )
@@ -491,6 +492,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             network_profile: None,
             proxy_allow_hosts: Vec::new(),
             proxy_credentials: Vec::new(),
+            custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
         },
     )
@@ -524,6 +526,8 @@ struct ExecutionFlags {
     proxy_allow_hosts: Vec<String>,
     /// Credential services for reverse proxy (from --proxy-credential or profile config)
     proxy_credentials: Vec<String>,
+    /// Custom credential definitions from profile (merged with built-in during resolution)
+    custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
     /// External proxy address (from --external-proxy)
     external_proxy: Option<String>,
 }
@@ -562,7 +566,8 @@ fn apply_pre_fork_sandbox(
 /// Build a `ProxyConfig` from execution flags and network policy.
 ///
 /// Resolves the network profile (if set), merges extra hosts from CLI/profile,
-/// and includes credential routes.
+/// and includes credential routes. Custom credentials from the profile are
+/// merged with built-in credentials during resolution.
 fn build_proxy_config_from_flags(
     flags: &ExecutionFlags,
 ) -> Result<nono_proxy::config::ProxyConfig> {
@@ -589,8 +594,12 @@ fn build_proxy_config_from_flags(
         }
     }
 
-    // Resolve credential routes (validates all services exist)
-    let routes = network_policy::resolve_credentials(&net_policy, &all_credentials)?;
+    // Resolve credential routes (validates all services exist in either custom or built-in)
+    let routes = network_policy::resolve_credentials(
+        &net_policy,
+        &all_credentials,
+        &flags.custom_credentials,
+    )?;
     resolved.routes = routes;
 
     // Build the proxy config with extra hosts from CLI/profile
@@ -1037,6 +1046,8 @@ struct PreparedSandbox {
     proxy_allow_hosts: Vec<String>,
     /// Credential services from profile config
     proxy_credentials: Vec<String>,
+    /// Custom credential definitions from profile config
+    custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
@@ -1136,6 +1147,10 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     let profile_proxy_credentials = loaded_profile
         .as_ref()
         .map(|p| p.network.proxy_credentials.clone())
+        .unwrap_or_default();
+    let profile_custom_credentials = loaded_profile
+        .as_ref()
+        .map(|p| p.network.custom_credentials.clone())
         .unwrap_or_default();
 
     // Build capabilities from profile or arguments.
@@ -1278,6 +1293,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         network_profile: profile_network_profile,
         proxy_allow_hosts: profile_proxy_allow,
         proxy_credentials: profile_proxy_credentials,
+        custom_credentials: profile_custom_credentials,
     })
 }
 
