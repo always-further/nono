@@ -252,7 +252,7 @@ fn run_sign_keyless(args: TrustSignArgs) -> Result<()> {
             reason: format!("failed to create async runtime: {e}"),
         })?;
 
-    // Discover OIDC token from ambient environment (GitHub Actions, etc.)
+    // Discover OIDC token from ambient environment (GitHub Actions, GitLab CI, etc.)
     let token = discover_oidc_token(&rt)?;
 
     let context = sigstore_sign::SigningContext::production();
@@ -418,8 +418,50 @@ async fn sign_file_keyless(
     Ok(())
 }
 
+fn gitlab_keyless_predicate() -> Option<serde_json::Value> {
+    if std::env::var("GITLAB_CI").as_deref() != Ok("true") {
+        return None;
+    }
+
+    let host = std::env::var("CI_SERVER_HOST").unwrap_or_else(|_| "gitlab.com".to_string());
+    let port = std::env::var("CI_SERVER_PORT").unwrap_or_else(|_| "443".to_string());
+    let project_path = std::env::var("CI_PROJECT_PATH").unwrap_or_default();
+
+    let host_authority = if port == "443" {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
+
+    let git_ref = match std::env::var("CI_COMMIT_TAG") {
+        Ok(tag) if !tag.is_empty() => format!("refs/tags/{tag}"),
+        _ => format!(
+            "refs/heads/{}",
+            std::env::var("CI_COMMIT_REF_NAME").unwrap_or_default()
+        ),
+    };
+
+    let workflow = format!("{host_authority}/{project_path}//.gitlab-ci.yml@{git_ref}");
+
+    Some(serde_json::json!({
+        "version": 1,
+        "signer": {
+            "kind": "keyless",
+            "oidc_issuer": std::env::var("CI_SERVER_URL")
+                .unwrap_or_else(|_| "https://gitlab.com".to_string()),
+            "repository": project_path,
+            "workflow": workflow,
+            "ref": git_ref
+        }
+    }))
+}
+
 /// Build the keyless signer predicate from ambient OIDC environment variables.
 fn build_keyless_predicate() -> serde_json::Value {
+    if let Some(gitlab_predicate) = gitlab_keyless_predicate() {
+        return gitlab_predicate;
+    }
+
     serde_json::json!({
         "version": 1,
         "signer": {
@@ -1061,6 +1103,11 @@ fn canonicalize_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 fn format_identity(identity: &trust::SignerIdentity) -> String {
     match identity {
         trust::SignerIdentity::Keyed { key_id } => format!("{key_id} (keyed)"),
+        trust::SignerIdentity::Keyless { workflow, .. }
+            if workflow.contains("//.gitlab-ci.yml@") =>
+        {
+            workflow.clone()
+        }
         trust::SignerIdentity::Keyless {
             repository,
             workflow,
@@ -1125,6 +1172,103 @@ mod tests {
             format_identity(&id),
             "org/repo (.github/workflows/sign.yml)"
         );
+    }
+
+    #[test]
+    fn format_identity_keyless_gitlab() {
+        let id = trust::SignerIdentity::Keyless {
+            issuer: "https://gitlab.com".to_string(),
+            repository: "my-group/my-project".to_string(),
+            workflow: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        assert_eq!(
+            format_identity(&id),
+            "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn format_identity_keyless_gitlab_custom_port() {
+        let id = trust::SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com:8443".to_string(),
+            repository: "team/app".to_string(),
+            workflow: "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
+                .to_string(),
+            git_ref: "refs/heads/develop".to_string(),
+        };
+        assert_eq!(
+            format_identity(&id),
+            "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
+        );
+    }
+
+    #[test]
+    fn build_keyless_predicate_defaults_to_github() {
+        std::env::remove_var("GITLAB_CI");
+        let predicate = build_keyless_predicate();
+        let signer = &predicate["signer"];
+        assert_eq!(signer["kind"], "keyless");
+        assert!(signer.get("oidc_issuer").is_some());
+        assert!(signer.get("repository").is_some());
+        assert!(signer.get("workflow").is_some());
+        assert!(signer.get("ref").is_some());
+    }
+
+    #[test]
+    fn build_keyless_predicate_gitlab() {
+        std::env::set_var("GITLAB_CI", "true");
+        std::env::set_var("CI_SERVER_HOST", "gitlab.com");
+        std::env::set_var("CI_SERVER_PORT", "443");
+        std::env::set_var("CI_PROJECT_PATH", "my-group/my-project");
+        std::env::set_var("CI_COMMIT_REF_NAME", "main");
+        std::env::remove_var("CI_COMMIT_TAG");
+        let predicate = build_keyless_predicate();
+        let signer = &predicate["signer"];
+        assert_eq!(signer["kind"], "keyless");
+        assert_eq!(signer["repository"], "my-group/my-project");
+        assert_eq!(
+            signer["workflow"],
+            "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+        );
+        assert_eq!(signer["ref"], "refs/heads/main");
+        std::env::remove_var("GITLAB_CI");
+        std::env::remove_var("CI_SERVER_HOST");
+        std::env::remove_var("CI_SERVER_PORT");
+        std::env::remove_var("CI_PROJECT_PATH");
+        std::env::remove_var("CI_COMMIT_REF_NAME");
+    }
+
+    #[test]
+    fn build_keyless_predicate_gitlab_custom_port() {
+        std::env::set_var("GITLAB_CI", "true");
+        std::env::set_var("CI_SERVER_HOST", "gitlab.example.com");
+        std::env::set_var("CI_SERVER_PORT", "8443");
+        std::env::set_var("CI_PROJECT_PATH", "team/app");
+        std::env::set_var("CI_COMMIT_REF_NAME", "develop");
+        std::env::remove_var("CI_COMMIT_TAG");
+        let predicate = build_keyless_predicate();
+        let signer = &predicate["signer"];
+        assert_eq!(
+            signer["workflow"],
+            "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
+        );
+        std::env::remove_var("GITLAB_CI");
+        std::env::remove_var("CI_SERVER_HOST");
+        std::env::remove_var("CI_SERVER_PORT");
+        std::env::remove_var("CI_PROJECT_PATH");
+        std::env::remove_var("CI_COMMIT_REF_NAME");
+    }
+
+    #[test]
+    fn build_keyless_predicate_gitlab_takes_precedence() {
+        std::env::set_var("GITLAB_CI", "true");
+        std::env::set_var("CI_SERVER_URL", "https://gitlab.example.com");
+        let predicate = build_keyless_predicate();
+        let signer = &predicate["signer"];
+        assert_eq!(signer["oidc_issuer"], "https://gitlab.example.com");
+        std::env::remove_var("GITLAB_CI");
+        std::env::remove_var("CI_SERVER_URL");
     }
 
     #[test]
