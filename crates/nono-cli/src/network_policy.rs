@@ -9,7 +9,6 @@ use nono_proxy::config::{ProxyConfig, RouteConfig};
 use serde::Deserialize;
 use std::collections::HashMap;
 use tracing::debug;
-use url::Url;
 
 // ============================================================================
 // JSON schema types
@@ -157,152 +156,6 @@ pub fn resolve_groups(
     })
 }
 
-/// Check if a host string represents a loopback address.
-///
-/// Accepts:
-/// - `localhost`
-/// - `127.x.x.x` (full 127.0.0.0/8 CIDR range)
-/// - `::1` (IPv6 loopback)
-/// - `0.0.0.0` (binds to all interfaces, commonly used for local dev servers)
-fn is_loopback_host(host: &str) -> bool {
-    if host == "localhost" || host == "::1" || host == "0.0.0.0" {
-        return true;
-    }
-
-    // Check 127.0.0.0/8 CIDR range
-    if let Some(rest) = host.strip_prefix("127.") {
-        // Validate remaining octets are valid IPv4
-        let parts: Vec<&str> = rest.split('.').collect();
-        if parts.len() == 3 {
-            return parts.iter().all(|p| p.parse::<u8>().is_ok());
-        }
-    }
-
-    false
-}
-
-/// Validate an upstream URL for security.
-///
-/// Ensures the URL is HTTPS, or HTTP only for loopback addresses (for local development).
-/// This prevents credential injection to arbitrary HTTP endpoints.
-fn validate_upstream_url(url: &str, service_name: &str) -> Result<()> {
-    let parsed = Url::parse(url).map_err(|e| {
-        NonoError::ConfigParse(format!(
-            "Invalid upstream URL for credential '{}': {}",
-            service_name, e
-        ))
-    })?;
-
-    match parsed.scheme() {
-        "https" => Ok(()),
-        "http" => {
-            // Allow HTTP only for loopback addresses
-            let host = parsed.host_str().unwrap_or("");
-            if is_loopback_host(host) {
-                Ok(())
-            } else {
-                Err(NonoError::ConfigParse(format!(
-                    "Upstream URL for credential '{}' must use HTTPS (HTTP only allowed for loopback addresses): {}",
-                    service_name, url
-                )))
-            }
-        }
-        scheme => Err(NonoError::ConfigParse(format!(
-            "Upstream URL for credential '{}' must use HTTPS, got scheme '{}': {}",
-            service_name, scheme, url
-        ))),
-    }
-}
-
-/// Check if a character is a valid HTTP token character per RFC 7230.
-///
-/// token = 1*tchar
-/// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
-///         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
-fn is_http_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric()
-        || matches!(
-            c,
-            '!' | '#'
-                | '$'
-                | '%'
-                | '&'
-                | '\''
-                | '*'
-                | '+'
-                | '-'
-                | '.'
-                | '^'
-                | '_'
-                | '`'
-                | '|'
-                | '~'
-        )
-}
-
-/// Validate an HTTP header name for RFC 7230 compliance.
-///
-/// Header names must be valid HTTP tokens: non-empty strings containing only
-/// tchar characters (alphanumeric + specific punctuation). This prevents
-/// header injection attacks via control characters.
-fn validate_inject_header(header: &str, service_name: &str) -> Result<()> {
-    if header.is_empty() {
-        return Err(NonoError::ConfigParse(format!(
-            "inject_header for service '{}' cannot be empty",
-            service_name
-        )));
-    }
-
-    if !header.chars().all(is_http_token_char) {
-        return Err(NonoError::ConfigParse(format!(
-            "inject_header '{}' for service '{}' contains invalid characters; \
-             header names must be valid HTTP tokens (alphanumeric and !#$%&'*+-.^_`|~)",
-            header, service_name
-        )));
-    }
-
-    Ok(())
-}
-
-/// Validate a credential format string for injection safety.
-///
-/// Rejects format strings containing CRLF sequences (\r, \n) which could
-/// enable header injection attacks. The `{}` placeholder will be replaced
-/// with the actual credential value.
-fn validate_credential_format(format: &str, service_name: &str) -> Result<()> {
-    if format.contains('\r') || format.contains('\n') {
-        return Err(NonoError::ConfigParse(format!(
-            "credential_format for service '{}' contains invalid CRLF characters; \
-             this could enable header injection attacks",
-            service_name
-        )));
-    }
-
-    Ok(())
-}
-
-/// Validate a credential key name for security.
-///
-/// Ensures the key contains only alphanumeric characters and underscores,
-/// which are valid for keystore account names.
-fn validate_credential_key(key: &str, service_name: &str) -> Result<()> {
-    if key.is_empty() {
-        return Err(NonoError::ConfigParse(format!(
-            "Credential key for service '{}' cannot be empty",
-            service_name
-        )));
-    }
-
-    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(NonoError::ConfigParse(format!(
-            "Credential key '{}' for service '{}' must contain only alphanumeric characters and underscores",
-            key, service_name
-        )));
-    }
-
-    Ok(())
-}
-
 /// Resolve credential definitions into proxy RouteConfig entries.
 ///
 /// Merges custom credentials from the profile with built-in credentials from
@@ -339,14 +192,11 @@ pub fn resolve_credentials(
     let mut routes = Vec::new();
 
     for name in service_names {
-        // Custom credentials take precedence over built-in
+        // Custom credentials take precedence over built-in.
+        // Note: Custom credentials are already validated at profile load time
+        // in profile/mod.rs::validate_profile_custom_credentials(), so we don't
+        // need to re-validate here.
         if let Some(cred) = custom_credentials.get(name) {
-            // Validate custom credential definition
-            validate_upstream_url(&cred.upstream, name)?;
-            validate_credential_key(&cred.credential_key, name)?;
-            validate_inject_header(&cred.inject_header, name)?;
-            validate_credential_format(&cred.credential_format, name)?;
-
             routes.push(RouteConfig {
                 prefix: name.clone(),
                 upstream: cred.upstream.clone(),
@@ -608,54 +458,9 @@ mod tests {
         assert_eq!(routes[0].upstream, "http://localhost:8080/api");
     }
 
-    #[test]
-    fn test_custom_credential_http_remote_rejected() {
-        use crate::profile::CustomCredentialDef;
-
-        let json = embedded_network_policy_json();
-        let policy = load_network_policy(json).unwrap();
-
-        let mut custom = HashMap::new();
-        custom.insert(
-            "insecure".to_string(),
-            CustomCredentialDef {
-                upstream: "http://api.example.com".to_string(), // HTTP to remote host
-                credential_key: "api_key".to_string(),
-                inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
-            },
-        );
-
-        let result = resolve_credentials(&policy, &["insecure".to_string()], &custom);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("HTTPS"));
-        assert!(err.contains("insecure"));
-    }
-
-    #[test]
-    fn test_custom_credential_invalid_key_rejected() {
-        use crate::profile::CustomCredentialDef;
-
-        let json = embedded_network_policy_json();
-        let policy = load_network_policy(json).unwrap();
-
-        let mut custom = HashMap::new();
-        custom.insert(
-            "bad".to_string(),
-            CustomCredentialDef {
-                upstream: "https://api.example.com".to_string(),
-                credential_key: "bad-key-with-dashes".to_string(), // Invalid: contains dashes
-                inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
-            },
-        );
-
-        let result = resolve_credentials(&policy, &["bad".to_string()], &custom);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("alphanumeric"));
-    }
+    // Note: Validation tests for custom credentials (HTTP-only-to-remote-rejected,
+    // invalid-key-rejected, etc.) are in profile/mod.rs since validation now happens
+    // at profile load time, not at resolve time.
 
     #[test]
     fn test_build_proxy_config() {
@@ -694,53 +499,12 @@ mod tests {
     }
 
     // ============================================================================
-    // Loopback host detection tests
+    // Integration tests for custom credentials via resolve_credentials
+    // Note: Validation functions (is_loopback_host, validate_inject_header,
+    // validate_credential_format) are tested in profile/mod.rs where they live.
+    // These tests verify that resolve_credentials correctly processes already-
+    // validated custom credentials.
     // ============================================================================
-
-    #[test]
-    fn test_is_loopback_host_localhost() {
-        assert!(is_loopback_host("localhost"));
-    }
-
-    #[test]
-    fn test_is_loopback_host_127_0_0_1() {
-        assert!(is_loopback_host("127.0.0.1"));
-    }
-
-    #[test]
-    fn test_is_loopback_host_127_cidr_range() {
-        // Various addresses in 127.0.0.0/8
-        assert!(is_loopback_host("127.0.0.2"));
-        assert!(is_loopback_host("127.1.2.3"));
-        assert!(is_loopback_host("127.255.255.255"));
-    }
-
-    #[test]
-    fn test_is_loopback_host_ipv6_loopback() {
-        assert!(is_loopback_host("::1"));
-    }
-
-    #[test]
-    fn test_is_loopback_host_0_0_0_0() {
-        assert!(is_loopback_host("0.0.0.0"));
-    }
-
-    #[test]
-    fn test_is_loopback_host_rejects_remote() {
-        assert!(!is_loopback_host("example.com"));
-        assert!(!is_loopback_host("192.168.1.1"));
-        assert!(!is_loopback_host("10.0.0.1"));
-        assert!(!is_loopback_host("8.8.8.8"));
-    }
-
-    #[test]
-    fn test_is_loopback_host_rejects_invalid_127() {
-        // Invalid octets
-        assert!(!is_loopback_host("127.0.0.256"));
-        assert!(!is_loopback_host("127.0.0"));
-        assert!(!is_loopback_host("127.0.0.0.0"));
-        assert!(!is_loopback_host("127.abc.0.1"));
-    }
 
     #[test]
     fn test_custom_credential_http_127_cidr_allowed() {
@@ -786,121 +550,8 @@ mod tests {
         assert_eq!(routes.len(), 1);
     }
 
-    // ============================================================================
-    // inject_header validation tests (RFC 7230)
-    // ============================================================================
-
     #[test]
-    fn test_validate_inject_header_valid() {
-        assert!(validate_inject_header("Authorization", "test").is_ok());
-        assert!(validate_inject_header("X-Api-Key", "test").is_ok());
-        assert!(validate_inject_header("x-custom-header", "test").is_ok());
-        assert!(validate_inject_header("Content-Type", "test").is_ok());
-    }
-
-    #[test]
-    fn test_validate_inject_header_valid_special_chars() {
-        // RFC 7230 tchar: !#$%&'*+-.^_`|~
-        assert!(validate_inject_header("X-Header!", "test").is_ok());
-        assert!(validate_inject_header("X#Header", "test").is_ok());
-        assert!(validate_inject_header("X$Header", "test").is_ok());
-        assert!(validate_inject_header("X%Header", "test").is_ok());
-        assert!(validate_inject_header("X&Header", "test").is_ok());
-        assert!(validate_inject_header("X'Header", "test").is_ok());
-        assert!(validate_inject_header("X*Header", "test").is_ok());
-        assert!(validate_inject_header("X+Header", "test").is_ok());
-        assert!(validate_inject_header("X-Header", "test").is_ok());
-        assert!(validate_inject_header("X.Header", "test").is_ok());
-        assert!(validate_inject_header("X^Header", "test").is_ok());
-        assert!(validate_inject_header("X_Header", "test").is_ok());
-        assert!(validate_inject_header("X`Header", "test").is_ok());
-        assert!(validate_inject_header("X|Header", "test").is_ok());
-        assert!(validate_inject_header("X~Header", "test").is_ok());
-    }
-
-    #[test]
-    fn test_validate_inject_header_empty_rejected() {
-        let result = validate_inject_header("", "test");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
-    }
-
-    #[test]
-    fn test_validate_inject_header_control_chars_rejected() {
-        let result = validate_inject_header("X-Header\r\nEvil: injected", "test");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid characters"));
-    }
-
-    #[test]
-    fn test_validate_inject_header_space_rejected() {
-        let result = validate_inject_header("X Header", "test");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid characters"));
-    }
-
-    #[test]
-    fn test_validate_inject_header_colon_rejected() {
-        let result = validate_inject_header("X-Header:", "test");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid characters"));
-    }
-
-    #[test]
-    fn test_validate_inject_header_parentheses_rejected() {
-        let result = validate_inject_header("X-Header()", "test");
-        assert!(result.is_err());
-    }
-
-    // ============================================================================
-    // credential_format validation tests (CRLF injection)
-    // ============================================================================
-
-    #[test]
-    fn test_validate_credential_format_valid() {
-        assert!(validate_credential_format("Bearer {}", "test").is_ok());
-        assert!(validate_credential_format("Token {}", "test").is_ok());
-        assert!(validate_credential_format("{}", "test").is_ok());
-        assert!(validate_credential_format("Basic {}", "test").is_ok());
-        assert!(validate_credential_format("ApiKey={}", "test").is_ok());
-    }
-
-    #[test]
-    fn test_validate_credential_format_cr_rejected() {
-        let result = validate_credential_format("Bearer {}\rEvil: header", "test");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CRLF"));
-    }
-
-    #[test]
-    fn test_validate_credential_format_lf_rejected() {
-        let result = validate_credential_format("Bearer {}\nEvil: header", "test");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CRLF"));
-    }
-
-    #[test]
-    fn test_validate_credential_format_crlf_rejected() {
-        let result = validate_credential_format("Bearer {}\r\nEvil: header", "test");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CRLF"));
-    }
-
-    // ============================================================================
-    // Integration tests for full validation chain
-    // ============================================================================
-
-    #[test]
-    fn test_custom_credential_invalid_header_rejected() {
+    fn test_custom_credential_with_valid_header() {
         use crate::profile::CustomCredentialDef;
 
         let json = embedded_network_policy_json();
@@ -908,42 +559,18 @@ mod tests {
 
         let mut custom = HashMap::new();
         custom.insert(
-            "bad".to_string(),
+            "test".to_string(),
             CustomCredentialDef {
                 upstream: "https://api.example.com".to_string(),
                 credential_key: "api_key".to_string(),
-                inject_header: "X-Header\r\nEvil: injected".to_string(), // CRLF injection attempt
-                credential_format: "Bearer {}".to_string(),
+                inject_header: "X-Custom-Auth".to_string(),
+                credential_format: "Token {}".to_string(),
             },
         );
 
-        let result = resolve_credentials(&policy, &["bad".to_string()], &custom);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("invalid characters"));
-    }
-
-    #[test]
-    fn test_custom_credential_invalid_format_rejected() {
-        use crate::profile::CustomCredentialDef;
-
-        let json = embedded_network_policy_json();
-        let policy = load_network_policy(json).unwrap();
-
-        let mut custom = HashMap::new();
-        custom.insert(
-            "bad".to_string(),
-            CustomCredentialDef {
-                upstream: "https://api.example.com".to_string(),
-                credential_key: "api_key".to_string(),
-                inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}\r\nEvil: injected".to_string(), // CRLF injection attempt
-            },
-        );
-
-        let result = resolve_credentials(&policy, &["bad".to_string()], &custom);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("CRLF"));
+        let routes = resolve_credentials(&policy, &["test".to_string()], &custom).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].inject_header, "X-Custom-Auth");
+        assert_eq!(routes[0].credential_format, "Token {}");
     }
 }
