@@ -1082,9 +1082,8 @@ mod tests {
     // - upstream URL (HTTPS required, HTTP only for loopback)
     // ============================================================================
 
-    #[test]
-    fn test_validate_custom_credential_valid() {
-        let cred = CustomCredentialDef {
+    fn header_cred_builder() -> CustomCredentialDef {
+        CustomCredentialDef {
             upstream: "https://api.example.com".to_string(),
             credential_key: "api_key".to_string(),
             inject_mode: InjectMode::Header,
@@ -1093,37 +1092,27 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
-        };
+        }
+    }
+
+    #[test]
+    fn test_validate_custom_credential_valid() {
+        let cred = header_cred_builder();
         assert!(validate_custom_credential("test", &cred).is_ok());
     }
 
     #[test]
     fn test_validate_custom_credential_http_loopback_allowed() {
-        let cred = CustomCredentialDef {
-            upstream: "http://127.0.0.1:8080/api".to_string(),
-            credential_key: "local_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.upstream = "http://127.0.0.1:8080/api".to_string();
+        cred.credential_key = "local_key".to_string();
         assert!(validate_custom_credential("local", &cred).is_ok());
     }
 
     #[test]
     fn test_validate_custom_credential_http_remote_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "http://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.upstream = "http://api.example.com".to_string();
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("HTTP to remote should be rejected");
         assert!(err.to_string().contains("HTTPS"));
@@ -1131,16 +1120,8 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_invalid_header_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "X-Header\r\nEvil: injected".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.inject_header = "X-Header\r\nEvil: injected".to_string();
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("CRLF in header should be rejected");
         assert!(err.to_string().contains("invalid characters"));
@@ -1148,16 +1129,8 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_invalid_format_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}\r\nEvil: header".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.credential_format = "Bearer {}\r\nEvil: header".to_string();
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("CRLF in format should be rejected");
         assert!(err.to_string().contains("CRLF"));
@@ -1165,16 +1138,8 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_invalid_key_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api-key".to_string(), // hyphens not allowed
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.credential_key = "api-key".to_string(); // hyphens not allowed
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("hyphen in key should be rejected");
         assert!(err.to_string().contains("alphanumeric"));
@@ -1182,16 +1147,8 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_empty_header_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.inject_header = "".to_string();
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("empty header should be rejected");
         assert!(err.to_string().contains("cannot be empty"));
@@ -1199,16 +1156,8 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_header_with_space_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "X Header".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.inject_header = "X Header".to_string();
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("space in header should be rejected");
         assert!(err.to_string().contains("invalid characters"));
@@ -1216,16 +1165,8 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_header_with_colon_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "X-Header:".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.inject_header = "X-Header:".to_string();
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("colon in header should be rejected");
         assert!(err.to_string().contains("invalid characters"));
@@ -1233,32 +1174,15 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_valid_special_header_chars() {
-        // RFC 7230 tchar special chars should be allowed in header names
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "X-Header!".to_string(), // ! is valid tchar
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.inject_header = "X-Header!".to_string(); // ! is valid tchar
         assert!(validate_custom_credential("test", &cred).is_ok());
     }
 
     #[test]
     fn test_validate_custom_credential_format_with_cr_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}\rEvil: header".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.credential_format = "Bearer {}\rEvil: header".to_string();
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("CR in format should be rejected");
         assert!(err.to_string().contains("CRLF"));
@@ -1266,16 +1190,8 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_format_with_lf_rejected() {
-        let cred = CustomCredentialDef {
-            upstream: "https://api.example.com".to_string(),
-            credential_key: "api_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}\nEvil: header".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.credential_format = "Bearer {}\nEvil: header".to_string();
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("LF in format should be rejected");
         assert!(err.to_string().contains("CRLF"));
@@ -1284,16 +1200,8 @@ mod tests {
     #[test]
     fn test_validate_custom_credential_various_valid_formats() {
         for format in ["Bearer {}", "Token {}", "{}", "Basic {}", "ApiKey={}"] {
-            let cred = CustomCredentialDef {
-                upstream: "https://api.example.com".to_string(),
-                credential_key: "api_key".to_string(),
-                inject_mode: InjectMode::Header,
-                inject_header: "Authorization".to_string(),
-                credential_format: format.to_string(),
-                path_pattern: None,
-                path_replacement: None,
-                query_param_name: None,
-            };
+            let mut cred = header_cred_builder();
+            cred.credential_format = format.to_string();
             assert!(
                 validate_custom_credential("test", &cred).is_ok(),
                 "Expected format '{}' to be valid",
@@ -1304,46 +1212,25 @@ mod tests {
 
     #[test]
     fn test_validate_custom_credential_http_localhost_allowed() {
-        let cred = CustomCredentialDef {
-            upstream: "http://localhost:3000/api".to_string(),
-            credential_key: "local_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.upstream = "http://localhost:3000/api".to_string();
+        cred.credential_key = "local_key".to_string();
         assert!(validate_custom_credential("local", &cred).is_ok());
     }
 
     #[test]
     fn test_validate_custom_credential_http_ipv6_loopback_allowed() {
-        let cred = CustomCredentialDef {
-            upstream: "http://[::1]:8080/api".to_string(),
-            credential_key: "local_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.upstream = "http://[::1]:8080/api".to_string();
+        cred.credential_key = "local_key".to_string();
         assert!(validate_custom_credential("local", &cred).is_ok());
     }
 
     #[test]
     fn test_validate_custom_credential_http_0_0_0_0_allowed() {
-        let cred = CustomCredentialDef {
-            upstream: "http://0.0.0.0:3000/api".to_string(),
-            credential_key: "local_key".to_string(),
-            inject_mode: InjectMode::Header,
-            inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}".to_string(),
-            path_pattern: None,
-            path_replacement: None,
-            query_param_name: None,
-        };
+        let mut cred = header_cred_builder();
+        cred.upstream = "http://0.0.0.0:3000/api".to_string();
+        cred.credential_key = "local_key".to_string();
         assert!(validate_custom_credential("local", &cred).is_ok());
     }
 
