@@ -794,6 +794,11 @@ fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
 fn format_identity(identity: &trust::SignerIdentity) -> String {
     match identity {
         trust::SignerIdentity::Keyed { key_id } => format!("{key_id} (keyed)"),
+        trust::SignerIdentity::Keyless { workflow, .. }
+            if workflow.contains("//.gitlab-ci.yml@") =>
+        {
+            workflow.clone()
+        }
         trust::SignerIdentity::Keyless {
             repository,
             workflow,

@@ -677,6 +677,88 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_trusted_gitlab_keyless() {
+        let publisher = Publisher {
+            name: "gitlab-ci".to_string(),
+            issuer: Some("https://gitlab.com".to_string()),
+            repository: Some("my-group/my-project".to_string()),
+            workflow: Some(
+                "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/*".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/*".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+        let policy = make_policy(Enforcement::Deny, vec![publisher], vec![]);
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.com".to_string(),
+            repository: "my-group/my-project".to_string(),
+            workflow: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        let result = evaluate_file(&policy, Path::new("SKILLS.md"), "abcd", Some(&identity));
+        assert!(result.outcome.is_verified());
+        if let VerificationOutcome::Verified { publisher } = &result.outcome {
+            assert_eq!(publisher, "gitlab-ci");
+        }
+    }
+
+    #[test]
+    fn evaluate_trusted_gitlab_self_managed_keyless() {
+        let publisher = Publisher {
+            name: "gitlab-self-managed".to_string(),
+            issuer: Some("https://gitlab.example.com".to_string()),
+            repository: Some("internal/project".to_string()),
+            workflow: Some(
+                "gitlab.example.com/internal/project//.gitlab-ci.yml@refs/heads/*".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/*".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+        let policy = make_policy(Enforcement::Deny, vec![publisher], vec![]);
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com".to_string(),
+            repository: "internal/project".to_string(),
+            workflow: "gitlab.example.com/internal/project//.gitlab-ci.yml@refs/heads/release"
+                .to_string(),
+            git_ref: "refs/heads/release".to_string(),
+        };
+        let result = evaluate_file(&policy, Path::new("CLAUDE.md"), "abcd", Some(&identity));
+        assert!(result.outcome.is_verified());
+        if let VerificationOutcome::Verified { publisher } = &result.outcome {
+            assert_eq!(publisher, "gitlab-self-managed");
+        }
+    }
+
+    #[test]
+    fn evaluate_untrusted_gitlab_wrong_project() {
+        let publisher = Publisher {
+            name: "gitlab-ci".to_string(),
+            issuer: Some("https://gitlab.example.com".to_string()),
+            repository: Some("trusted/project".to_string()),
+            workflow: Some(
+                "gitlab.example.com/trusted/project//.gitlab-ci.yml@refs/heads/*".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/*".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+        let policy = make_policy(Enforcement::Deny, vec![publisher], vec![]);
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com".to_string(),
+            repository: "evil/project".to_string(),
+            workflow: "gitlab.example.com/evil/project//.gitlab-ci.yml@refs/heads/main".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        let result = evaluate_file(&policy, Path::new("SKILLS.md"), "abcd", Some(&identity));
+        assert!(matches!(
+            result.outcome,
+            VerificationOutcome::UntrustedPublisher { .. }
+        ));
+    }
+
+    #[test]
     fn evaluate_untrusted_publisher() {
         let policy = make_policy(
             Enforcement::Deny,
