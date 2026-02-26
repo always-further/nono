@@ -978,8 +978,8 @@ mod tests {
             credential_format: "Bearer {}".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("HTTPS"));
+        let err = result.expect_err("HTTP to remote should be rejected");
+        assert!(err.to_string().contains("HTTPS"));
     }
 
     #[test]
@@ -991,11 +991,8 @@ mod tests {
             credential_format: "Bearer {}".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid characters"));
+        let err = result.expect_err("CRLF in header should be rejected");
+        assert!(err.to_string().contains("invalid characters"));
     }
 
     #[test]
@@ -1007,8 +1004,8 @@ mod tests {
             credential_format: "Bearer {}\r\nEvil: header".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CRLF"));
+        let err = result.expect_err("CRLF in format should be rejected");
+        assert!(err.to_string().contains("CRLF"));
     }
 
     #[test]
@@ -1020,8 +1017,8 @@ mod tests {
             credential_format: "Bearer {}".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("alphanumeric"));
+        let err = result.expect_err("hyphen in key should be rejected");
+        assert!(err.to_string().contains("alphanumeric"));
     }
 
     #[test]
@@ -1033,8 +1030,8 @@ mod tests {
             credential_format: "Bearer {}".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+        let err = result.expect_err("empty header should be rejected");
+        assert!(err.to_string().contains("cannot be empty"));
     }
 
     #[test]
@@ -1046,11 +1043,8 @@ mod tests {
             credential_format: "Bearer {}".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid characters"));
+        let err = result.expect_err("space in header should be rejected");
+        assert!(err.to_string().contains("invalid characters"));
     }
 
     #[test]
@@ -1062,11 +1056,8 @@ mod tests {
             credential_format: "Bearer {}".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid characters"));
+        let err = result.expect_err("colon in header should be rejected");
+        assert!(err.to_string().contains("invalid characters"));
     }
 
     #[test]
@@ -1090,8 +1081,8 @@ mod tests {
             credential_format: "Bearer {}\rEvil: header".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CRLF"));
+        let err = result.expect_err("CR in format should be rejected");
+        assert!(err.to_string().contains("CRLF"));
     }
 
     #[test]
@@ -1103,8 +1094,8 @@ mod tests {
             credential_format: "Bearer {}\nEvil: header".to_string(),
         };
         let result = validate_custom_credential("test", &cred);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CRLF"));
+        let err = result.expect_err("LF in format should be rejected");
+        assert!(err.to_string().contains("CRLF"));
     }
 
     #[test]
