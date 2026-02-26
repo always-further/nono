@@ -623,6 +623,9 @@ mod tests {
 
     #[test]
     fn test_expand_vars() {
+        // Save original HOME to restore after test (avoid polluting other parallel tests)
+        let original_home = env::var("HOME").ok();
+
         let workdir = PathBuf::from("/projects/myapp");
         env::set_var("HOME", "/home/user");
 
@@ -631,6 +634,11 @@ mod tests {
 
         let expanded = expand_vars("$HOME/.config", &workdir).expect("valid env");
         assert_eq!(expanded, PathBuf::from("/home/user/.config"));
+
+        // Restore original HOME
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        }
     }
 
     #[test]

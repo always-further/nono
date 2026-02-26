@@ -1234,6 +1234,9 @@ mod tests {
 
     #[test]
     fn test_expand_home() {
+        // Save original HOME to restore after test (avoid polluting other parallel tests)
+        let original_home = std::env::var("HOME").ok();
+
         std::env::set_var("HOME", "/home/test");
         assert_eq!(expand_home("~/foo").expect("valid home"), "/home/test/foo");
         assert_eq!(
@@ -1244,6 +1247,11 @@ mod tests {
             expand_home("/absolute/path").expect("no expansion needed"),
             "/absolute/path"
         );
+
+        // Restore original HOME
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
     }
 
     #[test]
