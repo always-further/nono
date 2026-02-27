@@ -36,22 +36,23 @@ echo "Updating crate versions..."
 sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" crates/nono/Cargo.toml
 rm crates/nono/Cargo.toml.bak
 
-# Update nono-proxy
-sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" crates/nono-proxy/Cargo.toml
-# Also update the nono dependency version
-sed -i.bak "s/nono = { version = \"[^\"]*\"/nono = { version = \"${NEXT_VERSION}\"/" crates/nono-proxy/Cargo.toml
+# Update nono-proxy (version + nono dependency)
+sed -i.bak -e "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" \
+    -e "s/nono = { version = \"[^\"]*\"/nono = { version = \"${NEXT_VERSION}\"/" \
+    crates/nono-proxy/Cargo.toml
 rm crates/nono-proxy/Cargo.toml.bak
 
-# Update nono-cli
-sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" crates/nono-cli/Cargo.toml
-# Also update the nono and nono-proxy dependency versions
-sed -i.bak "s/nono = { version = \"[^\"]*\"/nono = { version = \"${NEXT_VERSION}\"/" crates/nono-cli/Cargo.toml
-sed -i.bak "s/nono-proxy = { version = \"[^\"]*\"/nono-proxy = { version = \"${NEXT_VERSION}\"/" crates/nono-cli/Cargo.toml
+# Update nono-cli (version + nono and nono-proxy dependencies)
+sed -i.bak -e "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" \
+    -e "s/nono = { version = \"[^\"]*\"/nono = { version = \"${NEXT_VERSION}\"/" \
+    -e "s/nono-proxy = { version = \"[^\"]*\"/nono-proxy = { version = \"${NEXT_VERSION}\"/" \
+    crates/nono-cli/Cargo.toml
 rm crates/nono-cli/Cargo.toml.bak
 
-# Update nono-ffi
-sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" bindings/c/Cargo.toml
-sed -i.bak "s/nono = { version = \"[^\"]*\"/nono = { version = \"${NEXT_VERSION}\"/" bindings/c/Cargo.toml
+# Update nono-ffi (version + nono dependency)
+sed -i.bak -e "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" \
+    -e "s/nono = { version = \"[^\"]*\"/nono = { version = \"${NEXT_VERSION}\"/" \
+    bindings/c/Cargo.toml
 rm bindings/c/Cargo.toml.bak
 
 # Update Cargo.lock to reflect the new versions
