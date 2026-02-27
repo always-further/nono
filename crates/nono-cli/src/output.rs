@@ -9,16 +9,26 @@ use std::path::Path;
 
 /// Hedgehog puns for the banner
 const QUOTES: &[&str] = &[
-    "no yolo, just nono",
-    "all your base are not belong to us",
-    "Не положено!",
-    "keep calm and nono on",
-    "不可说的秘密",
-    "no nono no cry!",
-    "नहीं। बस।",
-    "nono, nono, nono, nono - there's a limit",
-    "NONO 危险",
-    "",
+    "¡Hola Nono!",
+    "Bonjour Nono !",
+    "Hallo Nono!",
+    "Ciao Nono!",
+    "Olá Nono!",
+    "こんにちは、Nono！",
+    "안녕하세요, Nono!",
+    "你好，Nono！",
+    "!مرحبًا نونو",
+    "नमस्ते नोनो!",
+    "Hej Nono!",
+    "Merhaba Nono!",
+    "Halo Nono!",
+    "Xin chào Nono!",
+    "Sawubona Nono!",
+    "Γεια σου Nono!",
+    "Привет, Nono!",
+    "Cześć Nono!",
+    "Shalom Nono!",
+    "Kamusta Nono!",
 ];
 
 /// Print the nono banner with hedgehog mascot
