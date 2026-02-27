@@ -100,6 +100,14 @@ pub struct CustomCredentialDef {
     /// Only used when inject_mode is "query_param".
     #[serde(default)]
     pub query_param_name: Option<String>,
+
+    /// Explicit environment variable name for the phantom token (e.g., "OPENAI_API_KEY").
+    ///
+    /// When set, the proxy uses this as the SDK API key env var instead of
+    /// deriving it from `credential_key.to_uppercase()`. Required when
+    /// `credential_key` is an `op://` URI.
+    #[serde(default)]
+    pub env_var: Option<String>,
 }
 
 fn default_inject_header() -> String {
@@ -132,10 +140,44 @@ fn is_http_token_char(c: char) -> bool {
         )
 }
 
+/// Validate a credential key.
+///
+/// Accepts either:
+/// - A bare keyring account name (alphanumeric + underscores only)
+/// - A 1Password `op://` URI (validated by `nono::keystore::validate_op_uri`)
+fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(NonoError::ProfileParse(format!(
+            "credential_key for custom credential '{}' cannot be empty",
+            context_name
+        )));
+    }
+
+    if nono::keystore::is_op_uri(key) {
+        // Validate as 1Password URI
+        nono::keystore::validate_op_uri(key).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "invalid 1Password URI for custom credential '{}': {}",
+                context_name, e
+            ))
+        })
+    } else {
+        // Validate as keyring account name (alphanumeric + underscore)
+        if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_key '{}' for custom credential '{}' must contain only \
+                 alphanumeric characters and underscores (or use op:// URI for 1Password)",
+                key, context_name
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Validate a custom credential definition for security issues.
 ///
 /// Checks:
-/// - `credential_key` must be alphanumeric + underscores only
+/// - `credential_key` must be alphanumeric + underscores only, or a valid `op://` URI
 /// - `upstream` must be HTTPS (or HTTP for loopback only)
 /// - Mode-specific validation:
 ///   - `header`: inject_header must be valid HTTP token, credential_format no CRLF
@@ -143,23 +185,35 @@ fn is_http_token_char(c: char) -> bool {
 ///   - `query_param`: query_param_name required, valid query param name
 ///   - `basic_auth`: no additional required fields
 fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<()> {
-    // Validate credential_key (alphanumeric + underscore) - required for all modes
-    if cred.credential_key.is_empty() {
+    // Validate credential_key - required for all modes
+    validate_credential_key(name, &cred.credential_key)?;
+
+    // When credential_key is an op:// URI, env_var is required because the URI
+    // cannot be meaningfully uppercased into an env var name (e.g.,
+    // "op://vault/item/field" -> "OP://VAULT/ITEM/FIELD" is nonsensical).
+    if nono::keystore::is_op_uri(&cred.credential_key) && cred.env_var.is_none() {
         return Err(NonoError::ProfileParse(format!(
-            "credential_key for custom credential '{}' cannot be empty",
+            "env_var is required for custom credential '{}' when credential_key is an op:// URI; \
+             set it to the SDK API key env var name (e.g., \"OPENAI_API_KEY\")",
             name
         )));
     }
-    if !cred
-        .credential_key
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Err(NonoError::ProfileParse(format!(
-            "credential_key '{}' for custom credential '{}' must contain only \
-             alphanumeric characters and underscores",
-            cred.credential_key, name
-        )));
+
+    // Validate env_var format if specified
+    if let Some(ref ev) = cred.env_var {
+        if ev.is_empty() {
+            return Err(NonoError::ProfileParse(format!(
+                "env_var for custom credential '{}' cannot be empty",
+                name
+            )));
+        }
+        if !ev.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(NonoError::ProfileParse(format!(
+                "env_var '{}' for custom credential '{}' must contain only \
+                 alphanumeric characters and underscores",
+                ev, name
+            )));
+        }
     }
 
     // Validate upstream URL (HTTPS required, HTTP only for loopback)
@@ -339,6 +393,22 @@ fn validate_upstream_url(url: &str, service_name: &str) -> Result<()> {
 fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
     for (name, cred) in &profile.network.custom_credentials {
         validate_custom_credential(name, cred)?;
+    }
+    Ok(())
+}
+
+/// Validate env_credentials keys in a profile.
+///
+/// Keys can be either keyring account names or `op://` URIs.
+/// Keyring account names are validated at load time by the keyring crate itself,
+/// but `op://` URIs need structural validation upfront.
+fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
+    for key in profile.env_credentials.mappings.keys() {
+        if nono::keystore::is_op_uri(key) {
+            nono::keystore::validate_op_uri(key).map_err(|e| {
+                NonoError::ProfileParse(format!("invalid 1Password URI in env_credentials: {}", e))
+            })?;
+        }
     }
     Ok(())
 }
@@ -583,6 +653,9 @@ fn load_from_file(path: &Path) -> Result<Profile> {
 
     // Validate custom credentials for security issues
     validate_profile_custom_credentials(&profile)?;
+
+    // Validate env_credentials keys (op:// URIs need structural validation)
+    validate_env_credential_keys(&profile)?;
 
     Ok(profile)
 }
@@ -1092,6 +1165,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            env_var: None,
         }
     }
 
@@ -1249,6 +1323,7 @@ mod tests {
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: None,
             query_param_name: None,
+            env_var: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -1264,6 +1339,7 @@ mod tests {
             path_pattern: None, // Missing required field
             path_replacement: None,
             query_param_name: None,
+            env_var: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("missing path_pattern should be rejected");
@@ -1281,6 +1357,7 @@ mod tests {
             path_pattern: Some("/bot/token/".to_string()), // No {} placeholder
             path_replacement: None,
             query_param_name: None,
+            env_var: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("pattern without {} should be rejected");
@@ -1298,6 +1375,7 @@ mod tests {
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: Some("/v2/bot{}/".to_string()),
             query_param_name: None,
+            env_var: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -1313,6 +1391,7 @@ mod tests {
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: Some("/v2/bot/fixed/".to_string()), // No {} placeholder
             query_param_name: None,
+            env_var: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("replacement without {} should be rejected");
@@ -1330,6 +1409,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: Some("key".to_string()),
+            env_var: None,
         };
         assert!(validate_custom_credential("google_maps", &cred).is_ok());
     }
@@ -1345,6 +1425,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None, // Missing required field
+            env_var: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("missing query_param_name should be rejected");
@@ -1362,6 +1443,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: Some("".to_string()), // Empty
+            env_var: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("empty query_param_name should be rejected");
@@ -1379,9 +1461,69 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            env_var: None,
         };
         // BasicAuth mode doesn't require additional fields
         // Credential value is expected to be "username:password" format
         assert!(validate_custom_credential("example", &cred).is_ok());
+    }
+
+    // ============================================================================
+    // env_var validation tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_env_var_with_op_uri_requires_env_var() {
+        // When credential_key is an op:// URI, env_var must be set because
+        // uppercasing the URI produces a nonsensical env var name.
+        let mut cred = header_cred_builder();
+        cred.credential_key = "op://Development/OpenAI/credential".to_string();
+        cred.env_var = None;
+        let result = validate_custom_credential("openai", &cred);
+        let err = result.expect_err("op:// URI without env_var should be rejected");
+        assert!(err.to_string().contains("env_var is required"));
+    }
+
+    #[test]
+    fn test_validate_env_var_with_op_uri_and_env_var_ok() {
+        let mut cred = header_cred_builder();
+        cred.credential_key = "op://Development/OpenAI/credential".to_string();
+        cred.env_var = Some("OPENAI_API_KEY".to_string());
+        assert!(validate_custom_credential("openai", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_var_empty_rejected() {
+        let mut cred = header_cred_builder();
+        cred.env_var = Some("".to_string());
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("empty env_var should be rejected");
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_env_var_invalid_chars_rejected() {
+        let mut cred = header_cred_builder();
+        cred.env_var = Some("OPEN-AI_KEY".to_string()); // hyphens not allowed
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("env_var with hyphens should be rejected");
+        assert!(err.to_string().contains("alphanumeric"));
+    }
+
+    #[test]
+    fn test_validate_env_var_optional_for_keyring_keys() {
+        // When credential_key is a plain keyring name, env_var is optional
+        // (backward compat: falls back to cred_key.to_uppercase())
+        let mut cred = header_cred_builder();
+        cred.env_var = None;
+        assert!(validate_custom_credential("test", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_var_with_keyring_key_ok() {
+        // Explicit env_var with a keyring key is allowed (overrides default)
+        let mut cred = header_cred_builder();
+        cred.env_var = Some("MY_CUSTOM_VAR".to_string());
+        assert!(validate_custom_credential("test", &cred).is_ok());
     }
 }

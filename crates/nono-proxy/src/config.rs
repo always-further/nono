@@ -121,6 +121,14 @@ pub struct RouteConfig {
     /// Only used when inject_mode is "query_param".
     #[serde(default)]
     pub query_param_name: Option<String>,
+
+    /// Explicit environment variable name for the phantom token (e.g., "OPENAI_API_KEY").
+    ///
+    /// When set, this is used as the SDK API key env var name instead of deriving
+    /// it from `credential_key.to_uppercase()`. Required when `credential_key` is
+    /// an `op://` URI (which would produce a nonsensical env var name).
+    #[serde(default)]
+    pub env_var: Option<String>,
 }
 
 fn default_inject_header() -> String {
