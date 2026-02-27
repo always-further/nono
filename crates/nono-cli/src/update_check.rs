@@ -108,11 +108,13 @@ pub fn start_background_check() -> Option<UpdateCheckHandle> {
     let elapsed = now.signed_duration_since(state.last_check).num_seconds();
 
     if elapsed < CHECK_INTERVAL_SECS {
-        // Return cached result without spawning a thread
+        // Return cached result without spawning a thread, but only if the
+        // cached version is actually newer than what we're running
+        let current = env!("CARGO_PKG_VERSION");
         if state
             .cached_result
             .as_ref()
-            .is_some_and(|r| r.update_available)
+            .is_some_and(|r| r.update_available && is_newer_version(current, &r.latest_version))
         {
             let result = Arc::new(Mutex::new(state.cached_result));
             return Some(UpdateCheckHandle {
@@ -129,6 +131,7 @@ pub fn start_background_check() -> Option<UpdateCheckHandle> {
     let result_clone = Arc::clone(&result);
 
     let handle = thread::spawn(move || {
+        let current = env!("CARGO_PKG_VERSION");
         if let Some(info) = perform_check(&uuid) {
             let updated_state = UpdateCheckState {
                 uuid,
@@ -137,7 +140,7 @@ pub fn start_background_check() -> Option<UpdateCheckHandle> {
             };
             let _ = save_state(&updated_state);
 
-            if info.update_available {
+            if info.update_available && is_newer_version(current, &info.latest_version) {
                 if let Ok(mut guard) = result_clone.lock() {
                     *guard = Some(info);
                 }
@@ -234,6 +237,22 @@ fn generate_uuid() -> String {
 /// Uses `NONO_UPDATE_URL` env var to set your own URL for testing or private instances. Defaults to the public service.
 fn update_url() -> String {
     std::env::var("NONO_UPDATE_URL").unwrap_or_else(|_| UPDATE_SERVICE_URL.to_string())
+}
+
+/// Compare two semver version strings, returning true if `latest` is strictly newer than `current`.
+fn is_newer_version(current: &str, latest: &str) -> bool {
+    let parse = |s: &str| -> Option<(u64, u64, u64)> {
+        let s = s.strip_prefix('v').unwrap_or(s);
+        let mut parts = s.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts.next()?.parse().ok()?;
+        Some((major, minor, patch))
+    };
+    match (parse(current), parse(latest)) {
+        (Some(c), Some(l)) => l > c,
+        _ => false,
+    }
 }
 
 /// Perform the HTTP check against the update service
@@ -356,6 +375,31 @@ mod tests {
         let handle = start_background_check();
         assert!(handle.is_none());
         std::env::remove_var("NONO_NO_UPDATE_CHECK");
+    }
+
+    #[test]
+    fn test_is_newer_version() {
+        // Strictly newer
+        assert!(is_newer_version("0.6.0", "0.6.1"));
+        assert!(is_newer_version("0.6.1", "0.7.0"));
+        assert!(is_newer_version("0.6.1", "1.0.0"));
+
+        // Same version
+        assert!(!is_newer_version("0.6.1", "0.6.1"));
+
+        // Older (downgrade)
+        assert!(!is_newer_version("0.6.1", "0.6.0"));
+        assert!(!is_newer_version("1.0.0", "0.9.9"));
+
+        // With v prefix
+        assert!(is_newer_version("v0.6.0", "v0.6.1"));
+        assert!(is_newer_version("0.6.0", "v0.6.1"));
+        assert!(!is_newer_version("v0.6.1", "0.6.0"));
+
+        // Malformed input
+        assert!(!is_newer_version("bad", "0.6.1"));
+        assert!(!is_newer_version("0.6.1", "bad"));
+        assert!(!is_newer_version("", ""));
     }
 
     #[test]

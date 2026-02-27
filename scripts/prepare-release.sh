@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Helper script to prepare a release for nono workspace
-# Usage: ./scripts/prepare-release.sh
+# Usage: ./scripts/prepare-release.sh [VERSION]
+# If VERSION is provided (e.g., 0.6.0), it overrides the auto-detected version.
 
 set -euo pipefail
 
@@ -15,10 +16,14 @@ fi
 CURRENT_VERSION=$(grep '^version = ' crates/nono/Cargo.toml | head -1 | cut -d'"' -f2)
 echo "Current version: ${CURRENT_VERSION}"
 
-# Calculate next version based on commits (returns with 'v' prefix like 'v0.2.2')
-NEXT_VERSION_WITH_V=$(git cliff --bumped-version)
-# Strip the 'v' prefix for Cargo.toml
-NEXT_VERSION=${NEXT_VERSION_WITH_V#v}
+# Determine next version: use argument if provided, otherwise auto-detect
+if [[ -n "${1:-}" ]]; then
+    NEXT_VERSION="${1#v}"
+    NEXT_VERSION_WITH_V="v${NEXT_VERSION}"
+else
+    NEXT_VERSION_WITH_V=$(git cliff --bumped-version)
+    NEXT_VERSION=${NEXT_VERSION_WITH_V#v}
+fi
 echo "Next version: ${NEXT_VERSION}"
 
 # Ask for confirmation
@@ -61,6 +66,7 @@ cargo check --quiet
 
 # Generate changelog (git cliff expects the tag WITH 'v' prefix)
 echo "Generating CHANGELOG.md..."
+touch CHANGELOG.md
 git cliff --unreleased --tag "${NEXT_VERSION_WITH_V}" --prepend CHANGELOG.md
 
 echo ""
