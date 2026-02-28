@@ -1311,7 +1311,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
                      {}  For network API keys, use a profile with proxy_credentials for credential isolation.",
                     "warning".yellow(),
                     display_account,
-                    " ".repeat(10),
+                    " ".repeat(11),
                 );
             }
         }
