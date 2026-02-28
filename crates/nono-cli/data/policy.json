@@ -211,7 +211,9 @@
           "/Applications",
           "/cores",
           "/opt",
-          "/Volumes"
+          "/Volumes",
+          "/run",
+          "/nix"
         ]
       },
       "symlink_pairs": {
