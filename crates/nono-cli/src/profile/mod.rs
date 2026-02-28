@@ -685,7 +685,7 @@ fn get_user_profile_path(name: &str) -> Result<PathBuf> {
 /// - If `XDG_CONFIG_HOME` is set, it must be absolute.
 /// - If absolute, we canonicalize it to avoid path confusion through symlinks.
 /// - If invalid (relative or cannot be canonicalized), we fall back to `$HOME/.config`.
-fn resolve_user_config_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_user_config_dir() -> Result<PathBuf> {
     if let Ok(raw) = std::env::var("XDG_CONFIG_HOME") {
         let path = PathBuf::from(&raw);
         if path.is_absolute() {

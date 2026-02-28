@@ -336,8 +336,7 @@ impl SetupRunner {
         println!("[5/{}] Setting up example profiles...", self.total_phases());
 
         // Create profile directory
-        let profile_dir = dirs::config_dir()
-            .ok_or_else(|| NonoError::Setup("Failed to determine config directory".to_string()))?
+        let profile_dir = crate::profile::resolve_user_config_dir()?
             .join("nono")
             .join("profiles");
 
@@ -420,10 +419,10 @@ impl SetupRunner {
 
             if self.generate_profiles {
                 println!("Custom profiles:");
-                let profile_dir = dirs::config_dir()
+                let profile_dir = crate::profile::resolve_user_config_dir()
                     .map(|p| p.join("nono").join("profiles"))
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "~/.config/nono/profiles".to_string());
+                    .unwrap_or_else(|_| "~/.config/nono/profiles".to_string());
                 println!("  Edit example profiles in: {}", profile_dir);
                 println!();
             }
@@ -500,3 +499,41 @@ const DATA_PROCESSING_PROFILE: &str = r#"{
   }
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use tempfile::tempdir;
+
+    /// Profiles written by `setup --profiles` must be loadable by `load_profile()`.
+    ///
+    /// This is a round-trip test: run setup_profiles() to write example profiles,
+    /// then load one by name through the normal profile loader. Both must use the
+    /// same directory resolution — previously setup used `dirs::config_dir()` which
+    /// returns `~/Library/Application Support` on macOS, while the loader used
+    /// `resolve_user_config_dir()` returning `~/.config`. This test catches that.
+    #[test]
+    fn test_setup_profiles_loadable_by_name() {
+        let tmp = tempdir().expect("tempdir");
+
+        // Point HOME at a tmpdir so both setup and loader derive paths
+        // under our control.
+        env::set_var("HOME", tmp.path());
+        env::remove_var("XDG_CONFIG_HOME");
+
+        // Run the actual setup code that writes example profiles.
+        let runner = SetupRunner {
+            check_only: false,
+            generate_profiles: true,
+            show_shell_integration: false,
+            verbose: 0,
+        };
+        runner.setup_profiles().expect("setup_profiles failed");
+
+        // The loader must find the example profiles by name.
+        let profile = crate::profile::load_profile("example-agent")
+            .expect("example-agent profile written by setup was not found by load_profile()");
+        assert_eq!(profile.meta.name, "example-agent");
+    }
+}
