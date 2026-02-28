@@ -101,6 +101,11 @@ doc-lib:
 ci: check test
 	@echo "CI checks passed"
 
+# Run CI in a Linux (Debian Bookworm) container
+test-docker:
+	docker build -f Dockerfile.test -t nono-test .
+	docker run --rm nono-test
+
 # Help
 help:
 	@echo "nono Makefile targets:"
@@ -131,4 +136,5 @@ help:
 	@echo "  make clean          Clean build artifacts"
 	@echo "  make doc            Generate and open documentation"
 	@echo "  make ci             Simulate CI checks"
+	@echo "  make test-docker    Run CI in Linux container"
 	@echo "  make help           Show this help"

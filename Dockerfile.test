@@ -1,0 +1,40 @@
+FROM rust:1-bookworm
+
+# System deps for keyring's sync-secret-service backend (D-Bus)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libdbus-1-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add clippy rustfmt
+
+WORKDIR /src
+
+# Copy manifests first for dependency layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/nono/Cargo.toml crates/nono/Cargo.toml
+COPY crates/nono-cli/Cargo.toml crates/nono-cli/Cargo.toml
+COPY crates/nono-cli/build.rs crates/nono-cli/build.rs
+COPY crates/nono-proxy/Cargo.toml crates/nono-proxy/Cargo.toml
+COPY bindings/c/Cargo.toml bindings/c/Cargo.toml
+
+# Create stub source files so cargo can resolve the workspace
+RUN mkdir -p crates/nono/src crates/nono-cli/src crates/nono-cli/data \
+             crates/nono-proxy/src bindings/c/src \
+    && echo "" > crates/nono/src/lib.rs \
+    && echo "fn main() {}" > crates/nono-cli/src/main.rs \
+    && echo "{}" > crates/nono-cli/data/policy.json \
+    && echo "" > crates/nono-proxy/src/lib.rs \
+    && echo "" > bindings/c/src/lib.rs
+
+# Pre-build dependencies (cached unless Cargo.toml/lock changes)
+RUN cargo build --workspace 2>/dev/null || true
+RUN cargo build --workspace --tests 2>/dev/null || true
+
+# Copy real source (busts cache only when src changes)
+COPY . .
+
+# Force nono-cli rebuild so build.rs re-embeds data files
+# (the dep-caching step left stale OUT_DIR artifacts from the stubs)
+RUN cargo clean -p nono-cli
+
+# Run full CI: clippy + fmt + tests
+CMD ["make", "ci"]
