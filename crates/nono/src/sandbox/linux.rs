@@ -51,6 +51,8 @@ pub fn support_info() -> SupportInfo {
 fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
     match access {
         AccessMode::Read => {
+            // Read access includes basic file/dir reading and execution.
+            // IoctlDev is included for interactive TTY applications (ABI v5+).
             AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute | AccessFs::IoctlDev
         }
         AccessMode::Write => {
