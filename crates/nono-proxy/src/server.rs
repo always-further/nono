@@ -93,9 +93,12 @@ impl ProxyHandle {
             let url = format!("http://127.0.0.1:{}/{}", self.port, route.prefix);
             vars.push((base_url_name, url));
 
-            // API key set to session token (phantom token pattern)
-            // The credential_key (e.g., "openai_api_key") uppercased gives the env var name
-            if let Some(ref cred_key) = route.credential_key {
+            // API key set to session token (phantom token pattern).
+            // Use explicit env_var if set (required for op:// URIs), otherwise
+            // fall back to uppercasing the credential_key (e.g., "openai_api_key" -> "OPENAI_API_KEY").
+            if let Some(ref env_var) = route.env_var {
+                vars.push((env_var.clone(), self.token.to_string()));
+            } else if let Some(ref cred_key) = route.credential_key {
                 let api_key_name = cred_key.to_uppercase();
                 vars.push((api_key_name, self.token.to_string()));
             }
@@ -377,6 +380,7 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             }],
             ..Default::default()
         };
@@ -388,5 +392,97 @@ mod tests {
         assert!(vars[0].1.contains("/openai"));
 
         handle.shutdown();
+    }
+
+    #[test]
+    fn test_proxy_credential_env_vars_fallback_to_uppercase_key() {
+        // When env_var is None and credential_key is set, the env var name
+        // should be derived from uppercasing credential_key. This is the
+        // backward-compatible path for keyring-backed credentials.
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let handle = ProxyHandle {
+            port: 12345,
+            token: Zeroizing::new("test_token".to_string()),
+            shutdown_tx,
+        };
+        let config = ProxyConfig {
+            routes: vec![crate::config::RouteConfig {
+                prefix: "openai".to_string(),
+                upstream: "https://api.openai.com".to_string(),
+                credential_key: Some("openai_api_key".to_string()),
+                inject_mode: crate::config::InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: None, // No explicit env_var — should fall back to uppercase
+            }],
+            ..Default::default()
+        };
+
+        let vars = handle.credential_env_vars(&config);
+        assert_eq!(vars.len(), 2); // BASE_URL + API_KEY
+
+        // Should derive OPENAI_API_KEY from uppercasing "openai_api_key"
+        let api_key_var = vars.iter().find(|(k, _)| k == "OPENAI_API_KEY");
+        assert!(
+            api_key_var.is_some(),
+            "Should derive env var name from credential_key.to_uppercase()"
+        );
+
+        let (_, val) = api_key_var.expect("OPENAI_API_KEY should exist");
+        assert_eq!(val, "test_token");
+    }
+
+    #[test]
+    fn test_proxy_credential_env_vars_with_explicit_env_var() {
+        // When env_var is set on a route, it should be used instead of
+        // deriving from credential_key. This is essential for op:// URIs
+        // where uppercasing produces nonsensical env var names.
+        //
+        // We construct a ProxyHandle directly to test env var generation
+        // without starting a real proxy (which would try to load credentials).
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let handle = ProxyHandle {
+            port: 12345,
+            token: Zeroizing::new("test_token".to_string()),
+            shutdown_tx,
+        };
+        let config = ProxyConfig {
+            routes: vec![crate::config::RouteConfig {
+                prefix: "openai".to_string(),
+                upstream: "https://api.openai.com".to_string(),
+                credential_key: Some("op://Development/OpenAI/credential".to_string()),
+                inject_mode: crate::config::InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: Some("OPENAI_API_KEY".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let vars = handle.credential_env_vars(&config);
+        assert_eq!(vars.len(), 2); // BASE_URL + API_KEY
+
+        let api_key_var = vars.iter().find(|(k, _)| k == "OPENAI_API_KEY");
+        assert!(
+            api_key_var.is_some(),
+            "Should use explicit env_var name, not derive from credential_key"
+        );
+
+        // Verify the value is the phantom token, not the real credential
+        let (_, val) = api_key_var.expect("OPENAI_API_KEY var should exist");
+        assert_eq!(val, "test_token");
+
+        // Verify no nonsensical OP:// env var was generated
+        let bad_var = vars.iter().find(|(k, _)| k.starts_with("OP://"));
+        assert!(
+            bad_var.is_none(),
+            "Should not generate env var from op:// URI uppercase"
+        );
     }
 }

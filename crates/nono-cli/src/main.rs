@@ -427,11 +427,6 @@ fn run_sandbox(
         .map(|r| r.verified_paths())
         .unwrap_or_default();
 
-    let proxy_active = matches!(
-        prepared.caps.network_mode(),
-        nono::NetworkMode::ProxyOnly { .. }
-    );
-
     // Merge network profile from CLI args and profile config
     let network_profile = args
         .network_profile
@@ -441,6 +436,13 @@ fn run_sandbox(
     proxy_allow_hosts.extend(args.proxy_allow.clone());
     let mut proxy_credentials = prepared.proxy_credentials.clone();
     proxy_credentials.extend(args.proxy_credential.clone());
+
+    // The proxy is needed when the network mode is ProxyOnly OR when there are
+    // credential routes to inject (from profile proxy_credentials or --proxy-credential).
+    let proxy_active = matches!(
+        prepared.caps.network_mode(),
+        nono::NetworkMode::ProxyOnly { .. }
+    ) || !proxy_credentials.is_empty();
 
     execute_sandboxed(
         program,
@@ -1307,29 +1309,54 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .unwrap_or_default();
 
     let secret_mappings =
-        nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets);
+        nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets)?;
 
-    // Load credentials from keystore BEFORE sandbox is applied
+    // Load credentials from keystore/1Password BEFORE sandbox is applied
     let loaded_secrets = if !secret_mappings.is_empty() {
+        let op_count = secret_mappings
+            .keys()
+            .filter(|k| nono::keystore::is_op_uri(k))
+            .count();
+        let keyring_count = secret_mappings.len() - op_count;
+
         info!(
-            "Loading {} credential(s) from system keystore",
-            secret_mappings.len()
+            "Loading {} credential(s) (keyring: {}, 1Password: {})",
+            secret_mappings.len(),
+            keyring_count,
+            op_count
         );
         if !silent {
-            eprintln!(
-                "  Loading {} credential(s) from keystore...",
-                secret_mappings.len()
-            );
+            if keyring_count > 0 && op_count > 0 {
+                eprintln!(
+                    "  Loading {} credential(s) ({} from keystore, {} from 1Password)...",
+                    secret_mappings.len(),
+                    keyring_count,
+                    op_count
+                );
+            } else if op_count > 0 {
+                eprintln!(
+                    "  Loading {} credential(s) from 1Password...",
+                    secret_mappings.len()
+                );
+            } else {
+                eprintln!(
+                    "  Loading {} credential(s) from keystore...",
+                    secret_mappings.len()
+                );
+            }
             // Warn that env credentials are visible to the sandboxed process
             for account in secret_mappings.keys() {
+                let display_account = if nono::keystore::is_op_uri(account) {
+                    nono::keystore::redact_op_uri(account)
+                } else {
+                    account.to_string()
+                };
                 eprintln!(
-                    "  {}: --env-credential '{}' exposes the API key to the sandboxed process.",
+                    "  {}: --env-credential '{}' exposes the secret directly to the sandboxed process.\n\
+                     {}  For network API keys, use a profile with proxy_credentials for credential isolation.",
                     "warning".yellow(),
-                    account,
-                );
-                eprintln!(
-                    "           Use --proxy-credential '{}' instead for credential isolation with network API keys.",
-                    account,
+                    display_account,
+                    " ".repeat(11),
                 );
             }
         }

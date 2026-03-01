@@ -68,11 +68,11 @@ pub enum Commands {
     # Allow specific files (not directories)
     nono run --allow . --write-file ~/.claude.json claude
 
-    # Load secrets from system keystore (profile defines which secrets)
-    nono run --profile claude-code --secrets claude
+    # Load secrets from system keystore (comma-separated keyring names)
+    nono run --allow . --env-credential openai_api_key,anthropic_api_key -- claude
 
-    # Load specific secrets from keystore (comma-separated)
-    nono run --allow . --secrets openai_api_key,anthropic_api_key -- claude
+    # Load secret from 1Password (op:// URI with explicit env var name)
+    nono run --allow . --env-credential 'op://vault/item/field=OPENAI_API_KEY' -- claude
 ")]
     Run(Box<RunArgs>),
 
@@ -277,11 +277,12 @@ pub struct SandboxArgs {
     pub block_command: Vec<String>,
 
     // === Credential options ===
-    /// Load credentials from system keystore and inject as environment variables.
+    /// Load credentials and inject as environment variables.
     /// The sandboxed process can read these credentials directly.
     /// For network API keys, prefer --proxy-credential for credential isolation.
-    /// Specify comma-separated account names to load from the 'nono' keyring service.
-    #[arg(long, value_name = "ACCOUNTS")]
+    /// Comma-separated entries: keyring names (auto-uppercased to env var) or
+    /// 1Password URIs with explicit var (op://vault/item/field=MY_VAR).
+    #[arg(long, value_name = "CREDENTIALS")]
     pub env_credential: Option<String>,
 
     // === Profile options ===

@@ -61,7 +61,9 @@ pub mod undo;
 pub use capability::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NetworkMode};
 pub use diagnostic::{DenialReason, DenialRecord, DiagnosticFormatter, DiagnosticMode};
 pub use error::{NonoError, Result};
-pub use keystore::{load_secrets, LoadedSecret};
+pub use keystore::{
+    is_op_uri, load_secret_by_ref, load_secrets, redact_op_uri, validate_op_uri, LoadedSecret,
+};
 pub use net_filter::{FilterResult, HostFilter};
 pub use sandbox::{Sandbox, SupportInfo};
 pub use state::SandboxState;
