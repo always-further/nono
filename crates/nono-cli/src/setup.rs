@@ -515,6 +515,9 @@ mod tests {
     /// `resolve_user_config_dir()` returning `~/.config`. This test catches that.
     #[test]
     fn test_setup_profiles_loadable_by_name() {
+        let original_home = env::var("HOME").ok();
+        let original_xdg = env::var("XDG_CONFIG_HOME").ok();
+
         let tmp = tempdir().expect("tempdir");
 
         // Point HOME at a tmpdir so both setup and loader derive paths
@@ -535,5 +538,15 @@ mod tests {
         let profile = crate::profile::load_profile("example-agent")
             .expect("example-agent profile written by setup was not found by load_profile()");
         assert_eq!(profile.meta.name, "example-agent");
+
+        // Restore env vars to avoid polluting parallel tests.
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(xdg) = original_xdg {
+            env::set_var("XDG_CONFIG_HOME", xdg);
+        }
     }
 }
