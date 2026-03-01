@@ -354,8 +354,8 @@ fn resolve_single_group(
             add_deny_access_rules(path_str, caps, deny_paths)?;
         }
 
-        // Seatbelt-only: global unlink denial. Landlock handles file deletion
-        // via AccessFs flags in access_to_landlock() (RemoveDir excluded from write).
+        // Seatbelt-only: global unlink denial. Landlock handles file/directory
+        // deletion via AccessFs flags in access_to_landlock() (RemoveFile + RemoveDir).
         if deny.unlink && cfg!(target_os = "macos") {
             caps.add_platform_rule("(deny file-write-unlink)")?;
         }
