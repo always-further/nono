@@ -235,7 +235,7 @@ nono run --allow-cwd --network-profile minimal --proxy-allow custom-api.example.
 
 #### `--proxy-credential`
 
-Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name.
+Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name, or from 1Password when the profile's `credential_key` is an `op://` URI.
 
 ```bash
 # Inject OpenAI credentials (loads from keyring account "openai_api_key")
