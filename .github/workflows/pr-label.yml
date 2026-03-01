@@ -1,0 +1,67 @@
+name: PR Auto-Label
+
+on:
+  pull_request_target:
+    types: [opened, edited]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label:
+    name: Label from Title
+    if: ${{ !startsWith(github.head_ref, 'dependabot/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse title and apply label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Map conventional commit types to labels
+          declare -A TYPE_LABELS=(
+            [feat]=feature
+            [fix]=bug
+            [docs]=documentation
+            [chore]=chore
+            [refactor]=refactor
+            [test]=test
+            [ci]=ci
+            [perf]=performance
+            [build]=build
+          )
+
+          ALL_TYPE_LABELS="feature bug documentation chore refactor test ci performance build"
+
+          # Extract type from PR title (e.g., "feat(scope): description" -> "feat")
+          if [[ "$PR_TITLE" =~ ^([a-z]+)(\(.+\))?!?:\ .+ ]]; then
+            TYPE="${BASH_REMATCH[1]}"
+            LABEL="${TYPE_LABELS[$TYPE]}"
+          else
+            echo "PR title does not match conventional commit format, skipping"
+            exit 0
+          fi
+
+          if [[ -z "$LABEL" ]]; then
+            echo "Unknown type '$TYPE', skipping"
+            exit 0
+          fi
+
+          echo "Detected type: $TYPE -> label: $LABEL"
+
+          # Remove any existing type labels that don't match
+          CURRENT_LABELS=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" --json labels --jq '.labels[].name')
+          for existing in $CURRENT_LABELS; do
+            for type_label in $ALL_TYPE_LABELS; do
+              if [[ "$existing" == "$type_label" && "$existing" != "$LABEL" ]]; then
+                echo "Removing stale label: $existing"
+                gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --remove-label "$existing"
+              fi
+            done
+          done
+
+          # Add the correct label
+          echo "Adding label: $LABEL"
+          gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --add-label "$LABEL"

@@ -1,0 +1,34 @@
+name: PR Title Lint
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    name: Conventional Commit Title
+    if: ${{ !startsWith(github.head_ref, 'dependabot/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            docs
+            refactor
+            test
+            ci
+            perf
+            build
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The subject "{subject}" must not start with an uppercase letter.
+            Use lowercase: "feat: add feature" not "feat: Add feature".
