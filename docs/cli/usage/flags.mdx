@@ -349,11 +349,14 @@ nono run --allow-cwd --block-command my-dangerous-tool -- my-script.sh
 
 #### `--env-credential`
 
-Load credentials from the system keystore (macOS Keychain / Linux Secret Service) and inject them as environment variables. The sandboxed process can read these credentials directly.
+Load credentials from the system keystore (macOS Keychain / Linux Secret Service) or 1Password and inject them as environment variables. The sandboxed process can read these credentials directly.
 
 ```bash
 # Load specific credentials by account name
 nono run --allow-cwd --env-credential openai_api_key,anthropic_api_key -- my-agent
+
+# Load from 1Password (op:// URI with =VAR_NAME suffix)
+nono run --allow-cwd --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' -- my-agent
 
 # Use with profile (loads credentials defined in profile's [env_credentials] section)
 nono run --profile claude-code --env-credential -- claude
