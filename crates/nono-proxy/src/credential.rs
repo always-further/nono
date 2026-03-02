@@ -1,6 +1,6 @@
 //! Credential loading and management for reverse proxy mode.
 //!
-//! Loads API credentials from the system keystore at proxy startup.
+//! Loads API credentials from the system keystore or 1Password at proxy startup.
 //! Credentials are stored in `Zeroizing<String>` and injected into
 //! requests via headers, URL paths, query parameters, or Basic Auth.
 //! The sandboxed agent never sees the real credentials.
@@ -9,11 +9,10 @@ use crate::config::{InjectMode, RouteConfig};
 use crate::error::{ProxyError, Result};
 use base64::Engine;
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::debug;
 use zeroize::Zeroizing;
 
 /// A loaded credential ready for injection.
-#[derive(Debug)]
 pub struct LoadedCredential {
     /// Injection mode
     pub inject_mode: InjectMode,
@@ -39,6 +38,23 @@ pub struct LoadedCredential {
     pub query_param_name: Option<String>,
 }
 
+/// Custom Debug impl that redacts secret values to prevent accidental leakage
+/// in logs, panic messages, or debug output.
+impl std::fmt::Debug for LoadedCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedCredential")
+            .field("inject_mode", &self.inject_mode)
+            .field("upstream", &self.upstream)
+            .field("raw_credential", &"[REDACTED]")
+            .field("header_name", &self.header_name)
+            .field("header_value", &"[REDACTED]")
+            .field("path_pattern", &self.path_pattern)
+            .field("path_replacement", &self.path_replacement)
+            .field("query_param_name", &self.query_param_name)
+            .finish()
+    }
+}
+
 /// Credential store for all configured routes.
 #[derive(Debug)]
 pub struct CredentialStore {
@@ -61,7 +77,8 @@ impl CredentialStore {
                     route.prefix, route.inject_mode
                 );
 
-                let secret = load_from_keyring(key)?;
+                let secret = nono::keystore::load_secret_by_ref(KEYRING_SERVICE, key)
+                    .map_err(|e| ProxyError::Credential(e.to_string()))?;
 
                 // Format header value based on mode
                 let header_value = match route.inject_mode {
@@ -125,32 +142,8 @@ impl CredentialStore {
 }
 
 /// The keyring service name used by nono for all credentials.
-const KEYRING_SERVICE: &str = "nono";
-
-/// Load a secret from the system keyring.
-fn load_from_keyring(account: &str) -> Result<Zeroizing<String>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, account).map_err(|e| {
-        ProxyError::Credential(format!(
-            "failed to create keyring entry for '{}': {}",
-            account, e
-        ))
-    })?;
-
-    match entry.get_password() {
-        Ok(password) => Ok(Zeroizing::new(password)),
-        Err(keyring::Error::NoEntry) => {
-            warn!("No keyring entry found for account: {}", account);
-            Err(ProxyError::Credential(format!(
-                "secret not found in keyring for account '{}'",
-                account
-            )))
-        }
-        Err(e) => Err(ProxyError::Credential(format!(
-            "failed to load secret for '{}': {}",
-            account, e
-        ))),
-    }
-}
+/// Uses the same constant as `nono::keystore::DEFAULT_SERVICE` to ensure consistency.
+const KEYRING_SERVICE: &str = nono::keystore::DEFAULT_SERVICE;
 
 #[cfg(test)]
 mod tests {
@@ -165,6 +158,44 @@ mod tests {
     }
 
     #[test]
+    fn test_loaded_credential_debug_redacts_secrets() {
+        // Security: Debug output must NEVER contain real secret values.
+        // This prevents accidental leakage in logs, panic messages, or
+        // tracing output at debug level.
+        let cred = LoadedCredential {
+            inject_mode: InjectMode::Header,
+            upstream: "https://api.openai.com".to_string(),
+            raw_credential: Zeroizing::new("sk-secret-12345".to_string()),
+            header_name: "Authorization".to_string(),
+            header_value: Zeroizing::new("Bearer sk-secret-12345".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+        };
+
+        let debug_output = format!("{:?}", cred);
+
+        // Must contain REDACTED markers
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED], got: {}",
+            debug_output
+        );
+        // Must NOT contain the actual secret
+        assert!(
+            !debug_output.contains("sk-secret-12345"),
+            "Debug output must not contain the real secret"
+        );
+        assert!(
+            !debug_output.contains("Bearer sk-secret"),
+            "Debug output must not contain the formatted secret"
+        );
+        // Non-secret fields should still be visible
+        assert!(debug_output.contains("api.openai.com"));
+        assert!(debug_output.contains("Authorization"));
+    }
+
+    #[test]
     fn test_load_no_credential_routes() {
         let routes = vec![RouteConfig {
             prefix: "/test".to_string(),
@@ -176,6 +207,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            env_var: None,
         }];
         let store = CredentialStore::load(&routes);
         assert!(store.is_ok());

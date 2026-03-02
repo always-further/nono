@@ -94,15 +94,18 @@ A typical workflow for creating a new profile:
 nono learn --json -- my-agent
 
 # 2. Create a profile based on the output
-cat > ~/.config/nono/profiles/my-agent.toml << 'EOF'
-[meta]
-name = "my-agent"
-version = "1.0.0"
-
-[filesystem]
-read = ["/home/luke/data"]
-write = ["/tmp/my-tool-cache"]
-allow = ["/home/luke/project"]
+cat > ~/.config/nono/profiles/my-agent.json << 'EOF'
+{
+  "meta": {
+    "name": "my-agent",
+    "version": "1.0.0"
+  },
+  "filesystem": {
+    "read": ["/home/luke/data"],
+    "write": ["/tmp/my-tool-cache"],
+    "allow": ["/home/luke/project"]
+  }
+}
 EOF
 
 # 3. Verify the profile covers everything

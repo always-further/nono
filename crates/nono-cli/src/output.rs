@@ -9,16 +9,26 @@ use std::path::Path;
 
 /// Hedgehog puns for the banner
 const QUOTES: &[&str] = &[
-    "no yolo, just nono",
-    "all your base are not belong to us",
-    "Не положено!",
-    "keep calm and nono on",
-    "不可说的秘密",
-    "no nono no cry!",
-    "नहीं। बस।",
-    "nono, nono, nono, nono - there's a limit",
-    "NONO 危险",
-    "",
+    "¡Hola Nono!",
+    "Bonjour Nono !",
+    "Hallo Nono!",
+    "Ciao Nono!",
+    "Olá Nono!",
+    "こんにちは、Nono！",
+    "안녕하세요, Nono!",
+    "你好，Nono！",
+    "!مرحبًا نونو",
+    "नमस्ते नोनो!",
+    "Hej Nono!",
+    "Merhaba Nono!",
+    "Halo Nono!",
+    "Xin chào Nono!",
+    "Sawubona Nono!",
+    "Γεια σου Nono!",
+    "Привет, Nono!",
+    "Cześć Nono!",
+    "Shalom Nono!",
+    "Kamusta Nono!",
 ];
 
 /// Print the nono banner with hedgehog mascot
@@ -273,6 +283,97 @@ pub fn print_rollback_session_summary(changes: &[nono::undo::Change], silent: bo
         changes.len(),
         parts.join(", ")
     );
+}
+
+/// Detect how nono was installed based on the binary's path.
+fn detect_install_command() -> &'static str {
+    let exe = match std::env::current_exe().and_then(|p| p.canonicalize()) {
+        Ok(p) => p,
+        Err(_) => return "cargo install nono-cli",
+    };
+    let path = exe.to_string_lossy();
+
+    // Homebrew (macOS Intel or Apple Silicon)
+    if path.contains("/opt/homebrew/") || path.contains("/usr/local/Cellar/") {
+        return "brew upgrade nono";
+    }
+
+    // Cargo
+    if path.contains("/.cargo/bin/") {
+        return "cargo install nono-cli";
+    }
+
+    // Linux system package manager
+    if path.starts_with("/usr/bin/") || path.starts_with("/usr/local/bin/") {
+        if Path::new("/usr/bin/apt").exists() {
+            return "sudo apt update && sudo apt upgrade nono";
+        }
+        if Path::new("/usr/bin/dnf").exists() {
+            return "sudo dnf upgrade nono";
+        }
+        // Fallback for other system installs
+        return "upgrade nono via your package manager";
+    }
+
+    "cargo install nono-cli"
+}
+
+/// Strip ANSI escape sequences and non-printable characters from a string.
+///
+/// Prevents terminal injection from a compromised update server.
+fn sanitize_terminal_output(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC and the entire escape sequence
+            if let Some(next) = chars.next() {
+                if next == '[' {
+                    // CSI sequence: skip until a letter is found
+                    for seq_char in chars.by_ref() {
+                        if seq_char.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                // OSC, other sequences: already consumed the next char, continue
+            }
+        } else if c.is_control() && c != '\n' {
+            // Strip control characters (except newline)
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Print update notification if a newer version is available
+pub fn print_update_notification(info: &crate::update_check::UpdateInfo, silent: bool) {
+    if silent {
+        return;
+    }
+
+    let version = sanitize_terminal_output(&info.latest_version);
+    eprintln!(
+        "  {} nono {} is available (current: {})",
+        "Update:".yellow().bold(),
+        version.green(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    if let Some(ref msg) = info.message {
+        let safe_msg = sanitize_terminal_output(msg);
+        eprintln!("  {}", safe_msg.truecolor(150, 150, 150));
+    }
+    let install_cmd = detect_install_command();
+    eprintln!(
+        "  {}",
+        format!("Run: {install_cmd}").truecolor(150, 150, 150)
+    );
+    if let Some(ref url) = info.release_url {
+        let safe_url = sanitize_terminal_output(url);
+        eprintln!("  {}", safe_url.truecolor(100, 100, 100));
+    }
+    eprintln!();
 }
 
 /// Prompt the user to confirm sharing the current working directory.

@@ -68,11 +68,11 @@ pub enum Commands {
     # Allow specific files (not directories)
     nono run --allow . --write-file ~/.claude.json claude
 
-    # Load secrets from system keystore (profile defines which secrets)
-    nono run --profile claude-code --secrets claude
+    # Load secrets from system keystore (comma-separated keyring names)
+    nono run --allow . --env-credential openai_api_key,anthropic_api_key -- claude
 
-    # Load specific secrets from keystore (comma-separated)
-    nono run --allow . --secrets openai_api_key,anthropic_api_key -- claude
+    # Load secret from 1Password (op:// URI with explicit env var name)
+    nono run --allow . --env-credential 'op://vault/item/field=OPENAI_API_KEY' -- claude
 ")]
     Run(Box<RunArgs>),
 
@@ -260,6 +260,12 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "HOST:PORT")]
     pub external_proxy: Option<String>,
 
+    /// Fixed port for the credential injection proxy (default: OS-assigned).
+    /// Use this when the sandboxed application requires a known proxy port
+    /// (e.g., for base URL configuration that can't read environment variables).
+    #[arg(long, value_name = "PORT")]
+    pub proxy_port: Option<u16>,
+
     // === Command blocking ===
     /// Allow a normally-blocked dangerous command (use with caution).
     /// By default, destructive commands like rm, dd, chmod are blocked.
@@ -271,11 +277,12 @@ pub struct SandboxArgs {
     pub block_command: Vec<String>,
 
     // === Credential options ===
-    /// Load credentials from system keystore and inject as environment variables.
+    /// Load credentials and inject as environment variables.
     /// The sandboxed process can read these credentials directly.
     /// For network API keys, prefer --proxy-credential for credential isolation.
-    /// Specify comma-separated account names to load from the 'nono' keyring service.
-    #[arg(long, value_name = "ACCOUNTS")]
+    /// Comma-separated entries: keyring names (auto-uppercased to env var) or
+    /// 1Password URIs with explicit var (op://vault/item/field=MY_VAR).
+    #[arg(long, value_name = "CREDENTIALS")]
     pub env_credential: Option<String>,
 
     // === Profile options ===
@@ -305,6 +312,15 @@ pub struct SandboxArgs {
     /// Dry run - show what would be sandboxed without executing
     #[arg(long)]
     pub dry_run: bool,
+}
+
+impl SandboxArgs {
+    /// Whether any CLI flag requires proxy mode activation.
+    pub fn has_proxy_flags(&self) -> bool {
+        self.network_profile.is_some()
+            || !self.proxy_allow.is_empty()
+            || !self.proxy_credential.is_empty()
+    }
 }
 
 #[derive(Parser, Debug)]

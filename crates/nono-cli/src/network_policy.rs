@@ -207,6 +207,7 @@ pub fn resolve_credentials(
                 path_pattern: cred.path_pattern.clone(),
                 path_replacement: cred.path_replacement.clone(),
                 query_param_name: cred.query_param_name.clone(),
+                env_var: cred.env_var.clone(),
             });
         } else if let Some(cred) = policy.credentials.get(name) {
             // Built-in credentials always use header mode
@@ -220,6 +221,7 @@ pub fn resolve_credentials(
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             });
         }
         // We already validated existence above, so this else branch won't be hit
@@ -374,6 +376,7 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             },
         );
 
@@ -407,6 +410,7 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             },
         );
 
@@ -436,6 +440,7 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             },
         );
 
@@ -475,6 +480,7 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             },
         );
 
@@ -550,6 +556,7 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             },
         );
 
@@ -576,6 +583,7 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             },
         );
 
@@ -602,6 +610,7 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
+                env_var: None,
             },
         );
 
@@ -609,5 +618,58 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].inject_header, "X-Custom-Auth");
         assert_eq!(routes[0].credential_format, "Token {}");
+    }
+
+    #[test]
+    fn test_resolve_credentials_propagates_env_var() {
+        // When a custom credential has an explicit env_var, it must be
+        // propagated to the RouteConfig so credential_env_vars() uses it
+        // instead of deriving from credential_key.to_uppercase().
+        use crate::profile::CustomCredentialDef;
+
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy should load");
+
+        let mut custom = HashMap::new();
+        custom.insert(
+            "openai".to_string(),
+            CustomCredentialDef {
+                upstream: "https://api.openai.com/v1".to_string(),
+                credential_key: "op://Development/OpenAI/credential".to_string(),
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: Some("OPENAI_API_KEY".to_string()),
+            },
+        );
+
+        let routes =
+            resolve_credentials(&policy, &["openai".to_string()], &custom).expect("should resolve");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].env_var,
+            Some("OPENAI_API_KEY".to_string()),
+            "env_var must be propagated from CustomCredentialDef to RouteConfig"
+        );
+    }
+
+    #[test]
+    fn test_resolve_credentials_builtin_has_no_env_var() {
+        // Built-in credentials should always have env_var = None
+        // (they use the cred_key.to_uppercase() fallback)
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy should load");
+
+        let custom = HashMap::new();
+        let routes =
+            resolve_credentials(&policy, &["openai".to_string()], &custom).expect("should resolve");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].env_var, None,
+            "Built-in credentials should not have env_var set"
+        );
     }
 }

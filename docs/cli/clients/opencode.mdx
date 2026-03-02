@@ -35,26 +35,31 @@ The built-in profile provides:
 
 ## Custom Profile
 
-Create `~/.config/nono/profiles/opencode.toml` for different permissions:
+Create `~/.config/nono/profiles/opencode.json` for different permissions:
 
-```toml
-[meta]
-name = "opencode"
-version = "1.0.0"
-description = "OpenCode with restricted access"
-
-[filesystem]
-allow = ["$WORKDIR"]
-read = [
-  "$XDG_CONFIG_HOME/opencode",
-  "$XDG_DATA_HOME/opencode"
-]
-
-[network]
-block = false
-
-[secrets]
-openai_api_key = "OPENAI_API_KEY"
+```json
+{
+  "meta": {
+    "name": "opencode",
+    "version": "1.0.0",
+    "description": "OpenCode with restricted access"
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "read": [
+      "$XDG_CONFIG_HOME/opencode",
+      "$XDG_DATA_HOME/opencode"
+    ]
+  },
+  "network": {
+    "block": false
+  },
+  "secrets": {
+    "openai_api_key": "OPENAI_API_KEY"
+  }
+}
 ```
 
 **Usage:**
@@ -83,7 +88,7 @@ Then run:
 nono run --profile opencode --env-credential openai_api_key -- opencode
 ```
 
-See [Secrets Management](/cli/features/secrets) for full documentation.
+See [Credential Injection](/cli/features/credential-injection) for full documentation.
 
 ### Read-Only Mode
 

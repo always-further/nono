@@ -203,9 +203,21 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
             info!("Landlock sandbox fully enforced");
         }
         landlock::RulesetStatus::PartiallyEnforced => {
-            // This is normal - the kernel supports a subset of features we requested.
-            // The sandbox is still active and enforcing restrictions.
-            debug!("Landlock sandbox enforced in best-effort mode");
+            if needs_network_handling {
+                // Network filtering requires Landlock ABI v4 (kernel 6.7+).
+                // On older kernels the network rules are silently dropped,
+                // resulting in partial enforcement. Refuse to continue when
+                // the caller explicitly requested network restrictions.
+                return Err(NonoError::SandboxInit(
+                    "Landlock sandbox was only partially enforced. Network filtering \
+                     requires kernel 6.7+ (Landlock ABI v4). Refusing to start \
+                     without network restrictions."
+                        .to_string(),
+                ));
+            }
+            // Filesystem-only partial enforcement is acceptable — the kernel
+            // enforces the subset of fs features it supports.
+            debug!("Landlock sandbox enforced in best-effort mode (filesystem only)");
         }
         landlock::RulesetStatus::NotEnforced => {
             return Err(NonoError::SandboxInit(

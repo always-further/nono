@@ -19,6 +19,9 @@
   <a href="https://discord.gg/pPcjYzGvbS">
     <img src="https://img.shields.io/badge/Chat-Join%20Discord-7289da?style=for-the-badge&logo=discord&logoColor=white" alt="Join Discord"/>
   </a>
+  <a href="https://github.com/marketplace/actions/nono-attest">
+    <img src="https://img.shields.io/badge/Secure_Action-nono--attest-2088FF?style=for-the-badge&logo=github-actions&logoColor=white" alt="nono-attest GitHub Action"/>
+  </a>
 </p>
 
 </div>
@@ -27,7 +30,7 @@
 > This is an early alpha release that has not undergone comprehensive security audits. While we have taken care to implement robust security measures, there may still be undiscovered issues. We do not recommend using this in production until we release a stable version of 1.0.
 
 > [!NOTE]
-> We are just wrapping up the separation of the CLI and core library. The last stable CLI release is still available on homebrew tap (version v0.5.0) and is fine to use. We will update this README with installation instructions when all library clients are ready. We plan to submit to homebrew-core, but the repo is not yet 30 days old.
+> :tada: v0.6.1 has shipped! :tada: we have completed work to separate the CLI from the core library!
 
 AI agents get filesystem access, run shell commands, and are inherently open to prompt injection. The standard response is guardrails and policies. The problem is that policies can be bypassed and guardrails linguistically overcome.
 
@@ -35,20 +38,14 @@ Kernel-enforced sandboxing (Landlock/Seatbelt) blocks unauthorized access at the
 
 ## CLI
 
-The CLI builds on the library to provide a ready-to-use sandboxing tool, popular with coding-agents, with built-in profiles, policy groups, and interactive UX.
-
 ```bash
-# Claude Code with inbuilt profile
 nono run --profile claude-code -- claude
-# OpenCode with custom permissions
-nono run --profile opencode --allow-cwd/src --allow-cwd/output -- opencode
-# OpenClaw with custom permissions
-nono run --profile openclaw --allow-cwd -- openclaw gateway
-# Any command with custom permissions
 nono run --read ./src --write ./output -- cargo build
 ```
 
-## Library (Coming very Soon!)
+Built-in profiles for [Claude Code](https://docs.nono.sh/clients/claude-code), [OpenCode](https://docs.nono.sh/clients/opencode), and [OpenClaw](https://docs.nono.sh/clients/openclaw) — or define your own with custom permissions.
+
+## Library
 
 The core is a Rust library that can be embedded into any application via native bindings. The library is a policy-free sandbox primitive -- it applies only what clients explicitly request.
 
@@ -104,181 +101,88 @@ nono applies OS-level restrictions that cannot be bypassed or escalated from wit
 nono run --read ./src --write ./output -- cargo build
 ```
 
-### Secrets and Key Isolation
+### Credential Injection
 
-Credentials (API keys, tokens, passwords) are loaded from the system keystore and injected into the sandboxed process as environment variables at runtime. The keystore files themselves are never exposed to the sandboxed process, preventing exfiltration of raw secrets even if the agent is compromised.
+Two modes: **proxy injection** keeps credentials entirely outside the sandbox — the agent connects to `localhost` and the proxy injects real API keys into upstream requests. **Env injection** loads secrets from the OS keystore and injects them as environment variables before the sandbox locks.
 
 ```bash
-# Store a secret in the system keystore, then inject it at runtime
-security add-generic-password \
-  -T /usr/local/bin/nono \
-  -s "nono" \
-  -a "openai_api_key" \
-  -w "my_super_secret_api_key"
+# Proxy mode — agent never sees the API key, even in its own memory
+nono run --network-profile claude-code --proxy-credential openai -- my-agent
 
-nono run --secrets  openai_api_key --allow-cwd -- agent-command
+# Env mode — simpler, but secret is in the process environment
+nono run --env-credential openai_api_key --allow-cwd -- my-agent
 ```
 
-### Composable Policy Groups (Coming Soon!)
+### Agent SKILL Provenance and Supply Chain Security
 
-Security policy is defined as named groups in a single JSON file. Each group specifies allow/deny rules for filesystem paths, command execution, and platform-specific behavior. Profiles reference groups by name, making it straightforward to compose fine-grained policies from reusable building blocks. Profile-level filesystem entries and CLI overrides are applied additively on top.
+Instruction files (SKILLS.md, CLAUDE.md, AGENT.MD) and associated artifacts such as scripts are a supply chain attack vector. nono cryptographically signs and verifies them using Sigstore attestation with DSSE envelopes and in-toto / SLSA style statements. It supports keyed signing (system keystore) and keyless signing (OIDC via GitHub Actions + Fulcio + Rekor). Upon execution, nono verifies the signature, checks the signing certificate against trusted roots, and validates the statement predicates (e.g. signed within the last 30 days, signed by a trusted maintainer).
 
-Groups define reusable rules:
+<p align="center">
+  <a href="https://github.com/marketplace/actions/nono-attest">
+    <img src="https://img.shields.io/badge/GitHub_Action-nono--attest-2088FF?style=for-the-badge&logo=github-actions&logoColor=white" alt="nono-attest GitHub Action"/>
+  </a>
+</p>
+
+Sign instruction files directly within GitHub Actions workflows. Users can then verify that files originate from the expected repository and branch, signed by a trusted maintainer.
+
+### Network Filtering
+
+Allowlist-based host filtering via a local proxy. The sandbox blocks all direct outbound connections — the agent can only reach explicitly allowed hosts. Cloud metadata endpoints and private network ranges are hardcoded as denied. DNS rebinding protection checks resolved IPs against the deny list before connecting.
+
+```bash
+nono run --supervised --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+```
+
+### Supervisor and Capability Expansion
+
+On Linux, seccomp user notification intercepts syscalls when the agent needs access outside its sandbox. The supervisor prompts the user, then injects the file descriptor directly — the agent never executes its own `open()`. Sensitive paths are never-grantable regardless of approval.
+
+```bash
+nono run --rollback --supervised --allow-cwd -- claude
+```
+
+### Undo and Snapshots
+
+Content-addressable snapshots of your working directory taken before and during sandboxed execution. SHA-256 deduplication and Merkle tree commitments for integrity verification. Interactively review and restore individual files or the entire directory.
+
+```bash
+nono rollback list
+nono rollback restore
+```
+
+### Composable Policy Groups
+
+Security policy defined as named groups in a single JSON file. Profiles reference groups by name — compose fine-grained policies from reusable building blocks.
 
 ```json
 {
   "deny_credentials": {
-    "description": "Block access to cryptographic keys, tokens, and cloud credentials",
-    "deny": {
-      "access": ["~/.ssh", "~/.gnupg", "~/.aws", "~/.kube", "~/.docker"]
-    }
+    "deny": { "access": ["~/.ssh", "~/.gnupg", "~/.aws", "~/.kube"] }
   },
   "node_runtime": {
-    "description": "Node.js runtime and package manager paths",
-    "allow": {
-      "read": ["~/.nvm", "~/.fnm", "~/.npm", "/usr/local/lib/node_modules"]
-    }
-  }
-}
-```
-
-Profiles compose groups by name and add their own filesystem entries on top:
-
-```json
-{
-  "claude-code": {
-    "security": {
-      "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "unlink_protection"]
-    },
-    "filesystem": {
-      "allow": ["$HOME/.claude"],
-      "read_file": ["$HOME/.gitconfig"]
-    }
+    "allow": { "read": ["~/.nvm", "~/.fnm", "~/.npm"] }
   }
 }
 ```
 
 ### Destructive Command Blocking
 
-Dangerous commands (`rm`, `dd`, `chmod`, `sudo`, `scp`, and others) are blocked before execution. Commands can be selectively allowed or additional commands blocked per invocation in accordance with user profiles.
+Dangerous commands (`rm`, `dd`, `chmod`, `sudo`, `scp`) are blocked before execution. Selectively allow or block additional commands per invocation.
 
 ```bash
-# rm is blocked by default
 $ nono run --allow-cwd -- rm -rf /
 nono: blocked command: rm
-
-# Selectively allow a blocked command
-nono run --allow-cwd --allow-command rm -- rm ./temp-file.txt
 ```
 
 > [!WARNING]
-> This feature will be reinvented at some point, as execution of dangerous commands can still pass by masking, e.g. placed inside sh -c '...', or a wrapper script. This is layered on top of the kernel sandbox as defense-in-depth, as even if a command were allowed, the sandbox would still enforce filesystem restrictions. . The current model trusts that the sandbox restrictions are the real security boundary, and not command blocking, which is more a layered defense. 
+> Command blocking is defense-in-depth layered on top of the kernel sandbox. Commands can bypass this via `sh -c '...'` or wrapper scripts — the sandbox filesystem restrictions are the real security boundary.
 
-### Undo and Snapshots (Coming Soon!)
+### Audit Trail
 
-nono takes content-addressable snapshots of your working directory before the sandboxed process runs. If the agent makes unwanted changes, you can interactively review and restore individual files or the entire directory to its previous state. Snapshots use SHA-256 deduplication and Merkle tree commitments for integrity verification.
-
-```bash
-# List snapshots taken during sandboxed sessions
-nono rollback list
-
-# Interactively review and restore changes
-nono rollback restore
-```
-
-### Supervisor and Capability Expansion (Coming Soon!)
-
-On Linux, nono can run in supervised mode where the sandboxed process starts with minimal permissions. When the agent needs access to a file outside its sandbox, the request is intercepted via seccomp user notification and routed to the supervisor, which prompts the user for approval. Approved access is granted transparently by injecting file descriptors -- the agent never needs to know about nono. Sensitive paths (system config, SSH keys, etc.) are configured as never-grantable regardless of user approval.
+Every session records command, timing, exit code, tracked paths, and cryptographic snapshot commitments as structured JSON.
 
 ```bash
-# Run with rollback snapshots and capability expansion
-nono run --rollback --supervised --allow-cwd -- claude
-```
- 
-### Audit Trail (Coming Soon!)
-
-Every sandboxed session records what command was run, when it started and ended, its exit code, tracked paths, and cryptographic snapshot commitments. Session logs can be inspected as structured JSON for compliance and forensics.
-
-```bash
-# Show audit record for a session
 nono audit show 20260216-193311-20751 --json
-❯ nono audit show 20260216-193311-20751 --json
-{
-  "command": [
-    "sh",
-    "-c",
-    "echo done"
-  ],
-  "ended": "2026-02-16T19:33:11.519810+00:00",
-  "exit_code": 0,
-  "merkle_roots": [
-    "2ee13961d5b9ec78cca0c2bd1bad29ea39c3b2256df00dec97978e131961b753",
-    "2ee13961d5b9ec78cca0c2bd1bad29ea39c3b2256df00dec97978e131961b753"
-  ],
-  "session_id": "20260216-193311-20751",
-  "snapshots": [
-    {
-      "changes": [],
-      "file_count": 1,
-      "merkle_root": "2ee13961d5b9ec78cca0c2bd1bad29ea39c3b2256df00dec97978e131961b753",
-      "number": 0,
-      "timestamp": "1771270391"
-    },
-    {
-      "changes": [],
-      "file_count": 1,
-      "merkle_root": "2ee13961d5b9ec78cca0c2bd1bad29ea39c3b2256df00dec97978e131961b753",
-      "number": 1,
-      "timestamp": "1771270391"
-    }
-  ],
-  "started": "2026-02-16T19:33:11.496516+00:00",
-  "tracked_paths": [
-    "/Users/jsmith/project"
-  ]
-}
-```
-
-### Network Filtering Proxy (Coming Soon!)
-
-A micro HTTP proxy in the supervisor provides allowlist-based host filtering with optional credential injection. The sandbox blocks all direct outbound connections except to the local proxy — the agent can only reach explicitly allowed hosts. A hardcoded deny list blocks cloud metadata endpoints (169.254.169.254) and private network ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) regardless of allowlist configuration. DNS rebinding protection resolves hostnames and checks all resulting IPs against the deny list before connecting.
-
-```bash
-# Allow specific hosts via CONNECT tunnel
-nono run --supervised --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
-
-# Use a predefined network profile
-nono run --supervised --network-profile claude-code -- claude
-```
-
-### Credential Injection (Coming Soon!)
-
-For configured services, the network proxy can load credentials from the system keyring and inject them into outbound requests via reverse-proxy mode. The agent never sees real API keys — it connects to `localhost` paths like `/openai/v1/chat` and the proxy adds the `Authorization` header transparently. Credentials stay in the unsandboxed supervisor process and are never exposed to the sandboxed child's environment or memory.
-
-```bash
-# Proxy injects API key from keyring; agent sees http://localhost:PORT/openai
-nono run --supervised \
-  --network-profile claude-code \
-  --proxy-credential openai \
-  -- my-agent
-```
-
-### Instruction File Attestation (Coming Soon!)
-
-Instruction files (SKILLS.md, CLAUDE.md, AGENT.MD) are a supply chain attack vector — a compromised file can inject malicious directives into an agent's session. nono cryptographically verifies these files before the agent reads them using Sigstore-based attestation. Files are signed with DSSE envelopes and in-toto statements, supporting both keyed signing (private key in system keystore) and keyless signing (OIDC identity via GitHub Actions + Fulcio + Rekor transparency log). A trust policy defines which publishers are trusted, a blocklist of known-malicious digests, and enforcement mode (deny/warn/audit). On macOS, Seatbelt deny rules block unverified instruction files at the kernel level. On Linux, seccomp-notify intercepts reads at runtime.
-
-```bash
-# Generate a signing key
-nono trust keygen --id my-signing-key
-
-# Sign an instruction file
-nono trust sign SKILLS.md --key my-signing-key
-
-# Verify all instruction files in current directory
-nono trust verify --all
-
-# Run with attestation enforcement
-nono run --profile claude-code -- claude
 ```
 
 ## Quick Start

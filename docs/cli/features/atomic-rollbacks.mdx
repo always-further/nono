@@ -195,10 +195,13 @@ Configure these in your nono config file or use `nono rollback cleanup` for manu
 
 Profiles can customize rollback behavior:
 
-```toml
-[rollback]
-exclude_patterns = ["node_modules", ".next", "__pycache__", "target"]
-exclude_globs = ["*.tmp.[0-9]*.[0-9]*"]
+```json
+{
+  "rollback": {
+    "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
+    "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
+  }
+}
 ```
 
 These exclusions are combined with gitignore patterns from the working directory.

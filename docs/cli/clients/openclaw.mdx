@@ -34,29 +34,31 @@ nono has already proven capable of stopping some nasty reported CVEs from exploi
 
 ## Custom Profile
 
-If you need different permissions, create a custom profile at `~/.config/nono/profiles/openclaw-strict.toml`:
+If you need different permissions, create a custom profile at `~/.config/nono/profiles/openclaw-strict.json`:
 
 ```bash
 mkdir -p ~/.config/nono/profiles
 ```
 
-```toml
-[meta]
-name = "openclaw-strict"
-version = "1.0.0"
-description = "OpenClaw with read-only config access"
-
-[filesystem]
-allow = ["$WORKDIR"]
-read = ["$HOME/.openclaw", "$HOME/.config/openclaw"]
-
-[network]
-block = false  # Required for messaging APIs
-
-[secrets]
-# Load credentials from system keystore instead of files
-telegram_bot_token = "TELEGRAM_BOT_TOKEN"
-openai_api_key = "OPENAI_API_KEY"
+```json
+{
+  "meta": {
+    "name": "openclaw-strict",
+    "version": "1.0.0",
+    "description": "OpenClaw with read-only config access"
+  },
+  "filesystem": {
+    "allow": ["$WORKDIR"],
+    "read": ["$HOME/.openclaw", "$HOME/.config/openclaw"]
+  },
+  "network": {
+    "block": false
+  },
+  "env_credentials": {
+    "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
+    "openai_api_key": "OPENAI_API_KEY"
+  }
+}
 ```
 
 **Usage:**
@@ -65,7 +67,7 @@ nono run --profile openclaw-strict --env-credential -- openclaw gateway
 ```
 
 <Note>
-Custom profiles override built-in profiles of the same name. If you create `~/.config/nono/profiles/openclaw.toml`, it will be used instead of the built-in.
+Custom profiles override built-in profiles of the same name. If you create `~/.config/nono/profiles/openclaw.json`, it will be used instead of the built-in.
 </Note>
 
 See [Security Profiles](/cli/features/profiles-groups) for the full profile format reference.
@@ -120,7 +122,7 @@ The secrets are loaded from the keystore and injected as `$TELEGRAM_BOT_TOKEN` a
 Secrets are loaded **before** the sandbox is applied, then zeroized from nono's memory after `exec()`. The sandboxed process cannot access the keystore directly - it only receives the specific secrets you authorized.
 </Note>
 
-See [Secrets Management](/cli/features/secrets) for complete documentation on storing and managing secrets.
+See [Credential Injection](/cli/features/credential-injection) for complete documentation on storing and managing secrets.
 
 ### Limit Agent Filesystem Access
 
@@ -145,21 +147,234 @@ The profile allows full network access. For stricter isolation, use nono's proxy
 
 ### Credential Injection (Recommended)
 
-Instead of passing API keys directly to OpenClaw, use nono's credential injection to keep secrets out of the agent's memory entirely:
+Instead of passing API keys directly to OpenClaw, use nono's credential injection to keep secrets out of the agent's memory entirely.
+
+**Step 1: Store your API key in the system keyring**
+
+<Tabs>
+<Tab title="macOS">
+```bash
+# Google Gemini
+security add-generic-password -s "nono" -a "gemini_api_key" -w
+
+# OpenAI
+security add-generic-password -s "nono" -a "openai_api_key" -w
+
+# Anthropic
+security add-generic-password -s "nono" -a "anthropic_api_key" -w
+```
+</Tab>
+
+<Tab title="Linux">
+```bash
+# Google Gemini
+secret-tool store --label="nono: gemini_api_key" service nono username gemini_api_key
+
+# OpenAI
+secret-tool store --label="nono: openai_api_key" service nono username openai_api_key
+
+# Anthropic
+secret-tool store --label="nono: anthropic_api_key" service nono username anthropic_api_key
+```
+</Tab>
+</Tabs>
+
+**Step 2: Configure OpenClaw to use nono's proxy**
+
+OpenClaw's SDK doesn't read `*_BASE_URL` environment variables, so you need to configure each provider's `baseUrl` directly.
+
+Provider settings can be configured in two locations:
+- **Global**: `~/.openclaw/openclaw.json` - applies to all agents
+- **Per-agent**: `~/.openclaw/agents/<agentId>/agent/models.json` - overrides global for that agent
+
+Add/update the `models.providers` section with the proxy baseUrl:
+
+<Tabs>
+<Tab title="Google Gemini">
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "google": {
+        "baseUrl": "http://127.0.0.1:19999/gemini/v1beta",
+        "apiKey": "GEMINI_API_KEY",
+        "api": "google-generative-ai",
+        "models": [
+          {
+            "id": "gemini-2.5-flash",
+            "name": "Gemini 2.5 Flash",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The `baseUrl` must include `/v1beta` because the SDK appends paths like `/models/gemini-2.5-flash:streamGenerateContent` directly.
+</Tab>
+
+<Tab title="OpenAI">
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "openai": {
+        "baseUrl": "http://127.0.0.1:19999/openai/v1",
+        "apiKey": "OPENAI_API_KEY",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gpt-4o",
+            "name": "GPT-4o",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": 16384
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The `baseUrl` must include `/v1` because the SDK appends paths like `/chat/completions` directly.
+</Tab>
+
+<Tab title="Anthropic">
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "anthropic": {
+        "baseUrl": "http://127.0.0.1:19999/anthropic/v1",
+        "apiKey": "ANTHROPIC_API_KEY",
+        "api": "anthropic-messages",
+        "models": [
+          {
+            "id": "claude-sonnet-4-20250514",
+            "name": "Claude Sonnet 4",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The `baseUrl` must include `/v1` because the SDK appends paths like `/messages` directly.
+</Tab>
+</Tabs>
+
+<Warning>
+If you have provider config in both `openclaw.json` and `agents/<agentId>/agent/models.json`, the agent-specific config takes precedence. Make sure the `baseUrl` is set correctly in whichever file your agent is actually using.
+</Warning>
+
+**Step 3: Configure auth profile to read from environment**
+
+Edit `~/.openclaw/agents/main/agent/auth-profiles.json` and ensure each profile uses `envVar` instead of a hardcoded key:
+
+<Tabs>
+<Tab title="Google Gemini">
+```json
+{
+  "version": 1,
+  "profiles": {
+    "google:default": {
+      "type": "api_key",
+      "provider": "google",
+      "envVar": "GEMINI_API_KEY"
+    }
+  },
+  "lastGood": {
+    "google": "google:default"
+  }
+}
+```
+</Tab>
+
+<Tab title="OpenAI">
+```json
+{
+  "version": 1,
+  "profiles": {
+    "openai:default": {
+      "type": "api_key",
+      "provider": "openai",
+      "envVar": "OPENAI_API_KEY"
+    }
+  },
+  "lastGood": {
+    "openai": "openai:default"
+  }
+}
+```
+</Tab>
+
+<Tab title="Anthropic">
+```json
+{
+  "version": 1,
+  "profiles": {
+    "anthropic:default": {
+      "type": "api_key",
+      "provider": "anthropic",
+      "envVar": "ANTHROPIC_API_KEY"
+    }
+  },
+  "lastGood": {
+    "anthropic": "anthropic:default"
+  }
+}
+```
+</Tab>
+</Tabs>
+
+**Step 4: Run OpenClaw with credential injection**
 
 ```bash
-nono run --profile openclaw-demo --allow-cwd \
-  --proxy-credential openai --proxy-credential anthropic --proxy-credential gemini \
+# For Google Gemini
+nono run --profile openclaw --allow-cwd \
+  --proxy-credential gemini --proxy-port 19999 \
   --allow-bind 18789 -- openclaw gateway
+
+# For OpenAI
+nono run --profile openclaw --allow-cwd \
+  --proxy-credential openai --proxy-port 19999 \
+  --allow-bind 18789 -- openclaw gateway
+
+# For Anthropic
+nono run --profile openclaw --allow-cwd \
+  --proxy-credential anthropic --proxy-port 19999 \
+  --allow-bind 18789 -- openclaw gateway
+
+# Multiple providers
+nono run --profile openclaw --allow-cwd \
+  --proxy-credential gemini --proxy-credential openai --proxy-credential anthropic \
+  --proxy-port 19999 --allow-bind 18789 -- openclaw gateway
 ```
 
 **How it works:**
-1. Real API keys are stored in your system keyring (never in files or environment)
-2. nono sets `OPENAI_BASE_URL=http://127.0.0.1:PORT/openai` pointing to its local proxy
-3. nono sets `OPENAI_API_KEY` to a session-specific phantom token
-4. OpenClaw sends requests to the proxy with the phantom token
-5. The proxy validates the token, swaps in the real API key, forwards to the upstream API
-6. The real API key never enters the sandboxed process
+1. Real API keys are stored in your system keyring (never in files)
+2. nono starts a proxy on port 19999 and sets provider-specific API key environment variables (e.g., `GEMINI_API_KEY`, `OPENAI_API_KEY`) to a session-specific phantom token
+3. OpenClaw reads the phantom token and sends requests to the configured `baseUrl` (e.g., `http://127.0.0.1:19999/gemini/v1beta`)
+4. The proxy validates the phantom token, swaps in the real API key, and forwards the request to the provider's API
+5. The real API key never enters the sandboxed process
 
 This protects against prompt injection attacks that attempt to exfiltrate credentials - even if an attacker tricks the agent into revealing its "API key", they only get the worthless phantom token.
 

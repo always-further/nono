@@ -25,6 +25,7 @@ mod terminal_approval;
 mod trust_cmd;
 mod trust_intercept;
 mod trust_scan;
+mod update_check;
 
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
@@ -55,10 +56,18 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // Start background update check (non-blocking, 3s timeout)
+    let mut update_handle = if !cli.silent {
+        update_check::start_background_check()
+    } else {
+        None
+    };
+
     match cli.command {
         Commands::Learn(args) => run_learn(*args, cli.silent),
         Commands::Run(args) => {
             output::print_banner(cli.silent);
+            show_update_notification(&mut update_handle, cli.silent);
             run_sandbox(
                 args.sandbox,
                 args.command,
@@ -73,13 +82,38 @@ fn run() -> Result<()> {
         }
         Commands::Shell(args) => {
             output::print_banner(cli.silent);
+            show_update_notification(&mut update_handle, cli.silent);
             run_shell(*args, cli.silent)
         }
-        Commands::Why(args) => run_why(*args),
-        Commands::Setup(args) => run_setup(args),
-        Commands::Rollback(args) => rollback_commands::run_rollback(args),
-        Commands::Trust(args) => trust_cmd::run_trust(args),
-        Commands::Audit(args) => audit_commands::run_audit(args),
+        Commands::Why(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            run_why(*args)
+        }
+        Commands::Setup(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            run_setup(args)
+        }
+        Commands::Rollback(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            rollback_commands::run_rollback(args)
+        }
+        Commands::Trust(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            trust_cmd::run_trust(args)
+        }
+        Commands::Audit(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            audit_commands::run_audit(args)
+        }
+    }
+}
+
+/// Consume an update check handle and print notification if available
+fn show_update_notification(handle: &mut Option<update_check::UpdateCheckHandle>, silent: bool) {
+    if let Some(h) = handle.take() {
+        if let Some(info) = h.take_result() {
+            output::print_update_notification(&info, silent);
+        }
     }
 }
 
@@ -197,6 +231,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let (mut caps, needs_unlink) = CapabilitySet::from_profile(&prof, &workdir, &sandbox_args)?;
@@ -228,6 +263,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let (mut caps, needs_unlink) = CapabilitySet::from_args(&sandbox_args)?;
@@ -453,6 +489,7 @@ fn run_sandbox(
             custom_credentials: prepared.custom_credentials,
             external_proxy: args.external_proxy.clone(),
             allow_bind_ports: args.allow_bind,
+            proxy_port: args.proxy_port,
         },
     )
 }
@@ -519,6 +556,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
             allow_bind_ports: Vec::new(),
+            proxy_port: None,
         },
     )
 }
@@ -557,6 +595,8 @@ struct ExecutionFlags {
     external_proxy: Option<String>,
     /// Ports the sandboxed process is allowed to bind (from --allow-bind)
     allow_bind_ports: Vec<u16>,
+    /// Fixed port for the credential proxy (from --proxy-port)
+    proxy_port: Option<u16>,
 }
 
 /// Select execution strategy from user/runtime flags.
@@ -638,6 +678,11 @@ fn build_proxy_config_from_flags(
             address: addr.clone(),
             auth: None,
         });
+    }
+
+    // Set fixed proxy port if specified
+    if let Some(port) = flags.proxy_port {
+        proxy_config.bind_port = port;
     }
 
     Ok(proxy_config)
@@ -1283,29 +1328,54 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .unwrap_or_default();
 
     let secret_mappings =
-        nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets);
+        nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets)?;
 
-    // Load credentials from keystore BEFORE sandbox is applied
+    // Load credentials from keystore/1Password BEFORE sandbox is applied
     let loaded_secrets = if !secret_mappings.is_empty() {
+        let op_count = secret_mappings
+            .keys()
+            .filter(|k| nono::keystore::is_op_uri(k))
+            .count();
+        let keyring_count = secret_mappings.len() - op_count;
+
         info!(
-            "Loading {} credential(s) from system keystore",
-            secret_mappings.len()
+            "Loading {} credential(s) (keyring: {}, 1Password: {})",
+            secret_mappings.len(),
+            keyring_count,
+            op_count
         );
         if !silent {
-            eprintln!(
-                "  Loading {} credential(s) from keystore...",
-                secret_mappings.len()
-            );
+            if keyring_count > 0 && op_count > 0 {
+                eprintln!(
+                    "  Loading {} credential(s) ({} from keystore, {} from 1Password)...",
+                    secret_mappings.len(),
+                    keyring_count,
+                    op_count
+                );
+            } else if op_count > 0 {
+                eprintln!(
+                    "  Loading {} credential(s) from 1Password...",
+                    secret_mappings.len()
+                );
+            } else {
+                eprintln!(
+                    "  Loading {} credential(s) from keystore...",
+                    secret_mappings.len()
+                );
+            }
             // Warn that env credentials are visible to the sandboxed process
             for account in secret_mappings.keys() {
+                let display_account = if nono::keystore::is_op_uri(account) {
+                    nono::keystore::redact_op_uri(account)
+                } else {
+                    account.to_string()
+                };
                 eprintln!(
-                    "  {}: --env-credential '{}' exposes the API key to the sandboxed process.",
+                    "  {}: --env-credential '{}' exposes the secret directly to the sandboxed process.\n\
+                     {}  For network API keys, use a profile with proxy_credentials for credential isolation.",
                     "warning".yellow(),
-                    account,
-                );
-                eprintln!(
-                    "           Use --proxy-credential '{}' instead for credential isolation with network API keys.",
-                    account,
+                    display_account,
+                    " ".repeat(11),
                 );
             }
         }

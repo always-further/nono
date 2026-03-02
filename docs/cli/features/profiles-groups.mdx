@@ -97,7 +97,7 @@ The `secrets` section maps keystore account names to environment variable names.
 nono run --profile my-agent --env-credential -- my-command
 ```
 
-See [Secrets Management](/cli/features/secrets) for details on storing secrets in the keystore.
+See [Credential Injection](/cli/features/credential-injection) for details on storing secrets in the keystore.
 
 <Note>
   For API keys, prefer [Credential Injection](/cli/features/credential-injection) over environment variable injection. Credential injection routes API calls through a reverse proxy that injects credentials transparently - the API key never enters the sandbox, even as an environment variable.

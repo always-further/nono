@@ -273,6 +273,22 @@ Chain outbound connections through an external (enterprise) proxy. The default d
 nono run --allow-cwd --network-profile enterprise --external-proxy squid.corp:3128 -- my-agent
 ```
 
+#### `--proxy-port`
+
+Set a fixed port for the credential injection proxy (default: OS-assigned ephemeral port). Use this when the sandboxed application requires a known proxy port that can't be configured via environment variables.
+
+```bash
+# Use a fixed proxy port for applications that need base URL configuration
+nono run --profile openclaw --proxy-port 19999 --allow-bind 18789 -- openclaw gateway
+
+# The credential proxy will always be at http://127.0.0.1:19999
+# Configure the application to use this base URL for API calls
+```
+
+<Note>
+Without `--proxy-port`, nono uses an OS-assigned ephemeral port and sets environment variables like `GEMINI_BASE_URL=http://127.0.0.1:PORT/gemini`. Applications that read these env vars don't need `--proxy-port`. Use it only when the application requires manual base URL configuration.
+</Note>
+
 #### `--allow-bind`
 
 Allow the sandboxed process to bind and listen on a TCP port. Required when running server applications (like AI gateways) in proxy mode.
@@ -367,7 +383,7 @@ Credentials are:
 
 For network API keys, prefer `--proxy-credential` instead for credential isolation — the agent never sees the real API key.
 
-See [Secrets Management](/cli/features/secrets) for full documentation on storing and using credentials.
+See [Credential Injection](/cli/features/credential-injection) for full documentation on storing and using credentials.
 
 ### Profile Options
 

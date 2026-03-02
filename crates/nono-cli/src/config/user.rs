@@ -26,6 +26,8 @@ pub struct UserConfig {
     pub trusted_keys: HashMap<String, TrustedKeyInfo>,
     #[serde(default, alias = "undo")]
     pub rollback: RollbackSettings,
+    #[serde(default)]
+    pub updates: UpdateSettings,
 }
 
 /// Metadata for user config
@@ -107,6 +109,26 @@ pub struct RollbackSettings {
     /// Hours to keep stale sessions (ended is None, PID dead) before cleanup
     #[serde(default = "default_stale_grace_hours")]
     pub stale_grace_hours: u64,
+}
+
+/// Update check settings
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSettings {
+    /// Whether to check for CLI updates (default: true)
+    #[serde(default = "default_true")]
+    pub check: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check: default_true(),
+        }
+    }
 }
 
 fn default_max_sessions() -> usize {

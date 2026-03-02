@@ -69,7 +69,8 @@
           "~/.secrets",
           "~/.keys",
           "~/.pki",
-          "~/.terraform.d"
+          "~/.terraform.d",
+          "~/.config/op"
         ]
       }
     },
@@ -82,7 +83,10 @@
           "~/Library/Keychains",
           "/Library/Keychains",
           "~/.password-store",
-          "~/.1password"
+          "~/.1password",
+          "~/Library/Group Containers/2BUA8C4S2C.com.1password",
+          "~/Library/Application Support/1Password",
+          "~/Library/Containers/com.1password.1password"
         ]
       }
     },
@@ -94,6 +98,7 @@
         "access": [
           "~/.password-store",
           "~/.1password",
+          "~/.op",
           "~/.local/share/keyrings"
         ]
       }
@@ -211,7 +216,9 @@
           "/Applications",
           "/cores",
           "/opt",
-          "/Volumes"
+          "/Volumes",
+          "/run",
+          "/nix"
         ]
       },
       "symlink_pairs": {
@@ -479,7 +486,7 @@
       "trust_groups": [],
       "filesystem": {
         "allow": ["$HOME/.claude"],
-        "read": [],
+        "read": ["$HOME/.local/share/claude"],
         "allow_file": ["$HOME/.claude.json"],
         "read_file": ["$HOME/Library/Keychains/login.keychain-db", "$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
       },
