@@ -1174,8 +1174,10 @@ mod tests {
         );
 
         let result = manager.create_baseline();
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.expect_err("expected budget error"));
+        let Err(err) = result else {
+            panic!("expected budget error, got Ok");
+        };
+        let err_msg = format!("{err}");
         assert!(
             err_msg.contains("budget exceeded"),
             "Expected budget error, got: {err_msg}"
@@ -1199,8 +1201,10 @@ mod tests {
         );
 
         let result = manager.create_baseline();
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.expect_err("expected budget error"));
+        let Err(err) = result else {
+            panic!("expected budget error, got Ok");
+        };
+        let err_msg = format!("{err}");
         assert!(
             err_msg.contains("budget exceeded") || err_msg.contains("bytes tracked"),
             "Expected budget error, got: {err_msg}"
@@ -1237,8 +1241,10 @@ mod tests {
         .expect("manager");
 
         let result = manager.create_baseline();
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.expect_err("expected budget error"));
+        let Err(err) = result else {
+            panic!("expected budget error, got Ok");
+        };
+        let err_msg = format!("{err}");
         assert!(
             err_msg.contains("budget exceeded") || err_msg.contains("bytes tracked"),
             "Expected budget error for tracked file, got: {err_msg}"
