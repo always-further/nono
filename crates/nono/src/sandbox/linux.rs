@@ -52,7 +52,11 @@ pub fn support_info() -> SupportInfo {
 /// incremental artifacts), so excluding it would cause spurious EACCES errors.
 fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
     match access {
-        AccessMode::Read => AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
+        AccessMode::Read => {
+            // Read access includes basic file/dir reading and execution.
+            // IoctlDev is included for interactive TTY applications (ABI v5+).
+            AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute | AccessFs::IoctlDev
+        }
         AccessMode::Write => {
             // Write access includes all operations needed for normal file manipulation:
             // - WriteFile: modify file contents
@@ -830,6 +834,30 @@ mod tests {
         assert!(rw.contains(AccessFs::RemoveDir));
         assert!(rw.contains(AccessFs::Refer));
         assert!(rw.contains(AccessFs::Truncate));
+    }
+
+    #[test]
+    fn test_access_conversion_v5_ioctl_dev() {
+        let abi = ABI::V5;
+
+        let read = access_to_landlock(AccessMode::Read, abi);
+        assert!(
+            read.contains(AccessFs::IoctlDev),
+            "Read should include IoctlDev for device ioctl (TTY, etc.)"
+        );
+        // Existing Read permissions are preserved
+        assert!(read.contains(AccessFs::ReadFile));
+        assert!(read.contains(AccessFs::Execute));
+
+        let write = access_to_landlock(AccessMode::Write, abi);
+        // Write alone does not include IoctlDev (current design decision)
+        assert!(!write.contains(AccessFs::IoctlDev));
+
+        let rw = access_to_landlock(AccessMode::ReadWrite, abi);
+        assert!(
+            rw.contains(AccessFs::IoctlDev),
+            "ReadWrite should inherit IoctlDev from Read"
+        );
     }
 
     #[test]
