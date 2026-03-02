@@ -123,7 +123,12 @@ echo "--- Safe Variables Preserved ---"
 expect_env_present "PATH passed to child" "PATH"
 expect_env_present "HOME passed to child" "HOME"
 expect_env_present "USER passed to child" "USER"
-expect_env_present "TERM passed to child" "TERM"
+# TERM may not be set in CI environments (e.g., GitHub Actions)
+if [[ -n "${TERM:-}" ]]; then
+    expect_env_present "TERM passed to child" "TERM"
+else
+    skip_test "TERM passed to child" "TERM not set in this environment"
+fi
 
 # =============================================================================
 # Summary
