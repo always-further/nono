@@ -36,6 +36,10 @@ const SIZE_THRESHOLD: usize = 10_000;
 /// Maximum wall-clock time to spend counting files in a single directory.
 const SIZE_CHECK_TIME_CAP: Duration = Duration::from_secs(1);
 
+/// Maximum total wall-clock time for all size-based directory checks combined.
+/// Prevents unbounded latency when a project has many immediate subdirectories.
+const SIZE_CHECK_TOTAL_CAP: Duration = Duration::from_secs(5);
+
 /// Maximum entries to visit during bounded walk (Phase 2).
 const PROBE_ENTRY_CAP: usize = 5_000;
 
@@ -68,11 +72,6 @@ impl PreflightResult {
     /// Whether this result warrants a warning or prompt.
     pub fn needs_warning(&self) -> bool {
         !self.heavy_dirs.is_empty()
-    }
-
-    /// Get the directory names suitable for adding as exclusion patterns.
-    pub fn heavy_dir_names(&self) -> Vec<String> {
-        self.heavy_dirs.iter().map(|d| d.name.clone()).collect()
     }
 }
 
@@ -180,8 +179,13 @@ fn detect_heavy_dirs(tracked_paths: &[PathBuf], exclusion: &ExclusionFilter) -> 
         }
     }
 
-    // Size-based detection: bounded walk of unknown directories
+    // Size-based detection: bounded walk of unknown directories.
+    // Global time cap prevents unbounded latency on projects with many subdirs.
+    let size_check_start = Instant::now();
     for (path, name_str) in size_check_candidates {
+        if size_check_start.elapsed() >= SIZE_CHECK_TOTAL_CAP {
+            break;
+        }
         if exceeds_file_threshold(&path) {
             found.push(HeavyDir {
                 path,
@@ -228,9 +232,11 @@ fn exceeds_file_threshold(path: &std::path::Path) -> bool {
 ///
 /// This is the default behavior: auto-exclude heavy dirs and transparently
 /// tell the user what happened. No prompt, no blocking.
-pub(crate) fn print_auto_exclude_notice(result: &PreflightResult) {
-    let names: Vec<String> = result
-        .heavy_dirs
+///
+/// `excluded` contains only the dirs that were actually auto-excluded (after
+/// `--rollback-include` filtering). `result` provides the probe metrics.
+pub(crate) fn print_auto_exclude_notice(excluded: &[&HeavyDir], result: &PreflightResult) {
+    let names: Vec<String> = excluded
         .iter()
         .map(|d| format!("{} ({})", d.path.display(), d.description))
         .collect();
@@ -240,7 +246,8 @@ pub(crate) fn print_auto_exclude_notice(result: &PreflightResult) {
         format!("~{} files", result.probe_file_count)
     };
     eprintln!(
-        "  [nono] Rollback: auto-excluded {} [{}] in {:.1}s. Use --rollback-all to include.",
+        "  [nono] Rollback: auto-excluded {} [{}] in {:.1}s. \
+         Use --rollback-include <name> or --rollback-all to include.",
         names.join(", "),
         file_info,
         result.probe_duration.as_secs_f64(),
@@ -252,7 +259,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn heavy_dir_names_extracts_names() {
+    fn preflight_result_fields() {
         let result = PreflightResult {
             heavy_dirs: vec![
                 HeavyDir {
@@ -271,7 +278,8 @@ mod tests {
             probe_duration: Duration::from_millis(800),
         };
 
-        assert_eq!(result.heavy_dir_names(), vec!["target", "node_modules"]);
+        let names: Vec<&str> = result.heavy_dirs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["target", "node_modules"]);
         assert!(result.needs_warning());
         assert_eq!(result.probe_file_count, 5000);
         assert!(result.probe_capped);

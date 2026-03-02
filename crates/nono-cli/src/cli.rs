@@ -374,9 +374,9 @@ pub struct RunArgs {
     pub rollback_exclude_glob: Vec<String>,
 
     /// Force-include a directory in rollback snapshots that would otherwise be
-    /// auto-excluded (repeatable). Use when you need rollback coverage on build
-    /// artifacts or dependencies. Does NOT affect sandbox permissions.
-    #[arg(long, value_name = "PATH")]
+    /// auto-excluded (repeatable). Accepts directory names (e.g., "target",
+    /// "node_modules"), not full paths. Does NOT affect sandbox permissions.
+    #[arg(long, value_name = "DIR_NAME")]
     pub rollback_include: Vec<String>,
 
     /// Include ALL directories in rollback snapshots, overriding auto-exclusions.

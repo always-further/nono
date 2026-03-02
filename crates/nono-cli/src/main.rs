@@ -942,17 +942,20 @@ fn execute_sandboxed(
 
                         if preflight_result.needs_warning() {
                             // Filter out any dirs the user explicitly wants to include
-                            let auto_excluded: Vec<String> = preflight_result
-                                .heavy_dir_names()
-                                .into_iter()
-                                .filter(|name| !flags.rollback_include.contains(name))
-                                .collect();
+                            let auto_excluded: Vec<&rollback_preflight::HeavyDir> =
+                                preflight_result
+                                    .heavy_dirs
+                                    .iter()
+                                    .filter(|d| !flags.rollback_include.contains(&d.name))
+                                    .collect();
 
                             if !auto_excluded.is_empty() {
+                                let excluded_names: Vec<String> =
+                                    auto_excluded.iter().map(|d| d.name.clone()).collect();
                                 let mut all_patterns = rollback_base_exclusions();
                                 all_patterns
                                     .extend(flags.rollback_exclude_patterns.iter().cloned());
-                                all_patterns.extend(auto_excluded);
+                                all_patterns.extend(excluded_names);
                                 all_patterns.dedup();
                                 let updated_config = nono::undo::ExclusionConfig {
                                     use_gitignore: true,
@@ -965,9 +968,10 @@ fn execute_sandboxed(
                                     &gitignore_root,
                                 )?;
 
-                                // Print notice (not a prompt — just transparency)
+                                // Print notice showing only actually-excluded dirs
                                 if !flags.silent {
                                     rollback_preflight::print_auto_exclude_notice(
+                                        &auto_excluded,
                                         &preflight_result,
                                     );
                                 }
