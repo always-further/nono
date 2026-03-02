@@ -424,6 +424,7 @@ fn run_sandbox(
             prepared.caps.network_mode(),
             nono::NetworkMode::ProxyOnly { .. }
         ) || !proxy_credentials.is_empty()
+            || network_profile.is_some()
     };
 
     execute_sandboxed(
