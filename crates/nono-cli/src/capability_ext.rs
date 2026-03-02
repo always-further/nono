@@ -284,7 +284,7 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Apply allowed commands from profile
         for cmd in &profile.security.allowed_commands {
-            caps.add_allowed_command(cmd.clone());
+            caps.add_allowed_command(cmd.as_str());
         }
 
         // Apply CLI overrides (CLI args take precedence)
