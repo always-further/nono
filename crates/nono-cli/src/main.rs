@@ -921,6 +921,7 @@ fn execute_sandboxed(
 
                     let mut patterns = rollback_base_exclusions();
                     patterns.extend(flags.rollback_exclude_patterns.iter().cloned());
+                    patterns.sort_unstable();
                     patterns.dedup();
                     let exclusion_config = nono::undo::ExclusionConfig {
                         use_gitignore: true,
@@ -960,6 +961,7 @@ fn execute_sandboxed(
                                 all_patterns
                                     .extend(flags.rollback_exclude_patterns.iter().cloned());
                                 all_patterns.extend(excluded_names);
+                                all_patterns.sort_unstable();
                                 all_patterns.dedup();
                                 let updated_config = nono::undo::ExclusionConfig {
                                     use_gitignore: true,
