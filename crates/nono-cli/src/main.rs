@@ -876,6 +876,26 @@ fn execute_sandboxed(
             output::print_applying_sandbox(flags.silent);
 
             // --- Rollback snapshot lifecycle (only when --rollback is active) ---
+            // Warn if rollback-related flags are set but rollback is disabled.
+            if flags.no_rollback {
+                let has_rollback_flags = flags.rollback_all
+                    || !flags.rollback_include.is_empty()
+                    || !flags.rollback_exclude_patterns.is_empty()
+                    || !flags.rollback_exclude_globs.is_empty();
+                if has_rollback_flags {
+                    warn!(
+                        "--no-rollback is active; rollback flags \
+                         (--rollback-all, --rollback-include, --rollback-exclude) \
+                         have no effect"
+                    );
+                    if !flags.silent {
+                        eprintln!(
+                            "  [nono] Warning: --no-rollback is active; \
+                             rollback customization flags have no effect."
+                        );
+                    }
+                }
+            }
             let rollback_state = if flags.rollback && !flags.no_rollback {
                 // Collect tracked paths: only USER-specified directories with write access.
                 // System/group paths (caches, frameworks, etc.) are excluded to avoid
@@ -919,7 +939,14 @@ fn execute_sandboxed(
                         let _ = std::fs::set_permissions(&session_dir, perms);
                     }
 
-                    let mut patterns = rollback_base_exclusions();
+                    // When --rollback-all is set, only exclude VCS internals
+                    // (restoring partial .git/ corrupts the repo). Otherwise
+                    // use the full base exclusion list.
+                    let mut patterns = if flags.rollback_all {
+                        rollback_vcs_exclusions()
+                    } else {
+                        rollback_base_exclusions()
+                    };
                     patterns.extend(flags.rollback_exclude_patterns.iter().cloned());
                     patterns.sort_unstable();
                     patterns.dedup();
@@ -1136,6 +1163,17 @@ fn execute_sandboxed(
             std::process::exit(exit_code);
         }
     }
+}
+
+/// VCS-only exclusions for `--rollback-all` mode.
+///
+/// When the user opts into snapshotting everything, only VCS internals are
+/// excluded because restoring partial `.git/` contents corrupts the repository.
+fn rollback_vcs_exclusions() -> Vec<String> {
+    [".git", ".hg", ".svn"]
+        .iter()
+        .map(|s| String::from(*s))
+        .collect()
 }
 
 /// Base exclusion patterns for rollback snapshots.

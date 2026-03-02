@@ -376,7 +376,8 @@ pub struct RunArgs {
     pub rollback_include: Vec<String>,
 
     /// Include ALL directories in rollback snapshots, overriding auto-exclusions.
-    /// Warning: may be very slow on large projects with build artifacts.
+    /// VCS internals (.git, .hg, .svn) are always excluded to prevent repository
+    /// corruption. Warning: may be very slow on large projects with build artifacts.
     #[arg(long, conflicts_with = "rollback_include")]
     pub rollback_all: bool,
 
