@@ -170,12 +170,28 @@ impl ExclusionFilter {
         false
     }
 
-    /// Check if path matches any force-include pattern
+    /// Check if path matches any force-include pattern.
+    ///
+    /// Uses the same matching logic as `matches_exclude_patterns`:
+    /// patterns containing `/` are matched as substrings of the full path,
+    /// all other patterns are matched as exact component names.
     fn matches_force_include(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
         for pattern in &self.force_include {
-            if path_str.contains(pattern.as_str()) {
-                return true;
+            if pattern.contains('/') {
+                // Multi-component pattern: substring match on full path
+                let path_str = path.to_string_lossy();
+                if path_str.contains(pattern.as_str()) {
+                    return true;
+                }
+            } else {
+                // Single component: exact match against each path component
+                for component in path.components() {
+                    if let std::path::Component::Normal(name) = component {
+                        if name.to_string_lossy() == *pattern {
+                            return true;
+                        }
+                    }
+                }
             }
         }
         false
