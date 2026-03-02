@@ -109,6 +109,7 @@ pub(crate) fn run_preflight(
         for entry in WalkDir::new(tracked)
             .follow_links(false)
             .into_iter()
+            .filter_entry(|e| !exclusion.is_excluded(e.path()))
             .filter_map(|e| e.ok())
         {
             if entry.path().is_file() {

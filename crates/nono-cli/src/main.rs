@@ -433,6 +433,18 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         nono::NetworkMode::ProxyOnly { .. }
     ) || !proxy_credentials.is_empty();
 
+    // Split --rollback-exclude values: glob metacharacters route to filename
+    // matching, everything else routes to component-based pattern matching.
+    let is_glob = |v: &String| v.contains('*') || v.contains('?') || v.contains('[');
+    let (cli_exclude_globs, cli_exclude_patterns): (Vec<_>, Vec<_>) =
+        run_args.rollback_exclude.into_iter().partition(is_glob);
+
+    let mut merged_patterns = prepared.rollback_exclude_patterns;
+    merged_patterns.extend(cli_exclude_patterns);
+
+    let mut merged_globs = prepared.rollback_exclude_globs;
+    merged_globs.extend(cli_exclude_globs);
+
     execute_sandboxed(
         program,
         cmd_args,
@@ -453,28 +465,8 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             scan_root,
             trust_scan_verified,
             protected_paths: verified_protected_paths,
-            rollback_exclude_patterns: {
-                let mut patterns = prepared.rollback_exclude_patterns;
-                patterns.extend(
-                    run_args
-                        .rollback_exclude
-                        .iter()
-                        .filter(|v| !v.contains('*') && !v.contains('?') && !v.contains('['))
-                        .cloned(),
-                );
-                patterns
-            },
-            rollback_exclude_globs: {
-                let mut globs = prepared.rollback_exclude_globs;
-                globs.extend(
-                    run_args
-                        .rollback_exclude
-                        .iter()
-                        .filter(|v| v.contains('*') || v.contains('?') || v.contains('['))
-                        .cloned(),
-                );
-                globs
-            },
+            rollback_exclude_patterns: merged_patterns,
+            rollback_exclude_globs: merged_globs,
             proxy_active,
             network_profile,
             proxy_allow_hosts,
