@@ -1,8 +1,10 @@
 //! Rollback preflight: detect large unexcluded directories before baseline creation.
 //!
-//! Two-phase scan:
-//! 1. Sentinel check — read immediate children of tracked dirs for known heavy names
-//! 2. Bounded walk — walk up to a cap to produce a lower-bound file estimate
+//! Detection uses two strategies:
+//! 1. **Name-based** — immediate children matching known heavy names (.git, target, etc.)
+//! 2. **Size-based** — any immediate-child directory exceeding 10,000 files
+//!
+//! After detection, a bounded walk estimates total scope for the notice message.
 //!
 //! The preflight is advisory. The library walk budget (Layer 2) provides the hard
 //! enforcement at walk time.
@@ -27,6 +29,12 @@ const KNOWN_HEAVY_DIRS: &[(&str, &str)] = &[
     (".gradle", "Gradle cache"),
     (".cache", "cache directory"),
 ];
+
+/// File count threshold for size-based auto-exclusion of unknown directories.
+const SIZE_THRESHOLD: usize = 10_000;
+
+/// Maximum wall-clock time to spend counting files in a single directory.
+const SIZE_CHECK_TIME_CAP: Duration = Duration::from_secs(1);
 
 /// Maximum entries to visit during bounded walk (Phase 2).
 const PROBE_ENTRY_CAP: usize = 5_000;
@@ -123,9 +131,11 @@ pub(crate) fn run_preflight(
     }
 }
 
-/// Phase 1: check immediate children of tracked dirs for known heavy names.
+/// Phase 1: check immediate children of tracked dirs for known heavy names
+/// and size-based detection of unknown large directories.
 fn detect_heavy_dirs(tracked_paths: &[PathBuf], exclusion: &ExclusionFilter) -> Vec<HeavyDir> {
     let mut found = Vec::new();
+    let mut size_check_candidates = Vec::new();
 
     for tracked in tracked_paths {
         if !tracked.exists() || tracked.is_file() {
@@ -151,17 +161,33 @@ fn detect_heavy_dirs(tracked_paths: &[PathBuf], exclusion: &ExclusionFilter) -> 
                 continue;
             };
 
-            // Check if this is a known heavy directory
-            if let Some((_, description)) = KNOWN_HEAVY_DIRS.iter().find(|(n, _)| *n == name_str) {
-                // Check if it's already excluded
-                if !exclusion.is_excluded(&path) {
-                    found.push(HeavyDir {
-                        path,
-                        name: name_str,
-                        description: (*description).to_string(),
-                    });
-                }
+            // Skip already-excluded directories
+            if exclusion.is_excluded(&path) {
+                continue;
             }
+
+            // Check if this is a known heavy directory by name
+            if let Some((_, description)) = KNOWN_HEAVY_DIRS.iter().find(|(n, _)| *n == name_str) {
+                found.push(HeavyDir {
+                    path,
+                    name: name_str,
+                    description: (*description).to_string(),
+                });
+            } else {
+                // Not a known name — candidate for size-based check
+                size_check_candidates.push((path, name_str));
+            }
+        }
+    }
+
+    // Size-based detection: bounded walk of unknown directories
+    for (path, name_str) in size_check_candidates {
+        if exceeds_file_threshold(&path) {
+            found.push(HeavyDir {
+                path,
+                name: name_str,
+                description: format!("large directory (>{SIZE_THRESHOLD} files)"),
+            });
         }
     }
 
@@ -169,6 +195,33 @@ fn detect_heavy_dirs(tracked_paths: &[PathBuf], exclusion: &ExclusionFilter) -> 
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found.dedup_by(|a, b| a.name == b.name);
     found
+}
+
+/// Check if a directory exceeds the file count threshold via bounded walk.
+/// Returns true if the directory contains more than `SIZE_THRESHOLD` files,
+/// or if the time cap is hit before counting completes (assumes large).
+fn exceeds_file_threshold(path: &std::path::Path) -> bool {
+    let start = Instant::now();
+    let mut count: usize = 0;
+
+    for entry in WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.path().is_file() {
+            count = count.saturating_add(1);
+        }
+        if count > SIZE_THRESHOLD {
+            return true;
+        }
+        if start.elapsed() >= SIZE_CHECK_TIME_CAP {
+            // Time cap hit before we finished counting — treat as large
+            return count > SIZE_THRESHOLD / 2;
+        }
+    }
+
+    false
 }
 
 /// Print a one-line auto-exclude notice to stderr.
