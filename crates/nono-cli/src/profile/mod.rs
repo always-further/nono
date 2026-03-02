@@ -545,6 +545,9 @@ pub struct RollbackConfig {
 /// A complete profile definition
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Profile {
+    /// Optional base profile to inherit from (by name)
+    #[serde(default)]
+    pub extends: Option<String>,
     #[serde(default)]
     pub meta: ProfileMeta,
     #[serde(default)]
@@ -650,8 +653,12 @@ fn merge_base_groups(profile: &mut Profile) -> Result<()> {
     Ok(())
 }
 
-/// Load a profile from a JSON file
-fn load_from_file(path: &Path) -> Result<Profile> {
+/// Parse a profile JSON file without resolving inheritance.
+///
+/// Returns the raw deserialized `Profile` with `extends` still set.
+/// Used during inheritance resolution to load base profiles without
+/// triggering infinite recursion.
+fn parse_profile_file(path: &Path) -> Result<Profile> {
     let content = fs::read_to_string(path).map_err(|e| NonoError::ProfileRead {
         path: path.to_path_buf(),
         source: e,
@@ -667,6 +674,178 @@ fn load_from_file(path: &Path) -> Result<Profile> {
     validate_env_credential_keys(&profile)?;
 
     Ok(profile)
+}
+
+/// Load a profile from a JSON file, resolving inheritance.
+fn load_from_file(path: &Path) -> Result<Profile> {
+    let profile = parse_profile_file(path)?;
+    resolve_extends(profile, &mut Vec::new(), 0)
+}
+
+// ============================================================================
+// Profile inheritance (extends)
+// ============================================================================
+
+/// Maximum depth for profile inheritance chains.
+const MAX_INHERITANCE_DEPTH: usize = 10;
+
+/// Resolve the `extends` chain for a profile.
+///
+/// If the profile declares `extends`, the base profile is loaded, its own
+/// `extends` resolved recursively, and the two are merged. The `visited` vec
+/// tracks profile names already in the chain to detect circular dependencies.
+fn resolve_extends(child: Profile, visited: &mut Vec<String>, depth: usize) -> Result<Profile> {
+    let base_name = match child.extends {
+        Some(ref name) => name.clone(),
+        None => return Ok(child),
+    };
+
+    if depth >= MAX_INHERITANCE_DEPTH {
+        return Err(NonoError::ProfileInheritance(format!(
+            "inheritance chain too deep (max {}): {}",
+            MAX_INHERITANCE_DEPTH,
+            visited.join(" -> ")
+        )));
+    }
+
+    if visited.contains(&base_name) {
+        return Err(NonoError::ProfileInheritance(format!(
+            "circular dependency detected: {} -> {}",
+            visited.join(" -> "),
+            base_name
+        )));
+    }
+
+    visited.push(base_name.clone());
+
+    let base = load_base_profile_raw(&base_name)?;
+    let resolved_base = resolve_extends(base, visited, depth + 1)?;
+
+    Ok(merge_profiles(resolved_base, child))
+}
+
+/// Load a base profile by name WITHOUT applying `merge_base_groups`.
+///
+/// Checks user profiles first, then built-in profiles. Built-in profiles
+/// are loaded via direct field copy from `ProfileDef` (not `to_profile()`,
+/// which would merge base_groups prematurely).
+fn load_base_profile_raw(name: &str) -> Result<Profile> {
+    if !is_valid_profile_name(name) {
+        return Err(NonoError::ProfileInheritance(format!(
+            "invalid base profile name '{}'",
+            name
+        )));
+    }
+
+    // 1. Check user profiles first
+    let profile_path = get_user_profile_path(name)?;
+    if profile_path.exists() {
+        return parse_profile_file(&profile_path);
+    }
+
+    // 2. Fall back to built-in profile from embedded policy
+    let policy = crate::policy::load_embedded_policy()?;
+    if let Some(def) = policy.profiles.get(name) {
+        return Ok(Profile {
+            extends: None,
+            meta: def.meta.clone(),
+            security: SecurityConfig {
+                groups: def.security.groups.clone(),
+                trust_groups: def.trust_groups.clone(),
+            },
+            filesystem: def.filesystem.clone(),
+            network: def.network.clone(),
+            env_credentials: def.env_credentials.clone(),
+            workdir: def.workdir.clone(),
+            hooks: def.hooks.clone(),
+            rollback: def.rollback.clone(),
+            interactive: def.interactive,
+        });
+    }
+
+    Err(NonoError::ProfileInheritance(format!(
+        "base profile '{}' not found",
+        name
+    )))
+}
+
+/// Merge a resolved base profile with a child profile.
+///
+/// The child's values take precedence for scalar fields. Collection fields
+/// are appended and deduplicated. The `extends` field is consumed (set to `None`).
+fn merge_profiles(base: Profile, child: Profile) -> Profile {
+    Profile {
+        extends: None,
+        meta: child.meta,
+        security: SecurityConfig {
+            groups: dedup_append(&base.security.groups, &child.security.groups),
+            trust_groups: dedup_append(&base.security.trust_groups, &child.security.trust_groups),
+        },
+        filesystem: FilesystemConfig {
+            allow: dedup_append(&base.filesystem.allow, &child.filesystem.allow),
+            read: dedup_append(&base.filesystem.read, &child.filesystem.read),
+            write: dedup_append(&base.filesystem.write, &child.filesystem.write),
+            allow_file: dedup_append(&base.filesystem.allow_file, &child.filesystem.allow_file),
+            read_file: dedup_append(&base.filesystem.read_file, &child.filesystem.read_file),
+            write_file: dedup_append(&base.filesystem.write_file, &child.filesystem.write_file),
+        },
+        network: NetworkConfig {
+            block: base.network.block || child.network.block,
+            network_profile: child.network.network_profile.or(base.network.network_profile),
+            proxy_allow: dedup_append(&base.network.proxy_allow, &child.network.proxy_allow),
+            proxy_credentials: dedup_append(
+                &base.network.proxy_credentials,
+                &child.network.proxy_credentials,
+            ),
+            custom_credentials: {
+                let mut merged = base.network.custom_credentials;
+                merged.extend(child.network.custom_credentials);
+                merged
+            },
+        },
+        env_credentials: SecretsConfig {
+            mappings: {
+                let mut merged = base.env_credentials.mappings;
+                merged.extend(child.env_credentials.mappings);
+                merged
+            },
+        },
+        workdir: if child.workdir.access != WorkdirAccess::None {
+            child.workdir
+        } else {
+            base.workdir
+        },
+        hooks: HooksConfig {
+            hooks: {
+                let mut merged = base.hooks.hooks;
+                merged.extend(child.hooks.hooks);
+                merged
+            },
+        },
+        rollback: RollbackConfig {
+            exclude_patterns: dedup_append(
+                &base.rollback.exclude_patterns,
+                &child.rollback.exclude_patterns,
+            ),
+            exclude_globs: dedup_append(
+                &base.rollback.exclude_globs,
+                &child.rollback.exclude_globs,
+            ),
+        },
+        interactive: base.interactive || child.interactive,
+    }
+}
+
+/// Append child items after base items, deduplicating while preserving order.
+fn dedup_append(base: &[String], child: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::with_capacity(base.len() + child.len());
+    for item in base.iter().chain(child.iter()) {
+        if seen.insert(item.clone()) {
+            result.push(item.clone());
+        }
+    }
+    result
 }
 
 /// Get the path to a user profile
