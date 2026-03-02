@@ -61,6 +61,29 @@ nono run --allow-cwd --dry-run -- command
 | OpenCode | `nono run --profile opencode -- opencode` |
 | OpenClaw | `nono run --profile openclaw -- openclaw gateway` |
 
+## Rollback
+
+Rollback snapshots automatically exclude known regenerable directories (`.git`, `target`, `node_modules`, etc.) and any directory with more than 10,000 files to prevent hangs on large projects.
+
+```bash
+# Zero-flag usage — auto-excludes large directories
+nono run --rollback --allow-cwd -- npm test
+
+# Force-include an auto-excluded directory
+nono run --rollback --rollback-include target -- cargo build
+
+# Exclude a custom directory from rollback
+nono run --rollback --rollback-exclude vendor -- go test ./...
+
+# Include everything (may be slow on large projects)
+nono run --rollback --rollback-all -- cargo test
+
+# Disable rollback entirely
+nono run --no-rollback --allow-cwd -- npm test
+```
+
+> **Note:** Rollback exclusion does not affect sandbox permissions. Excluded directories are still sandboxed — they just can't be rolled back.
+
 ## Command Blocking
 
 Dangerous commands are blocked by default:

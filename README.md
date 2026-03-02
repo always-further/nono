@@ -143,9 +143,21 @@ nono run --rollback --supervised --allow-cwd -- claude
 
 ### Undo and Snapshots
 
-Content-addressable snapshots of your working directory taken before and during sandboxed execution. SHA-256 deduplication and Merkle tree commitments for integrity verification. Interactively review and restore individual files or the entire directory.
+Content-addressable snapshots of your working directory taken before and during sandboxed execution. SHA-256 deduplication and Merkle tree commitments for integrity verification. Interactively review and restore individual files or the entire directory. Known regenerable directories (`.git`, `target`, `node_modules`, etc.) and directories with more than 10,000 files are auto-excluded from snapshots to prevent hangs on large projects.
 
 ```bash
+# Zero-flag usage — auto-excludes large/regenerable directories
+nono run --rollback --allow-cwd -- npm test
+
+# Force-include an auto-excluded directory
+nono run --rollback --rollback-include target -- cargo build
+
+# Exclude a custom directory from rollback
+nono run --rollback --rollback-exclude vendor -- go test ./...
+
+# Disable rollback entirely
+nono run --no-rollback --allow-cwd -- npm test
+
 nono rollback list
 nono rollback restore
 ```
