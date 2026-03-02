@@ -80,6 +80,9 @@ pub enum NonoError {
     #[error("Profile parse error: {0}")]
     ProfileParse(String),
 
+    #[error("Profile inheritance error: {0}")]
+    ProfileInheritance(String),
+
     #[error("Home directory not found")]
     HomeNotFound,
 
