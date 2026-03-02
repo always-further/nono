@@ -922,7 +922,7 @@ fn execute_sandboxed(
                         use_gitignore: true,
                         exclude_patterns: patterns,
                         exclude_globs: flags.rollback_exclude_globs.clone(),
-                        force_include: Vec::new(),
+                        force_include: flags.rollback_include.clone(),
                     };
                     // Use the first tracked path as gitignore root
                     let gitignore_root = tracked_paths
@@ -961,7 +961,7 @@ fn execute_sandboxed(
                                     use_gitignore: true,
                                     exclude_patterns: all_patterns,
                                     exclude_globs: flags.rollback_exclude_globs.clone(),
-                                    force_include: Vec::new(),
+                                    force_include: flags.rollback_include.clone(),
                                 };
                                 exclusion = nono::undo::ExclusionFilter::new(
                                     updated_config,

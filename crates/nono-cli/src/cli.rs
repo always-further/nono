@@ -342,7 +342,7 @@ pub struct RunArgs {
     /// Enable atomic rollback snapshots for the session.
     /// Takes content-addressable snapshots of writable directories so you
     /// can restore to the pre-session state after the command exits.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_rollback")]
     pub rollback: bool,
 
     /// Use supervised execution mode for capability expansion approval.
@@ -359,7 +359,7 @@ pub struct RunArgs {
 
     /// Disable rollback entirely for this session.
     /// No snapshots are taken and no restore is offered.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "rollback")]
     pub no_rollback: bool,
 
     /// Exclude directory patterns from rollback snapshots (repeatable).
@@ -381,7 +381,7 @@ pub struct RunArgs {
 
     /// Include ALL directories in rollback snapshots, overriding auto-exclusions.
     /// Warning: may be very slow on large projects with build artifacts.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "rollback_include")]
     pub rollback_all: bool,
 
     /// Disable trust verification for instruction files.

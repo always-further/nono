@@ -551,6 +551,7 @@ impl SnapshotManager {
 
                 if let Ok(state) = file_state_from_metadata(path) {
                     total_bytes = total_bytes.saturating_add(state.size);
+                    self.check_budget(entries_visited, total_bytes)?;
                     files.insert(path.to_path_buf(), state);
                 }
             }
