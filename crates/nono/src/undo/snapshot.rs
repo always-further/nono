@@ -512,14 +512,12 @@ impl SnapshotManager {
                 .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
-                let path = entry.path();
-                if !path.is_file() {
-                    entries_visited = entries_visited.saturating_add(1);
-                    self.check_budget(entries_visited, total_bytes)?;
-                    continue;
-                }
                 entries_visited = entries_visited.saturating_add(1);
                 self.check_budget(entries_visited, total_bytes)?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
 
                 // Pre-check file size against budget before expensive hash+store
                 if let Ok(meta) = fs::metadata(path) {
@@ -584,14 +582,12 @@ impl SnapshotManager {
                 .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
-                let path = entry.path();
-                if !path.is_file() {
-                    entries_visited = entries_visited.saturating_add(1);
-                    self.check_budget(entries_visited, total_bytes)?;
-                    continue;
-                }
                 entries_visited = entries_visited.saturating_add(1);
                 self.check_budget(entries_visited, total_bytes)?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
 
                 if let Ok(state) = file_state_from_metadata(path) {
                     total_bytes = total_bytes.saturating_add(state.size);

@@ -950,6 +950,7 @@ fn execute_sandboxed(
                     patterns.extend(flags.rollback_exclude_patterns.iter().cloned());
                     patterns.sort_unstable();
                     patterns.dedup();
+                    let base_patterns = patterns.clone();
                     let exclusion_config = nono::undo::ExclusionConfig {
                         use_gitignore: true,
                         exclude_patterns: patterns,
@@ -984,9 +985,7 @@ fn execute_sandboxed(
                             if !auto_excluded.is_empty() {
                                 let excluded_names: Vec<String> =
                                     auto_excluded.iter().map(|d| d.name.clone()).collect();
-                                let mut all_patterns = rollback_base_exclusions();
-                                all_patterns
-                                    .extend(flags.rollback_exclude_patterns.iter().cloned());
+                                let mut all_patterns = base_patterns.clone();
                                 all_patterns.extend(excluded_names);
                                 all_patterns.sort_unstable();
                                 all_patterns.dedup();
