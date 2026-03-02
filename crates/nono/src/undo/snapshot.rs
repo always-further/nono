@@ -399,11 +399,26 @@ impl SnapshotManager {
 
     /// Validate that all paths in a manifest are within the tracked directories.
     ///
-    /// Prevents path traversal attacks via tampered manifests. Each path must
-    /// be a descendant of at least one tracked path (checked via `Path::starts_with`
-    /// which performs component-wise comparison, not string prefix matching).
+    /// Two-step validation:
+    /// 1. Reject paths containing `..` (parent directory) components. Without this,
+    ///    a tampered manifest could include paths like `/tracked/dir/../../etc/passwd`
+    ///    which pass `Path::starts_with("/tracked")` (component-wise prefix match)
+    ///    but resolve to locations outside the tracked directory on the filesystem.
+    /// 2. Verify each path is a descendant of at least one tracked directory
+    ///    (checked via `Path::starts_with`, component-wise comparison).
     fn validate_manifest_paths(&self, manifest: &SnapshotManifest) -> Result<()> {
         for path in manifest.files.keys() {
+            // Reject parent-directory traversal components to prevent path escape.
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(NonoError::Snapshot(format!(
+                    "Manifest contains path with parent directory traversal: {}",
+                    path.display()
+                )));
+            }
+
             let within_tracked = self
                 .tracked_paths
                 .iter()
@@ -716,6 +731,7 @@ fn has_atomic_temp_suffix(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::undo::exclusion::ExclusionConfig;
+    use crate::undo::types::ContentHash;
     use tempfile::TempDir;
 
     fn setup_test_dir() -> (TempDir, PathBuf) {
@@ -993,6 +1009,100 @@ mod tests {
         let baseline_changes =
             SnapshotManager::load_changes_from(&session_dir, 0).expect("load baseline changes");
         assert!(baseline_changes.is_empty());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_parent_dir_traversal() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let manager = make_manager(&session_dir, &tracked);
+
+        // Craft a manifest with a path containing ".." that passes starts_with
+        // but would resolve outside the tracked directory.
+        let mut files = HashMap::new();
+        let evil_path = tracked
+            .join("subdir")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd");
+        files.insert(
+            evil_path,
+            FileState {
+                hash: ContentHash::from_bytes([0xde; 32]),
+                size: 100,
+                mtime: 0,
+                permissions: 0o644,
+            },
+        );
+
+        let manifest = SnapshotManifest {
+            number: 0,
+            parent: None,
+            files,
+            merkle_root: ContentHash::from_bytes([0; 32]),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        let result = manager.validate_manifest_paths(&manifest);
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should reject").to_string();
+        assert!(
+            err_msg.contains("parent directory traversal"),
+            "Expected traversal error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn validate_manifest_rejects_path_outside_tracked() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let manager = make_manager(&session_dir, &tracked);
+
+        let mut files = HashMap::new();
+        files.insert(
+            PathBuf::from("/tmp/not-tracked/secret.txt"),
+            FileState {
+                hash: ContentHash::from_bytes([0xde; 32]),
+                size: 50,
+                mtime: 0,
+                permissions: 0o644,
+            },
+        );
+
+        let manifest = SnapshotManifest {
+            number: 0,
+            parent: None,
+            files,
+            merkle_root: ContentHash::from_bytes([0; 32]),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        let result = manager.validate_manifest_paths(&manifest);
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should reject").to_string();
+        assert!(
+            err_msg.contains("outside tracked directories"),
+            "Expected outside-tracked error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn validate_manifest_accepts_valid_paths() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let mut manager = make_manager(&session_dir, &tracked);
+        let baseline = manager.create_baseline().expect("baseline");
+
+        // A real baseline manifest should pass validation.
+        let result = manager.validate_manifest_paths(&baseline);
+        assert!(result.is_ok());
     }
 
     #[test]
