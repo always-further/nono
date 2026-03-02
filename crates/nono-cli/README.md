@@ -61,6 +61,42 @@ nono run --allow-cwd --dry-run -- command
 | OpenCode | `nono run --profile opencode -- opencode` |
 | OpenClaw | `nono run --profile openclaw -- openclaw gateway` |
 
+## Profile Inheritance
+
+User profiles can extend built-in or other user profiles with the `extends` field. The child inherits all settings from the base and only declares additions or overrides.
+
+```json
+{
+  "extends": "claude-code",
+  "meta": { "name": "my-claude" },
+  "filesystem": {
+    "allow": ["/opt/my-tools"],
+    "read": ["/etc/my-app"]
+  }
+}
+```
+
+Save to `~/.config/nono/profiles/my-claude.json`, then:
+
+```bash
+nono run --profile my-claude -- claude
+```
+
+### Merge semantics
+
+- **Lists** (filesystem paths, security groups, rollback patterns): appended and deduplicated
+- **HashMaps** (credentials, hooks): merged, child wins on same key
+- **Booleans** (`network.block`, `interactive`): OR — either activates
+- **Scalars** (`meta`, `network_profile`): child overrides
+
+### Chaining
+
+Profiles can form chains (up to 10 levels deep). Circular dependencies are detected and rejected.
+
+```
+my-dev.json → team-base.json → claude-code (built-in)
+```
+
 ## Command Blocking
 
 Dangerous commands are blocked by default:

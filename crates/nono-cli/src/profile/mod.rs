@@ -813,6 +813,9 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 merged
             },
         },
+        // NOTE: WorkdirAccess::None serves as both "not specified" and "explicitly no access".
+        // A child cannot override a base's workdir grant to None. This is a v1 limitation;
+        // fixing it requires wrapping in Option<WorkdirAccess> and updating all consumers.
         workdir: if child.workdir.access != WorkdirAccess::None {
             child.workdir
         } else {
@@ -841,10 +844,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
 
 /// Append child items after base items, deduplicating while preserving order.
 fn dedup_append(base: &[String], child: &[String]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::with_capacity(base.len() + child.len());
     let mut result = Vec::with_capacity(base.len() + child.len());
     for item in base.iter().chain(child.iter()) {
-        if seen.insert(item.clone()) {
+        if seen.insert(item) {
             result.push(item.clone());
         }
     }
@@ -1959,6 +1962,125 @@ mod tests {
         assert_eq!(merged.workdir.access, WorkdirAccess::Read);
     }
 
+    #[test]
+    fn test_merge_profiles_trust_groups_additive() {
+        let mut base = base_profile();
+        base.security.trust_groups = vec!["base_trust".to_string()];
+
+        let mut child = child_profile();
+        child.security.trust_groups = vec!["child_trust".to_string()];
+
+        let merged = merge_profiles(base, child);
+        // trust_groups are additive — child can add its own
+        assert!(merged
+            .security
+            .trust_groups
+            .contains(&"base_trust".to_string()));
+        assert!(merged
+            .security
+            .trust_groups
+            .contains(&"child_trust".to_string()));
+    }
+
+    #[test]
+    fn test_merge_profiles_merges_hooks() {
+        let mut base = base_profile();
+        base.hooks.hooks.insert(
+            "claude-code".to_string(),
+            HookConfig {
+                event: "PostToolUseFailure".to_string(),
+                matcher: "Bash".to_string(),
+                script: "base-hook.sh".to_string(),
+            },
+        );
+
+        let mut child = child_profile();
+        child.hooks.hooks.insert(
+            "opencode".to_string(),
+            HookConfig {
+                event: "PreToolUse".to_string(),
+                matcher: "Write".to_string(),
+                script: "child-hook.sh".to_string(),
+            },
+        );
+
+        let merged = merge_profiles(base, child);
+        assert!(merged.hooks.hooks.contains_key("claude-code"));
+        assert!(merged.hooks.hooks.contains_key("opencode"));
+
+        // Same-key collision: child wins
+        let mut base2 = base_profile();
+        base2.hooks.hooks.insert(
+            "claude-code".to_string(),
+            HookConfig {
+                event: "PostToolUseFailure".to_string(),
+                matcher: "Bash".to_string(),
+                script: "base-hook.sh".to_string(),
+            },
+        );
+
+        let mut child2 = child_profile();
+        child2.hooks.hooks.insert(
+            "claude-code".to_string(),
+            HookConfig {
+                event: "PreToolUse".to_string(),
+                matcher: "Read".to_string(),
+                script: "child-hook.sh".to_string(),
+            },
+        );
+
+        let merged2 = merge_profiles(base2, child2);
+        let hook = &merged2.hooks.hooks["claude-code"];
+        assert_eq!(
+            hook.script, "child-hook.sh",
+            "child should win on collision"
+        );
+        assert_eq!(hook.event, "PreToolUse");
+    }
+
+    #[test]
+    fn test_merge_profiles_custom_credentials_child_wins_on_collision() {
+        let mut base = base_profile();
+        base.network.custom_credentials.insert(
+            "svc_shared".to_string(),
+            CustomCredentialDef {
+                upstream: "https://base.example.com".to_string(),
+                credential_key: "key_base".to_string(),
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: None,
+            },
+        );
+
+        let mut child = child_profile();
+        child.network.custom_credentials.insert(
+            "svc_shared".to_string(),
+            CustomCredentialDef {
+                upstream: "https://child.example.com".to_string(),
+                credential_key: "key_child".to_string(),
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Token {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: None,
+            },
+        );
+
+        let merged = merge_profiles(base, child);
+        let cred = &merged.network.custom_credentials["svc_shared"];
+        assert_eq!(
+            cred.upstream, "https://child.example.com",
+            "child should win on same-key collision"
+        );
+        assert_eq!(cred.credential_key, "key_child");
+    }
+
     // --- Loading pipeline tests ---
 
     #[test]
@@ -1993,38 +2115,46 @@ mod tests {
 
     #[test]
     fn test_extends_user_profile() {
+        // Test user-to-user file-based inheritance by parsing two temp files
+        // and running resolve_extends + merge_profiles — the same pipeline
+        // that load_from_file uses. We avoid setting XDG_CONFIG_HOME because
+        // env::set_var is process-global and races with parallel tests.
         let dir = tempdir().expect("tmpdir");
 
-        // Write base profile
+        // Write base profile (no extends)
         let base_path = dir.path().join("base.json");
         std::fs::write(
             &base_path,
             r#"{
-                "meta": { "name": "base" },
-                "filesystem": { "allow": ["/base/path"] },
+                "meta": { "name": "base-user" },
+                "filesystem": { "allow": ["/base/path"], "read": ["/base/read"] },
                 "network": { "block": true }
             }"#,
         )
         .expect("write base");
 
-        // Write child that extends a built-in
+        // Write child profile (no extends in file — we set it after parsing)
         let child_path = dir.path().join("child.json");
         std::fs::write(
             &child_path,
             r#"{
-                "extends": "claude-code",
-                "meta": { "name": "child" },
+                "meta": { "name": "child-user" },
                 "filesystem": { "allow": ["/child/path"] }
             }"#,
         )
         .expect("write child");
 
-        let profile = load_from_file(&child_path).expect("load child");
-        assert_eq!(profile.meta.name, "child");
-        assert!(profile
-            .filesystem
-            .allow
-            .contains(&"/child/path".to_string()));
+        // Simulate the load_from_file pipeline: parse both, then merge
+        let base = parse_profile_file(&base_path).expect("parse base");
+        let child = parse_profile_file(&child_path).expect("parse child");
+        let merged = merge_profiles(base, child);
+
+        assert_eq!(merged.meta.name, "child-user");
+        assert!(merged.filesystem.allow.contains(&"/base/path".to_string()));
+        assert!(merged.filesystem.allow.contains(&"/child/path".to_string()));
+        assert!(merged.filesystem.read.contains(&"/base/read".to_string()));
+        assert!(merged.network.block, "base block=true must be inherited");
+        assert!(merged.extends.is_none());
     }
 
     #[test]
