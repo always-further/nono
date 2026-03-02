@@ -1,0 +1,252 @@
+//! Rollback preflight: detect large unexcluded directories before baseline creation.
+//!
+//! Two-phase scan:
+//! 1. Sentinel check — read immediate children of tracked dirs for known heavy names
+//! 2. Bounded walk — walk up to a cap to produce a lower-bound file estimate
+//!
+//! The preflight is advisory. The library walk budget (Layer 2) provides the hard
+//! enforcement at walk time.
+
+use nono::undo::ExclusionFilter;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use walkdir::WalkDir;
+
+/// Well-known directory names that are typically very large and fully regenerable.
+const KNOWN_HEAVY_DIRS: &[(&str, &str)] = &[
+    (".git", "VCS internals"),
+    ("target", "build artifacts"),
+    ("node_modules", "dependencies"),
+    ("__pycache__", "Python bytecode cache"),
+    (".venv", "Python virtual environment"),
+    (".tox", "tox environments"),
+    ("dist", "distribution artifacts"),
+    ("build", "build output"),
+    (".next", "Next.js build"),
+    (".nuxt", "Nuxt.js build"),
+    (".gradle", "Gradle cache"),
+    (".cache", "cache directory"),
+];
+
+/// Maximum entries to visit during bounded walk (Phase 2).
+const PROBE_ENTRY_CAP: usize = 5_000;
+
+/// Maximum wall-clock time for bounded walk (Phase 2).
+const PROBE_TIME_CAP: Duration = Duration::from_secs(2);
+
+/// Result of the preflight scan.
+pub(crate) struct PreflightResult {
+    /// Heavy directories found that are NOT covered by the exclusion filter.
+    pub heavy_dirs: Vec<HeavyDir>,
+    /// Lower-bound file count from bounded walk (only populated if heavy dirs found).
+    pub probe_file_count: usize,
+    /// Whether the probe was capped before completion.
+    pub probe_capped: bool,
+    /// Wall-clock time of the probe.
+    pub probe_duration: Duration,
+}
+
+/// A detected heavy directory.
+pub(crate) struct HeavyDir {
+    /// Full path to the directory.
+    pub path: PathBuf,
+    /// Directory name (e.g. "target").
+    pub name: String,
+    /// Human-readable description (e.g. "build artifacts").
+    pub description: String,
+}
+
+impl PreflightResult {
+    /// Whether this result warrants a warning or prompt.
+    pub fn needs_warning(&self) -> bool {
+        !self.heavy_dirs.is_empty()
+    }
+
+    /// Get the directory names suitable for adding as exclusion patterns.
+    pub fn heavy_dir_names(&self) -> Vec<String> {
+        self.heavy_dirs.iter().map(|d| d.name.clone()).collect()
+    }
+}
+
+/// Run the preflight scan on tracked paths against the exclusion filter.
+///
+/// Phase 1 checks immediate children for known heavy directory names that are
+/// not already excluded. If none are found, returns early with an empty result.
+/// Phase 2 performs a bounded walk to estimate total file count.
+pub(crate) fn run_preflight(
+    tracked_paths: &[PathBuf],
+    exclusion: &ExclusionFilter,
+) -> PreflightResult {
+    // Phase 1: sentinel check
+    let heavy_dirs = detect_heavy_dirs(tracked_paths, exclusion);
+
+    if heavy_dirs.is_empty() {
+        return PreflightResult {
+            heavy_dirs,
+            probe_file_count: 0,
+            probe_capped: false,
+            probe_duration: Duration::ZERO,
+        };
+    }
+
+    // Phase 2: bounded walk to estimate scope
+    let start = Instant::now();
+    let mut file_count: usize = 0;
+    let mut capped = false;
+
+    'outer: for tracked in tracked_paths {
+        if !tracked.exists() || tracked.is_file() {
+            continue;
+        }
+
+        for entry in WalkDir::new(tracked)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.path().is_file() {
+                file_count = file_count.saturating_add(1);
+            }
+
+            if file_count >= PROBE_ENTRY_CAP || start.elapsed() >= PROBE_TIME_CAP {
+                capped = true;
+                break 'outer;
+            }
+        }
+    }
+
+    PreflightResult {
+        heavy_dirs,
+        probe_file_count: file_count,
+        probe_capped: capped,
+        probe_duration: start.elapsed(),
+    }
+}
+
+/// Phase 1: check immediate children of tracked dirs for known heavy names.
+fn detect_heavy_dirs(tracked_paths: &[PathBuf], exclusion: &ExclusionFilter) -> Vec<HeavyDir> {
+    let mut found = Vec::new();
+
+    for tracked in tracked_paths {
+        if !tracked.exists() || tracked.is_file() {
+            continue;
+        }
+
+        let entries = match std::fs::read_dir(tracked) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let Some(name_str) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+
+            // Check if this is a known heavy directory
+            if let Some((_, description)) = KNOWN_HEAVY_DIRS.iter().find(|(n, _)| *n == name_str) {
+                // Check if it's already excluded
+                if !exclusion.is_excluded(&path) {
+                    found.push(HeavyDir {
+                        path,
+                        name: name_str,
+                        description: (*description).to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Deduplicate by name (multiple tracked paths could contain same dir name)
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.dedup_by(|a, b| a.name == b.name);
+    found
+}
+
+/// Print a one-line auto-exclude notice to stderr.
+///
+/// This is the default behavior: auto-exclude heavy dirs and transparently
+/// tell the user what happened. No prompt, no blocking.
+pub(crate) fn print_auto_exclude_notice(result: &PreflightResult) {
+    let names: Vec<String> = result
+        .heavy_dirs
+        .iter()
+        .map(|d| format!("{} ({})", d.path.display(), d.description))
+        .collect();
+    let file_info = if result.probe_capped {
+        format!(">{} files", result.probe_file_count)
+    } else {
+        format!("~{} files", result.probe_file_count)
+    };
+    eprintln!(
+        "  [nono] Rollback: auto-excluded {} [{}] in {:.1}s. Use --rollback-all to include.",
+        names.join(", "),
+        file_info,
+        result.probe_duration.as_secs_f64(),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heavy_dir_names_extracts_names() {
+        let result = PreflightResult {
+            heavy_dirs: vec![
+                HeavyDir {
+                    path: PathBuf::from("/a/target"),
+                    name: "target".to_string(),
+                    description: "build artifacts".to_string(),
+                },
+                HeavyDir {
+                    path: PathBuf::from("/a/node_modules"),
+                    name: "node_modules".to_string(),
+                    description: "dependencies".to_string(),
+                },
+            ],
+            probe_file_count: 5000,
+            probe_capped: true,
+            probe_duration: Duration::from_millis(800),
+        };
+
+        assert_eq!(result.heavy_dir_names(), vec!["target", "node_modules"]);
+        assert!(result.needs_warning());
+        assert_eq!(result.probe_file_count, 5000);
+        assert!(result.probe_capped);
+        assert_eq!(result.probe_duration, Duration::from_millis(800));
+    }
+
+    #[test]
+    fn empty_result_does_not_need_warning() {
+        let result = PreflightResult {
+            heavy_dirs: vec![],
+            probe_file_count: 0,
+            probe_capped: false,
+            probe_duration: Duration::ZERO,
+        };
+
+        assert!(!result.needs_warning());
+        assert_eq!(result.probe_file_count, 0);
+        assert!(!result.probe_capped);
+    }
+
+    #[test]
+    fn heavy_dir_fields_accessible() {
+        let hd = HeavyDir {
+            path: PathBuf::from("/project/target"),
+            name: "target".to_string(),
+            description: "build artifacts".to_string(),
+        };
+        assert_eq!(hd.path, PathBuf::from("/project/target"));
+        assert_eq!(hd.description, "build artifacts");
+    }
+}

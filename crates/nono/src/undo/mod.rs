@@ -13,5 +13,5 @@ pub mod types;
 pub use exclusion::{ExclusionConfig, ExclusionFilter};
 pub use merkle::MerkleTree;
 pub use object_store::ObjectStore;
-pub use snapshot::SnapshotManager;
+pub use snapshot::{SnapshotManager, WalkBudget};
 pub use types::*;

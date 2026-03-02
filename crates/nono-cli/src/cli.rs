@@ -357,6 +357,33 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_rollback_prompt: bool,
 
+    /// Disable rollback entirely for this session.
+    /// No snapshots are taken and no restore is offered.
+    #[arg(long)]
+    pub no_rollback: bool,
+
+    /// Exclude directory patterns from rollback snapshots (repeatable).
+    /// Patterns without '/' match exact path components; patterns with '/'
+    /// match as substrings. Does NOT affect sandbox permissions.
+    #[arg(long, value_name = "PATTERN")]
+    pub rollback_exclude: Vec<String>,
+
+    /// Exclude files matching glob patterns from rollback snapshots (repeatable).
+    /// Matched against filenames only. Does NOT affect sandbox permissions.
+    #[arg(long, value_name = "GLOB")]
+    pub rollback_exclude_glob: Vec<String>,
+
+    /// Force-include a directory in rollback snapshots that would otherwise be
+    /// auto-excluded (repeatable). Use when you need rollback coverage on build
+    /// artifacts or dependencies. Does NOT affect sandbox permissions.
+    #[arg(long, value_name = "PATH")]
+    pub rollback_include: Vec<String>,
+
+    /// Include ALL directories in rollback snapshots, overriding auto-exclusions.
+    /// Warning: may be very slow on large projects with build artifacts.
+    #[arg(long)]
+    pub rollback_all: bool,
+
     /// Disable trust verification for instruction files.
     /// For development and testing only. Logs a warning and skips the
     /// pre-exec trust scan. Not recommended for production use.

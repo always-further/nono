@@ -17,6 +17,7 @@ mod profile;
 mod protected_paths;
 mod query_ext;
 mod rollback_commands;
+mod rollback_preflight;
 mod rollback_session;
 mod rollback_ui;
 mod sandbox_state;
@@ -29,7 +30,7 @@ mod update_check;
 
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
-use cli::{Cli, Commands, LearnArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
+use cli::{Cli, Commands, LearnArgs, RunArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
@@ -68,17 +69,7 @@ fn run() -> Result<()> {
         Commands::Run(args) => {
             output::print_banner(cli.silent);
             show_update_notification(&mut update_handle, cli.silent);
-            run_sandbox(
-                args.sandbox,
-                args.command,
-                args.no_diagnostics,
-                args.direct_exec,
-                args.rollback,
-                args.supervised,
-                args.no_rollback_prompt,
-                args.trust_override,
-                cli.silent,
-            )
+            run_sandbox(*args, cli.silent)
         }
         Commands::Shell(args) => {
             output::print_banner(cli.silent);
@@ -303,18 +294,16 @@ fn run_why(args: WhyArgs) -> Result<()> {
 }
 
 /// Run a command inside the sandbox
-#[allow(clippy::too_many_arguments)]
-fn run_sandbox(
-    args: SandboxArgs,
-    command: Vec<String>,
-    no_diagnostics: bool,
-    direct_exec: bool,
-    rollback: bool,
-    supervised: bool,
-    no_rollback_prompt: bool,
-    trust_override: bool,
-    silent: bool,
-) -> Result<()> {
+fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
+    let args = run_args.sandbox;
+    let command = run_args.command;
+    let no_diagnostics = run_args.no_diagnostics;
+    let direct_exec = run_args.direct_exec;
+    let rollback = run_args.rollback;
+    let supervised = run_args.supervised;
+    let no_rollback_prompt = run_args.no_rollback_prompt;
+    let trust_override = run_args.trust_override;
+
     // Check if we have a command to run
     if command.is_empty() {
         return Err(NonoError::NoCommand);
@@ -454,15 +443,26 @@ fn run_sandbox(
             no_diagnostics,
             direct_exec,
             rollback,
+            no_rollback: run_args.no_rollback,
             supervised,
             no_rollback_prompt,
             trust_override,
             silent,
+            rollback_all: run_args.rollback_all,
+            rollback_include: run_args.rollback_include,
             scan_root,
             trust_scan_verified,
             protected_paths: verified_protected_paths,
-            rollback_exclude_patterns: prepared.rollback_exclude_patterns,
-            rollback_exclude_globs: prepared.rollback_exclude_globs,
+            rollback_exclude_patterns: {
+                let mut patterns = prepared.rollback_exclude_patterns;
+                patterns.extend(run_args.rollback_exclude);
+                patterns
+            },
+            rollback_exclude_globs: {
+                let mut globs = prepared.rollback_exclude_globs;
+                globs.extend(run_args.rollback_exclude_glob);
+                globs
+            },
             proxy_active,
             network_profile,
             proxy_allow_hosts,
@@ -521,10 +521,13 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             no_diagnostics: true,
             direct_exec: false,
             rollback: false,
+            no_rollback: false,
             supervised: false,
             no_rollback_prompt: false,
             trust_override: false,
             silent,
+            rollback_all: false,
+            rollback_include: Vec::new(),
             scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             trust_scan_verified: false,
             protected_paths: Vec::new(),
@@ -548,10 +551,15 @@ struct ExecutionFlags {
     no_diagnostics: bool,
     direct_exec: bool,
     rollback: bool,
+    no_rollback: bool,
     supervised: bool,
     no_rollback_prompt: bool,
     trust_override: bool,
     silent: bool,
+    /// Override all auto-exclusions (full snapshot)
+    rollback_all: bool,
+    /// Force-include specific directories that would otherwise be auto-excluded
+    rollback_include: Vec<String>,
     /// Root directory for trust policy discovery and scanning
     scan_root: std::path::PathBuf,
     /// Whether trust scan ran and verified at least one file (crypto threads may linger)
@@ -864,7 +872,7 @@ fn execute_sandboxed(
             output::print_applying_sandbox(flags.silent);
 
             // --- Rollback snapshot lifecycle (only when --rollback is active) ---
-            let rollback_state = if flags.rollback {
+            let rollback_state = if flags.rollback && !flags.no_rollback {
                 // Collect tracked paths: only USER-specified directories with write access.
                 // System/group paths (caches, frameworks, etc.) are excluded to avoid
                 // snapshotting system directories the user didn't ask to track.
@@ -921,28 +929,74 @@ fn execute_sandboxed(
                         .first()
                         .cloned()
                         .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    let exclusion =
+                    let mut exclusion =
                         nono::undo::ExclusionFilter::new(exclusion_config, &gitignore_root)?;
 
-                    let mut manager = nono::undo::SnapshotManager::new(
-                        session_dir.clone(),
-                        tracked_paths.clone(),
-                        exclusion,
-                    )?;
+                    // Run preflight to detect large unexcluded directories.
+                    // When --rollback-all is NOT set, auto-exclude detected heavy dirs
+                    // and print a one-line notice. This ensures zero-flag usage Just Works.
+                    // Directories listed in --rollback-include are kept (not auto-excluded).
+                    if !flags.rollback_all {
+                        let preflight_result =
+                            rollback_preflight::run_preflight(&tracked_paths, &exclusion);
 
-                    let baseline = manager.create_baseline()?;
-                    let atomic_temp_before = manager.collect_atomic_temp_files();
+                        if preflight_result.needs_warning() {
+                            // Filter out any dirs the user explicitly wants to include
+                            let auto_excluded: Vec<String> = preflight_result
+                                .heavy_dir_names()
+                                .into_iter()
+                                .filter(|name| !flags.rollback_include.contains(name))
+                                .collect();
 
-                    output::print_rollback_tracking(&tracked_paths, flags.silent);
+                            if !auto_excluded.is_empty() {
+                                let mut all_patterns = rollback_base_exclusions();
+                                all_patterns
+                                    .extend(flags.rollback_exclude_patterns.iter().cloned());
+                                all_patterns.extend(auto_excluded);
+                                all_patterns.dedup();
+                                let updated_config = nono::undo::ExclusionConfig {
+                                    use_gitignore: true,
+                                    exclude_patterns: all_patterns,
+                                    exclude_globs: flags.rollback_exclude_globs.clone(),
+                                    force_include: Vec::new(),
+                                };
+                                exclusion = nono::undo::ExclusionFilter::new(
+                                    updated_config,
+                                    &gitignore_root,
+                                )?;
 
-                    Some((
-                        manager,
-                        baseline,
-                        session_id,
-                        session_dir,
-                        tracked_paths,
-                        atomic_temp_before,
-                    ))
+                                // Print notice (not a prompt — just transparency)
+                                if !flags.silent {
+                                    rollback_preflight::print_auto_exclude_notice(
+                                        &preflight_result,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    {
+                        let mut manager = nono::undo::SnapshotManager::new(
+                            session_dir.clone(),
+                            tracked_paths.clone(),
+                            exclusion,
+                            nono::undo::WalkBudget::default(),
+                        )?;
+
+                        let baseline = manager.create_baseline()?;
+                        let atomic_temp_before = manager.collect_atomic_temp_files();
+
+                        output::print_rollback_tracking(&tracked_paths, flags.silent);
+
+                        Some((
+                            manager,
+                            baseline,
+                            session_id,
+                            session_dir,
+                            tracked_paths,
+                            atomic_temp_before,
+                        ))
+                    }
                 } else {
                     None
                 }
@@ -1088,6 +1142,11 @@ pub(crate) fn rollback_base_exclusions() -> Vec<String> {
         ".git",
         ".hg",
         ".svn",
+        // Build artifacts — fully regenerable from source
+        "target",
+        "node_modules",
+        "__pycache__",
+        ".venv",
         // OS metadata
         ".DS_Store",
     ]
