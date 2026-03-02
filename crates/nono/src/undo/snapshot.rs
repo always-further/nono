@@ -289,6 +289,7 @@ impl SnapshotManager {
     #[must_use]
     pub fn collect_atomic_temp_files(&self) -> HashSet<PathBuf> {
         let mut files = HashSet::new();
+        let mut entries_visited: usize = 0;
 
         for tracked in &self.tracked_paths {
             if !tracked.exists() {
@@ -305,8 +306,18 @@ impl SnapshotManager {
             for entry in WalkDir::new(tracked)
                 .follow_links(false)
                 .into_iter()
+                .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
+                entries_visited = entries_visited.saturating_add(1);
+                if self.budget.max_entries > 0 && entries_visited > self.budget.max_entries {
+                    tracing::warn!(
+                        "Atomic temp file scan capped at {} entries (budget limit)",
+                        entries_visited
+                    );
+                    return files;
+                }
+
                 let path = entry.path();
                 if !path.is_file() {
                     continue;
@@ -465,10 +476,26 @@ impl SnapshotManager {
 
             if tracked.is_file() {
                 if !self.exclusion.is_excluded(tracked) {
+                    // Pre-check file size against budget before expensive I/O
+                    if let Ok(meta) = fs::metadata(tracked) {
+                        let file_size = meta.len();
+                        if self.budget.max_bytes > 0
+                            && total_bytes.saturating_add(file_size) > self.budget.max_bytes
+                        {
+                            return Err(NonoError::Snapshot(format!(
+                                "Rollback budget exceeded: {} bytes tracked (limit: {} bytes). \
+                                 Consider adding exclusion patterns for large directories, \
+                                 or disable rollback with --no-rollback.",
+                                total_bytes.saturating_add(file_size),
+                                self.budget.max_bytes
+                            )));
+                        }
+                    }
                     match self.hash_and_store_file(tracked) {
                         Ok(state) => {
                             entries_visited = entries_visited.saturating_add(1);
                             total_bytes = total_bytes.saturating_add(state.size);
+                            self.check_budget(entries_visited, total_bytes)?;
                             files.insert(tracked.clone(), state);
                         }
                         Err(e) => {
@@ -493,6 +520,22 @@ impl SnapshotManager {
                 }
                 entries_visited = entries_visited.saturating_add(1);
                 self.check_budget(entries_visited, total_bytes)?;
+
+                // Pre-check file size against budget before expensive hash+store
+                if let Ok(meta) = fs::metadata(path) {
+                    let file_size = meta.len();
+                    if self.budget.max_bytes > 0
+                        && total_bytes.saturating_add(file_size) > self.budget.max_bytes
+                    {
+                        return Err(NonoError::Snapshot(format!(
+                            "Rollback budget exceeded: {} bytes tracked (limit: {} bytes). \
+                             Consider adding exclusion patterns for large directories, \
+                             or disable rollback with --no-rollback.",
+                            total_bytes.saturating_add(file_size),
+                            self.budget.max_bytes
+                        )));
+                    }
+                }
 
                 match self.hash_and_store_file(path) {
                     Ok(state) => {
@@ -528,6 +571,7 @@ impl SnapshotManager {
                     if let Ok(state) = file_state_from_metadata(tracked) {
                         entries_visited = entries_visited.saturating_add(1);
                         total_bytes = total_bytes.saturating_add(state.size);
+                        self.check_budget(entries_visited, total_bytes)?;
                         files.insert(tracked.clone(), state);
                     }
                 }
