@@ -391,11 +391,6 @@ fn run_sandbox(
         .map(|r| r.verified_paths())
         .unwrap_or_default();
 
-    let proxy_active = matches!(
-        prepared.caps.network_mode(),
-        nono::NetworkMode::ProxyOnly { .. }
-    );
-
     // Merge network profile from CLI args and profile config
     let network_profile = args
         .network_profile
@@ -405,6 +400,31 @@ fn run_sandbox(
     proxy_allow_hosts.extend(args.proxy_allow.clone());
     let mut proxy_credentials = prepared.proxy_credentials.clone();
     proxy_credentials.extend(args.proxy_credential.clone());
+
+    // The proxy is needed when the network mode is ProxyOnly OR when there are
+    // credential routes to inject. However, --net-block takes precedence: if
+    // network is explicitly blocked, the proxy must NOT activate since that
+    // would re-enable network access through the proxy's localhost listener.
+    let proxy_active = if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
+        if !proxy_credentials.is_empty() || network_profile.is_some() {
+            warn!(
+                "--net-block is active; ignoring proxy configuration \
+                 that would re-enable network access"
+            );
+            if !silent {
+                eprintln!(
+                    "  [nono] Warning: --net-block overrides proxy/credential settings. \
+                     Network remains fully blocked."
+                );
+            }
+        }
+        false
+    } else {
+        matches!(
+            prepared.caps.network_mode(),
+            nono::NetworkMode::ProxyOnly { .. }
+        ) || !proxy_credentials.is_empty()
+    };
 
     execute_sandboxed(
         program,
