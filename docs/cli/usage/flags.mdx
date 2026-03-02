@@ -459,7 +459,7 @@ nono run --no-rollback --allow-cwd -- npm test
 
 #### `--rollback-exclude`
 
-Exclude a directory pattern from rollback snapshots. Repeatable. Patterns without `/` match exact path components; patterns with `/` match as substrings. Does NOT affect sandbox permissions — excluded directories are still sandboxed.
+Exclude from rollback snapshots. Repeatable. Values containing glob characters (`*`, `?`, `[`) are matched against filenames. Plain names match exact path components; names with `/` match as path substrings. Does NOT affect sandbox permissions — excluded directories are still sandboxed.
 
 ```bash
 # Exclude a custom directory from rollback
@@ -467,15 +467,9 @@ nono run --rollback --rollback-exclude vendor -- go test ./...
 
 # Exclude multiple directories
 nono run --rollback --rollback-exclude vendor --rollback-exclude .terraform -- terraform plan
-```
 
-#### `--rollback-exclude-glob`
-
-Exclude files matching a glob pattern from rollback snapshots. Repeatable. Matched against filenames only. Does NOT affect sandbox permissions.
-
-```bash
-# Exclude log files from rollback
-nono run --rollback --rollback-exclude-glob "*.log" -- my-agent
+# Exclude log files from rollback (glob pattern)
+nono run --rollback --rollback-exclude "*.log" -- my-agent
 ```
 
 #### `--rollback-include`

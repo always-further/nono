@@ -204,17 +204,17 @@ Added to `RunArgs` in `crates/nono-cli/src/cli.rs`:
 | Flag | Type | Description |
 |------|------|-------------|
 | `--no-rollback` | `bool` | Disable rollback entirely (no snapshots, no restore) |
-| `--rollback-exclude <PATTERN>` | `Vec<String>`, repeatable | Exclude directory pattern from rollback snapshots |
-| `--rollback-exclude-glob <GLOB>` | `Vec<String>`, repeatable | Exclude files matching glob from rollback snapshots |
-| `--rollback-include <PATH>` | `Vec<String>`, repeatable | Force-include a directory that would otherwise be auto-excluded |
+| `--rollback-exclude <PATTERN>` | `Vec<String>`, repeatable | Exclude from rollback snapshots (glob chars route to filename matching; plain names match path components) |
+| `--rollback-include <DIR_NAME>` | `Vec<String>`, repeatable | Force-include a directory that would otherwise be auto-excluded |
 | `--rollback-all` | `bool` | Override ALL auto-exclusions for full snapshot coverage |
 
 Flag names are prefixed with `rollback-` to make clear they affect rollback scope,
 **not** sandbox scope. Excluding a directory from rollback does NOT exclude it from
 the sandbox — the kernel still enforces the full capability set.
 
-`--rollback-exclude` and `--rollback-exclude-glob` are additive with profile-sourced
-exclusion patterns (CLI values are merged with profile values).
+`--rollback-exclude` values are additive with profile-sourced exclusion patterns
+(CLI values are merged with profile values). Values containing glob metacharacters
+(`*`, `?`, `[`) are matched against filenames; all other values match path components.
 
 #### Examples
 

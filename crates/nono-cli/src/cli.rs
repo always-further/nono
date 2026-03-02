@@ -362,16 +362,12 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "rollback")]
     pub no_rollback: bool,
 
-    /// Exclude directory patterns from rollback snapshots (repeatable).
-    /// Patterns without '/' match exact path components; patterns with '/'
-    /// match as substrings. Does NOT affect sandbox permissions.
+    /// Exclude from rollback snapshots (repeatable).
+    /// Values containing glob characters (*, ?, [) are matched against
+    /// filenames. Plain names match exact path components; names with '/'
+    /// match as path substrings. Does NOT affect sandbox permissions.
     #[arg(long, value_name = "PATTERN")]
     pub rollback_exclude: Vec<String>,
-
-    /// Exclude files matching glob patterns from rollback snapshots (repeatable).
-    /// Matched against filenames only. Does NOT affect sandbox permissions.
-    #[arg(long, value_name = "GLOB")]
-    pub rollback_exclude_glob: Vec<String>,
 
     /// Force-include a directory in rollback snapshots that would otherwise be
     /// auto-excluded (repeatable). Accepts directory names (e.g., "target",

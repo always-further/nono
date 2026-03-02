@@ -455,12 +455,24 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             protected_paths: verified_protected_paths,
             rollback_exclude_patterns: {
                 let mut patterns = prepared.rollback_exclude_patterns;
-                patterns.extend(run_args.rollback_exclude);
+                patterns.extend(
+                    run_args
+                        .rollback_exclude
+                        .iter()
+                        .filter(|v| !v.contains('*') && !v.contains('?') && !v.contains('['))
+                        .cloned(),
+                );
                 patterns
             },
             rollback_exclude_globs: {
                 let mut globs = prepared.rollback_exclude_globs;
-                globs.extend(run_args.rollback_exclude_glob);
+                globs.extend(
+                    run_args
+                        .rollback_exclude
+                        .iter()
+                        .filter(|v| v.contains('*') || v.contains('?') || v.contains('['))
+                        .cloned(),
+                );
                 globs
             },
             proxy_active,
