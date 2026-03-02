@@ -2007,17 +2007,15 @@ mod tests {
         )
         .expect("write base");
 
-        // Write child that extends base via full path
+        // Write child that extends a built-in
         let child_path = dir.path().join("child.json");
         std::fs::write(
             &child_path,
-            &format!(
-                r#"{{
+            r#"{
                 "extends": "claude-code",
-                "meta": {{ "name": "child" }},
-                "filesystem": {{ "allow": ["/child/path"] }}
-            }}"#
-            ),
+                "meta": { "name": "child" },
+                "filesystem": { "allow": ["/child/path"] }
+            }"#,
         )
         .expect("write child");
 
