@@ -187,7 +187,7 @@ fn detect_heavy_dirs(tracked_paths: &[PathBuf], exclusion: &ExclusionFilter) -> 
         if size_check_start.elapsed() >= SIZE_CHECK_TOTAL_CAP {
             break;
         }
-        if exceeds_file_threshold(&path) {
+        if exceeds_file_threshold(&path, exclusion) {
             found.push(HeavyDir {
                 path,
                 name: name_str,
@@ -205,13 +205,17 @@ fn detect_heavy_dirs(tracked_paths: &[PathBuf], exclusion: &ExclusionFilter) -> 
 /// Check if a directory exceeds the file count threshold via bounded walk.
 /// Returns true if the directory contains more than `SIZE_THRESHOLD` files,
 /// or if the time cap is hit before counting completes (assumes large).
-fn exceeds_file_threshold(path: &std::path::Path) -> bool {
+///
+/// Applies the exclusion filter to skip already-excluded subtrees, ensuring
+/// the count reflects the effective snapshot scope.
+fn exceeds_file_threshold(path: &std::path::Path, exclusion: &ExclusionFilter) -> bool {
     let start = Instant::now();
     let mut count: usize = 0;
 
     for entry in WalkDir::new(path)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|e| !exclusion.is_excluded(e.path()))
         .filter_map(|e| e.ok())
     {
         if entry.path().is_file() {
