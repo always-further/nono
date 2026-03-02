@@ -262,6 +262,18 @@ pub(crate) fn print_auto_exclude_notice(excluded: &[&HeavyDir], result: &Preflig
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nono::undo::ExclusionConfig;
+
+    fn make_filter(patterns: Vec<&str>) -> ExclusionFilter {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: patterns.into_iter().map(String::from).collect(),
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        ExclusionFilter::new(config, dir.path()).expect("filter")
+    }
 
     #[test]
     fn preflight_result_fields() {
@@ -314,5 +326,68 @@ mod tests {
         };
         assert_eq!(hd.path, PathBuf::from("/project/target"));
         assert_eq!(hd.description, "build artifacts");
+    }
+
+    #[test]
+    fn detect_heavy_dirs_finds_known_names() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let tracked = dir.path().join("project");
+        std::fs::create_dir_all(tracked.join("target")).expect("create target");
+        std::fs::create_dir_all(tracked.join("node_modules")).expect("create node_modules");
+        std::fs::create_dir_all(tracked.join("src")).expect("create src");
+
+        let filter = make_filter(vec![]);
+        let heavy = detect_heavy_dirs(&[tracked], &filter);
+
+        let names: Vec<&str> = heavy.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"target"), "Should detect target/");
+        assert!(
+            names.contains(&"node_modules"),
+            "Should detect node_modules/"
+        );
+        assert!(!names.contains(&"src"), "src/ is not a known heavy dir");
+    }
+
+    #[test]
+    fn detect_heavy_dirs_skips_already_excluded() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let tracked = dir.path().join("project");
+        std::fs::create_dir_all(tracked.join("target")).expect("create target");
+        std::fs::create_dir_all(tracked.join("node_modules")).expect("create node_modules");
+
+        // Pre-exclude target
+        let filter = make_filter(vec!["target"]);
+        let heavy = detect_heavy_dirs(&[tracked], &filter);
+
+        let names: Vec<&str> = heavy.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            !names.contains(&"target"),
+            "Already-excluded target should not appear"
+        );
+        assert!(
+            names.contains(&"node_modules"),
+            "node_modules should appear"
+        );
+    }
+
+    #[test]
+    fn preflight_empty_tracked_dir_no_warning() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let tracked = dir.path().join("empty_project");
+        std::fs::create_dir_all(&tracked).expect("create empty dir");
+
+        let filter = make_filter(vec![]);
+        let result = run_preflight(&[tracked], &filter);
+
+        assert!(!result.needs_warning());
+    }
+
+    #[test]
+    fn preflight_nonexistent_path_no_warning() {
+        let filter = make_filter(vec![]);
+        let result = run_preflight(&[PathBuf::from("/nonexistent/path/xyz")], &filter);
+
+        assert!(!result.needs_warning());
+        assert_eq!(result.probe_file_count, 0);
     }
 }

@@ -1135,4 +1135,192 @@ mod tests {
         assert!(!new_temp.exists());
         assert!(not_atomic.exists());
     }
+
+    fn make_manager_with_budget(
+        session_dir: &Path,
+        tracked: &Path,
+        budget: WalkBudget,
+    ) -> SnapshotManager {
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: Vec::new(),
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        let filter = ExclusionFilter::new(config, tracked).expect("filter");
+        SnapshotManager::new(
+            session_dir.to_path_buf(),
+            vec![tracked.to_path_buf()],
+            filter,
+            budget,
+        )
+        .expect("manager")
+    }
+
+    #[test]
+    fn walk_budget_entry_limit_exceeded() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        // Budget of 1 entry but dir has 2 files + dir itself = exceeds
+        let mut manager = make_manager_with_budget(
+            &session_dir,
+            &tracked,
+            WalkBudget {
+                max_entries: 1,
+                max_bytes: 0,
+            },
+        );
+
+        let result = manager.create_baseline();
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.expect_err("expected budget error"));
+        assert!(
+            err_msg.contains("budget exceeded"),
+            "Expected budget error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn walk_budget_byte_limit_exceeded() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        // Budget of 1 byte but files have content
+        let mut manager = make_manager_with_budget(
+            &session_dir,
+            &tracked,
+            WalkBudget {
+                max_entries: 0,
+                max_bytes: 1,
+            },
+        );
+
+        let result = manager.create_baseline();
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.expect_err("expected budget error"));
+        assert!(
+            err_msg.contains("budget exceeded") || err_msg.contains("bytes tracked"),
+            "Expected budget error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn budget_checked_for_tracked_files() {
+        let dir = TempDir::new().expect("tempdir");
+        let tracked_file = dir.path().join("bigfile.txt");
+        fs::write(&tracked_file, b"some content here").expect("write file");
+
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: Vec::new(),
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        let filter = ExclusionFilter::new(config, dir.path()).expect("filter");
+
+        // Budget of 1 byte — the tracked file exceeds it
+        let mut manager = SnapshotManager::new(
+            session_dir,
+            vec![tracked_file],
+            filter,
+            WalkBudget {
+                max_entries: 0,
+                max_bytes: 1,
+            },
+        )
+        .expect("manager");
+
+        let result = manager.create_baseline();
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.expect_err("expected budget error"));
+        assert!(
+            err_msg.contains("budget exceeded") || err_msg.contains("bytes tracked"),
+            "Expected budget error for tracked file, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn collect_atomic_temp_prunes_excluded_dirs() {
+        let dir = TempDir::new().expect("tempdir");
+        let tracked = dir.path().join("project");
+        fs::create_dir_all(tracked.join("excluded_dir")).expect("create excluded dir");
+        fs::write(
+            tracked.join("excluded_dir/file.txt.tmp.100.200"),
+            b"temp in excluded",
+        )
+        .expect("write excluded temp");
+        fs::write(tracked.join("visible.txt.tmp.100.200"), b"temp visible")
+            .expect("write visible temp");
+
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: vec!["excluded_dir".to_string()],
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        let filter = ExclusionFilter::new(config, &tracked).expect("filter");
+        let manager = SnapshotManager::new(
+            session_dir,
+            vec![tracked.clone()],
+            filter,
+            WalkBudget::default(),
+        )
+        .expect("manager");
+
+        let temps = manager.collect_atomic_temp_files();
+        // Should find the visible temp but not the one in excluded_dir
+        assert!(temps.contains(&tracked.join("visible.txt.tmp.100.200")));
+        assert!(!temps.contains(&tracked.join("excluded_dir/file.txt.tmp.100.200")));
+    }
+
+    #[test]
+    fn collect_atomic_temp_respects_budget() {
+        let dir = TempDir::new().expect("tempdir");
+        let tracked = dir.path().join("project");
+        fs::create_dir_all(&tracked).expect("create tracked");
+
+        // Create many files so the budget is hit
+        for i in 0..10 {
+            fs::write(tracked.join(format!("file{i}.txt.tmp.100.200")), b"temp")
+                .expect("write temp");
+        }
+
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: Vec::new(),
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        let filter = ExclusionFilter::new(config, &tracked).expect("filter");
+        let manager = SnapshotManager::new(
+            session_dir,
+            vec![tracked],
+            filter,
+            WalkBudget {
+                max_entries: 3, // Very low budget
+                max_bytes: 0,
+            },
+        )
+        .expect("manager");
+
+        let temps = manager.collect_atomic_temp_files();
+        // Should have fewer than 10 due to budget cap
+        assert!(
+            temps.len() < 10,
+            "Expected budget cap, got {} temps",
+            temps.len()
+        );
+    }
 }

@@ -1193,4 +1193,48 @@ mod tests {
             _ => panic!("Expected Trust command"),
         }
     }
+
+    #[test]
+    fn test_rollback_flags_with_no_rollback() {
+        // --no-rollback alongside rollback customization flags should parse
+        // (the warning is emitted at runtime, not parse time)
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--no-rollback",
+            "--rollback-exclude",
+            "target",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert!(args.no_rollback);
+                assert_eq!(args.rollback_exclude, vec!["target"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_rollback_all_conflicts_with_include() {
+        // --rollback-all conflicts with --rollback-include (clap enforced)
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--rollback-all",
+            "--rollback-include",
+            "target",
+            "echo",
+            "hello",
+        ]);
+        assert!(
+            result.is_err(),
+            "--rollback-all and --rollback-include should conflict"
+        );
+    }
 }

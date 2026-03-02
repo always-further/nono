@@ -281,6 +281,37 @@ mod tests {
     }
 
     #[test]
+    fn force_include_matches_path_component() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: vec!["node_modules".to_string()],
+            exclude_globs: Vec::new(),
+            force_include: vec!["node_modules".to_string()],
+        };
+        let filter = ExclusionFilter::new(config, dir.path()).expect("filter");
+
+        // Force-include should match the exact component
+        assert!(!filter.is_excluded(&PathBuf::from("/project/node_modules/pkg/index.js")));
+    }
+
+    #[test]
+    fn force_include_rejects_substring_match() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: vec!["myapp".to_string()],
+            exclude_globs: Vec::new(),
+            // "app" should NOT match the component "myapp"
+            force_include: vec!["app".to_string()],
+        };
+        let filter = ExclusionFilter::new(config, dir.path()).expect("filter");
+
+        // "app" as force_include must not match "myapp" component
+        assert!(filter.is_excluded(&PathBuf::from("/project/myapp/src/main.rs")));
+    }
+
+    #[test]
     fn gitignore_integration() {
         let dir = TempDir::new().expect("tempdir");
         std::fs::write(dir.path().join(".gitignore"), "*.log\nbuild/\n").expect("write gitignore");
