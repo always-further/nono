@@ -145,6 +145,7 @@ impl ProfileDef {
             security: profile::SecurityConfig {
                 groups,
                 trust_groups: self.trust_groups.clone(),
+                allowed_commands: self.security.allowed_commands.clone(),
             },
             filesystem: self.filesystem.clone(),
             network: self.network.clone(),

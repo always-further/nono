@@ -282,6 +282,11 @@ impl CapabilitySetExt for CapabilitySet {
             });
         }
 
+        // Apply allowed commands from profile
+        for cmd in &profile.security.allowed_commands {
+            caps.add_allowed_command(cmd.clone());
+        }
+
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
 
@@ -519,6 +524,59 @@ mod tests {
             err.to_string()
                 .contains("overlaps protected nono state root"),
             "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn test_from_profile_allowed_commands() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("rm-test.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "rm-test" },
+                "filesystem": { "allow": ["/tmp"] },
+                "security": { "allowed_commands": ["rm", "shred"] }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = SandboxArgs {
+            allow: vec![],
+            read: vec![],
+            write: vec![],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![],
+            net_block: false,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
+            allow_command: vec![],
+            block_command: vec![],
+            env_credential: None,
+            profile: None,
+            allow_cwd: false,
+            workdir: None,
+            config: None,
+            verbose: 0,
+            dry_run: false,
+            allow_bind: vec![],
+            proxy_port: None,
+        };
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+        assert!(
+            caps.allowed_commands().contains(&"rm".to_string()),
+            "profile allowed_commands should include 'rm'"
+        );
+        assert!(
+            caps.allowed_commands().contains(&"shred".to_string()),
+            "profile allowed_commands should include 'shred'"
         );
     }
 
