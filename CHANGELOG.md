@@ -2,6 +2,7 @@
 
 ### 🚀 Features
 
+- Add `allowed_commands` support to profile security config (#158)
 - Add 1Password secret injection via op:// URI support (#183)
 ## [0.6.1] - 2026-02-27
 

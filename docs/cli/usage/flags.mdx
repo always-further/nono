@@ -352,6 +352,20 @@ nono run --allow-cwd --allow-command rm --allow-command mv -- my-script.sh
   Command blocking is a best-effort surface-level control. It matches against the executable name being invoked directly. It does not prevent a process from performing the equivalent operation through language-level APIs (e.g., `os.remove()` in Python), shell built-ins, or renamed binaries. For hard protection against destructive filesystem operations, rely on kernel-enforced deny groups (`deny.access`, `deny.unlink`) and path-based sandboxing, which apply regardless of how the operation is invoked.
 </Note>
 
+Commands can also be allowed permanently via the `allowed_commands` field in a profile's security config:
+
+```json
+{
+  "meta": { "name": "my-profile" },
+  "filesystem": { "allow": ["/tmp"] },
+  "security": { "allowed_commands": ["rm", "chmod"] }
+}
+```
+
+```bash
+nono run --profile my-profile -- rm /tmp/old-file.txt
+```
+
 #### `--block-command`
 
 Block an additional command beyond the default blocklist.

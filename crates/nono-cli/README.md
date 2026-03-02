@@ -72,10 +72,21 @@ Dangerous commands are blocked by default:
 | Permission changes | `chmod`, `chown`, `chgrp` |
 | Privilege escalation | `sudo`, `su`, `doas` |
 
-Override with `--allow-command`:
+Override per invocation with `--allow-command`, or permanently in a profile with `allowed_commands`:
 
 ```bash
+# Per invocation
 nono run --allow-cwd --allow-command rm -- rm ./temp-file.txt
+
+# Via profile
+cat > ~/.config/nono/profiles/my-profile.json << 'EOF'
+{
+  "meta": { "name": "my-profile" },
+  "filesystem": { "allow": ["/tmp"] },
+  "security": { "allowed_commands": ["rm"] }
+}
+EOF
+nono run --profile my-profile -- rm /tmp/old-file.txt
 ```
 
 ## Documentation

@@ -167,11 +167,18 @@ Security policy defined as named groups in a single JSON file. Profiles referenc
 
 ### Destructive Command Blocking
 
-Dangerous commands (`rm`, `dd`, `chmod`, `sudo`, `scp`) are blocked before execution. Selectively allow or block additional commands per invocation.
+Dangerous commands (`rm`, `dd`, `chmod`, `sudo`, `scp`) are blocked before execution. Override per invocation with `--allow-command` or permanently via `allowed_commands` in a profile.
 
 ```bash
 $ nono run --allow-cwd -- rm -rf /
 nono: blocked command: rm
+
+# Override per invocation
+nono run --allow-cwd --allow-command rm -- rm ./temp-file.txt
+
+# Override via profile
+# { "security": { "allowed_commands": ["rm"] } }
+nono run --profile my-profile -- rm /tmp/old-file.txt
 ```
 
 > [!WARNING]
