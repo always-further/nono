@@ -787,7 +787,8 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             trust_groups: dedup_append(&base.security.trust_groups, &child.security.trust_groups),
             allowed_commands: dedup_append(
                 &base.security.allowed_commands,
-                &child.security.allowed_commands),
+                &child.security.allowed_commands,
+            ),
         },
         filesystem: FilesystemConfig {
             allow: dedup_append(&base.filesystem.allow, &child.filesystem.allow),
@@ -1774,6 +1775,7 @@ mod tests {
             security: SecurityConfig {
                 groups: vec!["base_group".to_string()],
                 trust_groups: vec!["base_trust".to_string()],
+                ..Default::default()
             },
             filesystem: FilesystemConfig {
                 allow: vec!["/base/rw".to_string()],
@@ -1823,6 +1825,7 @@ mod tests {
             security: SecurityConfig {
                 groups: vec!["child_group".to_string()],
                 trust_groups: vec![],
+                ..Default::default()
             },
             filesystem: FilesystemConfig {
                 allow: vec!["/child/rw".to_string()],
