@@ -1,11 +1,14 @@
-//! Secure credential loading from system keystore and 1Password
+//! Secure credential loading from system keystore, 1Password, and environment
 //!
 //! This module provides functionality to load secrets from the system keystore
-//! (macOS Keychain / Linux Secret Service) or 1Password (via the `op` CLI) and
-//! return them as zeroized strings.
+//! (macOS Keychain / Linux Secret Service), 1Password (via the `op` CLI), or
+//! environment variables (via the `env://` scheme) and return them as zeroized
+//! strings.
 //!
-//! Credential references starting with `op://` are loaded via the 1Password CLI.
-//! All other references are loaded from the system keyring.
+//! Credential references are dispatched by URI scheme:
+//! - `env://VAR_NAME` — reads from the current process environment
+//! - `op://vault/item/field` — loaded via the 1Password CLI
+//! - Everything else — loaded from the system keyring
 //!
 //! All secrets are wrapped in `Zeroizing<String>` to ensure they are securely
 //! cleared from memory after use.
@@ -32,6 +35,46 @@ pub const DEFAULT_SERVICE: &str = "nono";
 
 /// The `op://` URI scheme prefix, indicating 1Password CLI backend.
 const OP_URI_PREFIX: &str = "op://";
+
+/// The `env://` URI scheme prefix, indicating environment variable backend.
+const ENV_URI_PREFIX: &str = "env://";
+
+/// Environment variable names that must never be loaded via `env://`.
+///
+/// These control linker, interpreter, or shell behavior. Allowing them as
+/// credential sources would let an `env://` URI act as an injection vector.
+const DANGEROUS_ENV_VAR_NAMES: &[&str] = &[
+    // Linker injection
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    // Shell injection
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "CDPATH",
+    "PROMPT_COMMAND",
+    // Interpreter injection
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "DOTNET_STARTUP_HOOKS",
+    "GOFLAGS",
+    // Process-critical
+    "PATH",
+    "HOME",
+    "SHELL",
+];
 
 /// Characters forbidden in `op://` URIs to prevent argument/shell injection.
 const FORBIDDEN_URI_CHARS: &[char] = &[
@@ -86,12 +129,14 @@ pub fn load_secrets(
 
 /// Load a single secret, dispatching to the appropriate backend.
 ///
-/// If `credential_ref` starts with `op://`, delegates to the 1Password CLI.
-/// Otherwise, loads from the system keyring under the given service name.
+/// Dispatch order:
+/// 1. `env://VAR` — reads from the process environment
+/// 2. `op://vault/item/field` — delegates to the 1Password CLI
+/// 3. Everything else — loads from the system keyring
 ///
 /// # Arguments
 /// * `service` - Keyring service name (only used for keyring backend)
-/// * `credential_ref` - Either a keyring account name or an `op://` URI
+/// * `credential_ref` - A keyring account name, `op://` URI, or `env://` URI
 ///
 /// # Security
 /// The returned value is wrapped in `Zeroizing<String>`. For `op://` URIs,
@@ -100,7 +145,9 @@ pub fn load_secrets(
 /// is the same class of limitation as the keyring crate's internal buffers.
 #[must_use = "loaded secret should be used or explicitly dropped"]
 pub fn load_secret_by_ref(service: &str, credential_ref: &str) -> Result<Zeroizing<String>> {
-    if credential_ref.starts_with(OP_URI_PREFIX) {
+    if credential_ref.starts_with(ENV_URI_PREFIX) {
+        load_from_env(credential_ref)
+    } else if credential_ref.starts_with(OP_URI_PREFIX) {
         load_from_op(credential_ref)
     } else {
         load_single_secret(service, credential_ref)
@@ -165,6 +212,93 @@ pub fn validate_op_uri(uri: &str) -> Result<()> {
 #[must_use]
 pub fn is_op_uri(credential_ref: &str) -> bool {
     credential_ref.starts_with(OP_URI_PREFIX)
+}
+
+/// Returns true if the credential reference is an `env://` URI.
+#[must_use]
+pub fn is_env_uri(credential_ref: &str) -> bool {
+    credential_ref.starts_with(ENV_URI_PREFIX)
+}
+
+/// Validate an `env://VAR_NAME` URI.
+///
+/// Accepts variable names containing only ASCII alphanumeric characters and
+/// underscores (`[A-Za-z0-9_]+`). This is stricter than POSIX (which allows
+/// any byte except `=` and NUL) but matches real-world conventions and
+/// prevents injection through crafted variable names.
+///
+/// Rejects:
+/// - Empty variable name
+/// - Names containing non-alphanumeric/underscore characters
+/// - Dangerous variable names that control linker/interpreter/shell behavior
+pub fn validate_env_uri(uri: &str) -> Result<()> {
+    let var_name = uri.strip_prefix(ENV_URI_PREFIX).ok_or_else(|| {
+        NonoError::ConfigParse(format!(
+            "credential reference '{}' does not start with '{}'",
+            uri, ENV_URI_PREFIX
+        ))
+    })?;
+
+    if var_name.is_empty() {
+        return Err(NonoError::ConfigParse(
+            "env:// URI has empty variable name".to_string(),
+        ));
+    }
+
+    if let Some(bad) = var_name
+        .chars()
+        .find(|c| !c.is_ascii_alphanumeric() && *c != '_')
+    {
+        return Err(NonoError::ConfigParse(format!(
+            "env:// variable name contains invalid character {:?}: {}",
+            bad, uri
+        )));
+    }
+
+    if DANGEROUS_ENV_VAR_NAMES.contains(&var_name) {
+        return Err(NonoError::ConfigParse(format!(
+            "env:// cannot read dangerous environment variable: {}",
+            var_name
+        )));
+    }
+
+    Ok(())
+}
+
+/// Load a secret from an environment variable.
+///
+/// Reads from the current process environment (before sandbox application).
+/// The value is wrapped in `Zeroizing<String>` to minimize plaintext lifetime.
+///
+/// # Errors
+///
+/// Returns `SecretNotFound` if the variable is unset or empty.
+/// Returns `KeystoreAccess` if the variable contains non-UTF-8 data.
+fn load_from_env(uri: &str) -> Result<Zeroizing<String>> {
+    validate_env_uri(uri)?;
+
+    let var_name = uri
+        .strip_prefix(ENV_URI_PREFIX)
+        .ok_or_else(|| NonoError::ConfigParse(format!("invalid env:// URI: {}", uri)))?;
+
+    match std::env::var(var_name) {
+        Ok(value) if value.is_empty() => Err(NonoError::SecretNotFound(format!(
+            "environment variable '{}' is set but empty",
+            var_name
+        ))),
+        Ok(value) => {
+            tracing::debug!("Loaded secret from environment variable '{}'", var_name);
+            Ok(Zeroizing::new(value))
+        }
+        Err(std::env::VarError::NotPresent) => Err(NonoError::SecretNotFound(format!(
+            "environment variable '{}' is not set",
+            var_name
+        ))),
+        Err(std::env::VarError::NotUnicode(_)) => Err(NonoError::KeystoreAccess(format!(
+            "environment variable '{}' contains non-UTF-8 data",
+            var_name
+        ))),
+    }
 }
 
 /// Load a single secret from the keystore.
@@ -359,17 +493,22 @@ fn wait_with_timeout(
 
 /// Build secret mappings from a comma-separated list of credential entries.
 ///
-/// Supports two formats:
+/// Supports three formats:
 /// - **Keyring names**: `openai_api_key` → env var `OPENAI_API_KEY` (auto-uppercased)
 /// - **1Password URIs with explicit var**: `op://vault/item/field=MY_VAR` → env var `MY_VAR`
+/// - **Environment URIs**: `env://GITHUB_TOKEN` → env var `GITHUB_TOKEN` (auto-derived)
+///   or `env://GITHUB_TOKEN=GH_TOKEN` → env var `GH_TOKEN` (explicit)
 ///
 /// 1Password URIs (`op://...`) **must** include `=VAR_NAME` because uppercasing a URI
-/// produces a meaningless env var name. Bare `op://` URIs without `=` are rejected
-/// and return an error.
+/// produces a meaningless env var name. Bare `op://` URIs without `=` are rejected.
+///
+/// Environment URIs (`env://...`) auto-derive the target variable name from the source
+/// when `=` is omitted: `env://GITHUB_TOKEN` maps to env var `GITHUB_TOKEN`.
 ///
 /// # Errors
 ///
-/// Returns an error if an `op://` URI is provided without an `=VAR_NAME` suffix.
+/// Returns an error if an `op://` URI is provided without an `=VAR_NAME` suffix,
+/// or if any URI fails validation.
 ///
 /// # Example
 ///
@@ -389,7 +528,30 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
             continue;
         }
 
-        if entry.starts_with(OP_URI_PREFIX) {
+        if entry.starts_with(ENV_URI_PREFIX) {
+            // env:// URI: auto-derive target var or use explicit =VAR_NAME
+            if let Some(eq_pos) = entry.rfind('=') {
+                let uri = &entry[..eq_pos];
+                let var_name = &entry[eq_pos + 1..];
+
+                if var_name.is_empty() {
+                    return Err(NonoError::ConfigParse(format!(
+                        "env:// credential '{}' has '=' but no variable name",
+                        uri
+                    )));
+                }
+
+                validate_env_uri(uri)?;
+                mappings.insert(uri.to_string(), var_name.to_string());
+            } else {
+                // Auto-derive: env://GITHUB_TOKEN -> target GITHUB_TOKEN
+                validate_env_uri(entry)?;
+                let source_var = entry
+                    .strip_prefix(ENV_URI_PREFIX)
+                    .ok_or_else(|| NonoError::ConfigParse("invalid env:// URI".to_string()))?;
+                mappings.insert(entry.to_string(), source_var.to_string());
+            }
+        } else if entry.starts_with(OP_URI_PREFIX) {
             // 1Password URI: must have =VAR_NAME suffix
             // Find the last '=' that separates the URI from the var name.
             // op:// URIs don't contain '=', so the last '=' is unambiguous.
@@ -833,6 +995,216 @@ mod tests {
             err.contains("1Password") || err.contains("op"),
             "expected 1Password error, got: {}",
             err
+        );
+    }
+
+    // =========================================================================
+    // env:// URI tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_env_uri_positive() {
+        assert!(is_env_uri("env://GITHUB_TOKEN"));
+        assert!(is_env_uri("env://MY_KEY_123"));
+    }
+
+    #[test]
+    fn test_is_env_uri_negative() {
+        assert!(!is_env_uri("openai_api_key"));
+        assert!(!is_env_uri("op://vault/item/field"));
+        assert!(!is_env_uri("ENV://UPPER_SCHEME"));
+    }
+
+    #[test]
+    fn test_validate_env_uri_valid() {
+        assert!(validate_env_uri("env://GITHUB_TOKEN").is_ok());
+        assert!(validate_env_uri("env://MY_API_KEY_123").is_ok());
+        assert!(validate_env_uri("env://x").is_ok());
+        assert!(validate_env_uri("env://A").is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_uri_empty_name() {
+        let err = validate_env_uri("env://").expect_err("should reject");
+        assert!(
+            err.to_string().contains("empty variable name"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_env_uri_invalid_chars() {
+        // Spaces
+        let err = validate_env_uri("env://MY VAR").expect_err("should reject");
+        assert!(
+            err.to_string().contains("invalid character"),
+            "got: {}",
+            err
+        );
+
+        // Dashes
+        let err = validate_env_uri("env://MY-VAR").expect_err("should reject");
+        assert!(
+            err.to_string().contains("invalid character"),
+            "got: {}",
+            err
+        );
+
+        // Dots
+        let err = validate_env_uri("env://MY.VAR").expect_err("should reject");
+        assert!(
+            err.to_string().contains("invalid character"),
+            "got: {}",
+            err
+        );
+
+        // Shell metacharacters
+        let err = validate_env_uri("env://$(whoami)").expect_err("should reject");
+        assert!(
+            err.to_string().contains("invalid character"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_env_uri_dangerous_ld_preload() {
+        let err = validate_env_uri("env://LD_PRELOAD").expect_err("should reject");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_env_uri_dangerous_dyld() {
+        let err = validate_env_uri("env://DYLD_INSERT_LIBRARIES").expect_err("should reject");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_env_uri_dangerous_node_options() {
+        let err = validate_env_uri("env://NODE_OPTIONS").expect_err("should reject");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_env_uri_dangerous_path() {
+        let err = validate_env_uri("env://PATH").expect_err("should reject");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_env_uri_missing_prefix() {
+        let err = validate_env_uri("GITHUB_TOKEN").expect_err("should reject");
+        assert!(
+            err.to_string().contains("does not start with"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_load_from_env_set() {
+        // Set a test variable, load it, verify value
+        let test_var = "NONO_TEST_ENV_SECRET_12345";
+        unsafe { std::env::set_var(test_var, "secret_value_42") };
+
+        let result = load_from_env(&format!("env://{}", test_var));
+        assert!(result.is_ok(), "should load: {:?}", result.err());
+        assert_eq!(*result.expect("should load"), "secret_value_42");
+
+        unsafe { std::env::remove_var(test_var) };
+    }
+
+    #[test]
+    fn test_load_from_env_not_set() {
+        let result = load_from_env("env://NONO_NONEXISTENT_VAR_XYZZY");
+        assert!(result.is_err());
+        let err = result.expect_err("should fail").to_string();
+        assert!(err.contains("not set"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_load_from_env_empty() {
+        let test_var = "NONO_TEST_ENV_EMPTY_12345";
+        unsafe { std::env::set_var(test_var, "") };
+
+        let result = load_from_env(&format!("env://{}", test_var));
+        assert!(result.is_err());
+        let err = result.expect_err("should fail").to_string();
+        assert!(err.contains("empty"), "got: {}", err);
+
+        unsafe { std::env::remove_var(test_var) };
+    }
+
+    #[test]
+    fn test_load_secret_by_ref_dispatches_env() {
+        let test_var = "NONO_TEST_REF_DISPATCH_12345";
+        unsafe { std::env::set_var(test_var, "dispatched_ok") };
+
+        let result = load_secret_by_ref("nono", &format!("env://{}", test_var));
+        assert!(
+            result.is_ok(),
+            "should dispatch to env backend: {:?}",
+            result.err()
+        );
+        assert_eq!(*result.expect("should load"), "dispatched_ok");
+
+        unsafe { std::env::remove_var(test_var) };
+    }
+
+    // --- env:// in build_mappings_from_list ---
+
+    #[test]
+    fn test_build_mappings_env_uri_auto_derive() {
+        let mappings = build_mappings_from_list("env://GITHUB_TOKEN").expect("should parse");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            mappings.get("env://GITHUB_TOKEN"),
+            Some(&"GITHUB_TOKEN".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_mappings_env_uri_with_explicit_var() {
+        let mappings =
+            build_mappings_from_list("env://GITHUB_TOKEN=GH_TOKEN").expect("should parse");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            mappings.get("env://GITHUB_TOKEN"),
+            Some(&"GH_TOKEN".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_mappings_env_uri_empty_var_rejected() {
+        let err =
+            build_mappings_from_list("env://GITHUB_TOKEN=").expect_err("should reject empty var");
+        assert!(err.to_string().contains("no variable name"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_build_mappings_env_uri_dangerous_rejected() {
+        let err =
+            build_mappings_from_list("env://LD_PRELOAD").expect_err("should reject dangerous var");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_build_mappings_mixed_keyring_op_env() {
+        let mappings = build_mappings_from_list(
+            "my_api_key,op://vault/item/field=SECRET_VAR,env://GITHUB_TOKEN",
+        )
+        .expect("should parse");
+
+        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings.get("my_api_key"), Some(&"MY_API_KEY".to_string()));
+        assert_eq!(
+            mappings.get("op://vault/item/field"),
+            Some(&"SECRET_VAR".to_string())
+        );
+        assert_eq!(
+            mappings.get("env://GITHUB_TOKEN"),
+            Some(&"GITHUB_TOKEN".to_string())
         );
     }
 }

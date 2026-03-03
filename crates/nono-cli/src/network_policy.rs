@@ -69,6 +69,13 @@ pub struct CredentialDef {
     pub inject_header: String,
     #[serde(default = "default_credential_format")]
     pub credential_format: String,
+    /// Explicit environment variable name for the phantom token.
+    ///
+    /// Required when `credential_key` is an `env://` or `op://` URI, since
+    /// uppercasing those produces nonsensical env var names. When `None`,
+    /// the proxy derives the env var from `credential_key.to_uppercase()`.
+    #[serde(default)]
+    pub env_var: Option<String>,
 }
 
 fn default_inject_header() -> String {
@@ -226,7 +233,7 @@ pub fn resolve_credentials(
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
-                env_var: None,
+                env_var: cred.env_var.clone(),
             });
         }
         // We already validated existence above, so this else branch won't be hit
@@ -685,8 +692,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_credentials_builtin_has_no_env_var() {
-        // Built-in credentials should always have env_var = None
+    fn test_resolve_credentials_builtin_without_env_var() {
+        // Built-in credentials without explicit env_var should have env_var = None
         // (they use the cred_key.to_uppercase() fallback)
         let json = embedded_network_policy_json();
         let policy = load_network_policy(json).expect("policy should load");
@@ -697,7 +704,58 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(
             routes[0].env_var, None,
-            "Built-in credentials should not have env_var set"
+            "Built-in credentials without env_var field should have None"
+        );
+    }
+
+    #[test]
+    fn test_resolve_github_credential() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy should load");
+
+        let custom = HashMap::new();
+        let routes =
+            resolve_credentials(&policy, &["github".to_string()], &custom).expect("should resolve");
+        assert_eq!(routes.len(), 1);
+
+        let github = &routes[0];
+        assert_eq!(github.prefix, "github");
+        assert_eq!(github.upstream, "https://api.github.com");
+        assert_eq!(
+            github.credential_key,
+            Some("env://GITHUB_TOKEN".to_string())
+        );
+        assert_eq!(github.credential_format, "token {}");
+        assert_eq!(
+            github.env_var,
+            Some("GITHUB_TOKEN".to_string()),
+            "github credential must have explicit env_var for phantom token"
+        );
+    }
+
+    #[test]
+    fn test_claude_code_profile_includes_github_credential() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy should load");
+
+        let resolved = resolve_network_profile(&policy, "claude-code").expect("should resolve");
+        assert!(
+            resolved.profile_credentials.contains(&"github".to_string()),
+            "claude-code profile should include github credential, got: {:?}",
+            resolved.profile_credentials
+        );
+    }
+
+    #[test]
+    fn test_developer_profile_includes_github_credential() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy should load");
+
+        let resolved = resolve_network_profile(&policy, "developer").expect("should resolve");
+        assert!(
+            resolved.profile_credentials.contains(&"github".to_string()),
+            "developer profile should include github credential, got: {:?}",
+            resolved.profile_credentials
         );
     }
 }

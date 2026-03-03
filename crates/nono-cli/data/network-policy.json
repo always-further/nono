@@ -101,6 +101,16 @@
     }
   },
   "profiles": {
+    "opencode": {
+      "groups": [
+        "llm_apis",
+        "package_registries",
+        "github",
+        "sigstore",
+        "documentation"
+      ],
+      "credentials": ["google-ai", "github"]
+    },
     "developer": {
       "groups": [
         "llm_apis",
@@ -108,7 +118,18 @@
         "github",
         "sigstore",
         "documentation"
-      ]
+      ],
+      "credentials": ["github"]
+    },
+    "claude-code": {
+      "groups": [
+        "llm_apis",
+        "package_registries",
+        "github",
+        "sigstore",
+        "documentation"
+      ],
+      "credentials": ["github"]
     },
     "minimal": {
       "groups": [
@@ -148,6 +169,13 @@
       "upstream": "https://generativelanguage.googleapis.com",
       "inject_header": "x-goog-api-key",
       "credential_format": "{}"
+    },
+    "github": {
+      "upstream": "https://api.github.com",
+      "credential_key": "env://GITHUB_TOKEN",
+      "inject_header": "Authorization",
+      "credential_format": "token {}",
+      "env_var": "GITHUB_TOKEN"
     }
   }
 }

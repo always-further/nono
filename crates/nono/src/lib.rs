@@ -62,7 +62,8 @@ pub use capability::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, 
 pub use diagnostic::{DenialReason, DenialRecord, DiagnosticFormatter, DiagnosticMode};
 pub use error::{NonoError, Result};
 pub use keystore::{
-    is_op_uri, load_secret_by_ref, load_secrets, redact_op_uri, validate_op_uri, LoadedSecret,
+    is_env_uri, is_op_uri, load_secret_by_ref, load_secrets, redact_op_uri, validate_env_uri,
+    validate_op_uri, LoadedSecret,
 };
 pub use net_filter::{FilterResult, HostFilter};
 pub use sandbox::{Sandbox, SupportInfo};
