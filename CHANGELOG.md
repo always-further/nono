@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.8.1] - 2026-03-03
+
+### Miscellaneous
+
+- Release v0.8.0
+
 ## [0.8.0] - 2026-03-02
 
 ### Bug Fixes
