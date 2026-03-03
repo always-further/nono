@@ -756,6 +756,7 @@ fn load_base_profile_raw(name: &str) -> Result<Profile> {
             security: SecurityConfig {
                 groups: def.security.groups.clone(),
                 trust_groups: def.trust_groups.clone(),
+                allowed_commands: def.security.allowed_commands.clone(),
             },
             filesystem: def.filesystem.clone(),
             network: def.network.clone(),
@@ -784,6 +785,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
         security: SecurityConfig {
             groups: dedup_append(&base.security.groups, &child.security.groups),
             trust_groups: dedup_append(&base.security.trust_groups, &child.security.trust_groups),
+            allowed_commands: dedup_append(&base.security.allowed_commands, &child.security.allowed_commands),
         },
         filesystem: FilesystemConfig {
             allow: dedup_append(&base.filesystem.allow, &child.filesystem.allow),
