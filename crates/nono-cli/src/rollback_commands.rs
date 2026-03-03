@@ -644,6 +644,7 @@ fn cmd_restore(args: RollbackRestoreArgs) -> Result<()> {
         session.dir.clone(),
         session.metadata.tracked_paths.clone(),
         exclusion,
+        nono::undo::WalkBudget::default(),
     )?;
 
     if args.dry_run {

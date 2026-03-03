@@ -235,7 +235,7 @@ nono run --allow-cwd --network-profile minimal --proxy-allow custom-api.example.
 
 #### `--proxy-credential`
 
-Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name.
+Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name, or from 1Password when the profile's `credential_key` is an `op://` URI.
 
 ```bash
 # Inject OpenAI credentials (loads from keyring account "openai_api_key")
@@ -365,11 +365,14 @@ nono run --allow-cwd --block-command my-dangerous-tool -- my-script.sh
 
 #### `--env-credential`
 
-Load credentials from the system keystore (macOS Keychain / Linux Secret Service) and inject them as environment variables. The sandboxed process can read these credentials directly.
+Load credentials from the system keystore (macOS Keychain / Linux Secret Service) or 1Password and inject them as environment variables. The sandboxed process can read these credentials directly.
 
 ```bash
 # Load specific credentials by account name
 nono run --allow-cwd --env-credential openai_api_key,anthropic_api_key -- my-agent
+
+# Load from 1Password (op:// URI with =VAR_NAME suffix)
+nono run --allow-cwd --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' -- my-agent
 
 # Use with profile (loads credentials defined in profile's [env_credentials] section)
 nono run --profile claude-code --env-credential -- claude
@@ -447,6 +450,54 @@ Suppress the interactive post-exit review when using `--rollback`. Snapshots are
 
 ```bash
 nono run --rollback --no-rollback-prompt --allow-cwd -- my-agent
+```
+
+#### `--no-rollback`
+
+Disable rollback entirely for this session. No snapshots are taken and no restore is offered. Useful when rollback overhead is not needed.
+
+```bash
+nono run --no-rollback --allow-cwd -- npm test
+```
+
+#### `--rollback-exclude`
+
+Exclude from rollback snapshots. Repeatable. Values containing glob characters (`*`, `?`, `[`) are matched against filenames. Plain names match exact path components; names with `/` match as path substrings. Does NOT affect sandbox permissions — excluded directories are still sandboxed.
+
+```bash
+# Exclude a custom directory from rollback
+nono run --rollback --rollback-exclude vendor -- go test ./...
+
+# Exclude multiple directories
+nono run --rollback --rollback-exclude vendor --rollback-exclude .terraform -- terraform plan
+
+# Exclude log files from rollback (glob pattern)
+nono run --rollback --rollback-exclude "*.log" -- my-agent
+```
+
+#### `--rollback-include`
+
+Force-include a directory in rollback snapshots that would otherwise be auto-excluded. Repeatable. Accepts directory names (e.g., `target`, `node_modules`), not full paths. Use when you need rollback coverage on build artifacts or dependencies.
+
+```bash
+# Include target/ in rollback (normally auto-excluded)
+nono run --rollback --rollback-include target -- cargo build
+
+# Include multiple directories
+nono run --rollback --rollback-include target --rollback-include dist -- make build
+```
+
+<Note>
+  nono automatically excludes known regenerable directories (`.git`, `target`, `node_modules`, etc.) and any directory with more than 10,000 files from rollback snapshots. This prevents rollback from hanging on large projects. Use `--rollback-include` to override for specific directories or `--rollback-all` to disable all auto-exclusions.
+</Note>
+
+#### `--rollback-all`
+
+Include ALL directories in rollback snapshots, overriding all auto-exclusions. This may be very slow on large projects with build artifacts.
+
+```bash
+# Full rollback coverage (may be slow)
+nono run --rollback --rollback-all -- cargo test
 ```
 
 #### `--exec`

@@ -44,10 +44,12 @@ pub fn support_info() -> SupportInfo {
 
 /// Convert AccessMode to Landlock AccessFs flags
 ///
-/// Note: RemoveDir is intentionally excluded to prevent directory deletion.
-/// RemoveFile, Truncate, and Refer are included to support atomic writes
-/// (write to .tmp → rename to target), which is the standard pattern used by
-/// most applications for safe config updates.
+/// RemoveFile, RemoveDir, Truncate, and Refer are included to support atomic
+/// writes (write to .tmp → rename to target), which is the standard pattern
+/// used by most applications for safe config/build artifact updates.
+/// Landlock requires `LANDLOCK_ACCESS_FS_REMOVE_DIR` on the source directory
+/// for `rename()` operations involving directories (e.g., cargo build
+/// incremental artifacts), so excluding it would cause spurious EACCES errors.
 fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
     match access {
         AccessMode::Read => AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
@@ -56,11 +58,10 @@ fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
             // - WriteFile: modify file contents
             // - MakeReg/MakeDir/etc: create new files/directories
             // - RemoveFile: delete files (required for rename() in atomic writes)
+            // - RemoveDir: delete directories (required for rename() of directories,
+            //   e.g., cargo build incremental artifacts)
             // - Refer: rename/hard link operations (required for atomic writes)
             // - Truncate: change file size (common write operation, ABI v3+)
-            //
-            // Still excluded:
-            // - RemoveDir: directory deletion (more dangerous than file deletion)
             AccessFs::WriteFile
                 | AccessFs::MakeChar
                 | AccessFs::MakeDir
@@ -70,6 +71,7 @@ fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
                 | AccessFs::MakeBlock
                 | AccessFs::MakeSym
                 | AccessFs::RemoveFile
+                | AccessFs::RemoveDir
                 | AccessFs::Refer
                 | AccessFs::Truncate
         }
@@ -814,22 +816,20 @@ mod tests {
         let write = access_to_landlock(AccessMode::Write, abi);
         assert!(write.contains(AccessFs::WriteFile));
         assert!(!write.contains(AccessFs::ReadFile));
-        // Verify atomic write operations ARE included (RemoveFile, Refer, Truncate)
+        // Verify atomic write operations ARE included (RemoveFile, RemoveDir, Refer, Truncate)
         assert!(write.contains(AccessFs::RemoveFile));
+        assert!(write.contains(AccessFs::RemoveDir));
         assert!(write.contains(AccessFs::Refer));
         assert!(write.contains(AccessFs::Truncate));
-        // Verify directory removal is still NOT included (defense in depth)
-        assert!(!write.contains(AccessFs::RemoveDir));
 
         let rw = access_to_landlock(AccessMode::ReadWrite, abi);
         assert!(rw.contains(AccessFs::ReadFile));
         assert!(rw.contains(AccessFs::WriteFile));
         // Verify atomic write operations ARE included in ReadWrite too
         assert!(rw.contains(AccessFs::RemoveFile));
+        assert!(rw.contains(AccessFs::RemoveDir));
         assert!(rw.contains(AccessFs::Refer));
         assert!(rw.contains(AccessFs::Truncate));
-        // Verify directory removal is still NOT included
-        assert!(!rw.contains(AccessFs::RemoveDir));
     }
 
     #[test]

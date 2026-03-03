@@ -342,7 +342,7 @@ pub struct RunArgs {
     /// Enable atomic rollback snapshots for the session.
     /// Takes content-addressable snapshots of writable directories so you
     /// can restore to the pre-session state after the command exits.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_rollback")]
     pub rollback: bool,
 
     /// Use supervised execution mode for capability expansion approval.
@@ -356,6 +356,30 @@ pub struct RunArgs {
     /// restore UI is suppressed.
     #[arg(long)]
     pub no_rollback_prompt: bool,
+
+    /// Disable rollback entirely for this session.
+    /// No snapshots are taken and no restore is offered.
+    #[arg(long, conflicts_with = "rollback")]
+    pub no_rollback: bool,
+
+    /// Exclude from rollback snapshots (repeatable).
+    /// Values containing glob characters (*, ?, [) are matched against
+    /// filenames. Plain names match exact path components; names with '/'
+    /// match as path substrings. Does NOT affect sandbox permissions.
+    #[arg(long, value_name = "PATTERN")]
+    pub rollback_exclude: Vec<String>,
+
+    /// Force-include a directory in rollback snapshots that would otherwise be
+    /// auto-excluded (repeatable). Accepts directory names (e.g., "target",
+    /// "node_modules"), not full paths. Does NOT affect sandbox permissions.
+    #[arg(long, value_name = "DIR_NAME")]
+    pub rollback_include: Vec<String>,
+
+    /// Include ALL directories in rollback snapshots, overriding auto-exclusions.
+    /// VCS internals (.git, .hg, .svn) are always excluded to prevent repository
+    /// corruption. Warning: may be very slow on large projects with build artifacts.
+    #[arg(long, conflicts_with = "rollback_include")]
+    pub rollback_all: bool,
 
     /// Disable trust verification for instruction files.
     /// For development and testing only. Logs a warning and skips the
@@ -1168,5 +1192,49 @@ mod tests {
             },
             _ => panic!("Expected Trust command"),
         }
+    }
+
+    #[test]
+    fn test_rollback_flags_with_no_rollback() {
+        // --no-rollback alongside rollback customization flags should parse
+        // (the warning is emitted at runtime, not parse time)
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--no-rollback",
+            "--rollback-exclude",
+            "target",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert!(args.no_rollback);
+                assert_eq!(args.rollback_exclude, vec!["target"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_rollback_all_conflicts_with_include() {
+        // --rollback-all conflicts with --rollback-include (clap enforced)
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--rollback-all",
+            "--rollback-include",
+            "target",
+            "echo",
+            "hello",
+        ]);
+        assert!(
+            result.is_err(),
+            "--rollback-all and --rollback-include should conflict"
+        );
     }
 }
