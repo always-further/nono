@@ -2022,7 +2022,8 @@ fn open_canonical_path_no_symlinks(
     let flags = match access {
         nono::AccessMode::Read => libc::O_RDONLY,
         nono::AccessMode::Write => libc::O_WRONLY,
-        nono::AccessMode::ReadWrite => libc::O_RDWR,
+        nono::AccessMode::ReadWrite | nono::AccessMode::Interactive => libc::O_RDWR,
+        _ => libc::O_RDWR,
     } | libc::O_NOFOLLOW
         | libc::O_CLOEXEC;
 
@@ -2104,7 +2105,7 @@ mod tests {
     #[test]
     fn test_exec_strategy_supervised_selection() {
         // Verify the strategy selection logic from main.rs:
-        // interactive || direct_exec -> Direct
+        // interactive -> Direct
         // supervised -> Supervised
         // else -> Monitor
         let strategy = ExecStrategy::Supervised;

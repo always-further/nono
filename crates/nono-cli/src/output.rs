@@ -94,6 +94,8 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
                 AccessMode::Read => access_str.green(),
                 AccessMode::Write => access_str.yellow(),
                 AccessMode::ReadWrite => access_str.truecolor(204, 102, 0), // orange
+                AccessMode::Interactive => access_str.cyan(),
+                _ => access_str.white(),
             };
 
             if verbose > 0 {
@@ -396,6 +398,8 @@ pub fn prompt_cwd_sharing(cwd: &Path, access: &AccessMode) -> Result<bool> {
         AccessMode::Read => access_str.green(),
         AccessMode::Write => access_str.yellow(),
         AccessMode::ReadWrite => access_str.truecolor(204, 102, 0),
+        AccessMode::Interactive => access_str.cyan(),
+        _ => access_str.white(),
     };
 
     eprintln!(

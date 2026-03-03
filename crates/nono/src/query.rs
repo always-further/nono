@@ -91,7 +91,8 @@ impl QueryContext {
             if covers {
                 let sufficient = matches!(
                     (cap.access, requested),
-                    (AccessMode::ReadWrite, _)
+                    (AccessMode::Interactive, _)
+                        | (AccessMode::ReadWrite, _)
                         | (AccessMode::Read, AccessMode::Read)
                         | (AccessMode::Write, AccessMode::Write)
                 );

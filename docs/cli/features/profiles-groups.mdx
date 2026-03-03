@@ -176,7 +176,7 @@ The `interactive` field (default: `false`) indicates whether the application has
 }
 ```
 
-When `true`, nono uses direct exec mode (equivalent to `--exec` flag), which preserves the terminal for apps like Claude Code, vim, or htop.
+When `true`, nono uses interactive mode (equivalent to `--interactive` flag), which preserves the terminal for apps like Claude Code, vim, or htop. This also upgrades TTY device paths to Interactive access mode, adding IoctlDev on Linux Landlock V5+.
 
 ### Rollback Exclusions
 

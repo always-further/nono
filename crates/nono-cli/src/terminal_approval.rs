@@ -123,6 +123,8 @@ fn format_access_mode(access: &AccessMode) -> &'static str {
         AccessMode::Read => "read-only",
         AccessMode::Write => "write-only",
         AccessMode::ReadWrite => "read+write",
+        AccessMode::Interactive => "interactive (read+write+ioctl)",
+        _ => "unknown",
     }
 }
 

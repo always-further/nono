@@ -72,7 +72,7 @@ fn run() -> Result<()> {
                 args.sandbox,
                 args.command,
                 args.no_diagnostics,
-                args.direct_exec,
+                args.interactive,
                 args.rollback,
                 args.supervised,
                 args.no_rollback_prompt,
@@ -308,7 +308,7 @@ fn run_sandbox(
     args: SandboxArgs,
     command: Vec<String>,
     no_diagnostics: bool,
-    direct_exec: bool,
+    interactive_cli: bool,
     rollback: bool,
     supervised: bool,
     no_rollback_prompt: bool,
@@ -442,15 +442,20 @@ fn run_sandbox(
     let mut proxy_credentials = prepared.proxy_credentials.clone();
     proxy_credentials.extend(args.proxy_credential.clone());
 
+    // Upgrade TTY device paths to Interactive when interactive mode is active
+    let is_interactive = prepared.interactive || interactive_cli;
+    if is_interactive {
+        prepared.caps.upgrade_tty_to_interactive();
+    }
+
     execute_sandboxed(
         program,
         cmd_args,
         prepared.caps,
         prepared.secrets,
         ExecutionFlags {
-            interactive: prepared.interactive,
+            interactive: is_interactive,
             no_diagnostics,
-            direct_exec,
             rollback,
             supervised,
             no_rollback_prompt,
@@ -498,7 +503,10 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         return Ok(());
     }
 
-    let prepared = prepare_sandbox(&args.sandbox, silent)?;
+    let mut prepared = prepare_sandbox(&args.sandbox, silent)?;
+
+    // Shell is always interactive - upgrade TTY device paths
+    prepared.caps.upgrade_tty_to_interactive();
 
     if !silent {
         eprintln!(
@@ -517,7 +525,6 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         ExecutionFlags {
             interactive: true,
             no_diagnostics: true,
-            direct_exec: false,
             rollback: false,
             supervised: false,
             no_rollback_prompt: false,
@@ -544,7 +551,6 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
 struct ExecutionFlags {
     interactive: bool,
     no_diagnostics: bool,
-    direct_exec: bool,
     rollback: bool,
     supervised: bool,
     no_rollback_prompt: bool,
@@ -588,7 +594,7 @@ struct ExecutionFlags {
 fn select_execution_strategy(flags: &ExecutionFlags) -> exec_strategy::ExecStrategy {
     if flags.rollback || flags.supervised || flags.proxy_active {
         exec_strategy::ExecStrategy::Supervised
-    } else if flags.interactive || flags.direct_exec {
+    } else if flags.interactive {
         exec_strategy::ExecStrategy::Direct
     } else {
         exec_strategy::ExecStrategy::Monitor
@@ -871,7 +877,10 @@ fn execute_sandboxed(
                     .iter()
                     .filter(|c| {
                         !c.is_file
-                            && matches!(c.access, AccessMode::Write | AccessMode::ReadWrite)
+                            && matches!(
+                                c.access,
+                                AccessMode::Write | AccessMode::ReadWrite | AccessMode::Interactive
+                            )
                             && matches!(c.source, nono::CapabilitySource::User)
                     })
                     .map(|c| c.resolved.clone())

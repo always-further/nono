@@ -335,8 +335,10 @@ pub struct RunArgs {
 
     /// Preserve TTY for interactive apps (e.g., Claude Code, vim, htop).
     /// Without this flag, nono monitors output which can break interactive UIs.
-    #[arg(long = "exec")]
-    pub direct_exec: bool,
+    /// Also upgrades TTY device paths to Interactive access mode (adds IoctlDev
+    /// on Linux Landlock V5+). WARNING: this weakens isolation for TTY devices.
+    #[arg(long = "interactive", short = 'i', alias = "exec")]
+    pub interactive: bool,
 
     /// Enable atomic rollback snapshots for the session.
     /// Takes content-addressable snapshots of writable directories so you

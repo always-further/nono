@@ -62,6 +62,7 @@ impl SandboxState {
                 "read" => AccessMode::Read,
                 "write" => AccessMode::Write,
                 "read+write" => AccessMode::ReadWrite,
+                "interactive" => AccessMode::Interactive,
                 other => {
                     return Err(crate::error::NonoError::ConfigParse(format!(
                         "invalid access mode in sandbox state: {other}"

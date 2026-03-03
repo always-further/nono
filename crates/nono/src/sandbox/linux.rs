@@ -50,7 +50,11 @@ pub fn support_info() -> SupportInfo {
 /// most applications for safe config updates.
 fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
     match access {
-        AccessMode::Read => AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
+        AccessMode::Read => {
+            // Read access includes basic file/dir reading and execution.
+            // IoctlDev is NOT included here; use Interactive for TTY paths.
+            AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute
+        }
         AccessMode::Write => {
             // Write access includes all operations needed for normal file manipulation:
             // - WriteFile: modify file contents
@@ -75,6 +79,12 @@ fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
         }
         AccessMode::ReadWrite => {
             access_to_landlock(AccessMode::Read, _abi) | access_to_landlock(AccessMode::Write, _abi)
+        }
+        AccessMode::Interactive => {
+            // Interactive = ReadWrite + IoctlDev for TTY/PTY device operations.
+            // IoctlDev (Landlock ABI v5+) permits all ioctl commands on device nodes.
+            // On kernels < v5, restrict_self() returns PartiallyEnforced (safe degradation).
+            access_to_landlock(AccessMode::ReadWrite, _abi) | AccessFs::IoctlDev
         }
     }
 }
@@ -818,6 +828,46 @@ mod tests {
         assert!(rw.contains(AccessFs::Truncate));
         // Verify directory removal is still NOT included
         assert!(!rw.contains(AccessFs::RemoveDir));
+    }
+
+    #[test]
+    fn test_access_conversion_interactive() {
+        let abi = ABI::V5;
+
+        // Only Interactive includes IoctlDev
+        let interactive = access_to_landlock(AccessMode::Interactive, abi);
+        assert!(
+            interactive.contains(AccessFs::IoctlDev),
+            "Interactive should include IoctlDev for device ioctl (TTY, etc.)"
+        );
+        // Interactive inherits all ReadWrite permissions
+        assert!(interactive.contains(AccessFs::ReadFile));
+        assert!(interactive.contains(AccessFs::WriteFile));
+        assert!(interactive.contains(AccessFs::Execute));
+    }
+
+    #[test]
+    fn test_readwrite_no_ioctl_dev() {
+        let abi = ABI::V5;
+
+        // Read, Write, and ReadWrite must NOT include IoctlDev
+        let read = access_to_landlock(AccessMode::Read, abi);
+        assert!(
+            !read.contains(AccessFs::IoctlDev),
+            "Read must not include IoctlDev"
+        );
+
+        let write = access_to_landlock(AccessMode::Write, abi);
+        assert!(
+            !write.contains(AccessFs::IoctlDev),
+            "Write must not include IoctlDev"
+        );
+
+        let rw = access_to_landlock(AccessMode::ReadWrite, abi);
+        assert!(
+            !rw.contains(AccessFs::IoctlDev),
+            "ReadWrite must not include IoctlDev"
+        );
     }
 
     #[test]

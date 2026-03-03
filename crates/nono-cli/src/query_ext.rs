@@ -100,7 +100,8 @@ pub fn query_path(path: &Path, requested: AccessMode, caps: &CapabilitySet) -> R
 
         let sufficient = matches!(
             (cap.access, requested),
-            (AccessMode::ReadWrite, _)
+            (AccessMode::Interactive, _)
+                | (AccessMode::ReadWrite, _)
                 | (AccessMode::Read, AccessMode::Read)
                 | (AccessMode::Write, AccessMode::Write)
         );

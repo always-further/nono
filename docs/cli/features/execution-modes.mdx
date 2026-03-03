@@ -9,14 +9,14 @@ nono provides three execution modes that trade off between attack surface, featu
 
 | Mode | Flag | Parent Sandboxed | Rollback | Expansion | Attack Surface |
 |------|------|-----------------|----------|-----------|----------------|
-| Direct | `--exec` | N/A (no parent) | No | No | Minimal |
+| Direct | `--interactive` / `-i` | N/A (no parent) | No | No | Minimal |
 | Monitor | (default) | Yes | No | No | Small |
 | Supervised | `--rollback` / `--supervised` | No | `--rollback` only | Linux only | Larger |
 
 ## Direct Mode
 
 ```bash
-nono run --exec --allow-cwd -- my-command
+nono run --interactive --allow-cwd -- my-command
 ```
 
 nono applies the sandbox and then `exec()`s directly into the target command. nono disappears from the process tree entirely - there is no parent process.
@@ -99,7 +99,7 @@ Do you need rollback snapshots?
         └── No
             │
             Do you need minimal overhead or TTY preservation?
-            ├── Yes → Direct (--exec)
+            ├── Yes → Direct (--interactive)
             └── No → Monitor (default)
 ```
 

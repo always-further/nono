@@ -54,6 +54,8 @@ impl SandboxState {
                         AccessMode::Read => "read".to_string(),
                         AccessMode::Write => "write".to_string(),
                         AccessMode::ReadWrite => "readwrite".to_string(),
+                        AccessMode::Interactive => "interactive".to_string(),
+                        _ => "readwrite".to_string(),
                     },
                     is_file: c.is_file,
                 })
@@ -79,6 +81,7 @@ impl SandboxState {
                 "read" => AccessMode::Read,
                 "write" => AccessMode::Write,
                 "readwrite" => AccessMode::ReadWrite,
+                "interactive" => AccessMode::Interactive,
                 other => {
                     return Err(NonoError::ConfigParse(format!(
                         "invalid access mode in sandbox state: {other}"

@@ -46,6 +46,7 @@ impl std::fmt::Display for CapabilitySource {
 }
 
 /// Filesystem access mode
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccessMode {
     /// Read-only access
@@ -54,6 +55,11 @@ pub enum AccessMode {
     Write,
     /// Read and write access
     ReadWrite,
+    /// ReadWrite + device ioctl: for TTY/PTY devices needing terminal operations.
+    /// On Linux (Landlock V5+), adds IoctlDev. On macOS, same as ReadWrite
+    /// (Seatbelt handles ioctl separately). WARNING: IoctlDev permits ALL ioctl
+    /// commands on device nodes, which weakens isolation.
+    Interactive,
 }
 
 impl std::fmt::Display for AccessMode {
@@ -62,6 +68,7 @@ impl std::fmt::Display for AccessMode {
             AccessMode::Read => write!(f, "read"),
             AccessMode::Write => write!(f, "write"),
             AccessMode::ReadWrite => write!(f, "read+write"),
+            AccessMode::Interactive => write!(f, "interactive"),
         }
     }
 }
@@ -744,13 +751,24 @@ impl CapabilitySet {
                     false
                 } else {
                     // Same source category: highest access wins
-                    cap.access == AccessMode::ReadWrite && existing.access != AccessMode::ReadWrite
+                    // Interactive > ReadWrite > Read/Write
+                    (cap.access == AccessMode::Interactive
+                        && existing.access != AccessMode::Interactive)
+                        || (cap.access == AccessMode::ReadWrite
+                            && !matches!(
+                                existing.access,
+                                AccessMode::ReadWrite | AccessMode::Interactive
+                            ))
                 };
 
                 // Merge complementary access modes (Read + Write = ReadWrite).
+                // Interactive absorbs all other modes.
                 // When two entries from the same source category have different
                 // non-ReadWrite modes, upgrade the kept entry to ReadWrite.
                 let merged_access = match (existing.access, cap.access) {
+                    (AccessMode::Interactive, _) | (_, AccessMode::Interactive) => {
+                        Some(AccessMode::Interactive)
+                    }
                     (AccessMode::Read, AccessMode::Write)
                     | (AccessMode::Write, AccessMode::Read) => Some(AccessMode::ReadWrite),
                     _ => None,
@@ -798,6 +816,41 @@ impl CapabilitySet {
         to_remove.reverse();
         for idx in to_remove {
             self.fs.remove(idx);
+        }
+    }
+
+    /// Upgrade TTY/PTY device paths to `AccessMode::Interactive`.
+    ///
+    /// Scans existing filesystem capabilities and promotes paths matching
+    /// `/dev/tty` or `/dev/pts` to `Interactive` access mode, which adds
+    /// `IoctlDev` on Linux (Landlock V5+) for terminal operations.
+    ///
+    /// **User intent protection**: Entries with `CapabilitySource::User` are
+    /// never modified. If a user explicitly set `/dev/tty` to `Read`, that
+    /// choice is respected.
+    ///
+    /// This method is idempotent: calling it multiple times produces the same result.
+    pub fn upgrade_tty_to_interactive(&mut self) {
+        let tty_path = Path::new("/dev/tty");
+        let pts_path = Path::new("/dev/pts");
+
+        for cap in &mut self.fs {
+            // Never override explicit user intent
+            if matches!(cap.source, CapabilitySource::User) {
+                continue;
+            }
+            // Already Interactive, nothing to do
+            if cap.access == AccessMode::Interactive {
+                continue;
+            }
+            // Check if this is a TTY/PTY device path
+            let is_tty = cap.resolved == tty_path
+                || cap.resolved.starts_with(pts_path)
+                || cap.original == tty_path
+                || cap.original.starts_with(pts_path);
+            if is_tty {
+                cap.access = AccessMode::Interactive;
+            }
         }
     }
 
@@ -1407,5 +1460,145 @@ mod tests {
         let summary = caps.summary();
         assert!(summary.contains("tcp connect ports: 443"));
         assert!(summary.contains("tcp bind ports: 8080"));
+    }
+
+    #[test]
+    fn test_access_mode_interactive_display() {
+        assert_eq!(AccessMode::Interactive.to_string(), "interactive");
+    }
+
+    #[test]
+    fn test_dedup_interactive_absorbs_read() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::Interactive,
+            is_file: true,
+            source: CapabilitySource::System,
+        });
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::Read,
+            is_file: true,
+            source: CapabilitySource::System,
+        });
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        assert_eq!(caps.fs_capabilities()[0].access, AccessMode::Interactive);
+    }
+
+    #[test]
+    fn test_dedup_interactive_absorbs_readwrite() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::ReadWrite,
+            is_file: true,
+            source: CapabilitySource::System,
+        });
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::Interactive,
+            is_file: true,
+            source: CapabilitySource::System,
+        });
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        assert_eq!(caps.fs_capabilities()[0].access, AccessMode::Interactive);
+    }
+
+    #[test]
+    fn test_dedup_read_write_merge_to_interactive_when_interactive_present() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::Read,
+            is_file: true,
+            source: CapabilitySource::System,
+        });
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::Interactive,
+            is_file: true,
+            source: CapabilitySource::System,
+        });
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        assert_eq!(caps.fs_capabilities()[0].access, AccessMode::Interactive);
+    }
+
+    #[test]
+    fn test_upgrade_tty_to_interactive() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::ReadWrite,
+            is_file: true,
+            source: CapabilitySource::System,
+        });
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/pts"),
+            resolved: PathBuf::from("/dev/pts"),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::Group("tty".to_string()),
+        });
+        caps.upgrade_tty_to_interactive();
+        assert_eq!(caps.fs_capabilities()[0].access, AccessMode::Interactive);
+        assert_eq!(caps.fs_capabilities()[1].access, AccessMode::Interactive);
+    }
+
+    #[test]
+    fn test_upgrade_tty_leaves_non_tty_unchanged() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/usr"),
+            resolved: PathBuf::from("/usr"),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+        caps.upgrade_tty_to_interactive();
+        assert_eq!(caps.fs_capabilities()[0].access, AccessMode::Read);
+    }
+
+    #[test]
+    fn test_upgrade_tty_preserves_user_intent() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::Read,
+            is_file: true,
+            source: CapabilitySource::User,
+        });
+        caps.upgrade_tty_to_interactive();
+        // User explicitly set Read on /dev/tty - must NOT be upgraded
+        assert_eq!(caps.fs_capabilities()[0].access, AccessMode::Read);
+    }
+
+    #[test]
+    fn test_upgrade_tty_idempotent() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::ReadWrite,
+            is_file: true,
+            source: CapabilitySource::System,
+        });
+        caps.upgrade_tty_to_interactive();
+        let first = caps.fs_capabilities()[0].access;
+        caps.upgrade_tty_to_interactive();
+        let second = caps.fs_capabilities()[0].access;
+        assert_eq!(first, second);
+        assert_eq!(first, AccessMode::Interactive);
     }
 }

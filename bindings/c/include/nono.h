@@ -24,6 +24,8 @@
 
 #define NONO_ACCESS_MODE_READ_WRITE 2
 
+#define NONO_ACCESS_MODE_INTERACTIVE 3
+
 /**
  * Sentinel value returned on error (NULL pointer, out-of-bounds index).
  */

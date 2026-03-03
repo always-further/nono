@@ -62,7 +62,7 @@ const EXT_CLASS_READ_WRITE: &str = "com.apple.app-sandbox.read-write";
 pub fn extension_issue_file(path: &Path, access: AccessMode) -> Result<String> {
     let class = match access {
         AccessMode::Read => EXT_CLASS_READ,
-        AccessMode::Write | AccessMode::ReadWrite => EXT_CLASS_READ_WRITE,
+        AccessMode::Write | AccessMode::ReadWrite | AccessMode::Interactive => EXT_CLASS_READ_WRITE,
     };
 
     let class_c = CString::new(class)
@@ -366,7 +366,10 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // This prevents loading arbitrary shared libraries via DYLD_INSERT_LIBRARIES
     // from paths outside the sandbox's read set.
     for cap in caps.fs_capabilities() {
-        if matches!(cap.access, AccessMode::Read | AccessMode::ReadWrite) {
+        if matches!(
+            cap.access,
+            AccessMode::Read | AccessMode::ReadWrite | AccessMode::Interactive
+        ) {
             for filter in path_filters_for_cap(cap)? {
                 profile.push_str(&format!("(allow file-map-executable ({}))\n", filter));
             }
@@ -392,7 +395,7 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // (e.g. /tmp vs /private/tmp) so Seatbelt allows traversing symlinks.
     for cap in caps.fs_capabilities() {
         match cap.access {
-            AccessMode::Read | AccessMode::ReadWrite => {
+            AccessMode::Read | AccessMode::ReadWrite | AccessMode::Interactive => {
                 for filter in path_filters_for_cap(cap)? {
                     profile.push_str(&format!("(allow file-read* ({}))\n", filter));
                 }
@@ -431,7 +434,7 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // Emits rules for both original and resolved paths when they differ.
     for cap in caps.fs_capabilities() {
         match cap.access {
-            AccessMode::Write | AccessMode::ReadWrite => {
+            AccessMode::Write | AccessMode::ReadWrite | AccessMode::Interactive => {
                 for filter in path_filters_for_cap(cap)? {
                     profile.push_str(&format!("(allow file-write* ({}))\n", filter));
                 }

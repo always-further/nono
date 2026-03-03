@@ -503,7 +503,12 @@ pub fn apply_macos_login_keychain_exception(caps: &mut CapabilitySet) {
         .fs_capabilities()
         .iter()
         .filter(|cap| cap.is_file)
-        .filter(|cap| matches!(cap.access, AccessMode::Read | AccessMode::ReadWrite))
+        .filter(|cap| {
+            matches!(
+                cap.access,
+                AccessMode::Read | AccessMode::ReadWrite | AccessMode::Interactive
+            )
+        })
         .map(|cap| cap.resolved.clone())
         .filter(|path| is_login_db(path))
         .filter_map(|path| {
@@ -558,7 +563,12 @@ pub fn apply_unlink_overrides(caps: &mut CapabilitySet) {
     let writable_paths: Vec<PathBuf> = caps
         .fs_capabilities()
         .iter()
-        .filter(|cap| matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite))
+        .filter(|cap| {
+            matches!(
+                cap.access,
+                AccessMode::Write | AccessMode::ReadWrite | AccessMode::Interactive
+            )
+        })
         .filter(|cap| !cap.is_file)
         .map(|cap| cap.resolved.clone())
         .collect();

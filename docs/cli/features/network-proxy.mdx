@@ -189,7 +189,7 @@ nono run -vv --network-profile claude-code --allow-cwd -- my-agent
 
 - **HTTP/1.1 only** - The CONNECT tunnel passes raw bytes (HTTP/2 works end-to-end), but the reverse proxy mode speaks HTTP/1.1 to upstream
 - **No per-port filtering on macOS** - Seatbelt cannot filter outbound by destination port (only ProxyOnly mode is supported, not arbitrary per-port rules)
-- **Proxy mode requires supervised execution** - The proxy runs in the unsandboxed parent process, so `--exec` mode is incompatible
+- **Proxy mode requires supervised execution** - The proxy runs in the unsandboxed parent process, so `--interactive` (direct exec) mode is incompatible
 
 ## Next Steps
 

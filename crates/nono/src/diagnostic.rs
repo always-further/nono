@@ -424,6 +424,7 @@ fn access_str(access: AccessMode) -> &'static str {
         AccessMode::Read => "read",
         AccessMode::Write => "write",
         AccessMode::ReadWrite => "read+write",
+        AccessMode::Interactive => "interactive",
     }
 }
 

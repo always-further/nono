@@ -449,12 +449,17 @@ Suppress the interactive post-exit review when using `--rollback`. Snapshots are
 nono run --rollback --no-rollback-prompt --allow-cwd -- my-agent
 ```
 
-#### `--exec`
+#### `--interactive` / `-i`
 
-Use direct execution mode. nono applies the sandbox and then `exec()`s directly into the target command. No parent process remains.
+Use interactive execution mode for TTY applications (e.g., Claude Code, vim, htop). nono applies the sandbox and then `exec()`s directly into the target command, preserving the terminal. Also upgrades TTY device paths (`/dev/tty`, `/dev/pts`) to Interactive access mode, which adds `IoctlDev` on Linux Landlock V5+.
+
+**WARNING**: Interactive mode weakens isolation for TTY devices. `IoctlDev` permits all ioctl commands on device nodes, including `TIOCSTI` (terminal input injection). Only use when the application genuinely needs terminal interaction.
+
+`--exec` is accepted as a hidden alias for backward compatibility.
 
 ```bash
-nono run --exec --allow-cwd -- my-command
+nono run --interactive --allow-cwd -- my-command
+nono run -i --allow-cwd -- my-command
 ```
 
 #### `--no-diagnostics`
