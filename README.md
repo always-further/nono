@@ -237,7 +237,7 @@ nono ships with built-in profiles for popular AI coding agents. Each profile def
 | **OpenCode** | `opencode` | [Guide](https://docs.nono.sh/clients/opencode) |
 | **OpenClaw** | `openclaw` | [Guide](https://docs.nono.sh/clients/openclaw) |
 
-nono is agent-agnostic and works with any CLI command. See the [full documentation](https://docs.nono.sh) for usage details, configuration, and integration guides.
+Custom profiles can [extend built-in ones](https://docs.nono.sh/profiles) with `"extends": "claude-code"` to inherit all settings and add overrides. nono is agent-agnostic and works with any CLI command. See the [full documentation](https://docs.nono.sh) for usage details, configuration, and integration guides.
 
 ## Projects using nono
 

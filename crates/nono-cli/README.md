@@ -61,28 +61,41 @@ nono run --allow-cwd --dry-run -- command
 | OpenCode | `nono run --profile opencode -- opencode` |
 | OpenClaw | `nono run --profile openclaw -- openclaw gateway` |
 
-## Rollback
+## Profile Inheritance
 
-Rollback snapshots automatically exclude known regenerable directories (`.git`, `target`, `node_modules`, etc.) and any directory with more than 10,000 files to prevent hangs on large projects.
+User profiles can extend built-in or other user profiles with the `extends` field. The child inherits all settings from the base and only declares additions or overrides.
 
-```bash
-# Zero-flag usage — auto-excludes large directories
-nono run --rollback --allow-cwd -- npm test
-
-# Force-include an auto-excluded directory
-nono run --rollback --rollback-include target -- cargo build
-
-# Exclude a custom directory from rollback
-nono run --rollback --rollback-exclude vendor -- go test ./...
-
-# Include everything (may be slow on large projects)
-nono run --rollback --rollback-all -- cargo test
-
-# Disable rollback entirely
-nono run --no-rollback --allow-cwd -- npm test
+```json
+{
+  "extends": "claude-code",
+  "meta": { "name": "my-claude" },
+  "filesystem": {
+    "allow": ["/opt/my-tools"],
+    "read": ["/etc/my-app"]
+  }
+}
 ```
 
-> **Note:** Rollback exclusion does not affect sandbox permissions. Excluded directories are still sandboxed — they just can't be rolled back.
+Save to `~/.config/nono/profiles/my-claude.json`, then:
+
+```bash
+nono run --profile my-claude -- claude
+```
+
+### Merge semantics
+
+- **Lists** (filesystem paths, security groups, rollback patterns): appended and deduplicated
+- **HashMaps** (credentials, hooks): merged, child wins on same key
+- **Booleans** (`network.block`, `interactive`): OR — either activates
+- **Scalars** (`meta`, `network_profile`): child overrides
+
+### Chaining
+
+Profiles can form chains (up to 10 levels deep). Circular dependencies are detected and rejected.
+
+```
+my-dev.json → team-base.json → claude-code (built-in)
+```
 
 ## Command Blocking
 
