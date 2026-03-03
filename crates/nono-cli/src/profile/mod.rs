@@ -1727,7 +1727,6 @@ mod tests {
         assert!(validate_custom_credential("test", &cred).is_ok());
     }
 
-<<<<<<< fix/allowed-commands-profile
     #[test]
     fn test_security_config_allowed_commands_deserializes() {
         let json = r#"{
@@ -1753,7 +1752,7 @@ mod tests {
         std::fs::write(&path, json).expect("write profile");
         let profile = load_profile_from_path(&path).expect("parse profile");
         assert!(profile.security.allowed_commands.is_empty());
-=======
+    }
     // ============================================================================
     // Profile inheritance (extends) tests
     // ============================================================================
@@ -2425,6 +2424,5 @@ mod tests {
         let json_str = r#"{ "meta": { "name": "no-ext" } }"#;
         let profile: Profile = serde_json::from_str(json_str).expect("parse");
         assert!(profile.extends.is_none());
->>>>>>> main
     }
 }
