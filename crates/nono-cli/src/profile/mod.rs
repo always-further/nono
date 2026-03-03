@@ -785,7 +785,9 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
         security: SecurityConfig {
             groups: dedup_append(&base.security.groups, &child.security.groups),
             trust_groups: dedup_append(&base.security.trust_groups, &child.security.trust_groups),
-            allowed_commands: dedup_append(&base.security.allowed_commands, &child.security.allowed_commands),
+            allowed_commands: dedup_append(
+                &base.security.allowed_commands,
+                &child.security.allowed_commands),
         },
         filesystem: FilesystemConfig {
             allow: dedup_append(&base.filesystem.allow, &child.filesystem.allow),
