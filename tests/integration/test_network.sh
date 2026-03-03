@@ -80,7 +80,7 @@ fi
 
 if command_exists wget; then
     expect_success "wget works by default" \
-        "$NONO_BIN" run --allow "$TMPDIR" -- wget -q --timeout=10 -O /dev/null https://example.com
+        "$NONO_BIN" run --allow "$TMPDIR" -- wget -q --timeout=10 -O "$TMPDIR/wget_output" https://example.com
 else
     skip_test "wget works by default" "wget not installed"
 fi

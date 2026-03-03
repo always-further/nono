@@ -17,6 +17,7 @@ mod profile;
 mod protected_paths;
 mod query_ext;
 mod rollback_commands;
+mod rollback_preflight;
 mod rollback_session;
 mod rollback_ui;
 mod sandbox_state;
@@ -29,7 +30,7 @@ mod update_check;
 
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
-use cli::{Cli, Commands, LearnArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
+use cli::{Cli, Commands, LearnArgs, RunArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
@@ -68,17 +69,7 @@ fn run() -> Result<()> {
         Commands::Run(args) => {
             output::print_banner(cli.silent);
             show_update_notification(&mut update_handle, cli.silent);
-            run_sandbox(
-                args.sandbox,
-                args.command,
-                args.no_diagnostics,
-                args.direct_exec,
-                args.rollback,
-                args.supervised,
-                args.no_rollback_prompt,
-                args.trust_override,
-                cli.silent,
-            )
+            run_sandbox(*args, cli.silent)
         }
         Commands::Shell(args) => {
             output::print_banner(cli.silent);
@@ -303,18 +294,16 @@ fn run_why(args: WhyArgs) -> Result<()> {
 }
 
 /// Run a command inside the sandbox
-#[allow(clippy::too_many_arguments)]
-fn run_sandbox(
-    args: SandboxArgs,
-    command: Vec<String>,
-    no_diagnostics: bool,
-    direct_exec: bool,
-    rollback: bool,
-    supervised: bool,
-    no_rollback_prompt: bool,
-    trust_override: bool,
-    silent: bool,
-) -> Result<()> {
+fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
+    let args = run_args.sandbox;
+    let command = run_args.command;
+    let no_diagnostics = run_args.no_diagnostics;
+    let direct_exec = run_args.direct_exec;
+    let rollback = run_args.rollback;
+    let supervised = run_args.supervised;
+    let no_rollback_prompt = run_args.no_rollback_prompt;
+    let trust_override = run_args.trust_override;
+
     // Check if we have a command to run
     if command.is_empty() {
         return Err(NonoError::NoCommand);
@@ -438,11 +427,42 @@ fn run_sandbox(
     proxy_credentials.extend(args.proxy_credential.clone());
 
     // The proxy is needed when the network mode is ProxyOnly OR when there are
-    // credential routes to inject (from profile proxy_credentials or --proxy-credential).
-    let proxy_active = matches!(
-        prepared.caps.network_mode(),
-        nono::NetworkMode::ProxyOnly { .. }
-    ) || !proxy_credentials.is_empty();
+    // credential routes to inject. However, --net-block takes precedence: if
+    // network is explicitly blocked, the proxy must NOT activate since that
+    // would re-enable network access through the proxy's localhost listener.
+    let proxy_active = if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
+        if !proxy_credentials.is_empty() || network_profile.is_some() {
+            warn!(
+                "--net-block is active; ignoring proxy configuration \
+                 that would re-enable network access"
+            );
+            if !silent {
+                eprintln!(
+                    "  [nono] Warning: --net-block overrides proxy/credential settings. \
+                     Network remains fully blocked."
+                );
+            }
+        }
+        false
+    } else {
+        matches!(
+            prepared.caps.network_mode(),
+            nono::NetworkMode::ProxyOnly { .. }
+        ) || !proxy_credentials.is_empty()
+            || network_profile.is_some()
+    };
+
+    // Split --rollback-exclude values: glob metacharacters route to filename
+    // matching, everything else routes to component-based pattern matching.
+    let is_glob = |v: &String| v.contains('*') || v.contains('?') || v.contains('[');
+    let (cli_exclude_globs, cli_exclude_patterns): (Vec<_>, Vec<_>) =
+        run_args.rollback_exclude.into_iter().partition(is_glob);
+
+    let mut merged_patterns = prepared.rollback_exclude_patterns;
+    merged_patterns.extend(cli_exclude_patterns);
+
+    let mut merged_globs = prepared.rollback_exclude_globs;
+    merged_globs.extend(cli_exclude_globs);
 
     execute_sandboxed(
         program,
@@ -454,15 +474,18 @@ fn run_sandbox(
             no_diagnostics,
             direct_exec,
             rollback,
+            no_rollback: run_args.no_rollback,
             supervised,
             no_rollback_prompt,
             trust_override,
             silent,
+            rollback_all: run_args.rollback_all,
+            rollback_include: run_args.rollback_include,
             scan_root,
             trust_scan_verified,
             protected_paths: verified_protected_paths,
-            rollback_exclude_patterns: prepared.rollback_exclude_patterns,
-            rollback_exclude_globs: prepared.rollback_exclude_globs,
+            rollback_exclude_patterns: merged_patterns,
+            rollback_exclude_globs: merged_globs,
             proxy_active,
             network_profile,
             proxy_allow_hosts,
@@ -521,10 +544,13 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             no_diagnostics: true,
             direct_exec: false,
             rollback: false,
+            no_rollback: false,
             supervised: false,
             no_rollback_prompt: false,
             trust_override: false,
             silent,
+            rollback_all: false,
+            rollback_include: Vec::new(),
             scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             trust_scan_verified: false,
             protected_paths: Vec::new(),
@@ -548,10 +574,15 @@ struct ExecutionFlags {
     no_diagnostics: bool,
     direct_exec: bool,
     rollback: bool,
+    no_rollback: bool,
     supervised: bool,
     no_rollback_prompt: bool,
     trust_override: bool,
     silent: bool,
+    /// Override all auto-exclusions (full snapshot)
+    rollback_all: bool,
+    /// Force-include specific directories that would otherwise be auto-excluded
+    rollback_include: Vec<String>,
     /// Root directory for trust policy discovery and scanning
     scan_root: std::path::PathBuf,
     /// Whether trust scan ran and verified at least one file (crypto threads may linger)
@@ -864,7 +895,27 @@ fn execute_sandboxed(
             output::print_applying_sandbox(flags.silent);
 
             // --- Rollback snapshot lifecycle (only when --rollback is active) ---
-            let rollback_state = if flags.rollback {
+            // Warn if rollback-related flags are set but rollback is disabled.
+            if flags.no_rollback {
+                let has_rollback_flags = flags.rollback_all
+                    || !flags.rollback_include.is_empty()
+                    || !flags.rollback_exclude_patterns.is_empty()
+                    || !flags.rollback_exclude_globs.is_empty();
+                if has_rollback_flags {
+                    warn!(
+                        "--no-rollback is active; rollback flags \
+                         (--rollback-all, --rollback-include, --rollback-exclude) \
+                         have no effect"
+                    );
+                    if !flags.silent {
+                        eprintln!(
+                            "  [nono] Warning: --no-rollback is active; \
+                             rollback customization flags have no effect."
+                        );
+                    }
+                }
+            }
+            let rollback_state = if flags.rollback && !flags.no_rollback {
                 // Collect tracked paths: only USER-specified directories with write access.
                 // System/group paths (caches, frameworks, etc.) are excluded to avoid
                 // snapshotting system directories the user didn't ask to track.
@@ -907,42 +958,100 @@ fn execute_sandboxed(
                         let _ = std::fs::set_permissions(&session_dir, perms);
                     }
 
-                    let mut patterns = rollback_base_exclusions();
+                    // When --rollback-all is set, only exclude VCS internals
+                    // (restoring partial .git/ corrupts the repo). Otherwise
+                    // use the full base exclusion list.
+                    let mut patterns = if flags.rollback_all {
+                        rollback_vcs_exclusions()
+                    } else {
+                        rollback_base_exclusions()
+                    };
                     patterns.extend(flags.rollback_exclude_patterns.iter().cloned());
+                    patterns.sort_unstable();
                     patterns.dedup();
+                    let base_patterns = patterns.clone();
                     let exclusion_config = nono::undo::ExclusionConfig {
                         use_gitignore: true,
                         exclude_patterns: patterns,
                         exclude_globs: flags.rollback_exclude_globs.clone(),
-                        force_include: Vec::new(),
+                        force_include: flags.rollback_include.clone(),
                     };
                     // Use the first tracked path as gitignore root
                     let gitignore_root = tracked_paths
                         .first()
                         .cloned()
                         .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    let exclusion =
+                    let mut exclusion =
                         nono::undo::ExclusionFilter::new(exclusion_config, &gitignore_root)?;
 
-                    let mut manager = nono::undo::SnapshotManager::new(
-                        session_dir.clone(),
-                        tracked_paths.clone(),
-                        exclusion,
-                    )?;
+                    // Run preflight to detect large unexcluded directories.
+                    // When --rollback-all is NOT set, auto-exclude detected heavy dirs
+                    // and print a one-line notice. This ensures zero-flag usage Just Works.
+                    // Directories listed in --rollback-include are kept (not auto-excluded).
+                    if !flags.rollback_all {
+                        let preflight_result =
+                            rollback_preflight::run_preflight(&tracked_paths, &exclusion);
 
-                    let baseline = manager.create_baseline()?;
-                    let atomic_temp_before = manager.collect_atomic_temp_files();
+                        if preflight_result.needs_warning() {
+                            // Filter out any dirs the user explicitly wants to include
+                            let auto_excluded: Vec<&rollback_preflight::HeavyDir> =
+                                preflight_result
+                                    .heavy_dirs
+                                    .iter()
+                                    .filter(|d| !flags.rollback_include.contains(&d.name))
+                                    .collect();
 
-                    output::print_rollback_tracking(&tracked_paths, flags.silent);
+                            if !auto_excluded.is_empty() {
+                                let excluded_names: Vec<String> =
+                                    auto_excluded.iter().map(|d| d.name.clone()).collect();
+                                let mut all_patterns = base_patterns.clone();
+                                all_patterns.extend(excluded_names);
+                                all_patterns.sort_unstable();
+                                all_patterns.dedup();
+                                let updated_config = nono::undo::ExclusionConfig {
+                                    use_gitignore: true,
+                                    exclude_patterns: all_patterns,
+                                    exclude_globs: flags.rollback_exclude_globs.clone(),
+                                    force_include: flags.rollback_include.clone(),
+                                };
+                                exclusion = nono::undo::ExclusionFilter::new(
+                                    updated_config,
+                                    &gitignore_root,
+                                )?;
 
-                    Some((
-                        manager,
-                        baseline,
-                        session_id,
-                        session_dir,
-                        tracked_paths,
-                        atomic_temp_before,
-                    ))
+                                // Print notice showing only actually-excluded dirs
+                                if !flags.silent {
+                                    rollback_preflight::print_auto_exclude_notice(
+                                        &auto_excluded,
+                                        &preflight_result,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    {
+                        let mut manager = nono::undo::SnapshotManager::new(
+                            session_dir.clone(),
+                            tracked_paths.clone(),
+                            exclusion,
+                            nono::undo::WalkBudget::default(),
+                        )?;
+
+                        let baseline = manager.create_baseline()?;
+                        let atomic_temp_before = manager.collect_atomic_temp_files();
+
+                        output::print_rollback_tracking(&tracked_paths, flags.silent);
+
+                        Some((
+                            manager,
+                            baseline,
+                            session_id,
+                            session_dir,
+                            tracked_paths,
+                            atomic_temp_before,
+                        ))
+                    }
                 } else {
                     None
                 }
@@ -1074,6 +1183,17 @@ fn execute_sandboxed(
     }
 }
 
+/// VCS-only exclusions for `--rollback-all` mode.
+///
+/// When the user opts into snapshotting everything, only VCS internals are
+/// excluded because restoring partial `.git/` contents corrupts the repository.
+fn rollback_vcs_exclusions() -> Vec<String> {
+    [".git", ".hg", ".svn"]
+        .iter()
+        .map(|s| String::from(*s))
+        .collect()
+}
+
 /// Base exclusion patterns for rollback snapshots.
 ///
 /// These are CLI policy — the library provides only the matching mechanism.
@@ -1088,6 +1208,11 @@ pub(crate) fn rollback_base_exclusions() -> Vec<String> {
         ".git",
         ".hg",
         ".svn",
+        // Build artifacts — fully regenerable from source
+        "target",
+        "node_modules",
+        "__pycache__",
+        ".venv",
         // OS metadata
         ".DS_Store",
     ]
@@ -1218,6 +1343,22 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .as_ref()
         .map(|p| p.network.custom_credentials.clone())
         .unwrap_or_default();
+
+    // On Linux, pre-create the Claude Code config lock file before building
+    // capabilities. Claude Code's saveConfigWithLock creates ~/.claude.json.lock
+    // next to ~/.claude.json. Landlock cannot grant permission to create new
+    // files in ~/ without opening the entire directory, so we pre-create the
+    // lock file and grant access to it via the profile's allow_file list.
+    #[cfg(target_os = "linux")]
+    if args.profile.as_deref() == Some("claude-code") {
+        let home = config::validated_home()?;
+        let lock_path = std::path::Path::new(&home).join(".claude.json.lock");
+        if !lock_path.exists() {
+            if let Err(e) = std::fs::File::create(&lock_path) {
+                warn!("Failed to pre-create {}: {}", lock_path.display(), e);
+            }
+        }
+    }
 
     // Build capabilities from profile or arguments.
     // Unlink overrides are deferred so they can cover the CWD path added below.

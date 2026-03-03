@@ -355,8 +355,8 @@ fn resolve_single_group(
             add_deny_access_rules(path_str, caps, deny_paths)?;
         }
 
-        // Seatbelt-only: global unlink denial. Landlock handles file deletion
-        // via AccessFs flags in access_to_landlock() (RemoveDir excluded from write).
+        // Seatbelt-only: global unlink denial. Landlock handles file/directory
+        // deletion via AccessFs flags in access_to_landlock() (RemoveFile + RemoveDir).
         if deny.unlink && cfg!(target_os = "macos") {
             caps.add_platform_rule("(deny file-write-unlink)")?;
         }
@@ -414,7 +414,10 @@ fn add_fs_capability(
                 debug!("Could not add group directory {}: {}", path_str, e);
             }
         }
-    } else if path.is_file() {
+    } else {
+        // Accepts regular files, character devices (/dev/urandom, /dev/null, etc.),
+        // symlinks, and other non-directory paths — matching FsCapability::new_file()
+        // which rejects only directories.
         match FsCapability::new_file(&path, mode) {
             Ok(mut cap) => {
                 cap.source = source.clone();
@@ -424,11 +427,6 @@ fn add_fs_capability(
                 debug!("Could not add group file {}: {}", path_str, e);
             }
         }
-    } else {
-        debug!(
-            "Group path '{}' is neither file nor directory, skipping",
-            path_str
-        );
     }
 
     Ok(())
@@ -1313,6 +1311,68 @@ mod tests {
             result.is_ok(),
             "Unknown groups should not trigger required check"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_resolve_character_device_files() {
+        // Character device files like /dev/urandom must be included in the
+        // capability set. Rust's Path::is_file() returns false for device
+        // files, so the resolver must not gate on is_file().
+        let policy_json = r#"{
+            "meta": { "version": 2, "schema_version": "2.0" },
+            "groups": {
+                "test_devices": {
+                    "description": "Device files",
+                    "platform": "linux",
+                    "allow": { "read": ["/dev/urandom", "/dev/null", "/dev/zero"] }
+                }
+            }
+        }"#;
+        let policy = load_policy(policy_json).expect("parse failed");
+        let mut caps = CapabilitySet::new();
+        resolve_groups(&policy, &["test_devices".to_string()], &mut caps).expect("resolve failed");
+
+        let resolved_paths: Vec<PathBuf> = caps
+            .fs_capabilities()
+            .iter()
+            .map(|c| c.resolved.clone())
+            .collect();
+
+        for device in &["/dev/urandom", "/dev/null", "/dev/zero"] {
+            assert!(
+                resolved_paths.iter().any(|p| p == Path::new(device)),
+                "{} must be included, got: {:?}",
+                device,
+                resolved_paths
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_embedded_policy_includes_device_files() {
+        // The system_read_linux group lists /dev/urandom, /dev/null, etc.
+        // Verify they survive policy resolution and end up in the capability set.
+        let policy = load_embedded_policy().expect("embedded policy");
+        let mut caps = CapabilitySet::new();
+        resolve_groups(&policy, &["system_read_linux".to_string()], &mut caps)
+            .expect("resolve failed");
+
+        let resolved_paths: Vec<PathBuf> = caps
+            .fs_capabilities()
+            .iter()
+            .map(|c| c.resolved.clone())
+            .collect();
+
+        for device in &["/dev/urandom", "/dev/null", "/dev/zero", "/dev/random"] {
+            assert!(
+                resolved_paths.iter().any(|p| p == Path::new(device)),
+                "{} must be included in system_read_linux capabilities, got: {:?}",
+                device,
+                resolved_paths
+            );
+        }
     }
 
     #[test]

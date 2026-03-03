@@ -170,12 +170,28 @@ impl ExclusionFilter {
         false
     }
 
-    /// Check if path matches any force-include pattern
+    /// Check if path matches any force-include pattern.
+    ///
+    /// Uses the same matching logic as `matches_exclude_patterns`:
+    /// patterns containing `/` are matched as substrings of the full path,
+    /// all other patterns are matched as exact component names.
     fn matches_force_include(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
         for pattern in &self.force_include {
-            if path_str.contains(pattern.as_str()) {
-                return true;
+            if pattern.contains('/') {
+                // Multi-component pattern: substring match on full path
+                let path_str = path.to_string_lossy();
+                if path_str.contains(pattern.as_str()) {
+                    return true;
+                }
+            } else {
+                // Single component: exact match against each path component
+                for component in path.components() {
+                    if let std::path::Component::Normal(name) = component {
+                        if name.to_string_lossy() == *pattern {
+                            return true;
+                        }
+                    }
+                }
             }
         }
         false
@@ -262,6 +278,37 @@ mod tests {
         assert!(!filter.is_excluded(&PathBuf::from("/project/file.tmp")));
         // Non-numeric segments should not match
         assert!(!filter.is_excluded(&PathBuf::from("/project/file.tmp.backup.old")));
+    }
+
+    #[test]
+    fn force_include_matches_path_component() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: vec!["node_modules".to_string()],
+            exclude_globs: Vec::new(),
+            force_include: vec!["node_modules".to_string()],
+        };
+        let filter = ExclusionFilter::new(config, dir.path()).expect("filter");
+
+        // Force-include should match the exact component
+        assert!(!filter.is_excluded(&PathBuf::from("/project/node_modules/pkg/index.js")));
+    }
+
+    #[test]
+    fn force_include_rejects_substring_match() {
+        let dir = TempDir::new().expect("tempdir");
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: vec!["myapp".to_string()],
+            exclude_globs: Vec::new(),
+            // "app" should NOT match the component "myapp"
+            force_include: vec!["app".to_string()],
+        };
+        let filter = ExclusionFilter::new(config, dir.path()).expect("filter");
+
+        // "app" as force_include must not match "myapp" component
+        assert!(filter.is_excluded(&PathBuf::from("/project/myapp/src/main.rs")));
     }
 
     #[test]

@@ -16,6 +16,29 @@ use super::merkle::MerkleTree;
 use super::object_store::ObjectStore;
 use super::types::{Change, ChangeType, FileState, SessionMetadata, SnapshotManifest};
 
+/// Budget limits for directory walks during snapshot operations.
+///
+/// Provides a safety net against runaway walks when tracked directories contain
+/// unexpectedly large subtrees (e.g. `node_modules/`, `target/`). When either
+/// limit is exceeded, the walk returns an error instead of continuing indefinitely.
+///
+/// A limit of `0` means unlimited for that dimension.
+pub struct WalkBudget {
+    /// Maximum entries (files + dirs) to visit. 0 = unlimited.
+    pub max_entries: usize,
+    /// Maximum total bytes (sum of file sizes via metadata). 0 = unlimited.
+    pub max_bytes: u64,
+}
+
+impl Default for WalkBudget {
+    fn default() -> Self {
+        Self {
+            max_entries: 300_000,
+            max_bytes: 2 * 1024 * 1024 * 1024, // 2 GiB
+        }
+    }
+}
+
 /// Manages snapshots for an undo session.
 ///
 /// Coordinates the object store, exclusion filter, and Merkle tree to
@@ -26,6 +49,7 @@ pub struct SnapshotManager {
     exclusion: ExclusionFilter,
     object_store: ObjectStore,
     snapshot_count: u32,
+    budget: WalkBudget,
 }
 
 impl SnapshotManager {
@@ -36,6 +60,7 @@ impl SnapshotManager {
         session_dir: PathBuf,
         tracked_paths: Vec<PathBuf>,
         exclusion: ExclusionFilter,
+        budget: WalkBudget,
     ) -> Result<Self> {
         let snapshots_dir = session_dir.join("snapshots");
         let changes_dir = session_dir.join("changes");
@@ -63,6 +88,7 @@ impl SnapshotManager {
             exclusion,
             object_store,
             snapshot_count: 0,
+            budget,
         })
     }
 
@@ -263,6 +289,7 @@ impl SnapshotManager {
     #[must_use]
     pub fn collect_atomic_temp_files(&self) -> HashSet<PathBuf> {
         let mut files = HashSet::new();
+        let mut entries_visited: usize = 0;
 
         for tracked in &self.tracked_paths {
             if !tracked.exists() {
@@ -279,8 +306,18 @@ impl SnapshotManager {
             for entry in WalkDir::new(tracked)
                 .follow_links(false)
                 .into_iter()
+                .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
+                entries_visited = entries_visited.saturating_add(1);
+                if self.budget.max_entries > 0 && entries_visited > self.budget.max_entries {
+                    tracing::warn!(
+                        "Atomic temp file scan capped at {} entries (budget limit)",
+                        entries_visited
+                    );
+                    return files;
+                }
+
                 let path = entry.path();
                 if !path.is_file() {
                     continue;
@@ -399,11 +436,26 @@ impl SnapshotManager {
 
     /// Validate that all paths in a manifest are within the tracked directories.
     ///
-    /// Prevents path traversal attacks via tampered manifests. Each path must
-    /// be a descendant of at least one tracked path (checked via `Path::starts_with`
-    /// which performs component-wise comparison, not string prefix matching).
+    /// Two-step validation:
+    /// 1. Reject paths containing `..` (parent directory) components. Without this,
+    ///    a tampered manifest could include paths like `/tracked/dir/../../etc/passwd`
+    ///    which pass `Path::starts_with("/tracked")` (component-wise prefix match)
+    ///    but resolve to locations outside the tracked directory on the filesystem.
+    /// 2. Verify each path is a descendant of at least one tracked directory
+    ///    (checked via `Path::starts_with`, component-wise comparison).
     fn validate_manifest_paths(&self, manifest: &SnapshotManifest) -> Result<()> {
         for path in manifest.files.keys() {
+            // Reject parent-directory traversal components to prevent path escape.
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(NonoError::Snapshot(format!(
+                    "Manifest contains path with parent directory traversal: {}",
+                    path.display()
+                )));
+            }
+
             let within_tracked = self
                 .tracked_paths
                 .iter()
@@ -423,8 +475,14 @@ impl SnapshotManager {
     /// Permission errors on individual files are logged and skipped rather than
     /// failing the entire snapshot. This handles files with restrictive permissions
     /// (e.g., credential databases, lock files) that exist in tracked directories.
+    ///
+    /// Uses `filter_entry()` to prune entire excluded subtrees at directory-entry
+    /// time, preventing descent into directories like `.git/` or `target/`.
+    /// Enforces the walk budget to prevent runaway walks.
     fn walk_and_store(&self) -> Result<HashMap<PathBuf, FileState>> {
         let mut files = HashMap::new();
+        let mut entries_visited: usize = 0;
+        let mut total_bytes: u64 = 0;
 
         for tracked in &self.tracked_paths {
             if !tracked.exists() {
@@ -433,8 +491,26 @@ impl SnapshotManager {
 
             if tracked.is_file() {
                 if !self.exclusion.is_excluded(tracked) {
+                    // Pre-check file size against budget before expensive I/O
+                    if let Ok(meta) = fs::metadata(tracked) {
+                        let file_size = meta.len();
+                        if self.budget.max_bytes > 0
+                            && total_bytes.saturating_add(file_size) > self.budget.max_bytes
+                        {
+                            return Err(NonoError::Snapshot(format!(
+                                "Rollback budget exceeded: {} bytes tracked (limit: {} bytes). \
+                                 Consider adding exclusion patterns for large directories, \
+                                 or disable rollback with --no-rollback.",
+                                total_bytes.saturating_add(file_size),
+                                self.budget.max_bytes
+                            )));
+                        }
+                    }
                     match self.hash_and_store_file(tracked) {
                         Ok(state) => {
+                            entries_visited = entries_visited.saturating_add(1);
+                            total_bytes = total_bytes.saturating_add(state.size);
+                            self.check_budget(entries_visited, total_bytes)?;
                             files.insert(tracked.clone(), state);
                         }
                         Err(e) => {
@@ -448,17 +524,36 @@ impl SnapshotManager {
             for entry in WalkDir::new(tracked)
                 .follow_links(false)
                 .into_iter()
+                .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
+                entries_visited = entries_visited.saturating_add(1);
+                self.check_budget(entries_visited, total_bytes)?;
                 let path = entry.path();
                 if !path.is_file() {
                     continue;
                 }
-                if self.exclusion.is_excluded(path) {
-                    continue;
+
+                // Pre-check file size against budget before expensive hash+store
+                if let Ok(meta) = fs::metadata(path) {
+                    let file_size = meta.len();
+                    if self.budget.max_bytes > 0
+                        && total_bytes.saturating_add(file_size) > self.budget.max_bytes
+                    {
+                        return Err(NonoError::Snapshot(format!(
+                            "Rollback budget exceeded: {} bytes tracked (limit: {} bytes). \
+                             Consider adding exclusion patterns for large directories, \
+                             or disable rollback with --no-rollback.",
+                            total_bytes.saturating_add(file_size),
+                            self.budget.max_bytes
+                        )));
+                    }
                 }
+
                 match self.hash_and_store_file(path) {
                     Ok(state) => {
+                        total_bytes = total_bytes.saturating_add(state.size);
+                        self.check_budget(entries_visited, total_bytes)?;
                         files.insert(path.to_path_buf(), state);
                     }
                     Err(e) => {
@@ -472,8 +567,12 @@ impl SnapshotManager {
     }
 
     /// Walk tracked paths to get current file states without storing.
+    ///
+    /// Uses `filter_entry()` to prune excluded subtrees and enforces the walk budget.
     fn walk_current(&self) -> Result<HashMap<PathBuf, FileState>> {
         let mut files = HashMap::new();
+        let mut entries_visited: usize = 0;
+        let mut total_bytes: u64 = 0;
 
         for tracked in &self.tracked_paths {
             if !tracked.exists() {
@@ -483,6 +582,9 @@ impl SnapshotManager {
             if tracked.is_file() {
                 if !self.exclusion.is_excluded(tracked) {
                     if let Ok(state) = file_state_from_metadata(tracked) {
+                        entries_visited = entries_visited.saturating_add(1);
+                        total_bytes = total_bytes.saturating_add(state.size);
+                        self.check_budget(entries_visited, total_bytes)?;
                         files.insert(tracked.clone(), state);
                     }
                 }
@@ -492,16 +594,19 @@ impl SnapshotManager {
             for entry in WalkDir::new(tracked)
                 .follow_links(false)
                 .into_iter()
+                .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
+                entries_visited = entries_visited.saturating_add(1);
+                self.check_budget(entries_visited, total_bytes)?;
                 let path = entry.path();
                 if !path.is_file() {
                     continue;
                 }
-                if self.exclusion.is_excluded(path) {
-                    continue;
-                }
+
                 if let Ok(state) = file_state_from_metadata(path) {
+                    total_bytes = total_bytes.saturating_add(state.size);
+                    self.check_budget(entries_visited, total_bytes)?;
                     files.insert(path.to_path_buf(), state);
                 }
             }
@@ -526,6 +631,29 @@ impl SnapshotManager {
             mtime: metadata.mtime(),
             permissions: metadata.mode(),
         })
+    }
+
+    /// Check whether walk counters exceed the configured budget.
+    ///
+    /// A limit of `0` means unlimited for that dimension.
+    fn check_budget(&self, entries: usize, bytes: u64) -> Result<()> {
+        if self.budget.max_entries > 0 && entries > self.budget.max_entries {
+            return Err(NonoError::Snapshot(format!(
+                "Rollback budget exceeded: visited {} entries (limit: {}). \
+                 Consider adding exclusion patterns for large directories, \
+                 or disable rollback with --no-rollback.",
+                entries, self.budget.max_entries
+            )));
+        }
+        if self.budget.max_bytes > 0 && bytes > self.budget.max_bytes {
+            return Err(NonoError::Snapshot(format!(
+                "Rollback budget exceeded: {} bytes tracked (limit: {} bytes). \
+                 Consider adding exclusion patterns for large directories, \
+                 or disable rollback with --no-rollback.",
+                bytes, self.budget.max_bytes
+            )));
+        }
+        Ok(())
     }
 
     /// Write a manifest to the snapshots directory atomically.
@@ -716,6 +844,7 @@ fn has_atomic_temp_suffix(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::undo::exclusion::ExclusionConfig;
+    use crate::undo::types::ContentHash;
     use tempfile::TempDir;
 
     fn setup_test_dir() -> (TempDir, PathBuf) {
@@ -739,6 +868,7 @@ mod tests {
             session_dir.to_path_buf(),
             vec![tracked.to_path_buf()],
             filter,
+            WalkBudget::default(),
         )
         .expect("manager")
     }
@@ -996,6 +1126,100 @@ mod tests {
     }
 
     #[test]
+    fn validate_manifest_rejects_parent_dir_traversal() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let manager = make_manager(&session_dir, &tracked);
+
+        // Craft a manifest with a path containing ".." that passes starts_with
+        // but would resolve outside the tracked directory.
+        let mut files = HashMap::new();
+        let evil_path = tracked
+            .join("subdir")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd");
+        files.insert(
+            evil_path,
+            FileState {
+                hash: ContentHash::from_bytes([0xde; 32]),
+                size: 100,
+                mtime: 0,
+                permissions: 0o644,
+            },
+        );
+
+        let manifest = SnapshotManifest {
+            number: 0,
+            parent: None,
+            files,
+            merkle_root: ContentHash::from_bytes([0; 32]),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        let result = manager.validate_manifest_paths(&manifest);
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should reject").to_string();
+        assert!(
+            err_msg.contains("parent directory traversal"),
+            "Expected traversal error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn validate_manifest_rejects_path_outside_tracked() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let manager = make_manager(&session_dir, &tracked);
+
+        let mut files = HashMap::new();
+        files.insert(
+            PathBuf::from("/tmp/not-tracked/secret.txt"),
+            FileState {
+                hash: ContentHash::from_bytes([0xde; 32]),
+                size: 50,
+                mtime: 0,
+                permissions: 0o644,
+            },
+        );
+
+        let manifest = SnapshotManifest {
+            number: 0,
+            parent: None,
+            files,
+            merkle_root: ContentHash::from_bytes([0; 32]),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        let result = manager.validate_manifest_paths(&manifest);
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should reject").to_string();
+        assert!(
+            err_msg.contains("outside tracked directories"),
+            "Expected outside-tracked error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn validate_manifest_accepts_valid_paths() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let mut manager = make_manager(&session_dir, &tracked);
+        let baseline = manager.create_baseline().expect("baseline");
+
+        // A real baseline manifest should pass validation.
+        let result = manager.validate_manifest_paths(&baseline);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn cleanup_new_atomic_temp_files_removes_only_new_files() {
         let (dir, tracked) = setup_test_dir();
         let session_dir = dir.path().join("session");
@@ -1016,5 +1240,199 @@ mod tests {
         assert!(preexisting.exists());
         assert!(!new_temp.exists());
         assert!(not_atomic.exists());
+    }
+
+    fn make_manager_with_budget(
+        session_dir: &Path,
+        tracked: &Path,
+        budget: WalkBudget,
+    ) -> SnapshotManager {
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: Vec::new(),
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        let filter = ExclusionFilter::new(config, tracked).expect("filter");
+        SnapshotManager::new(
+            session_dir.to_path_buf(),
+            vec![tracked.to_path_buf()],
+            filter,
+            budget,
+        )
+        .expect("manager")
+    }
+
+    #[test]
+    fn walk_budget_entry_limit_exceeded() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        // Budget of 1 entry but dir has 2 files + dir itself = exceeds
+        let mut manager = make_manager_with_budget(
+            &session_dir,
+            &tracked,
+            WalkBudget {
+                max_entries: 1,
+                max_bytes: 0,
+            },
+        );
+
+        let result = manager.create_baseline();
+        let Err(err) = result else {
+            panic!("expected budget error, got Ok");
+        };
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("budget exceeded"),
+            "Expected budget error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn walk_budget_byte_limit_exceeded() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        // Budget of 1 byte but files have content
+        let mut manager = make_manager_with_budget(
+            &session_dir,
+            &tracked,
+            WalkBudget {
+                max_entries: 0,
+                max_bytes: 1,
+            },
+        );
+
+        let result = manager.create_baseline();
+        let Err(err) = result else {
+            panic!("expected budget error, got Ok");
+        };
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("budget exceeded") || err_msg.contains("bytes tracked"),
+            "Expected budget error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn budget_checked_for_tracked_files() {
+        let dir = TempDir::new().expect("tempdir");
+        let tracked_file = dir.path().join("bigfile.txt");
+        fs::write(&tracked_file, b"some content here").expect("write file");
+
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: Vec::new(),
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        let filter = ExclusionFilter::new(config, dir.path()).expect("filter");
+
+        // Budget of 1 byte — the tracked file exceeds it
+        let mut manager = SnapshotManager::new(
+            session_dir,
+            vec![tracked_file],
+            filter,
+            WalkBudget {
+                max_entries: 0,
+                max_bytes: 1,
+            },
+        )
+        .expect("manager");
+
+        let result = manager.create_baseline();
+        let Err(err) = result else {
+            panic!("expected budget error, got Ok");
+        };
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("budget exceeded") || err_msg.contains("bytes tracked"),
+            "Expected budget error for tracked file, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn collect_atomic_temp_prunes_excluded_dirs() {
+        let dir = TempDir::new().expect("tempdir");
+        let tracked = dir.path().join("project");
+        fs::create_dir_all(tracked.join("excluded_dir")).expect("create excluded dir");
+        fs::write(
+            tracked.join("excluded_dir/file.txt.tmp.100.200"),
+            b"temp in excluded",
+        )
+        .expect("write excluded temp");
+        fs::write(tracked.join("visible.txt.tmp.100.200"), b"temp visible")
+            .expect("write visible temp");
+
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: vec!["excluded_dir".to_string()],
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        let filter = ExclusionFilter::new(config, &tracked).expect("filter");
+        let manager = SnapshotManager::new(
+            session_dir,
+            vec![tracked.clone()],
+            filter,
+            WalkBudget::default(),
+        )
+        .expect("manager");
+
+        let temps = manager.collect_atomic_temp_files();
+        // Should find the visible temp but not the one in excluded_dir
+        assert!(temps.contains(&tracked.join("visible.txt.tmp.100.200")));
+        assert!(!temps.contains(&tracked.join("excluded_dir/file.txt.tmp.100.200")));
+    }
+
+    #[test]
+    fn collect_atomic_temp_respects_budget() {
+        let dir = TempDir::new().expect("tempdir");
+        let tracked = dir.path().join("project");
+        fs::create_dir_all(&tracked).expect("create tracked");
+
+        // Create many files so the budget is hit
+        for i in 0..10 {
+            fs::write(tracked.join(format!("file{i}.txt.tmp.100.200")), b"temp")
+                .expect("write temp");
+        }
+
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let config = ExclusionConfig {
+            use_gitignore: false,
+            exclude_patterns: Vec::new(),
+            exclude_globs: Vec::new(),
+            force_include: Vec::new(),
+        };
+        let filter = ExclusionFilter::new(config, &tracked).expect("filter");
+        let manager = SnapshotManager::new(
+            session_dir,
+            vec![tracked],
+            filter,
+            WalkBudget {
+                max_entries: 3, // Very low budget
+                max_bytes: 0,
+            },
+        )
+        .expect("manager");
+
+        let temps = manager.collect_atomic_temp_files();
+        // Should have fewer than 10 due to budget cap
+        assert!(
+            temps.len() < 10,
+            "Expected budget cap, got {} temps",
+            temps.len()
+        );
     }
 }

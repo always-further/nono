@@ -103,7 +103,7 @@ nono run --read ./src --write ./output -- cargo build
 
 ### Credential Injection
 
-Two modes: **proxy injection** keeps credentials entirely outside the sandbox — the agent connects to `localhost` and the proxy injects real API keys into upstream requests. **Env injection** loads secrets from the OS keystore and injects them as environment variables before the sandbox locks.
+Two modes: **proxy injection** keeps credentials entirely outside the sandbox — the agent connects to `localhost` and the proxy injects real API keys into upstream requests. **Env injection** loads secrets from the OS keystore or 1Password and injects them as environment variables before the sandbox locks.
 
 ```bash
 # Proxy mode — agent never sees the API key, even in its own memory
@@ -111,6 +111,9 @@ nono run --network-profile claude-code --proxy-credential openai -- my-agent
 
 # Env mode — simpler, but secret is in the process environment
 nono run --env-credential openai_api_key --allow-cwd -- my-agent
+
+# 1Password — use op:// URIs with an explicit env var name
+nono run --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' --allow-cwd -- my-agent
 ```
 
 ### Agent SKILL Provenance and Supply Chain Security
@@ -143,9 +146,21 @@ nono run --rollback --supervised --allow-cwd -- claude
 
 ### Undo and Snapshots
 
-Content-addressable snapshots of your working directory taken before and during sandboxed execution. SHA-256 deduplication and Merkle tree commitments for integrity verification. Interactively review and restore individual files or the entire directory.
+Content-addressable snapshots of your working directory taken before and during sandboxed execution. SHA-256 deduplication and Merkle tree commitments for integrity verification. Interactively review and restore individual files or the entire directory. Known regenerable directories (`.git`, `target`, `node_modules`, etc.) and directories with more than 10,000 files are auto-excluded from snapshots to prevent hangs on large projects.
 
 ```bash
+# Zero-flag usage — auto-excludes large/regenerable directories
+nono run --rollback --allow-cwd -- npm test
+
+# Force-include an auto-excluded directory
+nono run --rollback --rollback-include target -- cargo build
+
+# Exclude a custom directory from rollback
+nono run --rollback --rollback-exclude vendor -- go test ./...
+
+# Disable rollback entirely
+nono run --no-rollback --allow-cwd -- npm test
+
 nono rollback list
 nono rollback restore
 ```

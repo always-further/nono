@@ -9,6 +9,7 @@
       "hosts": [
         "api.openai.com",
         "api.anthropic.com",
+        "claude.ai",
         "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com",
         "api.groq.com",
