@@ -1711,43 +1711,49 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     let secret_mappings =
         nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets)?;
 
-    // Load credentials from keystore/1Password BEFORE sandbox is applied
+    // Load credentials from keystore/URI managers BEFORE sandbox is applied
     let loaded_secrets = if !secret_mappings.is_empty() {
         let op_count = secret_mappings
             .keys()
             .filter(|k| nono::keystore::is_op_uri(k))
             .count();
-        let keyring_count = secret_mappings.len() - op_count;
+        let apple_password_count = secret_mappings
+            .keys()
+            .filter(|k| nono::keystore::is_apple_password_uri(k))
+            .count();
+        let keyring_count = secret_mappings.len() - op_count - apple_password_count;
 
         info!(
-            "Loading {} credential(s) (keyring: {}, 1Password: {})",
+            "Loading {} credential(s) (keyring: {}, 1Password: {}, Apple Passwords: {})",
             secret_mappings.len(),
             keyring_count,
-            op_count
+            op_count,
+            apple_password_count
         );
         if !silent {
-            if keyring_count > 0 && op_count > 0 {
-                eprintln!(
-                    "  Loading {} credential(s) ({} from keystore, {} from 1Password)...",
-                    secret_mappings.len(),
-                    keyring_count,
-                    op_count
-                );
-            } else if op_count > 0 {
-                eprintln!(
-                    "  Loading {} credential(s) from 1Password...",
-                    secret_mappings.len()
-                );
-            } else {
-                eprintln!(
-                    "  Loading {} credential(s) from keystore...",
-                    secret_mappings.len()
-                );
+            let mut source_parts: Vec<String> = Vec::new();
+            if keyring_count > 0 {
+                source_parts.push(format!("{} from keystore", keyring_count));
             }
+            if op_count > 0 {
+                source_parts.push(format!("{} from 1Password", op_count));
+            }
+            if apple_password_count > 0 {
+                source_parts.push(format!("{} from Apple Passwords", apple_password_count));
+            }
+
+            eprintln!(
+                "  Loading {} credential(s) ({})...",
+                secret_mappings.len(),
+                source_parts.join(", ")
+            );
+
             // Warn that env credentials are visible to the sandboxed process
             for account in secret_mappings.keys() {
                 let display_account = if nono::keystore::is_op_uri(account) {
                     nono::keystore::redact_op_uri(account)
+                } else if nono::keystore::is_apple_password_uri(account) {
+                    nono::keystore::redact_apple_password_uri(account)
                 } else {
                     account.to_string()
                 };

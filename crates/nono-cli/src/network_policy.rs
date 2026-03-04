@@ -71,9 +71,10 @@ pub struct CredentialDef {
     pub credential_format: String,
     /// Explicit environment variable name for the phantom token.
     ///
-    /// Required when `credential_key` is an `env://` or `op://` URI, since
-    /// uppercasing those produces nonsensical env var names. When `None`,
-    /// the proxy derives the env var from `credential_key.to_uppercase()`.
+    /// Required when `credential_key` is a URI manager reference (`env://`,
+    /// `op://`, `apple-password://`), since uppercasing those produces
+    /// nonsensical env var names. When `None`, the proxy derives the env var
+    /// from `credential_key.to_uppercase()`.
     #[serde(default)]
     pub env_var: Option<String>,
 }

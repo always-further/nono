@@ -105,7 +105,8 @@ pub struct CustomCredentialDef {
     ///
     /// When set, the proxy uses this as the SDK API key env var instead of
     /// deriving it from `credential_key.to_uppercase()`. Required when
-    /// `credential_key` is an `op://` URI.
+    /// `credential_key` is a URI manager reference (`op://` or
+    /// `apple-password://`).
     #[serde(default)]
     pub env_var: Option<String>,
 }
@@ -145,6 +146,7 @@ fn is_http_token_char(c: char) -> bool {
 /// Accepts either:
 /// - A bare keyring account name (alphanumeric + underscores only)
 /// - A 1Password `op://` URI (validated by `nono::keystore::validate_op_uri`)
+/// - An Apple Passwords `apple-password://` URI
 fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(NonoError::ProfileParse(format!(
@@ -161,12 +163,19 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
                 context_name, e
             ))
         })
+    } else if nono::keystore::is_apple_password_uri(key) {
+        nono::keystore::validate_apple_password_uri(key).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "invalid Apple Passwords URI for custom credential '{}': {}",
+                context_name, e
+            ))
+        })
     } else {
         // Validate as keyring account name (alphanumeric + underscore)
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(NonoError::ProfileParse(format!(
                 "credential_key '{}' for custom credential '{}' must contain only \
-                 alphanumeric characters and underscores (or use op:// URI for 1Password)",
+                 alphanumeric characters and underscores (or use op:// / apple-password:// URI)",
                 key, context_name
             )));
         }
@@ -177,7 +186,8 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
 /// Validate a custom credential definition for security issues.
 ///
 /// Checks:
-/// - `credential_key` must be alphanumeric + underscores only, or a valid `op://` URI
+/// - `credential_key` must be alphanumeric + underscores only, or a valid
+///   `op://` / `apple-password://` URI
 /// - `upstream` must be HTTPS (or HTTP for loopback only)
 /// - Mode-specific validation:
 ///   - `header`: inject_header must be valid HTTP token, credential_format no CRLF
@@ -188,12 +198,16 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
     // Validate credential_key - required for all modes
     validate_credential_key(name, &cred.credential_key)?;
 
-    // When credential_key is an op:// URI, env_var is required because the URI
+    // When credential_key is a URI manager reference, env_var is required because the URI
     // cannot be meaningfully uppercased into an env var name (e.g.,
     // "op://vault/item/field" -> "OP://VAULT/ITEM/FIELD" is nonsensical).
-    if nono::keystore::is_op_uri(&cred.credential_key) && cred.env_var.is_none() {
+    if (nono::keystore::is_op_uri(&cred.credential_key)
+        || nono::keystore::is_apple_password_uri(&cred.credential_key))
+        && cred.env_var.is_none()
+    {
         return Err(NonoError::ProfileParse(format!(
-            "env_var is required for custom credential '{}' when credential_key is an op:// URI; \
+            "env_var is required for custom credential '{}' when credential_key is a URI \
+             manager reference (op:// or apple-password://); \
              set it to the SDK API key env var name (e.g., \"OPENAI_API_KEY\")",
             name
         )));
@@ -399,14 +413,22 @@ fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
 
 /// Validate env_credentials keys in a profile.
 ///
-/// Keys can be keyring account names, `op://` URIs, or `env://` URIs.
+/// Keys can be keyring account names, `op://` URIs, `apple-password://` URIs,
+/// or `env://` URIs.
 /// Keyring account names are validated at load time by the keyring crate itself,
-/// but `op://` and `env://` URIs need structural validation upfront.
+/// but URI entries need structural validation upfront.
 fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
     for (key, value) in &profile.env_credentials.mappings {
         if nono::keystore::is_op_uri(key) {
             nono::keystore::validate_op_uri(key).map_err(|e| {
                 NonoError::ProfileParse(format!("invalid 1Password URI in env_credentials: {}", e))
+            })?;
+        } else if nono::keystore::is_apple_password_uri(key) {
+            nono::keystore::validate_apple_password_uri(key).map_err(|e| {
+                NonoError::ProfileParse(format!(
+                    "invalid Apple Passwords URI in env_credentials: {}",
+                    e
+                ))
             })?;
         } else if nono::keystore::is_env_uri(key) {
             nono::keystore::validate_env_uri(key).map_err(|e| {
@@ -775,7 +797,7 @@ fn parse_profile_file(path: &Path) -> Result<Profile> {
     // Validate custom credentials for security issues
     validate_profile_custom_credentials(&profile)?;
 
-    // Validate env_credentials keys (op:// URIs need structural validation)
+    // Validate env_credentials keys (URI entries need structural validation)
     validate_env_credential_keys(&profile)?;
 
     Ok(profile)
@@ -1270,6 +1292,33 @@ mod tests {
             profile.env_credentials.mappings.get("anthropic_api_key"),
             Some(&"ANTHROPIC_API_KEY".to_string())
         );
+    }
+
+    #[test]
+    fn test_validate_env_credentials_accepts_apple_password_uri() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "apple-password://github.com/alice@example.com": "GITHUB_PASSWORD"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        assert!(validate_env_credential_keys(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_credentials_rejects_invalid_apple_password_uri() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "apple-password://github.com": "GITHUB_PASSWORD"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        let err = validate_env_credential_keys(&profile).expect_err("should reject");
+        assert!(err.to_string().contains("Apple Passwords URI"));
     }
 
     #[test]
@@ -1797,7 +1846,7 @@ mod tests {
 
     #[test]
     fn test_validate_env_var_with_op_uri_requires_env_var() {
-        // When credential_key is an op:// URI, env_var must be set because
+        // When credential_key is a URI manager ref, env_var must be set because
         // uppercasing the URI produces a nonsensical env var name.
         let mut cred = header_cred_builder();
         cred.credential_key = "op://Development/OpenAI/credential".to_string();
@@ -1813,6 +1862,24 @@ mod tests {
         cred.credential_key = "op://Development/OpenAI/credential".to_string();
         cred.env_var = Some("OPENAI_API_KEY".to_string());
         assert!(validate_custom_credential("openai", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_var_with_apple_password_uri_requires_env_var() {
+        let mut cred = header_cred_builder();
+        cred.credential_key = "apple-password://github.com/alice@example.com".to_string();
+        cred.env_var = None;
+        let result = validate_custom_credential("github", &cred);
+        let err = result.expect_err("apple-password URI without env_var should be rejected");
+        assert!(err.to_string().contains("env_var is required"));
+    }
+
+    #[test]
+    fn test_validate_env_var_with_apple_password_uri_and_env_var_ok() {
+        let mut cred = header_cred_builder();
+        cred.credential_key = "apple-password://github.com/alice@example.com".to_string();
+        cred.env_var = Some("GITHUB_PASSWORD".to_string());
+        assert!(validate_custom_credential("github", &cred).is_ok());
     }
 
     #[test]

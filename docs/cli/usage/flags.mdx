@@ -260,7 +260,7 @@ nono run --allow-cwd --network-profile minimal --proxy-allow custom-api.example.
 
 #### `--proxy-credential`
 
-Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name, or from 1Password when the profile's `credential_key` is an `op://` URI.
+Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name, from 1Password when `credential_key` is an `op://` URI, or from Apple Passwords on macOS when `credential_key` is an `apple-password://` URI.
 
 ```bash
 # Inject OpenAI credentials (loads from keyring account "openai_api_key")
@@ -471,7 +471,7 @@ Can be specified multiple times.
 
 #### `--env-credential`
 
-Load credentials from the system keystore (macOS Keychain / Linux Secret Service) or 1Password and inject them as environment variables. The sandboxed process can read these credentials directly.
+Load credentials from the system keystore (macOS Keychain / Linux Secret Service), 1Password, or Apple Passwords (macOS) and inject them as environment variables. The sandboxed process can read these credentials directly.
 
 ```bash
 # Load specific credentials by account name
@@ -480,6 +480,9 @@ nono run --allow-cwd --env-credential openai_api_key,anthropic_api_key -- my-age
 # Load from 1Password (op:// URI with =VAR_NAME suffix)
 nono run --allow-cwd --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' -- my-agent
 
+# Load from Apple Passwords on macOS (apple-password:// URI with =VAR_NAME suffix)
+nono run --allow-cwd --env-credential 'apple-password://github.com/alice@example.com=GITHUB_PASSWORD' -- my-agent
+
 # Use with profile (loads credentials defined in profile's [env_credentials] section)
 nono run --profile claude-code --env-credential -- claude
 ```
@@ -487,7 +490,8 @@ nono run --profile claude-code --env-credential -- claude
 Credentials are:
 
 - Loaded **before** the sandbox is applied (keystore access blocked after)
-- Auto-named by uppercasing: `openai_api_key` becomes `$OPENAI_API_KEY`
+- Auto-named by uppercasing for keyring names: `openai_api_key` becomes `$OPENAI_API_KEY`
+- URI manager entries (`op://...`, `apple-password://...`) require explicit `=VAR_NAME`
 - Zeroized from memory after `exec()`
 
 For network API keys, prefer `--proxy-credential` instead for credential isolation — the agent never sees the real API key.

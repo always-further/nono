@@ -80,6 +80,9 @@ PLATFORM NOTES:
 
     # Load secret from 1Password (op:// URI with explicit env var name)
     nono run --allow . --env-credential 'op://vault/item/field=OPENAI_API_KEY' -- claude
+
+    # Load secret from Apple Passwords on macOS (explicit env var name)
+    nono run --allow . --env-credential 'apple-password://github.com/alice@example.com=GITHUB_PASSWORD' -- claude
 ")]
     Run(Box<RunArgs>),
 
@@ -347,7 +350,8 @@ pub struct SandboxArgs {
     /// The sandboxed process can read these credentials directly.
     /// For network API keys, prefer --proxy-credential for credential isolation.
     /// Comma-separated entries: keyring names (auto-uppercased to env var) or
-    /// 1Password URIs with explicit var (op://vault/item/field=MY_VAR).
+    /// URI managers with explicit var:
+    /// op://vault/item/field=MY_VAR or apple-password://server/account=MY_VAR.
     #[arg(long, value_name = "CREDENTIALS", env = "NONO_ENV_CREDENTIAL")]
     pub env_credential: Option<String>,
 

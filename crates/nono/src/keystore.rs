@@ -1,13 +1,14 @@
-//! Secure credential loading from system keystore, 1Password, and environment
+//! Secure credential loading from system keystore, 1Password, Apple Passwords, and environment
 //!
 //! This module provides functionality to load secrets from the system keystore
 //! (macOS Keychain / Linux Secret Service), 1Password (via the `op` CLI), or
-//! environment variables (via the `env://` scheme) and return them as zeroized
-//! strings.
+//! Apple Passwords (via macOS `security`) or environment variables (via the
+//! `env://` scheme) and return them as zeroized strings.
 //!
 //! Credential references are dispatched by URI scheme:
 //! - `env://VAR_NAME` — reads from the current process environment
 //! - `op://vault/item/field` — loaded via the 1Password CLI
+//! - `apple-password://server/account` — loaded via macOS `security`
 //! - Everything else — loaded from the system keyring
 //!
 //! All secrets are wrapped in `Zeroizing<String>` to ensure they are securely
@@ -19,8 +20,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-/// Timeout for `op read` subprocess. Generous to allow biometric prompts.
-const OP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for secret-manager subprocesses.
+///
+/// Generous enough to allow biometric prompts in password manager CLIs.
+const SECRET_MANAGER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A credential loaded from the keystore
 pub struct LoadedSecret {
@@ -35,6 +38,12 @@ pub const DEFAULT_SERVICE: &str = "nono";
 
 /// The `op://` URI scheme prefix, indicating 1Password CLI backend.
 const OP_URI_PREFIX: &str = "op://";
+
+/// The `apple-password://` URI scheme prefix, indicating Apple Passwords backend.
+const APPLE_PASSWORD_URI_PREFIX: &str = "apple-password://";
+
+/// Alias prefix for Apple Passwords backend.
+const APPLE_PASSWORDS_URI_PREFIX: &str = "apple-passwords://";
 
 /// The `env://` URI scheme prefix, indicating environment variable backend.
 const ENV_URI_PREFIX: &str = "env://";
@@ -81,10 +90,13 @@ const FORBIDDEN_URI_CHARS: &[char] = &[
     ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '!', '\\', '"', '\'', '\n', '\r', '\0',
 ];
 
-/// Load secrets from the system keystore or 1Password
+/// Load secrets from the system keystore, 1Password, or Apple Passwords
 ///
-/// Credential references starting with `op://` are loaded via the 1Password CLI.
-/// All other references are loaded from the system keyring.
+/// Credential references with URI schemes are dispatched to their backend:
+/// - `op://` -> 1Password CLI
+/// - `apple-password://` -> macOS security CLI
+/// - `env://` -> parent process environment
+/// - everything else -> system keyring
 ///
 /// # Arguments
 /// * `service` - The service name in the keystore (e.g., "nono")
@@ -132,23 +144,28 @@ pub fn load_secrets(
 /// Dispatch order:
 /// 1. `env://VAR` — reads from the process environment
 /// 2. `op://vault/item/field` — delegates to the 1Password CLI
-/// 3. Everything else — loads from the system keyring
+/// 3. `apple-password://server/account` — delegates to macOS `security`
+/// 4. Everything else — loads from the system keyring
 ///
 /// # Arguments
 /// * `service` - Keyring service name (only used for keyring backend)
-/// * `credential_ref` - A keyring account name, `op://` URI, or `env://` URI
+/// * `credential_ref` - A keyring account name, `op://` URI, Apple Passwords URI,
+///   or `env://` URI
 ///
 /// # Security
-/// The returned value is wrapped in `Zeroizing<String>`. For `op://` URIs,
-/// the CLI stdout is captured and trimmed before wrapping. Note: the
-/// intermediate `Vec<u8>` from `Command::output()` is not zeroized — this
-/// is the same class of limitation as the keyring crate's internal buffers.
+/// The returned value is wrapped in `Zeroizing<String>`. For URI-based managers
+/// (`op://`, `apple-password://`), CLI stdout is captured and trimmed before
+/// wrapping. Note: the intermediate `Vec<u8>` from subprocess output is not
+/// zeroized — this is the same class of limitation as the keyring crate's
+/// internal buffers.
 #[must_use = "loaded secret should be used or explicitly dropped"]
 pub fn load_secret_by_ref(service: &str, credential_ref: &str) -> Result<Zeroizing<String>> {
     if credential_ref.starts_with(ENV_URI_PREFIX) {
         load_from_env(credential_ref)
     } else if credential_ref.starts_with(OP_URI_PREFIX) {
         load_from_op(credential_ref)
+    } else if is_apple_password_uri(credential_ref) {
+        load_from_apple_password(credential_ref)
     } else {
         load_single_secret(service, credential_ref)
     }
@@ -212,6 +229,91 @@ pub fn validate_op_uri(uri: &str) -> Result<()> {
 #[must_use]
 pub fn is_op_uri(credential_ref: &str) -> bool {
     credential_ref.starts_with(OP_URI_PREFIX)
+}
+
+fn strip_apple_password_prefix(uri: &str) -> Option<&str> {
+    uri.strip_prefix(APPLE_PASSWORD_URI_PREFIX)
+        .or_else(|| uri.strip_prefix(APPLE_PASSWORDS_URI_PREFIX))
+}
+
+/// Returns true if the credential reference is an Apple Passwords URI.
+#[must_use]
+pub fn is_apple_password_uri(credential_ref: &str) -> bool {
+    strip_apple_password_prefix(credential_ref).is_some()
+}
+
+/// Validate an Apple Passwords URI.
+///
+/// Expected format: `apple-password://server/account`.
+///
+/// Rejects:
+/// - Empty server or account
+/// - Characters that could enable argument injection
+/// - URIs with query strings or fragments
+/// - Any path shape other than `server/account`
+pub fn validate_apple_password_uri(uri: &str) -> Result<()> {
+    let path = strip_apple_password_prefix(uri).ok_or_else(|| {
+        NonoError::ConfigParse(format!(
+            "credential reference '{}' does not start with '{}' or '{}'",
+            uri, APPLE_PASSWORD_URI_PREFIX, APPLE_PASSWORDS_URI_PREFIX
+        ))
+    })?;
+
+    if let Some(bad) = path.chars().find(|c| FORBIDDEN_URI_CHARS.contains(c)) {
+        return Err(NonoError::ConfigParse(format!(
+            "Apple Passwords URI contains forbidden character {:?}: {}",
+            bad, uri
+        )));
+    }
+
+    if path.contains('?') || path.contains('#') {
+        return Err(NonoError::ConfigParse(format!(
+            "Apple Passwords URI must not contain query strings or fragments: {}",
+            uri
+        )));
+    }
+
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() != 2 {
+        return Err(NonoError::ConfigParse(format!(
+            "Apple Passwords URI must be 'apple-password://server/account': {}",
+            uri
+        )));
+    }
+
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(NonoError::ConfigParse(format!(
+            "Apple Passwords URI has empty server/account segment: {}",
+            uri
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn parse_apple_password_uri(uri: &str) -> Result<(&str, &str)> {
+    validate_apple_password_uri(uri)?;
+    let path = strip_apple_password_prefix(uri).ok_or_else(|| {
+        NonoError::ConfigParse(format!(
+            "credential reference '{}' is not an Apple Passwords URI",
+            uri
+        ))
+    })?;
+    let mut segments = path.splitn(2, '/');
+    let server = segments.next().ok_or_else(|| {
+        NonoError::ConfigParse(format!(
+            "Apple Passwords URI missing server segment: {}",
+            uri
+        ))
+    })?;
+    let account = segments.next().ok_or_else(|| {
+        NonoError::ConfigParse(format!(
+            "Apple Passwords URI missing account segment: {}",
+            uri
+        ))
+    })?;
+    Ok((server, account))
 }
 
 /// Returns true if the credential reference is an `env://` URI.
@@ -413,7 +515,13 @@ fn load_from_op(uri: &str) -> Result<Zeroizing<String>> {
             }
         })?;
 
-    let output = wait_with_timeout(&mut child, OP_TIMEOUT).map_err(|e| {
+    let output = wait_with_timeout(
+        &mut child,
+        SECRET_MANAGER_TIMEOUT,
+        "1Password CLI",
+        "Is 1Password waiting for authentication?",
+    )
+    .map_err(|e| {
         // Kill the process if it timed out
         let _ = child.kill();
         let _ = child.wait();
@@ -436,6 +544,73 @@ fn load_from_op(uri: &str) -> Result<Zeroizing<String>> {
 
     let trimmed = raw.trim_end_matches(['\n', '\r']).to_string();
     Ok(Zeroizing::new(trimmed))
+}
+
+/// Load a secret from Apple Passwords using macOS `security`.
+///
+/// Runs `security find-internet-password -s <server> -a <account> -w` and captures
+/// stdout. This backend is macOS-only.
+fn load_from_apple_password(uri: &str) -> Result<Zeroizing<String>> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = uri;
+        return Err(NonoError::KeystoreAccess(
+            "Apple Passwords credentials are only supported on macOS".to_string(),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let (server, account) = parse_apple_password_uri(uri)?;
+        tracing::debug!(
+            "Loading secret from Apple Passwords: {}",
+            redact_apple_password_uri(uri)
+        );
+
+        let mut child = Command::new("security")
+            .args(["find-internet-password", "-s", server, "-a", account, "-w"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    NonoError::KeystoreAccess(
+                        "macOS 'security' CLI not found (required for Apple Passwords lookup)"
+                            .to_string(),
+                    )
+                } else {
+                    NonoError::KeystoreAccess(format!("Could not start macOS security CLI: {}", e))
+                }
+            })?;
+
+        let output = wait_with_timeout(
+            &mut child,
+            SECRET_MANAGER_TIMEOUT,
+            "macOS security CLI",
+            "Is Keychain access waiting for user approval?",
+        )
+        .map_err(|e| {
+            let _ = child.kill();
+            let _ = child.wait();
+            e
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(classify_apple_password_error(&stderr, uri));
+        }
+
+        let raw = String::from_utf8(output.stdout).map_err(|_| {
+            NonoError::KeystoreAccess(format!(
+                "Apple Passwords returned non-UTF-8 data for '{}'",
+                redact_apple_password_uri(uri)
+            ))
+        })?;
+
+        let trimmed = raw.trim_end_matches(['\n', '\r']).to_string();
+        Ok(Zeroizing::new(trimmed))
+    }
 }
 
 /// Classify `op` CLI errors into actionable error messages.
@@ -470,6 +645,33 @@ fn classify_op_error(stderr: &str, uri: &str) -> NonoError {
     }
 }
 
+/// Classify `security` CLI errors for Apple Passwords lookups.
+#[cfg(target_os = "macos")]
+fn classify_apple_password_error(stderr: &str, uri: &str) -> NonoError {
+    let redacted = redact_apple_password_uri(uri);
+    let stderr_trimmed = stderr.trim();
+
+    if stderr.contains("could not be found in the keychain")
+        || stderr.contains("The specified item could not be found")
+    {
+        NonoError::SecretNotFound(format!(
+            "Apple Passwords entry not found: '{}'. Detail: {}",
+            redacted, stderr_trimmed
+        ))
+    } else if stderr.contains("User interaction is not allowed") {
+        NonoError::KeystoreAccess(format!(
+            "Apple Passwords access requires user approval for '{}'. \
+             Unlock Keychain/Passwords and retry. Detail: {}",
+            redacted, stderr_trimmed
+        ))
+    } else {
+        NonoError::KeystoreAccess(format!(
+            "Apple Passwords lookup failed for '{}': {}",
+            redacted, stderr_trimmed
+        ))
+    }
+}
+
 /// Redact the field segment of an `op://` URI for safe logging.
 ///
 /// `op://vault/item/field` → `op://vault/item/<redacted>`
@@ -483,12 +685,29 @@ pub fn redact_op_uri(uri: &str) -> String {
     "op://***".to_string()
 }
 
+/// Redact the account segment of an Apple Passwords URI for safe logging.
+///
+/// `apple-password://server/account` → `apple-password://server/<redacted>`
+pub fn redact_apple_password_uri(uri: &str) -> String {
+    if let Some(path) = strip_apple_password_prefix(uri) {
+        let mut segments = path.splitn(2, '/');
+        if let Some(server) = segments.next() {
+            if !server.is_empty() && segments.next().is_some() {
+                return format!("apple-password://{}/<redacted>", server);
+            }
+        }
+    }
+    "apple-password://***".to_string()
+}
+
 /// Wait for a child process with a timeout.
 ///
 /// Returns the process output on success, or a timeout error.
 fn wait_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
+    backend_name: &str,
+    timeout_hint: &str,
 ) -> Result<std::process::Output> {
     let start = std::time::Instant::now();
     let poll_interval = Duration::from_millis(100);
@@ -515,17 +734,18 @@ fn wait_with_timeout(
                 // Still running
                 if start.elapsed() >= timeout {
                     return Err(NonoError::KeystoreAccess(format!(
-                        "1Password CLI timed out after {}s. \
-                         Is 1Password waiting for authentication?",
-                        timeout.as_secs()
+                        "{} timed out after {}s. {}",
+                        backend_name,
+                        timeout.as_secs(),
+                        timeout_hint
                     )));
                 }
                 std::thread::sleep(poll_interval);
             }
             Err(e) => {
                 return Err(NonoError::KeystoreAccess(format!(
-                    "Failed to check 1Password CLI status: {}",
-                    e
+                    "Failed to check {} status: {}",
+                    backend_name, e
                 )));
             }
         }
@@ -534,22 +754,25 @@ fn wait_with_timeout(
 
 /// Build secret mappings from a comma-separated list of credential entries.
 ///
-/// Supports three formats:
+/// Supports four formats:
 /// - **Keyring names**: `openai_api_key` → env var `OPENAI_API_KEY` (auto-uppercased)
 /// - **1Password URIs with explicit var**: `op://vault/item/field=MY_VAR` → env var `MY_VAR`
+/// - **Apple Passwords URIs with explicit var**:
+///   `apple-password://server/account=MY_VAR` → env var `MY_VAR`
 /// - **Environment URIs**: `env://GITHUB_TOKEN` → env var `GITHUB_TOKEN` (auto-derived)
 ///   or `env://GITHUB_TOKEN=GH_TOKEN` → env var `GH_TOKEN` (explicit)
 ///
-/// 1Password URIs (`op://...`) **must** include `=VAR_NAME` because uppercasing a URI
-/// produces a meaningless env var name. Bare `op://` URIs without `=` are rejected.
+/// URI-based managers (`op://...`, `apple-password://...`) **must** include
+/// `=VAR_NAME` because uppercasing a URI produces a meaningless env var name.
+/// Bare URI entries without `=` are rejected.
 ///
 /// Environment URIs (`env://...`) auto-derive the target variable name from the source
 /// when `=` is omitted: `env://GITHUB_TOKEN` maps to env var `GITHUB_TOKEN`.
 ///
 /// # Errors
 ///
-/// Returns an error if an `op://` URI is provided without an `=VAR_NAME` suffix,
-/// or if any URI fails validation.
+/// Returns an error if a URI-based secret manager entry is provided without an
+/// `=VAR_NAME` suffix, or if any URI fails validation.
 ///
 /// # Example
 ///
@@ -625,6 +848,30 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
                     redact_op_uri(entry)
                 )));
             }
+        } else if is_apple_password_uri(entry) {
+            // Apple Passwords URI: must have =VAR_NAME suffix
+            if let Some(eq_pos) = entry.rfind('=') {
+                let uri = &entry[..eq_pos];
+                let var_name = &entry[eq_pos + 1..];
+
+                if var_name.is_empty() {
+                    return Err(NonoError::ConfigParse(format!(
+                        "Apple Passwords credential '{}' has '=' but no variable name. \
+                         Use format: apple-password://server/account=MY_VAR",
+                        redact_apple_password_uri(uri)
+                    )));
+                }
+
+                validate_apple_password_uri(uri)?;
+                validate_destination_env_var(var_name)?;
+                mappings.insert(uri.to_string(), var_name.to_string());
+            } else {
+                return Err(NonoError::ConfigParse(format!(
+                    "Apple Passwords credential requires an explicit variable name. \
+                     Use format: apple-password://server/account=MY_VAR (got '{}')",
+                    redact_apple_password_uri(entry)
+                )));
+            }
         } else {
             // Keyring name: auto-uppercase to env var name
             let env_var = entry.to_uppercase();
@@ -649,7 +896,8 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
 ///
 /// # Errors
 ///
-/// Returns an error if an `op://` URI in `cli_secrets` is missing `=VAR_NAME`.
+/// Returns an error if a URI-based credential in `cli_secrets` is missing
+/// `=VAR_NAME`.
 pub fn build_secret_mappings(
     cli_secrets: Option<&str>,
     profile_secrets: &HashMap<String, String>,
@@ -756,6 +1004,91 @@ mod tests {
             .expect_err("should reject invalid URI");
         assert!(
             err.to_string().contains("at least vault/item/field"),
+            "got: {}",
+            err
+        );
+    }
+
+    // --- apple-password:// URI support in build_mappings_from_list ---
+
+    #[test]
+    fn test_build_mappings_apple_password_uri_with_var_name() {
+        let mappings =
+            build_mappings_from_list("apple-password://github.com/alice@example.com=GITHUB_PASS")
+                .expect("should parse");
+
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            mappings.get("apple-password://github.com/alice@example.com"),
+            Some(&"GITHUB_PASS".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_mappings_apple_password_uri_without_var_rejected() {
+        let err = build_mappings_from_list("apple-password://github.com/alice@example.com")
+            .expect_err("should reject bare apple-password URI");
+        assert!(
+            err.to_string().contains("explicit variable name"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_build_mappings_apple_password_uri_invalid_uri_rejected() {
+        let err = build_mappings_from_list("apple-password://github.com=GITHUB_PASS")
+            .expect_err("should reject malformed apple-password URI");
+        assert!(err.to_string().contains("server/account"), "got: {}", err);
+    }
+
+    // --- apple-password:// URI validation tests ---
+
+    #[test]
+    fn test_validate_apple_password_uri_valid() {
+        assert!(
+            validate_apple_password_uri("apple-password://github.com/alice@example.com").is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_apple_password_uri_valid_alias_prefix() {
+        assert!(
+            validate_apple_password_uri("apple-passwords://github.com/alice@example.com").is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_apple_password_uri_missing_prefix() {
+        let err =
+            validate_apple_password_uri("github.com/alice@example.com").expect_err("should reject");
+        assert!(
+            err.to_string().contains("does not start with"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_apple_password_uri_missing_account() {
+        let err = validate_apple_password_uri("apple-password://github.com")
+            .expect_err("should reject missing account");
+        assert!(err.to_string().contains("server/account"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_apple_password_uri_empty_segment() {
+        let err = validate_apple_password_uri("apple-password://github.com/")
+            .expect_err("should reject empty account");
+        assert!(err.to_string().contains("empty"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_apple_password_uri_forbidden_char() {
+        let err = validate_apple_password_uri("apple-password://github.com/alice;rm -rf")
+            .expect_err("should reject forbidden char");
+        assert!(
+            err.to_string().contains("forbidden character"),
             "got: {}",
             err
         );
@@ -973,6 +1306,30 @@ mod tests {
         assert_eq!(redact_op_uri("keyring_account"), "op://***");
     }
 
+    #[test]
+    fn test_redact_apple_password_uri_valid() {
+        assert_eq!(
+            redact_apple_password_uri("apple-password://github.com/alice@example.com"),
+            "apple-password://github.com/<redacted>"
+        );
+    }
+
+    #[test]
+    fn test_redact_apple_password_uri_alias_prefix() {
+        assert_eq!(
+            redact_apple_password_uri("apple-passwords://github.com/alice@example.com"),
+            "apple-password://github.com/<redacted>"
+        );
+    }
+
+    #[test]
+    fn test_redact_apple_password_uri_malformed() {
+        assert_eq!(
+            redact_apple_password_uri("apple-password://only-server"),
+            "apple-password://***"
+        );
+    }
+
     // --- classify_op_error tests ---
     //
     // Verify that `op` CLI stderr messages are mapped to actionable errors
@@ -1016,6 +1373,28 @@ mod tests {
         assert!(msg.contains("1Password CLI failed"), "got: {}", msg);
     }
 
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_classify_apple_password_error_not_found() {
+        let err = classify_apple_password_error(
+            "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n",
+            "apple-password://github.com/alice@example.com",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("entry not found"), "got: {}", msg);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_classify_apple_password_error_user_interaction_required() {
+        let err = classify_apple_password_error(
+            "security: SecKeychainSearchCopyNext: User interaction is not allowed.\n",
+            "apple-password://github.com/alice@example.com",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("requires user approval"), "got: {}", msg);
+    }
+
     // --- is_op_uri tests ---
 
     #[test]
@@ -1027,6 +1406,22 @@ mod tests {
     fn test_is_op_uri_negative() {
         // Bare keyring account names must not be misidentified as 1Password refs
         assert!(!is_op_uri("openai_api_key"));
+    }
+
+    #[test]
+    fn test_is_apple_password_uri_positive() {
+        assert!(is_apple_password_uri(
+            "apple-password://github.com/alice@example.com"
+        ));
+        assert!(is_apple_password_uri(
+            "apple-passwords://github.com/alice@example.com"
+        ));
+    }
+
+    #[test]
+    fn test_is_apple_password_uri_negative() {
+        assert!(!is_apple_password_uri("openai_api_key"));
+        assert!(!is_apple_password_uri("op://vault/item/field"));
     }
 
     // --- load_secret_by_ref dispatch ---
@@ -1046,6 +1441,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_load_secret_by_ref_dispatches_apple_passwords() {
+        // Verify that Apple Password URIs are routed to the Apple backend.
+        // On macOS this should return an Apple Passwords / security-specific error.
+        // On non-macOS it should return the explicit unsupported-platform error.
+        let result = load_secret_by_ref("nono", "apple-password://github.com/alice@example.com");
+        assert!(result.is_err());
+        let err = result.expect_err("should be rejected").to_string();
+        assert!(
+            err.contains("Apple Passwords")
+                || err.contains("security")
+                || err.contains("only supported on macOS"),
+            "expected Apple Passwords error, got: {}",
+            err
+        );
+    }
+
     // =========================================================================
     // env:// URI tests
     // =========================================================================
@@ -1060,6 +1472,7 @@ mod tests {
     fn test_is_env_uri_negative() {
         assert!(!is_env_uri("openai_api_key"));
         assert!(!is_env_uri("op://vault/item/field"));
+        assert!(!is_env_uri("apple-password://github.com/alice@example.com"));
         assert!(!is_env_uri("ENV://UPPER_SCHEME"));
     }
 
@@ -1238,17 +1651,21 @@ mod tests {
     }
 
     #[test]
-    fn test_build_mappings_mixed_keyring_op_env() {
+    fn test_build_mappings_mixed_keyring_op_apple_env() {
         let mappings = build_mappings_from_list(
-            "my_api_key,op://vault/item/field=SECRET_VAR,env://GITHUB_TOKEN",
+            "my_api_key,op://vault/item/field=SECRET_VAR,apple-password://github.com/alice@example.com=GITHUB_PASS,env://GITHUB_TOKEN",
         )
         .expect("should parse");
 
-        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings.len(), 4);
         assert_eq!(mappings.get("my_api_key"), Some(&"MY_API_KEY".to_string()));
         assert_eq!(
             mappings.get("op://vault/item/field"),
             Some(&"SECRET_VAR".to_string())
+        );
+        assert_eq!(
+            mappings.get("apple-password://github.com/alice@example.com"),
+            Some(&"GITHUB_PASS".to_string())
         );
         assert_eq!(
             mappings.get("env://GITHUB_TOKEN"),
@@ -1334,6 +1751,14 @@ mod tests {
     fn test_build_mappings_op_uri_dangerous_target_rejected() {
         // op://vault/item/field=PATH must be rejected
         let err = build_mappings_from_list("op://vault/item/field=PATH")
+            .expect_err("should reject dangerous target");
+        assert!(err.to_string().contains("blocklist"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_build_mappings_apple_password_uri_dangerous_target_rejected() {
+        // apple-password://server/account=PATH must be rejected
+        let err = build_mappings_from_list("apple-password://github.com/alice@example.com=PATH")
             .expect_err("should reject dangerous target");
         assert!(err.to_string().contains("blocklist"), "got: {}", err);
     }
