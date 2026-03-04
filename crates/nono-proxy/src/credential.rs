@@ -9,7 +9,7 @@ use crate::config::{InjectMode, RouteConfig};
 use crate::error::{ProxyError, Result};
 use base64::Engine;
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::debug;
 use zeroize::Zeroizing;
 
 /// A loaded credential ready for injection.
@@ -85,7 +85,7 @@ impl CredentialStore {
                 let secret = match nono::keystore::load_secret_by_ref(KEYRING_SERVICE, key) {
                     Ok(s) => s,
                     Err(nono::NonoError::SecretNotFound(msg)) => {
-                        warn!(
+                        debug!(
                             "Credential '{}' not available, skipping route: {}",
                             route.prefix, msg
                         );
@@ -152,6 +152,12 @@ impl CredentialStore {
     #[must_use]
     pub fn len(&self) -> usize {
         self.credentials.len()
+    }
+
+    /// Returns the set of route prefixes that have loaded credentials.
+    #[must_use]
+    pub fn loaded_prefixes(&self) -> std::collections::HashSet<String> {
+        self.credentials.keys().cloned().collect()
     }
 }
 

@@ -10,6 +10,7 @@
         "api.openai.com",
         "api.anthropic.com",
         "claude.ai",
+        "platform.claude.com",
         "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com",
         "api.groq.com",

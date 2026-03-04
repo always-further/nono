@@ -39,6 +39,10 @@ pub struct ProxyHandle {
     pub token: Zeroizing<String>,
     /// Send `true` to trigger graceful shutdown
     shutdown_tx: watch::Sender<bool>,
+    /// Route prefixes that have credentials actually loaded.
+    /// Routes whose credentials were unavailable are excluded so we
+    /// don't inject phantom tokens that shadow valid external credentials.
+    loaded_routes: std::collections::HashSet<String>,
 }
 
 impl ProxyHandle {
@@ -92,6 +96,14 @@ impl ProxyHandle {
             let base_url_name = format!("{}_BASE_URL", route.prefix.to_uppercase());
             let url = format!("http://127.0.0.1:{}/{}", self.port, route.prefix);
             vars.push((base_url_name, url));
+
+            // Only inject phantom token env vars for routes whose credentials
+            // were actually loaded. If a credential was unavailable (e.g.,
+            // GITHUB_TOKEN env var not set), injecting a phantom token would
+            // shadow valid credentials from other sources (keyring, gh auth).
+            if !self.loaded_routes.contains(&route.prefix) {
+                continue;
+            }
 
             // API key set to session token (phantom token pattern).
             // Use explicit env_var if set (required for op:// URIs), otherwise
@@ -154,6 +166,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     } else {
         CredentialStore::load(&config.routes)?
     };
+    let loaded_routes = credential_store.loaded_prefixes();
 
     // Build filter
     let filter = if config.allowed_hosts.is_empty() {
@@ -197,6 +210,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         port,
         token: session_token,
         shutdown_tx,
+        loaded_routes,
     })
 }
 
@@ -404,6 +418,7 @@ mod tests {
             port: 12345,
             token: Zeroizing::new("test_token".to_string()),
             shutdown_tx,
+            loaded_routes: ["openai".to_string()].into_iter().collect(),
         };
         let config = ProxyConfig {
             routes: vec![crate::config::RouteConfig {
@@ -448,6 +463,7 @@ mod tests {
             port: 12345,
             token: Zeroizing::new("test_token".to_string()),
             shutdown_tx,
+            loaded_routes: ["openai".to_string()].into_iter().collect(),
         };
         let config = ProxyConfig {
             routes: vec![crate::config::RouteConfig {
@@ -483,6 +499,72 @@ mod tests {
         assert!(
             bad_var.is_none(),
             "Should not generate env var from op:// URI uppercase"
+        );
+    }
+
+    #[test]
+    fn test_proxy_credential_env_vars_skips_unloaded_routes() {
+        // When a credential is unavailable (e.g., GITHUB_TOKEN not set),
+        // the route should NOT inject a phantom token env var. Otherwise
+        // the phantom token shadows valid credentials from other sources
+        // like the system keyring. See: #234
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let handle = ProxyHandle {
+            port: 12345,
+            token: Zeroizing::new("test_token".to_string()),
+            shutdown_tx,
+            // Only "openai" was loaded; "github" credential was unavailable
+            loaded_routes: ["openai".to_string()].into_iter().collect(),
+        };
+        let config = ProxyConfig {
+            routes: vec![
+                crate::config::RouteConfig {
+                    prefix: "openai".to_string(),
+                    upstream: "https://api.openai.com".to_string(),
+                    credential_key: Some("openai_api_key".to_string()),
+                    inject_mode: crate::config::InjectMode::Header,
+                    inject_header: "Authorization".to_string(),
+                    credential_format: "Bearer {}".to_string(),
+                    path_pattern: None,
+                    path_replacement: None,
+                    query_param_name: None,
+                    env_var: None,
+                },
+                crate::config::RouteConfig {
+                    prefix: "github".to_string(),
+                    upstream: "https://api.github.com".to_string(),
+                    credential_key: Some("env://GITHUB_TOKEN".to_string()),
+                    inject_mode: crate::config::InjectMode::Header,
+                    inject_header: "Authorization".to_string(),
+                    credential_format: "token {}".to_string(),
+                    path_pattern: None,
+                    path_replacement: None,
+                    query_param_name: None,
+                    env_var: Some("GITHUB_TOKEN".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let vars = handle.credential_env_vars(&config);
+
+        // openai should have BASE_URL + API_KEY (credential loaded)
+        let openai_base = vars.iter().find(|(k, _)| k == "OPENAI_BASE_URL");
+        assert!(openai_base.is_some(), "loaded route should have BASE_URL");
+        let openai_key = vars.iter().find(|(k, _)| k == "OPENAI_API_KEY");
+        assert!(openai_key.is_some(), "loaded route should have API key");
+
+        // github should have BASE_URL (always set for declared routes) but
+        // must NOT have GITHUB_TOKEN (credential was not loaded)
+        let github_base = vars.iter().find(|(k, _)| k == "GITHUB_BASE_URL");
+        assert!(
+            github_base.is_some(),
+            "declared route should still have BASE_URL"
+        );
+        let github_token = vars.iter().find(|(k, _)| k == "GITHUB_TOKEN");
+        assert!(
+            github_token.is_none(),
+            "unloaded route must not inject phantom GITHUB_TOKEN"
         );
     }
 }

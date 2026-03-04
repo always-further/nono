@@ -113,8 +113,7 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Resolve base policy groups (system paths, deny rules, dangerous commands)
         let base = policy::base_groups_from_policy(loaded_policy);
-        let resolved = policy::resolve_groups(loaded_policy, &base, &mut caps)?;
-        let needs_unlink_overrides = resolved.needs_unlink_overrides;
+        let mut resolved = policy::resolve_groups(loaded_policy, &base, &mut caps)?;
 
         // Directory permissions (canonicalize handles existence check atomically)
         for path in &args.allow {
@@ -186,19 +185,9 @@ impl CapabilitySetExt for CapabilitySet {
             caps.add_blocked_command(cmd.clone());
         }
 
-        // Validate deny/allow overlaps (hard-fail on Linux where Landlock cannot enforce denies)
-        policy::validate_deny_overlaps(&resolved.deny_paths, &caps)?;
+        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args)?;
 
-        // Keep broad keychain deny groups active, but allow explicit
-        // login.keychain-db read grants (profile/CLI) on macOS.
-        policy::apply_macos_login_keychain_exception(&mut caps);
-
-        // Deduplicate capabilities
-        caps.deduplicate();
-
-        // Caller must call apply_unlink_overrides() after CWD and any other
-        // writable paths are added, if needs_unlink_overrides is true.
-        Ok((caps, needs_unlink_overrides))
+        Ok((caps, resolved.needs_unlink_overrides))
     }
 
     fn from_profile(
@@ -226,8 +215,7 @@ impl CapabilitySetExt for CapabilitySet {
         } else {
             profile.security.groups.clone()
         };
-        let resolved = policy::resolve_groups(loaded_policy, &groups, &mut caps)?;
-        let needs_unlink_overrides = resolved.needs_unlink_overrides;
+        let mut resolved = policy::resolve_groups(loaded_policy, &groups, &mut caps)?;
         debug!("Resolved {} policy groups", resolved.names.len());
 
         // Process profile filesystem config (profile-specific paths on top of groups).
@@ -322,53 +310,72 @@ impl CapabilitySetExt for CapabilitySet {
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
 
-        // Validate deny/allow overlaps (hard-fail on Linux where Landlock cannot enforce denies)
-        policy::validate_deny_overlaps(&resolved.deny_paths, &caps)?;
+        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args)?;
 
-        // Keep broad keychain deny groups active, but allow explicit
-        // login.keychain-db read grants (profile/CLI) on macOS.
-        policy::apply_macos_login_keychain_exception(&mut caps);
-
-        // Deduplicate capabilities
-        caps.deduplicate();
-
-        // Caller must call apply_unlink_overrides() after CWD and any other
-        // writable paths are added, if needs_unlink_overrides is true.
-        Ok((caps, needs_unlink_overrides))
+        Ok((caps, resolved.needs_unlink_overrides))
     }
 }
 
-/// Apply CLI argument overrides on top of existing capabilities
+/// Shared finalization: deny overrides, overlap validation, keychain exception, dedup.
+///
+/// Called by both `from_args()` and `from_profile()` after all grants are added.
+/// Caller must still call `apply_unlink_overrides()` after CWD and any other
+/// writable paths are added, if `resolved.needs_unlink_overrides` is true.
+fn finalize_caps(
+    caps: &mut CapabilitySet,
+    resolved: &mut policy::ResolvedGroups,
+    loaded_policy: &policy::Policy,
+    args: &SandboxArgs,
+) -> Result<()> {
+    // Apply deny overrides before validation (punch holes through deny groups)
+    policy::apply_deny_overrides(
+        &args.override_deny,
+        &mut resolved.deny_paths,
+        caps,
+        &loaded_policy.never_grant,
+    )?;
+
+    // Validate deny/allow overlaps (hard-fail on Linux where Landlock cannot enforce denies)
+    policy::validate_deny_overlaps(&resolved.deny_paths, caps)?;
+
+    // Keep broad keychain deny groups active, but allow explicit
+    // login.keychain-db read grants (profile/CLI) on macOS.
+    policy::apply_macos_login_keychain_exception(caps);
+
+    // Deduplicate capabilities
+    caps.deduplicate();
+
+    Ok(())
+}
+
+/// Apply CLI argument overrides on top of existing capabilities.
+///
+/// CLI directory args are always added, even if the path is already covered by
+/// a profile or group capability. The subsequent `deduplicate()` call resolves
+/// conflicts using source priority (User wins over Group/System) and merges
+/// complementary access modes (Read + Write = ReadWrite).
 fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()> {
     let protected_roots = ProtectedRoots::from_defaults()?;
 
     // Additional directories from CLI
     for path in &args.allow {
         validate_requested_dir(path, "CLI", &protected_roots)?;
-        if !caps.path_covered(path) {
-            if let Some(cap) =
-                try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")?
-            {
-                caps.add_fs(cap);
-            }
+        if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")? {
+            caps.add_fs(cap);
         }
     }
 
     for path in &args.read {
         validate_requested_dir(path, "CLI", &protected_roots)?;
-        if !caps.path_covered(path) {
-            if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
-                caps.add_fs(cap);
-            }
+        if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
+            caps.add_fs(cap);
         }
     }
 
     for path in &args.write {
         validate_requested_dir(path, "CLI", &protected_roots)?;
-        if !caps.path_covered(path) {
-            if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
-                caps.add_fs(cap);
-            }
+        if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
+            caps.add_fs(cap);
         }
     }
 
@@ -440,6 +447,7 @@ mod tests {
             proxy_allow: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
@@ -473,6 +481,7 @@ mod tests {
             proxy_allow: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
@@ -501,6 +510,7 @@ mod tests {
             read_file: vec![],
             write_file: vec![],
             net_block: false,
+            override_deny: vec![],
             allow_command: vec!["rm".to_string()],
             block_command: vec!["custom".to_string()],
             network_profile: None,
@@ -541,6 +551,7 @@ mod tests {
             proxy_allow: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
@@ -591,6 +602,7 @@ mod tests {
             proxy_allow: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
@@ -635,6 +647,7 @@ mod tests {
             proxy_allow: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
@@ -685,5 +698,143 @@ mod tests {
         // Dangerous commands should be blocked (cross-platform)
         assert!(caps.blocked_commands().contains(&"rm".to_string()));
         assert!(caps.blocked_commands().contains(&"dd".to_string()));
+    }
+
+    #[test]
+    fn test_cli_allow_upgrades_profile_read_path() {
+        // Regression test: a profile sets a path as read-only, and --allow on
+        // the CLI should upgrade it to ReadWrite. Previously, path_covered()
+        // in add_cli_overrides() silently dropped the CLI entry because it
+        // only checked path containment, not access mode.
+        let dir = tempdir().expect("tmpdir");
+        let target = dir.path().join("readonly_dir");
+        std::fs::create_dir(&target).expect("create target dir");
+
+        let profile_path = dir.path().join("test-profile.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "test-upgrade" }},
+                    "filesystem": {{ "read": ["{}"] }}
+                }}"#,
+                target.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = SandboxArgs {
+            allow: vec![target.clone()],
+            read: vec![],
+            write: vec![],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![],
+            net_block: false,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
+            override_deny: vec![],
+            allow_command: vec![],
+            block_command: vec![],
+            env_credential: None,
+            profile: None,
+            sandbox_policy: None,
+            allow_cwd: false,
+            workdir: None,
+            config: None,
+            verbose: 0,
+            dry_run: false,
+            allow_bind: vec![],
+            proxy_port: None,
+        };
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        let canonical = target.canonicalize().expect("canonicalize target");
+        let cap = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| c.resolved == canonical)
+            .expect("target path should be in capabilities");
+
+        assert_eq!(
+            cap.access,
+            AccessMode::ReadWrite,
+            "CLI --allow should upgrade profile read-only path to ReadWrite, got {:?}",
+            cap.access,
+        );
+    }
+
+    #[test]
+    fn test_cli_write_merges_with_profile_read_path() {
+        // Same regression but with --write instead of --allow.
+        // Profile read + CLI write should merge to ReadWrite.
+        let dir = tempdir().expect("tmpdir");
+        let target = dir.path().join("readonly_dir");
+        std::fs::create_dir(&target).expect("create target dir");
+
+        let profile_path = dir.path().join("test-profile.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "test-merge" }},
+                    "filesystem": {{ "read": ["{}"] }}
+                }}"#,
+                target.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = SandboxArgs {
+            allow: vec![],
+            read: vec![],
+            write: vec![target.clone()],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![],
+            net_block: false,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
+            override_deny: vec![],
+            allow_command: vec![],
+            block_command: vec![],
+            env_credential: None,
+            profile: None,
+            sandbox_policy: None,
+            allow_cwd: false,
+            workdir: None,
+            config: None,
+            verbose: 0,
+            dry_run: false,
+            allow_bind: vec![],
+            proxy_port: None,
+        };
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        let canonical = target.canonicalize().expect("canonicalize target");
+        let cap = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| c.resolved == canonical)
+            .expect("target path should be in capabilities");
+
+        assert_eq!(
+            cap.access,
+            AccessMode::ReadWrite,
+            "CLI --write + profile read should merge to ReadWrite, got {:?}",
+            cap.access,
+        );
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "nono-cli"
-version = "0.9.0"
+version = "0.10.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -17,8 +17,8 @@ name = "nono"
 path = "src/main.rs"
 
 [dependencies]
-nono = { version = "0.9.0", path = "../nono" }
-nono-proxy = { version = "0.9.0", path = "../nono-proxy" }
+nono = { version = "0.10.0", path = "../nono" }
+nono-proxy = { version = "0.10.0", path = "../nono-proxy" }
 clap = { version = "4", features = ["derive"] }
 colored = "3"
 similar = "2"

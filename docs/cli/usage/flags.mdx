@@ -375,6 +375,44 @@ Block an additional command beyond the default blocklist.
 nono run --allow-cwd --block-command my-dangerous-tool -- my-script.sh
 ```
 
+### Deny Group Overrides
+
+#### `--override-deny`
+
+Override a deny group rule for a specific path. Required groups like `deny_credentials` block access to paths such as `~/.aws`, `~/.config/gcloud`, etc. This flag punches a targeted hole through the deny without removing the entire group.
+
+The override path must also be explicitly granted via `--allow`, `--read`, `--write`, or their file equivalents. `--override-deny` only removes the deny rule — it does not implicitly grant access.
+
+```bash
+# Allow an AWS agent to access credentials
+nono run --override-deny ~/.aws --allow ~/.aws -- my-aws-agent
+
+# Allow read-only access to GCP config
+nono run --override-deny ~/.config/gcloud --read ~/.config/gcloud -- gcloud-agent
+
+# Multiple overrides
+nono run \
+  --override-deny ~/.aws \
+  --override-deny ~/.config/gcloud \
+  --allow ~/.aws \
+  --read ~/.config/gcloud \
+  -- multi-cloud-agent
+```
+
+Can be specified multiple times.
+
+<Warning>
+**Security guardrails:**
+
+- Paths in the `never_grant` list (SSH private keys, `/etc/shadow`, etc.) cannot be overridden. Attempting to override a `never_grant` path — or any ancestor that would expose one — is a hard error.
+- A warning is printed to stderr for each override applied, making security relaxations visible in logs.
+- On macOS, Seatbelt allow rules more specific than the deny are emitted. On Linux, the deny path is removed from validation so Landlock allow rules take effect.
+</Warning>
+
+<Note>
+  `--override-deny` without a matching grant (`--allow`, `--read`, `--write`, etc.) is a hard error. This prevents silent no-ops on Linux and unintended implicit grants on macOS.
+</Note>
+
 ### Credential Options
 
 #### `--env-credential`
