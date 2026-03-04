@@ -78,11 +78,11 @@ PLATFORM NOTES:
     # Load secrets from system keystore (comma-separated keyring names)
     nono run --allow . --env-credential openai_api_key,anthropic_api_key -- claude
 
-    # Load secret from 1Password (op:// URI with explicit env var name)
-    nono run --allow . --env-credential 'op://vault/item/field=OPENAI_API_KEY' -- claude
+    # Map 1Password URI to an explicit env var (repeatable)
+    nono run --allow . --env-credential-map 'op://vault/item/field' OPENAI_API_KEY -- claude
 
-    # Load secret from Apple Passwords on macOS (explicit env var name)
-    nono run --allow . --env-credential 'apple-password://github.com/alice@example.com=GITHUB_PASSWORD' -- claude
+    # Map Apple Passwords URI to an explicit env var (repeatable)
+    nono run --allow . --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD -- claude
 ")]
     Run(Box<RunArgs>),
 
@@ -349,11 +349,24 @@ pub struct SandboxArgs {
     /// Load credentials and inject as environment variables.
     /// The sandboxed process can read these credentials directly.
     /// For network API keys, prefer --proxy-credential for credential isolation.
-    /// Comma-separated entries: keyring names (auto-uppercased to env var) or
-    /// URI managers with explicit var:
-    /// op://vault/item/field=MY_VAR or apple-password://server/account=MY_VAR.
+    /// Comma-separated keyring account names only (auto-uppercased to env var).
+    /// For URI references with explicit destination env vars, prefer
+    /// --env-credential-map.
+    /// Legacy 1Password URI suffix form is still supported for compatibility:
+    /// op://...=VAR.
     #[arg(long, value_name = "CREDENTIALS", env = "NONO_ENV_CREDENTIAL")]
     pub env_credential: Option<String>,
+
+    /// Map a credential reference to an explicit destination environment variable.
+    /// Repeatable: --env-credential-map <CREDENTIAL_REF> <ENV_VAR>.
+    /// Works for keyring names and URI references (op://, apple-password://, env://).
+    #[arg(
+        long,
+        value_names = ["CREDENTIAL_REF", "ENV_VAR"],
+        num_args = 2,
+        action = clap::ArgAction::Append
+    )]
+    pub env_credential_map: Vec<String>,
 
     // === Profile options ===
     /// Use a profile by name or file path.
@@ -1398,6 +1411,41 @@ mod tests {
         match cli.command {
             Commands::Run(args) => {
                 assert_eq!(args.sandbox.override_deny.len(), 2);
+                assert_eq!(args.sandbox.override_deny[0], PathBuf::from("/tmp/a"));
+                assert_eq!(args.sandbox.override_deny[1], PathBuf::from("/tmp/b"));
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_env_credential_map_repeatable_parses_pairs() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--env-credential-map",
+            "op://vault/item/field",
+            "OPENAI_API_KEY",
+            "--env-credential-map",
+            "apple-password://github.com/user=name",
+            "GITHUB_PASSWORD",
+            "echo",
+            "ok",
+        ]);
+
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(
+                    args.sandbox.env_credential_map,
+                    vec![
+                        "op://vault/item/field".to_string(),
+                        "OPENAI_API_KEY".to_string(),
+                        "apple-password://github.com/user=name".to_string(),
+                        "GITHUB_PASSWORD".to_string()
+                    ]
+                );
             }
             _ => panic!("Expected Run command"),
         }

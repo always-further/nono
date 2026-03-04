@@ -757,14 +757,17 @@ fn wait_with_timeout(
 /// Supports four formats:
 /// - **Keyring names**: `openai_api_key` → env var `OPENAI_API_KEY` (auto-uppercased)
 /// - **1Password URIs with explicit var**: `op://vault/item/field=MY_VAR` → env var `MY_VAR`
-/// - **Apple Passwords URIs with explicit var**:
-///   `apple-password://server/account=MY_VAR` → env var `MY_VAR`
 /// - **Environment URIs**: `env://GITHUB_TOKEN` → env var `GITHUB_TOKEN` (auto-derived)
 ///   or `env://GITHUB_TOKEN=GH_TOKEN` → env var `GH_TOKEN` (explicit)
 ///
-/// URI-based managers (`op://...`, `apple-password://...`) **must** include
-/// `=VAR_NAME` because uppercasing a URI produces a meaningless env var name.
-/// Bare URI entries without `=` are rejected.
+/// URI-based managers must include explicit target variable names:
+/// - `op://...=VAR_NAME`
+///
+/// Bare URI entries without explicit target variables are rejected.
+///
+/// Apple Passwords references (`apple-password://...`) are not supported in
+/// this list-based parser. Use `build_mappings_from_pairs` (CLI:
+/// `--env-credential-map <CREDENTIAL_REF> <ENV_VAR>`) for explicit mapping.
 ///
 /// Environment URIs (`env://...`) auto-derive the target variable name from the source
 /// when `=` is omitted: `env://GITHUB_TOKEN` maps to env var `GITHUB_TOKEN`.
@@ -772,7 +775,8 @@ fn wait_with_timeout(
 /// # Errors
 ///
 /// Returns an error if a URI-based secret manager entry is provided without an
-/// `=VAR_NAME` suffix, or if any URI fails validation.
+/// explicit target variable suffix, if an Apple Passwords URI is provided in
+/// list mode, or if any URI fails validation.
 ///
 /// # Example
 ///
@@ -849,29 +853,11 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
                 )));
             }
         } else if is_apple_password_uri(entry) {
-            // Apple Passwords URI: must have =VAR_NAME suffix
-            if let Some(eq_pos) = entry.rfind('=') {
-                let uri = &entry[..eq_pos];
-                let var_name = &entry[eq_pos + 1..];
-
-                if var_name.is_empty() {
-                    return Err(NonoError::ConfigParse(format!(
-                        "Apple Passwords credential '{}' has '=' but no variable name. \
-                         Use format: apple-password://server/account=MY_VAR",
-                        redact_apple_password_uri(uri)
-                    )));
-                }
-
-                validate_apple_password_uri(uri)?;
-                validate_destination_env_var(var_name)?;
-                mappings.insert(uri.to_string(), var_name.to_string());
-            } else {
-                return Err(NonoError::ConfigParse(format!(
-                    "Apple Passwords credential requires an explicit variable name. \
-                     Use format: apple-password://server/account=MY_VAR (got '{}')",
-                    redact_apple_password_uri(entry)
-                )));
-            }
+            return Err(NonoError::ConfigParse(format!(
+                "Apple Passwords credential '{}' is not supported in --env-credential. \
+                 Use --env-credential-map 'apple-password://server/account' MY_VAR",
+                redact_apple_password_uri(entry)
+            )));
         } else {
             // Keyring name: auto-uppercase to env var name
             let env_var = entry.to_uppercase();
@@ -883,12 +869,55 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
     Ok(mappings)
 }
 
+/// Build secret mappings from explicit credential-ref/env-var pairs.
+///
+/// This is used by CLI options that pass the credential reference and
+/// destination environment variable as separate arguments.
+///
+/// # Arguments
+/// * `pairs` - List of `(credential_ref, env_var)` tuples
+///
+/// # Errors
+///
+/// Returns an error if any credential reference is empty, the destination env
+/// var is invalid, or a URI reference fails structural validation.
+pub fn build_mappings_from_pairs(pairs: &[(String, String)]) -> Result<HashMap<String, String>> {
+    let mut mappings = HashMap::new();
+
+    for (credential_ref, env_var) in pairs {
+        let credential_ref = credential_ref.trim();
+        let env_var = env_var.trim();
+
+        if credential_ref.is_empty() {
+            return Err(NonoError::ConfigParse(
+                "credential reference is empty in --env-credential-map".to_string(),
+            ));
+        }
+
+        validate_destination_env_var(env_var)?;
+
+        if credential_ref.starts_with(OP_URI_PREFIX) {
+            validate_op_uri(credential_ref)?;
+        } else if is_apple_password_uri(credential_ref) {
+            validate_apple_password_uri(credential_ref)?;
+        } else if credential_ref.starts_with(ENV_URI_PREFIX) {
+            validate_env_uri(credential_ref)?;
+        }
+
+        mappings.insert(credential_ref.to_string(), env_var.to_string());
+    }
+
+    Ok(mappings)
+}
+
 /// Build secret mappings from CLI argument and/or profile secrets
 ///
 /// Merges secrets from both sources, with CLI taking precedence.
 ///
 /// # Arguments
 /// * `cli_secrets` - Optional comma-separated list from CLI (--env-credential flag)
+/// * `cli_secret_mappings` - Optional explicit mappings from
+///   `--env-credential-map <CREDENTIAL_REF> <ENV_VAR>`
 /// * `profile_secrets` - Mappings from profile's [secrets] section
 ///
 /// # Returns
@@ -897,9 +926,11 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
 /// # Errors
 ///
 /// Returns an error if a URI-based credential in `cli_secrets` is missing
-/// `=VAR_NAME`.
+/// an explicit target variable suffix (`=VAR_NAME` for `op://`), if
+/// `apple-password://` appears in list mode, or if URI/env-var validation fails.
 pub fn build_secret_mappings(
     cli_secrets: Option<&str>,
+    cli_secret_mappings: &[(String, String)],
     profile_secrets: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
     let mut combined = profile_secrets.clone();
@@ -908,6 +939,12 @@ pub fn build_secret_mappings(
     if let Some(secrets_str) = cli_secrets {
         let cli_mappings = build_mappings_from_list(secrets_str)?;
         combined.extend(cli_mappings);
+    }
+
+    // Explicit CLI mappings override both profile secrets and --env-credential.
+    if !cli_secret_mappings.is_empty() {
+        let explicit_mappings = build_mappings_from_pairs(cli_secret_mappings)?;
+        combined.extend(explicit_mappings);
     }
 
     Ok(combined)
@@ -1009,37 +1046,41 @@ mod tests {
         );
     }
 
-    // --- apple-password:// URI support in build_mappings_from_list ---
+    // --- apple-password:// URI handling in build_mappings_from_list ---
 
     #[test]
-    fn test_build_mappings_apple_password_uri_with_var_name() {
-        let mappings =
-            build_mappings_from_list("apple-password://github.com/alice@example.com=GITHUB_PASS")
-                .expect("should parse");
-
-        assert_eq!(mappings.len(), 1);
-        assert_eq!(
-            mappings.get("apple-password://github.com/alice@example.com"),
-            Some(&"GITHUB_PASS".to_string())
-        );
-    }
-
-    #[test]
-    fn test_build_mappings_apple_password_uri_without_var_rejected() {
+    fn test_build_mappings_apple_password_uri_rejected_in_list_mode() {
         let err = build_mappings_from_list("apple-password://github.com/alice@example.com")
-            .expect_err("should reject bare apple-password URI");
+            .expect_err("should reject apple-password URI in list mode");
         assert!(
-            err.to_string().contains("explicit variable name"),
+            err.to_string().contains("--env-credential-map"),
             "got: {}",
             err
         );
     }
 
     #[test]
-    fn test_build_mappings_apple_password_uri_invalid_uri_rejected() {
-        let err = build_mappings_from_list("apple-password://github.com=GITHUB_PASS")
-            .expect_err("should reject malformed apple-password URI");
-        assert!(err.to_string().contains("server/account"), "got: {}", err);
+    fn test_build_mappings_apple_password_uri_with_inline_var_rejected_in_list_mode() {
+        let err =
+            build_mappings_from_list("apple-password://github.com/alice@example.com=>GITHUB_PASS")
+                .expect_err("should reject inline apple-password var syntax");
+        assert!(
+            err.to_string().contains("--env-credential-map"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_build_mappings_apple_password_uri_legacy_equals_suffix_rejected() {
+        let err =
+            build_mappings_from_list("apple-password://github.com/alice@example.com=GITHUB_PASS")
+                .expect_err("should reject legacy inline apple-password suffix");
+        assert!(
+            err.to_string().contains("--env-credential-map"),
+            "got: {}",
+            err
+        );
     }
 
     // --- apple-password:// URI validation tests ---
@@ -1651,21 +1692,17 @@ mod tests {
     }
 
     #[test]
-    fn test_build_mappings_mixed_keyring_op_apple_env() {
+    fn test_build_mappings_mixed_keyring_op_env() {
         let mappings = build_mappings_from_list(
-            "my_api_key,op://vault/item/field=SECRET_VAR,apple-password://github.com/alice@example.com=GITHUB_PASS,env://GITHUB_TOKEN",
+            "my_api_key,op://vault/item/field=SECRET_VAR,env://GITHUB_TOKEN",
         )
         .expect("should parse");
 
-        assert_eq!(mappings.len(), 4);
+        assert_eq!(mappings.len(), 3);
         assert_eq!(mappings.get("my_api_key"), Some(&"MY_API_KEY".to_string()));
         assert_eq!(
             mappings.get("op://vault/item/field"),
             Some(&"SECRET_VAR".to_string())
-        );
-        assert_eq!(
-            mappings.get("apple-password://github.com/alice@example.com"),
-            Some(&"GITHUB_PASS".to_string())
         );
         assert_eq!(
             mappings.get("env://GITHUB_TOKEN"),
@@ -1757,10 +1794,14 @@ mod tests {
 
     #[test]
     fn test_build_mappings_apple_password_uri_dangerous_target_rejected() {
-        // apple-password://server/account=PATH must be rejected
-        let err = build_mappings_from_list("apple-password://github.com/alice@example.com=PATH")
-            .expect_err("should reject dangerous target");
-        assert!(err.to_string().contains("blocklist"), "got: {}", err);
+        // Apple Passwords refs are rejected in list mode and must use explicit map flag.
+        let err = build_mappings_from_list("apple-password://github.com/alice@example.com=>PATH")
+            .expect_err("should reject apple-password in list mode");
+        assert!(
+            err.to_string().contains("--env-credential-map"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -1769,5 +1810,65 @@ mod tests {
         let err =
             build_mappings_from_list("ld_preload").expect_err("should reject dangerous target");
         assert!(err.to_string().contains("blocklist"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_build_mappings_from_pairs_keyring_and_uri() {
+        let pairs = vec![
+            ("openai_api_key".to_string(), "OPENAI_API_KEY".to_string()),
+            (
+                "op://vault/item/field".to_string(),
+                "OPENAI_SECRET".to_string(),
+            ),
+            (
+                "apple-password://github.com/user=name".to_string(),
+                "GITHUB_PASSWORD".to_string(),
+            ),
+            ("env://GITHUB_TOKEN".to_string(), "GH_TOKEN".to_string()),
+        ];
+
+        let mappings = build_mappings_from_pairs(&pairs).expect("should parse");
+        assert_eq!(mappings.len(), 4);
+        assert_eq!(
+            mappings.get("openai_api_key"),
+            Some(&"OPENAI_API_KEY".to_string())
+        );
+        assert_eq!(
+            mappings.get("op://vault/item/field"),
+            Some(&"OPENAI_SECRET".to_string())
+        );
+        assert_eq!(
+            mappings.get("apple-password://github.com/user=name"),
+            Some(&"GITHUB_PASSWORD".to_string())
+        );
+        assert_eq!(
+            mappings.get("env://GITHUB_TOKEN"),
+            Some(&"GH_TOKEN".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_mappings_from_pairs_empty_credential_ref_rejected() {
+        let pairs = vec![("".to_string(), "API_KEY".to_string())];
+        let err =
+            build_mappings_from_pairs(&pairs).expect_err("should reject empty credential ref");
+        assert!(
+            err.to_string().contains("credential reference is empty"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_build_secret_mappings_explicit_pairs_take_precedence() {
+        let mut profile = HashMap::new();
+        profile.insert("openai_api_key".to_string(), "FROM_PROFILE".to_string());
+
+        let cli_pairs = vec![("openai_api_key".to_string(), "FROM_MAP".to_string())];
+        let merged =
+            build_secret_mappings(Some("openai_api_key"), &cli_pairs, &profile).expect("merge ok");
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged.get("openai_api_key"), Some(&"FROM_MAP".to_string()));
     }
 }

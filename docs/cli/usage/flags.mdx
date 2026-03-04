@@ -471,27 +471,44 @@ Can be specified multiple times.
 
 #### `--env-credential`
 
-Load credentials from the system keystore (macOS Keychain / Linux Secret Service), 1Password, or Apple Passwords (macOS) and inject them as environment variables. The sandboxed process can read these credentials directly.
+Load credentials from the system keystore (macOS Keychain / Linux Secret Service) by account name and inject them as environment variables. The sandboxed process can read these credentials directly.
 
 ```bash
 # Load specific credentials by account name
 nono run --allow-cwd --env-credential openai_api_key,anthropic_api_key -- my-agent
 
-# Load from 1Password (op:// URI with =VAR_NAME suffix)
-nono run --allow-cwd --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' -- my-agent
-
-# Load from Apple Passwords on macOS (apple-password:// URI with =VAR_NAME suffix)
-nono run --allow-cwd --env-credential 'apple-password://github.com/alice@example.com=GITHUB_PASSWORD' -- my-agent
-
 # Use with profile (loads credentials defined in profile's [env_credentials] section)
 nono run --profile claude-code --env-credential -- claude
+```
+
+#### `--env-credential-map`
+
+Map an explicit credential reference to a destination environment variable.
+Repeatable as `--env-credential-map <CREDENTIAL_REF> <ENV_VAR>`.
+
+```bash
+# Load from 1Password
+nono run --allow-cwd --env-credential-map 'op://Development/OpenAI/credential' OPENAI_API_KEY -- my-agent
+
+# Load from Apple Passwords on macOS
+nono run --allow-cwd --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD -- my-agent
+
+# Load and rename from parent env
+nono run --allow-cwd --env-credential-map 'env://GITHUB_TOKEN' GH_TOKEN -- my-agent
+
+# Multiple mappings
+nono run --allow-cwd \
+  --env-credential-map 'op://Development/OpenAI/credential' OPENAI_API_KEY \
+  --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD \
+  -- my-agent
 ```
 
 Credentials are:
 
 - Loaded **before** the sandbox is applied (keystore access blocked after)
 - Auto-named by uppercasing for keyring names: `openai_api_key` becomes `$OPENAI_API_KEY`
-- URI manager entries (`op://...`, `apple-password://...`) require explicit `=VAR_NAME`
+- `--env-credential-map` validates URI references (`op://`, `apple-password://`, `env://`) and target env var names
+- `--env-credential` URI suffix form remains supported for 1Password compatibility (`op://...=VAR`)
 - Zeroized from memory after `exec()`
 
 For network API keys, prefer `--proxy-credential` instead for credential isolation — the agent never sees the real API key.
