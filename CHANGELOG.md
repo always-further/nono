@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.10.0] - 2026-03-04
+
+### Bug Fixes
+
+- Don't inject phantom token for unavailable credentials (#234) (#236) ([#236](https://github.com/always-further/nono/pull/236))
+
+- Allow CLI flags to upgrade access mode of profile-covered paths (#232) ([#232](https://github.com/always-further/nono/pull/232))
+
+- Landlock network false-negative and runtime ABI probe in setup (#230) ([#230](https://github.com/always-further/nono/pull/230))
+
+- Proxy host filtering and credential resolution for sandboxed (#215) ([#215](https://github.com/always-further/nono/pull/215))
+
+- Include character device files in policy group resolution (#218) ([#218](https://github.com/always-further/nono/pull/218))
+
+- Pre-create claude-code config lock file on Linux (#221) ([#221](https://github.com/always-further/nono/pull/221))
+
+
+### Features
+
+- Add --override-deny CLI flag for targeted deny group exemptions (#242) ([#242](https://github.com/always-further/nono/pull/242))
+
+- Add env:// credential scheme and GitHub token proxy support (#227) ([#227](https://github.com/always-further/nono/pull/227))
+
+- Remove RFC1918 private network CIDR deny list from host filter (#226) ([#226](https://github.com/always-further/nono/pull/226))
+
+- Add allowed_commands support to profile security config (#204) ([#204](https://github.com/always-further/nono/pull/204))
+
+- Profile inheritance via `extends` field (#203) ([#203](https://github.com/always-further/nono/pull/203))
+
 ## [0.9.0] - 2026-03-03
 
 ### Bug Fixes

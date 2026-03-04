@@ -281,6 +281,14 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "PORT")]
     pub proxy_port: Option<u16>,
 
+    // === Deny overrides ===
+    /// Override a deny group rule for a specific path.
+    /// The path must also be explicitly granted via --allow, --read, or --write.
+    /// Cannot override never_grant paths (e.g., SSH private keys).
+    /// Can be specified multiple times.
+    #[arg(long, value_name = "PATH")]
+    pub override_deny: Vec<PathBuf>,
+
     // === Command blocking ===
     /// Allow a normally-blocked dangerous command (use with caution).
     /// By default, destructive commands like rm, dd, chmod are blocked.
@@ -1277,5 +1285,47 @@ mod tests {
             result.is_err(),
             "--rollback-all and --rollback-include should conflict"
         );
+    }
+
+    #[test]
+    fn test_override_deny_single() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--override-deny",
+            "/tmp/test",
+            "--allow",
+            "/tmp/test",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.sandbox.override_deny.len(), 1);
+                assert_eq!(args.sandbox.override_deny[0], PathBuf::from("/tmp/test"));
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_override_deny_multiple() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--override-deny",
+            "/tmp/a",
+            "--override-deny",
+            "/tmp/b",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.sandbox.override_deny.len(), 2);
+            }
+            _ => panic!("Expected Run command"),
+        }
     }
 }
