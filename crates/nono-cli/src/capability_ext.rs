@@ -185,7 +185,7 @@ impl CapabilitySetExt for CapabilitySet {
             caps.add_blocked_command(cmd.clone());
         }
 
-        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args)?;
+        finalize_caps(&mut caps, &mut resolved, loaded_policy, args)?;
 
         Ok((caps, resolved.needs_unlink_overrides))
     }
@@ -310,7 +310,7 @@ impl CapabilitySetExt for CapabilitySet {
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
 
-        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args)?;
+        finalize_caps(&mut caps, &mut resolved, loaded_policy, args)?;
 
         Ok((caps, resolved.needs_unlink_overrides))
     }
