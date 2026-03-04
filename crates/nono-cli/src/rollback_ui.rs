@@ -88,14 +88,10 @@ fn print_change_details(changes: &[Change]) {
 
         let size_info = change
             .size_delta
-            .map(|delta| {
-                if delta > 0 {
-                    format!(" (+{delta} bytes)")
-                } else if delta < 0 {
-                    format!(" ({delta} bytes)")
-                } else {
-                    String::new()
-                }
+            .map(|delta| match delta.cmp(&0) {
+                std::cmp::Ordering::Greater => format!(" (+{delta} bytes)"),
+                std::cmp::Ordering::Less => format!(" ({delta} bytes)"),
+                std::cmp::Ordering::Equal => String::new(),
             })
             .unwrap_or_default();
 

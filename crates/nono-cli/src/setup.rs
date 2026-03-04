@@ -442,13 +442,9 @@ fn select_highest_supported_landlock_abi<F>(mut is_supported: F) -> Option<landl
 where
     F: FnMut(landlock::ABI) -> bool,
 {
-    for abi in landlock_abi_probe_order() {
-        if is_supported(abi) {
-            return Some(abi);
-        }
-    }
-
-    None
+    landlock_abi_probe_order()
+        .into_iter()
+        .find(|&abi| is_supported(abi))
 }
 
 #[cfg(target_os = "linux")]

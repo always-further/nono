@@ -1480,66 +1480,70 @@ fn run_supervisor_loop(
         // SAFETY: pfds is a valid array of pollfd structs on the stack.
         let ret = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 200) };
 
-        if ret > 0 {
-            // Check supervisor socket (only if still active)
-            if sock_fd_active && pfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                // Supervisor socket closed (CLOEXEC closes child's end after exec).
-                // If we have a seccomp notify fd, keep looping to handle
-                // seccomp notifications -- just stop polling the dead socket.
-                if notify_raw_fd.is_some() {
-                    debug!("Supervisor socket closed, continuing for seccomp notifications");
-                    sock_fd_active = false;
-                } else {
-                    debug!("Supervisor socket closed by child");
+        match ret.cmp(&0) {
+            std::cmp::Ordering::Greater => {
+                // Check supervisor socket (only if still active)
+                if sock_fd_active && pfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                    // Supervisor socket closed (CLOEXEC closes child's end after exec).
+                    // If we have a seccomp notify fd, keep looping to handle
+                    // seccomp notifications -- just stop polling the dead socket.
+                    if notify_raw_fd.is_some() {
+                        debug!("Supervisor socket closed, continuing for seccomp notifications");
+                        sock_fd_active = false;
+                    } else {
+                        debug!("Supervisor socket closed by child");
+                        break;
+                    }
+                }
+                if sock_fd_active && pfds[0].revents & libc::POLLIN != 0 {
+                    match sock.recv_message() {
+                        Ok(msg) => {
+                            if let Err(e) = handle_supervisor_message(
+                                sock,
+                                msg,
+                                config,
+                                &mut denials,
+                                &mut seen_request_ids,
+                                trust_interceptor.as_mut(),
+                            ) {
+                                warn!("Error handling supervisor message: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Error receiving supervisor message: {}", e);
+                            if notify_raw_fd.is_none() {
+                                break;
+                            }
+                            sock_fd_active = false;
+                        }
+                    }
+                }
+
+                // Check seccomp notify fd (if present)
+                if pfds.len() > 1 && pfds[1].revents & libc::POLLIN != 0 {
+                    if let Some(nfd) = notify_raw_fd {
+                        if let Err(e) = supervisor_linux::handle_seccomp_notification(
+                            nfd,
+                            child,
+                            config,
+                            initial_caps,
+                            &mut rate_limiter,
+                            &mut denials,
+                            trust_interceptor.as_mut(),
+                        ) {
+                            debug!("Error handling seccomp notification: {}", e);
+                        }
+                    }
+                }
+            }
+            std::cmp::Ordering::Less => {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    warn!("poll() error in supervisor loop: {}", err);
                     break;
                 }
             }
-            if sock_fd_active && pfds[0].revents & libc::POLLIN != 0 {
-                match sock.recv_message() {
-                    Ok(msg) => {
-                        if let Err(e) = handle_supervisor_message(
-                            sock,
-                            msg,
-                            config,
-                            &mut denials,
-                            &mut seen_request_ids,
-                            trust_interceptor.as_mut(),
-                        ) {
-                            warn!("Error handling supervisor message: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        debug!("Error receiving supervisor message: {}", e);
-                        if notify_raw_fd.is_none() {
-                            break;
-                        }
-                        sock_fd_active = false;
-                    }
-                }
-            }
-
-            // Check seccomp notify fd (if present)
-            if pfds.len() > 1 && pfds[1].revents & libc::POLLIN != 0 {
-                if let Some(nfd) = notify_raw_fd {
-                    if let Err(e) = supervisor_linux::handle_seccomp_notification(
-                        nfd,
-                        child,
-                        config,
-                        initial_caps,
-                        &mut rate_limiter,
-                        &mut denials,
-                        trust_interceptor.as_mut(),
-                    ) {
-                        debug!("Error handling seccomp notification: {}", e);
-                    }
-                }
-            }
-        } else if ret < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                warn!("poll() error in supervisor loop: {}", err);
-                break;
-            }
+            std::cmp::Ordering::Equal => {}
         }
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
