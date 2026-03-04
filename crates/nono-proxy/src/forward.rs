@@ -9,6 +9,7 @@
 use crate::audit;
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
+use crate::localhost::is_loopback_host;
 use crate::token;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -56,7 +57,7 @@ pub async fn handle_forward_proxy(
         && is_loopback_host(&host)
         && !localhost_connect_ports.contains(&port)
     {
-        let reason = format!("localhost port {} is not exposed", port);
+        let reason = format!("localhost port {} is not allowed", port);
         audit::log_denied(audit::ProxyMode::Forward, &host, port, &reason);
         send_response(stream, 403, &format!("Forbidden: {}", reason)).await?;
         return Err(ProxyError::HostDenied { host, reason });
@@ -116,22 +117,55 @@ fn parse_request_line(line: &str) -> Result<(String, String, String)> {
 fn build_upstream_request(method: &str, parsed: &Url, version: &str, headers: &[u8]) -> String {
     let path = path_and_query(parsed);
     let mut out = format!("{} {} {}\r\n", method, path, version);
+    append_target_host_header(&mut out, parsed);
 
     let headers_str = String::from_utf8_lossy(headers);
-    for line in headers_str.lines() {
-        let trimmed = line.trim_end_matches('\r');
-        if trimmed.is_empty() {
+    for raw_line in headers_str.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.is_empty() {
             continue;
         }
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("proxy-authorization:") || lower.starts_with("proxy-connection:") {
+
+        // Never forward folded headers or lines containing raw CR/LF.
+        if line
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_whitespace())
+            || line.contains('\r')
+            || line.contains('\n')
+        {
             continue;
         }
-        out.push_str(trimmed);
+
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let normalized_name = name.trim().to_ascii_lowercase();
+        if normalized_name.is_empty()
+            || normalized_name == "host"
+            || normalized_name == "proxy-authorization"
+            || normalized_name == "proxy-connection"
+        {
+            continue;
+        }
+
+        out.push_str(name.trim());
+        out.push(':');
+        out.push_str(value);
         out.push_str("\r\n");
     }
     out.push_str("\r\n");
     out
+}
+
+fn append_target_host_header(out: &mut String, parsed: &Url) {
+    if let Some(host) = parsed.host_str() {
+        if let Some(port) = parsed.port() {
+            out.push_str(&format!("Host: {}:{}\r\n", host, port));
+        } else {
+            out.push_str(&format!("Host: {}\r\n", host));
+        }
+    }
 }
 
 fn path_and_query(parsed: &Url) -> String {
@@ -165,15 +199,6 @@ async fn connect_to_resolved(addrs: &[SocketAddr], host: &str) -> Result<TcpStre
         host: host.to_string(),
         reason: last_err.unwrap_or_else(|| "no addresses to connect to".to_string()),
     })
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    let normalized = host.trim_matches(['[', ']']).to_ascii_lowercase();
-    normalized == "localhost"
-        || normalized == "127.0.0.1"
-        || normalized == "::1"
-        || normalized == "0.0.0.0"
-        || normalized == "::"
 }
 
 async fn send_response(stream: &mut TcpStream, status: u16, reason: &str) -> Result<()> {
@@ -221,11 +246,30 @@ mod tests {
     }
 
     #[test]
-    fn test_is_loopback_host() {
-        assert!(is_loopback_host("localhost"));
-        assert!(is_loopback_host("127.0.0.1"));
-        assert!(is_loopback_host("::1"));
-        assert!(is_loopback_host("[::1]"));
-        assert!(!is_loopback_host("example.com"));
+    fn test_build_upstream_request_replaces_host_header() {
+        let url = Url::parse("http://localhost:8080/v1").unwrap();
+        let headers = b"Host: attacker.example\r\nAccept: text/plain\r\n";
+        let req = build_upstream_request("GET", &url, "HTTP/1.1", headers);
+        assert!(req.contains("Host: localhost:8080\r\n"));
+        assert!(!req.contains("Host: attacker.example\r\n"));
+        assert!(req.contains("Accept: text/plain\r\n"));
+    }
+
+    #[test]
+    fn test_build_upstream_request_drops_proxy_auth_with_spaced_colon() {
+        let url = Url::parse("http://localhost:8080/v1").unwrap();
+        let headers = b"Proxy-Authorization : Bearer leaked\r\nAccept: */*\r\n";
+        let req = build_upstream_request("GET", &url, "HTTP/1.1", headers);
+        assert!(!req.to_ascii_lowercase().contains("proxy-authorization"));
+        assert!(req.contains("Accept: */*\r\n"));
+    }
+
+    #[test]
+    fn test_build_upstream_request_drops_headers_with_embedded_cr() {
+        let url = Url::parse("http://localhost:8080/v1").unwrap();
+        let headers = b"X-Test: ok\rInjected: evil\r\nAccept: */*\r\n";
+        let req = build_upstream_request("GET", &url, "HTTP/1.1", headers);
+        assert!(!req.contains("X-Test: ok\rInjected: evil\r\n"));
+        assert!(req.contains("Accept: */*\r\n"));
     }
 }

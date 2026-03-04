@@ -63,11 +63,16 @@ fn validate_requested_file(
     )
 }
 
-fn localhost_relay_requested(args: &SandboxArgs) -> bool {
+const LOCALHOST_RELAY_CONFLICT_ERR: &str =
+    "--experimental-localhost-relay MVP cannot be combined with \
+             --network-profile, --proxy-allow, --proxy-credential, \
+             --external-proxy, or --proxy-port";
+
+pub(crate) fn localhost_relay_requested(args: &SandboxArgs) -> bool {
     args.experimental_localhost_relay && !args.allow_port.is_empty()
 }
 
-fn validate_localhost_relay_args(args: &SandboxArgs) -> Result<()> {
+pub(crate) fn validate_localhost_relay_args(args: &SandboxArgs) -> Result<()> {
     if args.experimental_localhost_relay && args.allow_port.is_empty() {
         return Err(NonoError::ConfigParse(
             "--experimental-localhost-relay requires at least one --allow-port".to_string(),
@@ -87,6 +92,53 @@ fn validate_localhost_relay_args(args: &SandboxArgs) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_localhost_relay_mvp_conflicts(
+    localhost_relay_active: bool,
+    network_profile: &Option<String>,
+    proxy_allow_hosts: &[String],
+    proxy_credentials: &[String],
+    external_proxy: &Option<String>,
+    proxy_port: &Option<u16>,
+) -> Result<()> {
+    if localhost_relay_active
+        && (network_profile.is_some()
+            || !proxy_allow_hosts.is_empty()
+            || !proxy_credentials.is_empty()
+            || external_proxy.is_some()
+            || proxy_port.is_some())
+    {
+        return Err(NonoError::ConfigParse(
+            LOCALHOST_RELAY_CONFLICT_ERR.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_network_mode(
+    caps: &mut CapabilitySet,
+    args: &SandboxArgs,
+    block_network: bool,
+    has_proxy_flags: bool,
+) {
+    if localhost_relay_requested(args) {
+        // Localhost relay runs through the parent proxy listener.
+        // Use ProxyOnly so the child can only reach localhost:proxy_port.
+        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
+            port: 0,
+            bind_ports: args.allow_bind.clone(),
+        });
+    } else if block_network {
+        caps.set_network_blocked(true);
+    } else if has_proxy_flags {
+        // Proxy mode: port 0 is a placeholder, updated when proxy starts.
+        // bind_ports are passed through allow_bind CLI flag.
+        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
+            port: 0,
+            bind_ports: args.allow_bind.clone(),
+        });
+    }
 }
 
 /// Extension trait for CapabilitySet to add CLI-specific construction methods.
@@ -169,24 +221,7 @@ impl CapabilitySetExt for CapabilitySet {
             }
         }
 
-        // Network mode
-        if localhost_relay_requested(args) {
-            // Localhost relay runs through the parent proxy listener.
-            // Use ProxyOnly so the child can only reach localhost:proxy_port.
-            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
-                port: 0,
-                bind_ports: args.allow_bind.clone(),
-            });
-        } else if args.net_block {
-            caps.set_network_blocked(true);
-        } else if args.has_proxy_flags() {
-            // Proxy mode: port 0 is a placeholder, updated when proxy starts.
-            // bind_ports are passed through allow_bind CLI flag.
-            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
-                port: 0,
-                bind_ports: args.allow_bind.clone(),
-            });
-        }
+        apply_network_mode(&mut caps, args, args.net_block, args.has_proxy_flags());
 
         // Command allow/block lists
         for cmd in &args.allow_command {
@@ -305,22 +340,12 @@ impl CapabilitySetExt for CapabilitySet {
             }
         }
 
-        // Network mode from profile (CLI localhost-relay has highest priority).
-        if localhost_relay_requested(args) {
-            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
-                port: 0,
-                bind_ports: args.allow_bind.clone(),
-            });
-        } else if profile.network.block {
-            caps.set_network_blocked(true);
-        } else if profile.network.has_proxy_flags() {
-            // Profile requests proxy mode; port 0 is a placeholder.
-            // bind_ports come from CLI args (--allow-bind).
-            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
-                port: 0,
-                bind_ports: args.allow_bind.clone(),
-            });
-        }
+        apply_network_mode(
+            &mut caps,
+            args,
+            profile.network.block,
+            profile.network.has_proxy_flags(),
+        );
 
         // Apply allowed commands from profile
         for cmd in &profile.security.allowed_commands {
@@ -401,22 +426,8 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
         }
     }
 
-    // CLI network mode overrides profile
-    if localhost_relay_requested(args) {
-        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
-            port: 0,
-            bind_ports: args.allow_bind.clone(),
-        });
-    } else if args.net_block {
-        caps.set_network_blocked(true);
-    } else if args.has_proxy_flags() {
-        // CLI proxy flags override profile network settings.
-        // bind_ports come from --allow-bind CLI flag.
-        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
-            port: 0,
-            bind_ports: args.allow_bind.clone(),
-        });
-    }
+    // CLI network mode overrides profile.
+    apply_network_mode(caps, args, args.net_block, args.has_proxy_flags());
 
     // Command allow/block from CLI
     for cmd in &args.allow_command {

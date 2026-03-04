@@ -28,7 +28,10 @@ mod trust_intercept;
 mod trust_scan;
 mod update_check;
 
-use capability_ext::CapabilitySetExt;
+use capability_ext::{
+    localhost_relay_requested, validate_localhost_relay_args,
+    validate_localhost_relay_mvp_conflicts, CapabilitySetExt,
+};
 use clap::Parser;
 use cli::{Cli, Commands, LearnArgs, RunArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
 use colored::Colorize;
@@ -317,36 +320,16 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let program = OsString::from(command_iter.next().ok_or(NonoError::NoCommand)?);
     let cmd_args: Vec<OsString> = command_iter.map(OsString::from).collect();
 
-    let localhost_relay_active = args.experimental_localhost_relay && !args.allow_port.is_empty();
-    if args.experimental_localhost_relay && args.allow_port.is_empty() {
-        return Err(NonoError::ConfigParse(
-            "--experimental-localhost-relay requires at least one --allow-port".to_string(),
-        ));
-    }
-    if !args.allow_port.is_empty() && !args.experimental_localhost_relay {
-        return Err(NonoError::ConfigParse(
-            "--allow-port is experimental and requires --experimental-localhost-relay".to_string(),
-        ));
-    }
-    if localhost_relay_active && !args.net_block {
-        return Err(NonoError::ConfigParse(
-            "--experimental-localhost-relay currently requires --net-block".to_string(),
-        ));
-    }
-    if localhost_relay_active
-        && (args.network_profile.is_some()
-            || !args.proxy_allow.is_empty()
-            || !args.proxy_credential.is_empty()
-            || args.external_proxy.is_some()
-            || args.proxy_port.is_some())
-    {
-        return Err(NonoError::ConfigParse(
-            "--experimental-localhost-relay MVP cannot be combined with \
-             --network-profile, --proxy-allow, --proxy-credential, \
-             --external-proxy, or --proxy-port"
-                .to_string(),
-        ));
-    }
+    let localhost_relay_active = localhost_relay_requested(&args);
+    validate_localhost_relay_args(&args)?;
+    validate_localhost_relay_mvp_conflicts(
+        localhost_relay_active,
+        &args.network_profile,
+        &args.proxy_allow,
+        &args.proxy_credential,
+        &args.external_proxy,
+        &args.proxy_port,
+    )?;
 
     // Dry run mode - just show what would happen
     if args.dry_run {
@@ -463,20 +446,14 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 
     // MVP scope: localhost relay is intentionally narrow to keep behavior explicit.
     // Do not mix with host allowlists or credential routes yet.
-    if localhost_relay_active
-        && (network_profile.is_some()
-            || !proxy_allow_hosts.is_empty()
-            || !proxy_credentials.is_empty()
-            || args.external_proxy.is_some()
-            || args.proxy_port.is_some())
-    {
-        return Err(NonoError::ConfigParse(
-            "--experimental-localhost-relay MVP cannot be combined with \
-             --network-profile, --proxy-allow, --proxy-credential, \
-             --external-proxy, or --proxy-port"
-                .to_string(),
-        ));
-    }
+    validate_localhost_relay_mvp_conflicts(
+        localhost_relay_active,
+        &network_profile,
+        &proxy_allow_hosts,
+        &proxy_credentials,
+        &args.external_proxy,
+        &args.proxy_port,
+    )?;
 
     // The proxy is needed when the network mode is ProxyOnly OR when there are
     // credential routes to inject. However, --net-block takes precedence: if
@@ -757,15 +734,7 @@ fn build_proxy_config_from_flags(
     let localhost_relay_active =
         flags.experimental_localhost_relay && !flags.allowed_local_ports.is_empty();
     if localhost_relay_active {
-        for host in [
-            "localhost",
-            "127.0.0.1",
-            "::1",
-            "[::1]",
-            "0.0.0.0",
-            "::",
-            "[::]",
-        ] {
+        for host in ["localhost", "127.0.0.1", "::1", "[::1]"] {
             if !expanded_proxy_allow.iter().any(|h| h == host) {
                 expanded_proxy_allow.push(host.to_string());
             }

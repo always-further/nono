@@ -25,6 +25,7 @@ pub mod error;
 pub mod external;
 pub mod filter;
 pub mod forward;
+mod localhost;
 pub mod reverse;
 pub mod server;
 pub mod token;
