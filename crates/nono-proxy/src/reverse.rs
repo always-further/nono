@@ -48,6 +48,8 @@ pub struct ReverseProxyCtx<'a> {
     pub filter: &'a ProxyFilter,
     /// Shared TLS connector
     pub tls_connector: &'a TlsConnector,
+    /// Shared network audit sink for session metadata capture
+    pub audit_log: Option<&'a audit::SharedAuditLog>,
 }
 
 /// Handle a non-CONNECT HTTP request (reverse proxy mode).
@@ -98,7 +100,13 @@ pub async fn handle_reverse_proxy(
         cred.query_param_name.as_deref(),
         ctx.session_token,
     ) {
-        audit::log_denied(audit::ProxyMode::Reverse, &service, 0, &e.to_string());
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            &service,
+            0,
+            &e.to_string(),
+        );
         send_error(stream, 401, "Unauthorized").await?;
         return Ok(());
     }
@@ -129,7 +137,13 @@ pub async fn handle_reverse_proxy(
         let reason = check.result.reason();
         warn!("Upstream host denied by filter: {}", reason);
         send_error(stream, 403, "Forbidden").await?;
-        audit::log_denied(audit::ProxyMode::Reverse, &service, 0, &reason);
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            &service,
+            0,
+            &reason,
+        );
         return Ok(());
     }
 
@@ -172,7 +186,13 @@ pub async fn handle_reverse_proxy(
         Err(e) => {
             warn!("Upstream connection failed: {}", e);
             send_error(stream, 502, "Bad Gateway").await?;
-            audit::log_denied(audit::ProxyMode::Reverse, &service, 0, &e.to_string());
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &service,
+                0,
+                &e.to_string(),
+            );
             return Ok(());
         }
     };
@@ -241,7 +261,13 @@ pub async fn handle_reverse_proxy(
         stream.flush().await?;
     }
 
-    audit::log_reverse_proxy(&service, &method, &upstream_path, status_code);
+    audit::log_reverse_proxy(
+        ctx.audit_log,
+        &service,
+        &method,
+        &upstream_path,
+        status_code,
+    );
     Ok(())
 }
 

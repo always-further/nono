@@ -29,6 +29,7 @@ pub async fn handle_external_proxy(
     filter: &ProxyFilter,
     session_token: &Zeroizing<String>,
     external_config: &ExternalProxyConfig,
+    audit_log: Option<&audit::SharedAuditLog>,
 ) -> Result<()> {
     // Parse CONNECT target
     let (host, port) = parse_connect_target(first_line)?;
@@ -42,7 +43,7 @@ pub async fn handle_external_proxy(
     let check = filter.check_host(&host, port).await?;
     if !check.result.is_allowed() {
         let reason = check.result.reason();
-        audit::log_denied(audit::ProxyMode::External, &host, port, &reason);
+        audit::log_denied(audit_log, audit::ProxyMode::External, &host, port, &reason);
         send_response(stream, 403, &format!("Forbidden: {}", reason)).await?;
         return Err(ProxyError::HostDenied { host, reason });
     }
@@ -100,6 +101,7 @@ pub async fn handle_external_proxy(
     let status = parse_status_code(&response_line)?;
     if status != 200 {
         audit::log_denied(
+            audit_log,
             audit::ProxyMode::External,
             &host,
             port,
@@ -133,7 +135,13 @@ pub async fn handle_external_proxy(
 
     // Send 200 to agent
     send_response(stream, 200, "Connection Established").await?;
-    audit::log_allowed(audit::ProxyMode::External, &host, port, "CONNECT");
+    audit::log_allowed(
+        audit_log,
+        audit::ProxyMode::External,
+        &host,
+        port,
+        "CONNECT",
+    );
 
     // Bidirectional tunnel: agent <-> enterprise proxy <-> upstream
     let result = tokio::io::copy_bidirectional(stream, proxy_stream).await;

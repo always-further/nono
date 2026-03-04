@@ -1037,6 +1037,7 @@ mod tests {
             snapshot_count: 2,
             exit_code: Some(0),
             merkle_roots: vec![baseline.merkle_root],
+            network_events: vec![],
         };
 
         manager.save_session_metadata(&meta).expect("save metadata");
@@ -1091,12 +1092,42 @@ mod tests {
             snapshot_count: 1,
             exit_code: None,
             merkle_roots: vec![baseline.merkle_root],
+            network_events: vec![],
         };
         manager.save_session_metadata(&meta).expect("save");
 
         // Load without a SnapshotManager
         let loaded = SnapshotManager::load_session_metadata(&session_dir).expect("load");
         assert_eq!(loaded.session_id, "static-load-test");
+    }
+
+    #[test]
+    fn load_session_metadata_defaults_network_events_for_legacy_json() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let mut manager = make_manager(&session_dir, &tracked);
+        let baseline = manager.create_baseline().expect("baseline");
+
+        let legacy = serde_json::json!({
+            "session_id": "legacy-session",
+            "started": "2025-01-01T00:00:00Z",
+            "ended": null,
+            "command": ["test"],
+            "tracked_paths": [tracked],
+            "snapshot_count": 1,
+            "exit_code": 0,
+            "merkle_roots": [baseline.merkle_root.to_string()],
+        });
+        fs::write(
+            session_dir.join("session.json"),
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy metadata"),
+        )
+        .expect("write session metadata");
+
+        let loaded = SnapshotManager::load_session_metadata(&session_dir).expect("load");
+        assert!(loaded.network_events.is_empty());
     }
 
     #[test]

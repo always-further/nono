@@ -775,7 +775,7 @@ fn execute_sandboxed(
     // ephemeral port on localhost. The child is sandboxed to only connect to
     // that port via ProxyOnly mode.
     let mut proxy_env_vars: Vec<(String, String)> = Vec::new();
-    let _proxy_handle: Option<nono_proxy::server::ProxyHandle> = if flags.proxy_active {
+    let proxy_handle: Option<nono_proxy::server::ProxyHandle> = if flags.proxy_active {
         let proxy_config = build_proxy_config_from_flags(&flags)?;
 
         // Use multi-thread runtime so the accept loop and connection handlers
@@ -1156,6 +1156,10 @@ fn execute_sandboxed(
                 let merkle_roots = vec![baseline.merkle_root, final_manifest.merkle_root];
 
                 // Save session metadata
+                let network_events = proxy_handle.as_ref().map_or_else(
+                    Vec::new,
+                    nono_proxy::server::ProxyHandle::drain_audit_events,
+                );
                 let meta = nono::undo::SessionMetadata {
                     session_id,
                     started,
@@ -1165,6 +1169,7 @@ fn execute_sandboxed(
                     snapshot_count: manager.snapshot_count(),
                     exit_code: Some(exit_code),
                     merkle_roots,
+                    network_events,
                 };
                 manager.save_session_metadata(&meta)?;
 

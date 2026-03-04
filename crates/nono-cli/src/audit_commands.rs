@@ -174,6 +174,7 @@ fn print_list_json(sessions: &[SessionInfo]) -> Result<()> {
                 "tracked_paths": s.metadata.tracked_paths,
                 "snapshot_count": s.metadata.snapshot_count,
                 "exit_code": s.metadata.exit_code,
+                "network_event_count": s.metadata.network_events.len(),
                 "disk_size": s.disk_size,
                 "is_alive": s.is_alive,
                 "is_stale": s.is_stale,
@@ -257,6 +258,51 @@ fn cmd_show(args: AuditShowArgs) -> Result<()> {
         }
     }
 
+    if !session.metadata.network_events.is_empty() {
+        eprintln!();
+        eprintln!(
+            "  Network Events: {}",
+            session.metadata.network_events.len()
+        );
+        for event in &session.metadata.network_events {
+            let decision = match event.decision {
+                nono::undo::NetworkAuditDecision::Allow => "allow".green(),
+                nono::undo::NetworkAuditDecision::Deny => "deny".red(),
+            };
+            let mode = network_mode_label(&event.mode);
+            let mut target = event.target.clone();
+            if let Some(port) = event.port {
+                target = format!("{target}:{port}");
+            }
+
+            let mut details = Vec::new();
+            if let Some(ref method) = event.method {
+                details.push(format!("method={method}"));
+            }
+            if let Some(ref path) = event.path {
+                details.push(format!("path={path}"));
+            }
+            if let Some(status) = event.status {
+                details.push(format!("status={status}"));
+            }
+            if let Some(ref reason) = event.reason {
+                details.push(format!("reason={reason}"));
+            }
+
+            if details.is_empty() {
+                eprintln!("    {} {} {}", decision, mode, target);
+            } else {
+                eprintln!(
+                    "    {} {} {} ({})",
+                    decision,
+                    mode,
+                    target,
+                    details.join(", ")
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -292,6 +338,7 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
         "tracked_paths": session.metadata.tracked_paths,
         "exit_code": session.metadata.exit_code,
         "merkle_roots": session.metadata.merkle_roots.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+        "network_events": &session.metadata.network_events,
         "snapshots": snapshots,
     });
 
@@ -355,5 +402,13 @@ fn change_symbol(ct: &nono::undo::ChangeType) -> colored::ColoredString {
         nono::undo::ChangeType::Modified => "~".yellow(),
         nono::undo::ChangeType::Deleted => "-".red(),
         nono::undo::ChangeType::PermissionsChanged => "p".truecolor(150, 150, 150),
+    }
+}
+
+fn network_mode_label(mode: &nono::undo::NetworkAuditMode) -> &'static str {
+    match mode {
+        nono::undo::NetworkAuditMode::Connect => "connect",
+        nono::undo::NetworkAuditMode::Reverse => "reverse",
+        nono::undo::NetworkAuditMode::External => "external",
     }
 }

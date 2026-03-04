@@ -1301,6 +1301,7 @@ mod tests {
             snapshot_count: 2,
             exit_code: None,
             merkle_roots: vec![],
+            network_events: vec![],
         };
 
         let session = SessionInfo {
@@ -1331,6 +1332,7 @@ mod tests {
             snapshot_count: 2,
             exit_code: None,
             merkle_roots: vec![],
+            network_events: vec![],
         };
         let meta2 = SessionMetadata {
             session_id: "20260219-110000-67890".to_string(),
@@ -1341,6 +1343,7 @@ mod tests {
             snapshot_count: 2,
             exit_code: None,
             merkle_roots: vec![],
+            network_events: vec![],
         };
 
         let s1 = SessionInfo {

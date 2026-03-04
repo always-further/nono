@@ -169,6 +169,51 @@ pub struct Change {
     pub new_hash: Option<ContentHash>,
 }
 
+/// Proxy mode used for network audit events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkAuditMode {
+    /// CONNECT tunnel request
+    Connect,
+    /// Reverse proxy request
+    Reverse,
+    /// External proxy passthrough request
+    External,
+}
+
+/// Decision outcome for a network audit event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkAuditDecision {
+    /// Request was allowed
+    Allow,
+    /// Request was denied
+    Deny,
+}
+
+/// A single network audit event captured by the proxy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkAuditEvent {
+    /// Event timestamp in Unix milliseconds
+    pub timestamp_unix_ms: u64,
+    /// Proxy mode handling the request
+    pub mode: NetworkAuditMode,
+    /// Allow or deny decision
+    pub decision: NetworkAuditDecision,
+    /// Hostname or logical service target (for reverse proxy events)
+    pub target: String,
+    /// Port when available (CONNECT/external), otherwise None
+    pub port: Option<u16>,
+    /// HTTP method when available
+    pub method: Option<String>,
+    /// Request path for reverse proxy events
+    pub path: Option<String>,
+    /// Upstream response status for reverse proxy events
+    pub status: Option<u16>,
+    /// Denial reason, if denied
+    pub reason: Option<String>,
+}
+
 /// Metadata for an undo session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMetadata {
@@ -188,6 +233,9 @@ pub struct SessionMetadata {
     pub exit_code: Option<i32>,
     /// Merkle roots from each snapshot (chain of state commitments)
     pub merkle_roots: Vec<ContentHash>,
+    /// Network events captured by the proxy during this session
+    #[serde(default)]
+    pub network_events: Vec<NetworkAuditEvent>,
 }
 
 /// A snapshot manifest capturing filesystem state at a point in time
