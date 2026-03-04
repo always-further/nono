@@ -190,8 +190,6 @@ impl SetupRunner {
 
     #[cfg(target_os = "linux")]
     fn test_linux_landlock(&self) -> Result<()> {
-        use landlock::*;
-
         // Get kernel version
         let kernel_version = std::fs::read_to_string("/proc/version").ok().and_then(|s| {
             s.split_whitespace()
@@ -220,51 +218,29 @@ impl SetupRunner {
 
         println!("  * Landlock enabled in LSM list");
 
-        // We target the highest ABI and report its features
-        // The actual sandbox will use Compatible trait to handle older kernels
-        let abi = ABI::V5;
+        let abi = probe_landlock_abi()?;
 
         println!("  * Landlock ABI: {:?}", abi);
         println!("  * Available features:");
 
-        match abi {
-            ABI::V1 => {
-                println!("      - Basic filesystem access control");
-            }
-            ABI::V2 => {
-                println!("      - Basic filesystem access control");
-                println!("      - File rename across directories");
-            }
-            ABI::V3 => {
-                println!("      - Basic filesystem access control");
-                println!("      - File rename across directories");
-                println!("      - File truncation");
-            }
-            ABI::V4 => {
-                println!("      - Basic filesystem access control");
-                println!("      - File rename across directories");
-                println!("      - File truncation");
-                println!("      - TCP network filtering");
-            }
-            ABI::V5 => {
-                println!("      - Basic filesystem access control");
-                println!("      - File rename across directories");
-                println!("      - File truncation");
-                println!("      - TCP network filtering");
-                println!("      - Advanced socket and signal scoping");
-            }
-            _ => {}
+        for feature in landlock_feature_lines(abi) {
+            println!("      - {}", feature);
         }
 
-        // Try creating a test ruleset
-        let handled = AccessFs::from_all(abi);
-        let rs = Ruleset::default()
-            .handle_access(handled)
-            .map_err(|e| NonoError::Setup(format!("Failed to create Landlock ruleset: {}", e)))?;
-        rs.create()
-            .map_err(|e| NonoError::Setup(format!("Failed to create Landlock ruleset: {}", e)))?;
+        // Verify full ruleset creation for the detected ABI with hard requirements.
+        probe_landlock_abi_candidate(abi).map_err(|e| {
+            NonoError::Setup(format!(
+                "Failed to create Landlock ruleset for detected ABI {:?}: {}",
+                abi, e
+            ))
+        })?;
+        println!("  * Filesystem ruleset creation verified");
 
-        println!("  * Ruleset creation verified");
+        if verify_landlock_network_rule_support(abi)? {
+            println!("  * TCP network rule support verified");
+        } else {
+            println!("  * TCP network filtering: not supported by this ABI");
+        }
 
         Ok(())
     }
@@ -449,6 +425,146 @@ impl SetupRunner {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn landlock_abi_probe_order() -> [landlock::ABI; 6] {
+    [
+        landlock::ABI::V6,
+        landlock::ABI::V5,
+        landlock::ABI::V4,
+        landlock::ABI::V3,
+        landlock::ABI::V2,
+        landlock::ABI::V1,
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn select_highest_supported_landlock_abi<F>(mut is_supported: F) -> Option<landlock::ABI>
+where
+    F: FnMut(landlock::ABI) -> bool,
+{
+    for abi in landlock_abi_probe_order() {
+        if is_supported(abi) {
+            return Some(abi);
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn probe_landlock_abi() -> Result<landlock::ABI> {
+    let mut last_error = None;
+    let detected =
+        select_highest_supported_landlock_abi(|abi| match probe_landlock_abi_candidate(abi) {
+            Ok(()) => true,
+            Err(err) => {
+                last_error = Some(format!("ABI {:?}: {}", abi, err));
+                false
+            }
+        });
+
+    detected.ok_or_else(|| {
+        NonoError::Setup(format!(
+            "Failed to probe Landlock ABI with hard requirements{}",
+            last_error
+                .as_ref()
+                .map(|e| format!(" ({})", e))
+                .unwrap_or_default()
+        ))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn probe_landlock_abi_candidate(abi: landlock::ABI) -> std::result::Result<(), String> {
+    use landlock::{
+        Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, Scope,
+    };
+
+    let mut ruleset = Ruleset::default().set_compatibility(CompatLevel::HardRequirement);
+
+    ruleset = ruleset
+        .handle_access(AccessFs::from_all(abi))
+        .map_err(|e| format!("filesystem access probe failed: {}", e))?;
+
+    let handled_net = AccessNet::from_all(abi);
+    if !handled_net.is_empty() {
+        ruleset = ruleset
+            .handle_access(handled_net)
+            .map_err(|e| format!("network access probe failed: {}", e))?;
+    }
+
+    let scopes = Scope::from_all(abi);
+    if !scopes.is_empty() {
+        ruleset = ruleset
+            .scope(scopes)
+            .map_err(|e| format!("scope probe failed: {}", e))?;
+    }
+
+    ruleset
+        .create()
+        .map_err(|e| format!("ruleset creation probe failed: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_landlock_network_rule_support(abi: landlock::ABI) -> Result<bool> {
+    use landlock::{
+        Access, AccessNet, CompatLevel, Compatible, NetPort, Ruleset, RulesetAttr,
+        RulesetCreatedAttr,
+    };
+
+    let handled_net = AccessNet::from_all(abi);
+    if handled_net.is_empty() {
+        return Ok(false);
+    }
+
+    let ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(handled_net)
+        .map_err(|e| NonoError::Setup(format!("Failed to probe Landlock network access: {}", e)))?
+        .create()
+        .map_err(|e| NonoError::Setup(format!("Failed to create network probe ruleset: {}", e)))?;
+
+    let ruleset = ruleset
+        .set_compatibility(CompatLevel::HardRequirement)
+        .add_rule(NetPort::new(443, AccessNet::ConnectTcp))
+        .map_err(|e| NonoError::Setup(format!("Failed to add TCP connect probe rule: {}", e)))?;
+
+    ruleset
+        .set_compatibility(CompatLevel::HardRequirement)
+        .add_rule(NetPort::new(444, AccessNet::BindTcp))
+        .map_err(|e| NonoError::Setup(format!("Failed to add TCP bind probe rule: {}", e)))?;
+
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn landlock_feature_lines(abi: landlock::ABI) -> Vec<&'static str> {
+    use landlock::{Access, AccessFs, AccessNet, Scope};
+
+    let mut features = vec!["Basic filesystem access control"];
+    let fs_access = AccessFs::from_all(abi);
+
+    if fs_access.contains(AccessFs::Refer) {
+        features.push("File rename across directories");
+    }
+    if fs_access.contains(AccessFs::Truncate) {
+        features.push("File truncation");
+    }
+    if fs_access.contains(AccessFs::IoctlDev) {
+        features.push("Device ioctl filtering");
+    }
+    if !AccessNet::from_all(abi).is_empty() {
+        features.push("TCP network filtering");
+    }
+    if !Scope::from_all(abi).is_empty() {
+        features.push("Process scoping (signals and abstract UNIX sockets)");
+    }
+
+    features
+}
+
 // Profile templates
 const EXAMPLE_AGENT_PROFILE: &str = r#"{
   "meta": {
@@ -548,5 +664,29 @@ mod tests {
         if let Some(xdg) = original_xdg {
             env::set_var("XDG_CONFIG_HOME", xdg);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_select_highest_supported_landlock_abi_prefers_highest() {
+        let detected = select_highest_supported_landlock_abi(|abi| {
+            matches!(abi, landlock::ABI::V1 | landlock::ABI::V4)
+        });
+
+        assert_eq!(detected, Some(landlock::ABI::V4));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_select_highest_supported_landlock_abi_none() {
+        let detected = select_highest_supported_landlock_abi(|_| false);
+        assert_eq!(detected, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_landlock_feature_lines_include_tcp_for_v4_plus() {
+        let features = landlock_feature_lines(landlock::ABI::V4);
+        assert!(features.contains(&"TCP network filtering"));
     }
 }
