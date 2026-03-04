@@ -123,7 +123,7 @@ fn install_claude_code_hook(config: &HookConfig) -> Result<HookInstallResult> {
     }
 
     // Update settings.json to register the hook
-    let settings_modified = update_claude_settings(&settings_path, config, &script_path)?;
+    let settings_modified = update_claude_settings(&settings_path, config)?;
 
     // Update CLAUDE.md with nono sandbox instructions
     let claude_md_path = home.join(".claude").join("CLAUDE.md");
@@ -146,11 +146,7 @@ fn install_claude_code_hook(config: &HookConfig) -> Result<HookInstallResult> {
 
 /// Update Claude Code settings.json to register the hook
 /// Returns true if settings were modified, false if hook was already registered
-fn update_claude_settings(
-    settings_path: &PathBuf,
-    config: &HookConfig,
-    _script_path: &PathBuf,
-) -> Result<bool> {
+fn update_claude_settings(settings_path: &PathBuf, config: &HookConfig) -> Result<bool> {
     // Load existing settings or create new
     let mut settings: Value = if settings_path.exists() {
         let content = fs::read_to_string(settings_path).map_err(|e| {
