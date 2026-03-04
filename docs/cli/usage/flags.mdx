@@ -318,6 +318,44 @@ On Linux with Landlock ABI v4+, per-port filtering is enforced and only the spec
 `--allow-bind` only has effect in proxy mode (when `--network-profile` or `--proxy-allow` is active). Without proxy mode, network operations use the default OS-level allow/deny and bind is not restricted.
 </Note>
 
+#### `--allow-port`
+
+Allow outbound localhost connections to specific destination ports through the parent relay. Repeatable.
+
+```bash
+# Allow sandbox to connect to localhost:11435 only
+nono run --allow-cwd --net-block \
+  --experimental-localhost-relay --allow-port 11435 \
+  -- curl http://localhost:11435/
+
+# Allow multiple localhost destination ports
+nono run --allow-cwd --net-block \
+  --experimental-localhost-relay --allow-port 11435 --allow-port 11439 \
+  -- my-agent
+```
+
+<Note>
+`--allow-port` is currently experimental and requires `--experimental-localhost-relay`.
+</Note>
+
+#### `--experimental-localhost-relay`
+
+Enable experimental localhost relay mode for `nono run`. Localhost traffic is routed through the parent proxy, and only ports granted with `--allow-port` are reachable.
+
+```bash
+nono run --allow-cwd --net-block \
+  --experimental-localhost-relay --allow-port 11439 \
+  -- curl http://localhost:11439/
+```
+
+<Note>
+Current MVP constraints:
+- Requires `--net-block`.
+- Requires at least one `--allow-port`.
+- Supported only with `nono run` (not `nono shell`).
+- Cannot be combined with `--network-profile`, `--proxy-allow`, `--proxy-credential`, `--external-proxy`, or `--proxy-port`.
+</Note>
+
 ## `nono shell` Options
 
 `nono shell` supports the same permission, profile, secrets, and dry-run flags as `nono run`, plus:
