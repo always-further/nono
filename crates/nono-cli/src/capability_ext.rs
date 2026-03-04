@@ -64,21 +64,21 @@ fn validate_requested_file(
 }
 
 fn localhost_relay_requested(args: &SandboxArgs) -> bool {
-    args.experimental_localhost_relay && !args.expose_port.is_empty()
+    args.experimental_localhost_relay && !args.allow_port.is_empty()
 }
 
 fn validate_localhost_relay_args(args: &SandboxArgs) -> Result<()> {
-    if args.experimental_localhost_relay && args.expose_port.is_empty() {
+    if args.experimental_localhost_relay && args.allow_port.is_empty() {
         return Err(NonoError::ConfigParse(
-            "--experimental-localhost-relay requires at least one --expose-port".to_string(),
+            "--experimental-localhost-relay requires at least one --allow-port".to_string(),
         ));
     }
-    if args.expose_port.is_empty() {
+    if args.allow_port.is_empty() {
         return Ok(());
     }
     if !args.experimental_localhost_relay {
         return Err(NonoError::ConfigParse(
-            "--expose-port is experimental and requires --experimental-localhost-relay".to_string(),
+            "--allow-port is experimental and requires --experimental-localhost-relay".to_string(),
         ));
     }
     if !args.net_block {
@@ -461,7 +461,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -495,7 +495,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_args_expose_port_requires_experimental_flag() {
+    fn test_from_args_allow_port_requires_experimental_flag() {
         let args = SandboxArgs {
             allow: vec![],
             read: vec![],
@@ -528,7 +528,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![11434],
+            allow_port: vec![11434],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -537,7 +537,7 @@ mod tests {
             CapabilitySet::from_args(&args).expect_err("must reject missing experimental flag");
         assert!(
             err.to_string()
-                .contains("--expose-port is experimental and requires"),
+                .contains("--allow-port is experimental and requires"),
             "unexpected error: {err}"
         );
     }
@@ -566,7 +566,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![11434],
+            allow_port: vec![11434],
             experimental_localhost_relay: true,
             proxy_port: None,
         };
@@ -602,7 +602,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -639,7 +639,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -690,7 +690,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -735,7 +735,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -825,7 +825,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -893,7 +893,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };

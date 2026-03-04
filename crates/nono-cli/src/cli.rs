@@ -258,13 +258,13 @@ pub struct SandboxArgs {
     /// Allow outbound connectivity to localhost on specific ports via parent relay.
     /// Repeatable. Requires `--experimental-localhost-relay`.
     #[arg(long, value_name = "PORT")]
-    pub expose_port: Vec<u16>,
+    pub allow_port: Vec<u16>,
 
     /// EXPERIMENTAL: route localhost traffic through the parent proxy so
     /// sandbox-to-sandbox localhost services can be reached in restricted mode.
     ///
     /// MVP constraints:
-    /// - Requires `--net-block` and at least one `--expose-port`.
+    /// - Requires `--net-block` and at least one `--allow-port`.
     /// - Intended for `nono run` (not `nono shell`).
     /// - Localhost requests rely on proxy env var behavior.
     #[arg(long, hide = true)]
@@ -335,7 +335,7 @@ impl SandboxArgs {
         self.network_profile.is_some()
             || !self.proxy_allow.is_empty()
             || !self.proxy_credential.is_empty()
-            || (self.experimental_localhost_relay && !self.expose_port.is_empty())
+            || (self.experimental_localhost_relay && !self.allow_port.is_empty())
     }
 }
 
@@ -901,7 +901,7 @@ mod tests {
             ".",
             "--net-block",
             "--experimental-localhost-relay",
-            "--expose-port",
+            "--allow-port",
             "11434",
             "--",
             "echo",
@@ -911,7 +911,7 @@ mod tests {
             Commands::Run(args) => {
                 assert!(args.sandbox.net_block);
                 assert!(args.sandbox.experimental_localhost_relay);
-                assert_eq!(args.sandbox.expose_port, vec![11434]);
+                assert_eq!(args.sandbox.allow_port, vec![11434]);
             }
             _ => panic!("Expected Run command"),
         }

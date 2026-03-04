@@ -222,7 +222,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -256,7 +256,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
-            expose_port: vec![],
+            allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
         };
@@ -317,15 +317,15 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let program = OsString::from(command_iter.next().ok_or(NonoError::NoCommand)?);
     let cmd_args: Vec<OsString> = command_iter.map(OsString::from).collect();
 
-    let localhost_relay_active = args.experimental_localhost_relay && !args.expose_port.is_empty();
-    if args.experimental_localhost_relay && args.expose_port.is_empty() {
+    let localhost_relay_active = args.experimental_localhost_relay && !args.allow_port.is_empty();
+    if args.experimental_localhost_relay && args.allow_port.is_empty() {
         return Err(NonoError::ConfigParse(
-            "--experimental-localhost-relay requires at least one --expose-port".to_string(),
+            "--experimental-localhost-relay requires at least one --allow-port".to_string(),
         ));
     }
-    if !args.expose_port.is_empty() && !args.experimental_localhost_relay {
+    if !args.allow_port.is_empty() && !args.experimental_localhost_relay {
         return Err(NonoError::ConfigParse(
-            "--expose-port is experimental and requires --experimental-localhost-relay".to_string(),
+            "--allow-port is experimental and requires --experimental-localhost-relay".to_string(),
         ));
     }
     if localhost_relay_active && !args.net_block {
@@ -547,7 +547,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             custom_credentials: prepared.custom_credentials,
             external_proxy: args.external_proxy.clone(),
             allow_bind_ports: args.allow_bind,
-            exposed_local_ports: args.expose_port,
+            allowed_local_ports: args.allow_port,
             experimental_localhost_relay: args.experimental_localhost_relay,
             proxy_port: args.proxy_port,
         },
@@ -556,7 +556,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 
 /// Run an interactive shell inside the sandbox
 fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
-    if args.sandbox.experimental_localhost_relay || !args.sandbox.expose_port.is_empty() {
+    if args.sandbox.experimental_localhost_relay || !args.sandbox.allow_port.is_empty() {
         return Err(NonoError::ConfigParse(
             "--experimental-localhost-relay is currently supported only for `nono run`".to_string(),
         ));
@@ -625,7 +625,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
             allow_bind_ports: Vec::new(),
-            exposed_local_ports: Vec::new(),
+            allowed_local_ports: Vec::new(),
             experimental_localhost_relay: false,
             proxy_port: None,
         },
@@ -672,7 +672,7 @@ struct ExecutionFlags {
     /// Ports the sandboxed process is allowed to bind (from --allow-bind)
     allow_bind_ports: Vec<u16>,
     /// Localhost destination ports exposed via experimental relay mode.
-    exposed_local_ports: Vec<u16>,
+    allowed_local_ports: Vec<u16>,
     /// Enables experimental localhost relay behavior.
     experimental_localhost_relay: bool,
     /// Fixed port for the credential proxy (from --proxy-port)
@@ -755,7 +755,7 @@ fn build_proxy_config_from_flags(
         network_policy::expand_proxy_allow(&net_policy, &flags.proxy_allow_hosts);
 
     let localhost_relay_active =
-        flags.experimental_localhost_relay && !flags.exposed_local_ports.is_empty();
+        flags.experimental_localhost_relay && !flags.allowed_local_ports.is_empty();
     if localhost_relay_active {
         for host in [
             "localhost",
@@ -776,7 +776,7 @@ fn build_proxy_config_from_flags(
     let mut proxy_config = network_policy::build_proxy_config(&resolved, &expanded_proxy_allow);
 
     if localhost_relay_active {
-        let mut ports = flags.exposed_local_ports.clone();
+        let mut ports = flags.allowed_local_ports.clone();
         ports.sort_unstable();
         ports.dedup();
         proxy_config.localhost_connect_ports = ports;
@@ -898,10 +898,10 @@ fn execute_sandboxed(
                 port, flags.allow_bind_ports
             );
         }
-        if flags.experimental_localhost_relay && !flags.exposed_local_ports.is_empty() {
+        if flags.experimental_localhost_relay && !flags.allowed_local_ports.is_empty() {
             info!(
                 "Experimental localhost relay active for ports: {:?}",
-                flags.exposed_local_ports
+                flags.allowed_local_ports
             );
         }
         caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
@@ -922,7 +922,7 @@ fn execute_sandboxed(
 
         // Localhost relay needs localhost destinations to go through the proxy.
         // Standard NO_PROXY defaults bypass localhost, so override when enabled.
-        if flags.experimental_localhost_relay && !flags.exposed_local_ports.is_empty() {
+        if flags.experimental_localhost_relay && !flags.allowed_local_ports.is_empty() {
             for (k, v) in &mut proxy_env_vars {
                 if k == "NO_PROXY" || k == "no_proxy" {
                     *v = String::new();
@@ -1786,7 +1786,7 @@ mod tests {
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
             allow_bind_ports: Vec::new(),
-            exposed_local_ports: Vec::new(),
+            allowed_local_ports: Vec::new(),
             experimental_localhost_relay: false,
             proxy_port: None,
         }
@@ -1796,7 +1796,7 @@ mod tests {
     fn test_build_proxy_config_localhost_relay_adds_loopback_hosts_and_ports() {
         let mut flags = test_execution_flags();
         flags.experimental_localhost_relay = true;
-        flags.exposed_local_ports = vec![11434, 11435, 11434];
+        flags.allowed_local_ports = vec![11434, 11435, 11434];
 
         let cfg = build_proxy_config_from_flags(&flags).expect("proxy config should build");
         assert_eq!(cfg.localhost_connect_ports, vec![11434, 11435]);
