@@ -560,11 +560,38 @@ pub fn apply_deny_overrides(
         return Ok(());
     }
 
-    // Expand and canonicalize never_grant paths for comparison
-    let never_grant_expanded: Vec<PathBuf> = never_grant
-        .iter()
-        .filter_map(|p| expand_path(p).ok())
-        .collect();
+    // Expand and canonicalize never_grant paths for comparison.
+    // Expansion failures are fatal — a missing never_grant rule is a security bypass.
+    let mut never_grant_expanded: Vec<PathBuf> = Vec::with_capacity(never_grant.len());
+    for ng in never_grant {
+        let expanded = expand_path(ng).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to expand never_grant path '{}': {}. \
+                 Refusing to proceed — this could bypass security policy.",
+                ng, e
+            ))
+        })?;
+        // Canonicalize if the path exists to prevent symlink bypasses
+        // (e.g., override targets the canonical path while never_grant uses the symlink)
+        if expanded.exists() {
+            let canonical = expanded.canonicalize().map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Failed to canonicalize never_grant path '{}': {}. \
+                     Refusing to proceed — this could bypass security policy.",
+                    expanded.display(),
+                    e
+                ))
+            })?;
+            // Keep both forms: canonical catches symlink bypasses,
+            // expanded catches non-canonical override paths
+            if canonical != expanded {
+                never_grant_expanded.push(expanded);
+            }
+            never_grant_expanded.push(canonical);
+        } else {
+            never_grant_expanded.push(expanded);
+        }
+    }
 
     for override_path in overrides {
         // Expand ~ in the override path

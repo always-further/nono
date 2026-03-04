@@ -91,7 +91,6 @@ impl CapabilitySetExt for CapabilitySet {
         let loaded_policy = policy::load_embedded_policy()?;
         let base = policy::base_groups()?;
         let mut resolved = policy::resolve_groups(&loaded_policy, &base, &mut caps)?;
-        let needs_unlink_overrides = resolved.needs_unlink_overrides;
 
         // Directory permissions (canonicalize handles existence check atomically)
         for path in &args.allow {
@@ -163,27 +162,9 @@ impl CapabilitySetExt for CapabilitySet {
             caps.add_blocked_command(cmd.clone());
         }
 
-        // Apply deny overrides before validation (punch holes through deny groups)
-        policy::apply_deny_overrides(
-            &args.override_deny,
-            &mut resolved.deny_paths,
-            &mut caps,
-            &loaded_policy.never_grant,
-        )?;
+        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args)?;
 
-        // Validate deny/allow overlaps (hard-fail on Linux where Landlock cannot enforce denies)
-        policy::validate_deny_overlaps(&resolved.deny_paths, &caps)?;
-
-        // Keep broad keychain deny groups active, but allow explicit
-        // login.keychain-db read grants (profile/CLI) on macOS.
-        policy::apply_macos_login_keychain_exception(&mut caps);
-
-        // Deduplicate capabilities
-        caps.deduplicate();
-
-        // Caller must call apply_unlink_overrides() after CWD and any other
-        // writable paths are added, if needs_unlink_overrides is true.
-        Ok((caps, needs_unlink_overrides))
+        Ok((caps, resolved.needs_unlink_overrides))
     }
 
     fn from_profile(
@@ -203,7 +184,6 @@ impl CapabilitySetExt for CapabilitySet {
             profile.security.groups.clone()
         };
         let mut resolved = policy::resolve_groups(&loaded_policy, &groups, &mut caps)?;
-        let needs_unlink_overrides = resolved.needs_unlink_overrides;
         debug!("Resolved {} policy groups", resolved.names.len());
 
         // Process profile filesystem config (profile-specific paths on top of groups).
@@ -298,28 +278,42 @@ impl CapabilitySetExt for CapabilitySet {
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
 
-        // Apply deny overrides before validation (punch holes through deny groups)
-        policy::apply_deny_overrides(
-            &args.override_deny,
-            &mut resolved.deny_paths,
-            &mut caps,
-            &loaded_policy.never_grant,
-        )?;
+        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args)?;
 
-        // Validate deny/allow overlaps (hard-fail on Linux where Landlock cannot enforce denies)
-        policy::validate_deny_overlaps(&resolved.deny_paths, &caps)?;
-
-        // Keep broad keychain deny groups active, but allow explicit
-        // login.keychain-db read grants (profile/CLI) on macOS.
-        policy::apply_macos_login_keychain_exception(&mut caps);
-
-        // Deduplicate capabilities
-        caps.deduplicate();
-
-        // Caller must call apply_unlink_overrides() after CWD and any other
-        // writable paths are added, if needs_unlink_overrides is true.
-        Ok((caps, needs_unlink_overrides))
+        Ok((caps, resolved.needs_unlink_overrides))
     }
+}
+
+/// Shared finalization: deny overrides, overlap validation, keychain exception, dedup.
+///
+/// Called by both `from_args()` and `from_profile()` after all grants are added.
+/// Caller must still call `apply_unlink_overrides()` after CWD and any other
+/// writable paths are added, if `resolved.needs_unlink_overrides` is true.
+fn finalize_caps(
+    caps: &mut CapabilitySet,
+    resolved: &mut policy::ResolvedGroups,
+    loaded_policy: &policy::Policy,
+    args: &SandboxArgs,
+) -> Result<()> {
+    // Apply deny overrides before validation (punch holes through deny groups)
+    policy::apply_deny_overrides(
+        &args.override_deny,
+        &mut resolved.deny_paths,
+        caps,
+        &loaded_policy.never_grant,
+    )?;
+
+    // Validate deny/allow overlaps (hard-fail on Linux where Landlock cannot enforce denies)
+    policy::validate_deny_overlaps(&resolved.deny_paths, caps)?;
+
+    // Keep broad keychain deny groups active, but allow explicit
+    // login.keychain-db read grants (profile/CLI) on macOS.
+    policy::apply_macos_login_keychain_exception(caps);
+
+    // Deduplicate capabilities
+    caps.deduplicate();
+
+    Ok(())
 }
 
 /// Apply CLI argument overrides on top of existing capabilities.
@@ -705,6 +699,7 @@ mod tests {
             proxy_allow: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
@@ -771,6 +766,7 @@ mod tests {
             proxy_allow: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
