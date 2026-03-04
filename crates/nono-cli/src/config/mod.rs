@@ -83,6 +83,17 @@ pub fn check_blocked_command(
     allowed_commands: &[String],
     extra_blocked: &[String],
 ) -> Result<Option<String>> {
+    let loaded_policy = policy::load_embedded_policy()?;
+    check_blocked_command_with_policy(cmd, allowed_commands, extra_blocked, &loaded_policy)
+}
+
+/// Check if a command is blocked using an already-loaded sandbox policy.
+pub fn check_blocked_command_with_policy(
+    cmd: impl AsRef<std::ffi::OsStr>,
+    allowed_commands: &[String],
+    extra_blocked: &[String],
+    loaded_policy: &policy::Policy,
+) -> Result<Option<String>> {
     use std::ffi::OsStr;
     use std::path::Path;
 
@@ -102,8 +113,7 @@ pub fn check_blocked_command(
     }
 
     // Check default dangerous commands list from policy.json
-    let loaded_policy = policy::load_embedded_policy()?;
-    let dangerous = policy::get_dangerous_commands(&loaded_policy);
+    let dangerous = policy::get_dangerous_commands(loaded_policy);
     let binary_str = binary_os.to_string_lossy();
     if dangerous.contains(binary_str.as_ref()) {
         return Ok(Some(binary_str.into_owned()));

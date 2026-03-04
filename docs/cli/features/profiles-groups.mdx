@@ -31,9 +31,16 @@ Profiles can come from three sources, in order of precedence:
 |--------|----------|-------------|
 | CLI flags | Command line | Highest - explicit user intent |
 | User profiles | `~/.config/nono/profiles/` | Medium - user-defined |
-| Built-in profiles | Compiled into binary | Base - audited defaults |
+| Built-in profiles | Embedded `policy.json` (default) or `--sandbox-policy <FILE>` | Base - audited defaults (or explicit custom policy) |
 
 CLI flags always override profile settings.
+
+You can export the embedded policy and run with a customized policy file:
+
+```bash
+nono setup --export-policy ./policy.json
+nono run --sandbox-policy ./policy.json --profile claude-code -- claude
+```
 
 ### Profile Format
 

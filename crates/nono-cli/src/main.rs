@@ -216,6 +216,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             block_command: vec![],
             env_credential: None,
             profile: None,
+            sandbox_policy: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
             config: None,
@@ -248,6 +249,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             block_command: vec![],
             env_credential: None,
             profile: None,
+            sandbox_policy: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
             config: None,
@@ -469,6 +471,8 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         cmd_args,
         prepared.caps,
         prepared.secrets,
+        prepared.policy,
+        prepared.custom_policy_override,
         ExecutionFlags {
             interactive: prepared.interactive,
             no_diagnostics,
@@ -539,6 +543,8 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         vec![],
         prepared.caps,
         prepared.secrets,
+        prepared.policy,
+        prepared.custom_policy_override,
         ExecutionFlags {
             interactive: true,
             no_diagnostics: true,
@@ -716,12 +722,23 @@ fn execute_sandboxed(
     cmd_args: Vec<OsString>,
     mut caps: CapabilitySet,
     loaded_secrets: Vec<nono::LoadedSecret>,
+    policy_data: policy::Policy,
+    custom_policy_override: bool,
     flags: ExecutionFlags,
 ) -> Result<()> {
     // Check if command is blocked using config module
-    if let Some(blocked) =
+    let blocked = if custom_policy_override {
+        config::check_blocked_command_with_policy(
+            &program,
+            caps.allowed_commands(),
+            caps.blocked_commands(),
+            &policy_data,
+        )?
+    } else {
         config::check_blocked_command(&program, caps.allowed_commands(), caps.blocked_commands())?
-    {
+    };
+
+    if let Some(blocked) = blocked {
         return Err(NonoError::BlockedCommand {
             command: blocked,
             reason: "This command is blocked by default due to destructive potential. \
@@ -1066,8 +1083,7 @@ fn execute_sandboxed(
 
             // --- Supervisor IPC setup (only when --supervised is active) ---
             let supervisor_cfg_data = if flags.supervised {
-                let policy_data = policy::load_embedded_policy()?;
-                let mut never_grant = policy_data.never_grant;
+                let mut never_grant = policy_data.never_grant.clone();
                 let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
                 never_grant.extend(protected_roots.as_strings()?);
                 never_grant.sort();
@@ -1230,6 +1246,8 @@ pub(crate) fn rollback_base_exclusions() -> Vec<String> {
 struct PreparedSandbox {
     caps: CapabilitySet,
     secrets: Vec<nono::LoadedSecret>,
+    policy: policy::Policy,
+    custom_policy_override: bool,
     /// Whether the profile indicates interactive mode (needs TTY)
     interactive: bool,
     /// Profile-specific rollback exclusion patterns (additive on base patterns)
@@ -1267,9 +1285,13 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     // Clean up stale state files from previous nono runs
     sandbox_state::cleanup_stale_state_files();
 
+    // Load sandbox policy with explicit precedence:
+    // --sandbox-policy path overrides embedded policy.
+    let loaded_policy = policy::load_effective_policy(args.sandbox_policy.as_deref())?;
+
     // Load profile once if specified (used for both capabilities and secrets)
     let loaded_profile = if let Some(ref profile_name) = args.profile {
-        let prof = profile::load_profile(profile_name)?;
+        let prof = profile::load_profile_with_policy(profile_name, &loaded_policy)?;
 
         // Install hooks defined in the profile (idempotent - only installs if needed)
         if !prof.hooks.hooks.is_empty() {
@@ -1368,9 +1390,9 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     // Build capabilities from profile or arguments.
     // Unlink overrides are deferred so they can cover the CWD path added below.
     let (mut caps, needs_unlink_overrides) = if let Some(ref prof) = loaded_profile {
-        CapabilitySet::from_profile(prof, &workdir, args)?
+        CapabilitySet::from_profile_with_policy(prof, &workdir, args, &loaded_policy)?
     } else {
-        CapabilitySet::from_args(args)?
+        CapabilitySet::from_args_with_policy(args, &loaded_policy)?
     };
 
     // Auto-include CWD based on profile [workdir] config or default behavior
@@ -1425,14 +1447,13 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     // where deny-within-allow cannot be enforced.
     let active_groups = if let Some(ref prof) = loaded_profile {
         if prof.security.groups.is_empty() {
-            policy::base_groups()?
+            policy::base_groups_from_policy(&loaded_policy)
         } else {
             prof.security.groups.clone()
         }
     } else {
-        policy::base_groups()?
+        policy::base_groups_from_policy(&loaded_policy)
     };
-    let loaded_policy = policy::load_embedded_policy()?;
     let deny_paths = policy::resolve_deny_paths_for_groups(&loaded_policy, &active_groups)?;
     policy::validate_deny_overlaps(&deny_paths, &caps)?;
     let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
@@ -1524,6 +1545,8 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     Ok(PreparedSandbox {
         caps,
         secrets: loaded_secrets,
+        policy: loaded_policy,
+        custom_policy_override: args.sandbox_policy.is_some(),
         interactive: profile_interactive,
         rollback_exclude_patterns: profile_rollback_patterns,
         rollback_exclude_globs: profile_rollback_globs,

@@ -624,6 +624,46 @@ pub fn load_profile(name_or_path: &str) -> Result<Profile> {
     Err(NonoError::ProfileNotFound(name_or_path.to_string()))
 }
 
+/// Load a profile by name or file path using a provided policy.
+///
+/// Name loading precedence:
+/// 1. User profiles from ~/.config/nono/profiles/<name>.json (allows customization)
+/// 2. Profiles defined in the provided policy
+pub fn load_profile_with_policy(
+    name_or_path: &str,
+    policy: &crate::policy::Policy,
+) -> Result<Profile> {
+    // Direct file path: contains separator or ends with .json
+    if name_or_path.contains('/') || name_or_path.ends_with(".json") {
+        return load_profile_from_path_with_policy(Path::new(name_or_path), policy);
+    }
+
+    // Validate profile name (alphanumeric + hyphen only)
+    if !is_valid_profile_name(name_or_path) {
+        return Err(NonoError::ProfileParse(format!(
+            "Invalid profile name '{}': must be alphanumeric with hyphens only",
+            name_or_path
+        )));
+    }
+
+    // 1. Check user profiles first (allows overriding built-ins)
+    let profile_path = get_user_profile_path(name_or_path)?;
+    if profile_path.exists() {
+        tracing::info!("Loading user profile from: {}", profile_path.display());
+        let mut profile = load_from_file_with_policy(&profile_path, policy)?;
+        merge_base_groups_with_policy(&mut profile, policy)?;
+        return Ok(profile);
+    }
+
+    // 2. Fall back to profiles from provided policy
+    if let Some(profile) = crate::policy::get_policy_profile_from_policy(name_or_path, policy)? {
+        tracing::info!("Using built-in profile: {}", name_or_path);
+        return Ok(profile);
+    }
+
+    Err(NonoError::ProfileNotFound(name_or_path.to_string()))
+}
+
 /// Load a profile from a direct file path.
 ///
 /// The path must exist and point to a valid JSON profile file.
@@ -642,6 +682,24 @@ pub fn load_profile_from_path(path: &Path) -> Result<Profile> {
     Ok(profile)
 }
 
+/// Load a profile from a direct file path using a provided policy.
+pub fn load_profile_from_path_with_policy(
+    path: &Path,
+    policy: &crate::policy::Policy,
+) -> Result<Profile> {
+    if !path.exists() {
+        return Err(NonoError::ProfileRead {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "profile file not found"),
+        });
+    }
+
+    tracing::info!("Loading profile from path: {}", path.display());
+    let mut profile = load_from_file_with_policy(path, policy)?;
+    merge_base_groups_with_policy(&mut profile, policy)?;
+    Ok(profile)
+}
+
 /// Merge base_groups from policy.json into a user profile.
 ///
 /// User profiles loaded from file only declare their own groups in
@@ -652,7 +710,29 @@ fn merge_base_groups(profile: &mut Profile) -> Result<()> {
     let policy = crate::policy::load_embedded_policy()?;
     crate::policy::validate_trust_groups(&policy, &profile.security.trust_groups)?;
 
-    let base = policy.base_groups;
+    let base = crate::policy::base_groups()?;
+    let mut merged: Vec<String> = base
+        .into_iter()
+        .filter(|g| !profile.security.trust_groups.contains(g))
+        .collect();
+    // Append profile-specific groups (avoiding duplicates)
+    let mut seen: std::collections::HashSet<String> = merged.iter().cloned().collect();
+    for g in &profile.security.groups {
+        if seen.insert(g.clone()) {
+            merged.push(g.clone());
+        }
+    }
+    profile.security.groups = merged;
+    Ok(())
+}
+
+fn merge_base_groups_with_policy(
+    profile: &mut Profile,
+    policy: &crate::policy::Policy,
+) -> Result<()> {
+    crate::policy::validate_trust_groups(policy, &profile.security.trust_groups)?;
+
+    let base = crate::policy::base_groups_from_policy(policy);
     let mut merged: Vec<String> = base
         .into_iter()
         .filter(|g| !profile.security.trust_groups.contains(g))
@@ -697,6 +777,12 @@ fn load_from_file(path: &Path) -> Result<Profile> {
     resolve_extends(profile, &mut Vec::new(), 0)
 }
 
+/// Load a profile from a JSON file, resolving inheritance using a provided policy.
+fn load_from_file_with_policy(path: &Path, policy: &crate::policy::Policy) -> Result<Profile> {
+    let profile = parse_profile_file(path)?;
+    resolve_extends_with_policy(profile, &mut Vec::new(), 0, policy)
+}
+
 // ============================================================================
 // Profile inheritance (extends)
 // ============================================================================
@@ -710,6 +796,16 @@ const MAX_INHERITANCE_DEPTH: usize = 10;
 /// `extends` resolved recursively, and the two are merged. The `visited` vec
 /// tracks profile names already in the chain to detect circular dependencies.
 fn resolve_extends(child: Profile, visited: &mut Vec<String>, depth: usize) -> Result<Profile> {
+    let policy = crate::policy::load_embedded_policy()?;
+    resolve_extends_with_policy(child, visited, depth, &policy)
+}
+
+fn resolve_extends_with_policy(
+    child: Profile,
+    visited: &mut Vec<String>,
+    depth: usize,
+    policy: &crate::policy::Policy,
+) -> Result<Profile> {
     let base_name = match child.extends {
         Some(ref name) => name.clone(),
         None => return Ok(child),
@@ -733,8 +829,8 @@ fn resolve_extends(child: Profile, visited: &mut Vec<String>, depth: usize) -> R
 
     visited.push(base_name.clone());
 
-    let base = load_base_profile_raw(&base_name)?;
-    let resolved_base = resolve_extends(base, visited, depth + 1)?;
+    let base = load_base_profile_raw_with_policy(&base_name, policy)?;
+    let resolved_base = resolve_extends_with_policy(base, visited, depth + 1, policy)?;
 
     Ok(merge_profiles(resolved_base, child))
 }
@@ -744,7 +840,10 @@ fn resolve_extends(child: Profile, visited: &mut Vec<String>, depth: usize) -> R
 /// Checks user profiles first, then built-in profiles. Built-in profiles
 /// are loaded via direct field copy from `ProfileDef` (not `to_profile()`,
 /// which would merge base_groups prematurely).
-fn load_base_profile_raw(name: &str) -> Result<Profile> {
+fn load_base_profile_raw_with_policy(
+    name: &str,
+    policy: &crate::policy::Policy,
+) -> Result<Profile> {
     if !is_valid_profile_name(name) {
         return Err(NonoError::ProfileInheritance(format!(
             "invalid base profile name '{}'",
@@ -758,8 +857,7 @@ fn load_base_profile_raw(name: &str) -> Result<Profile> {
         return parse_profile_file(&profile_path);
     }
 
-    // 2. Fall back to built-in profile from embedded policy
-    let policy = crate::policy::load_embedded_policy()?;
+    // 2. Fall back to built-in profile from provided policy
     if let Some(def) = policy.profiles.get(name) {
         return Ok(Profile {
             extends: None,

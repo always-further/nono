@@ -73,6 +73,13 @@ pub trait CapabilitySetExt {
     /// Returns `(caps, needs_unlink_overrides)`.
     fn from_args(args: &SandboxArgs) -> Result<(CapabilitySet, bool)>;
 
+    /// Create a capability set from CLI sandbox arguments using a provided policy.
+    /// Returns `(caps, needs_unlink_overrides)`.
+    fn from_args_with_policy(
+        args: &SandboxArgs,
+        loaded_policy: &policy::Policy,
+    ) -> Result<(CapabilitySet, bool)>;
+
     /// Create a capability set from a profile with CLI overrides.
     /// Returns `(caps, needs_unlink_overrides)`.
     fn from_profile(
@@ -80,17 +87,33 @@ pub trait CapabilitySetExt {
         workdir: &Path,
         args: &SandboxArgs,
     ) -> Result<(CapabilitySet, bool)>;
+
+    /// Create a capability set from a profile with CLI overrides using a provided policy.
+    /// Returns `(caps, needs_unlink_overrides)`.
+    fn from_profile_with_policy(
+        profile: &Profile,
+        workdir: &Path,
+        args: &SandboxArgs,
+        loaded_policy: &policy::Policy,
+    ) -> Result<(CapabilitySet, bool)>;
 }
 
 impl CapabilitySetExt for CapabilitySet {
     fn from_args(args: &SandboxArgs) -> Result<(CapabilitySet, bool)> {
+        let loaded_policy = policy::load_embedded_policy()?;
+        Self::from_args_with_policy(args, &loaded_policy)
+    }
+
+    fn from_args_with_policy(
+        args: &SandboxArgs,
+        loaded_policy: &policy::Policy,
+    ) -> Result<(CapabilitySet, bool)> {
         let mut caps = CapabilitySet::new();
         let protected_roots = ProtectedRoots::from_defaults()?;
 
         // Resolve base policy groups (system paths, deny rules, dangerous commands)
-        let loaded_policy = policy::load_embedded_policy()?;
-        let base = policy::base_groups()?;
-        let resolved = policy::resolve_groups(&loaded_policy, &base, &mut caps)?;
+        let base = policy::base_groups_from_policy(loaded_policy);
+        let resolved = policy::resolve_groups(loaded_policy, &base, &mut caps)?;
         let needs_unlink_overrides = resolved.needs_unlink_overrides;
 
         // Directory permissions (canonicalize handles existence check atomically)
@@ -183,18 +206,27 @@ impl CapabilitySetExt for CapabilitySet {
         workdir: &Path,
         args: &SandboxArgs,
     ) -> Result<(CapabilitySet, bool)> {
+        let loaded_policy = policy::load_embedded_policy()?;
+        Self::from_profile_with_policy(profile, workdir, args, &loaded_policy)
+    }
+
+    fn from_profile_with_policy(
+        profile: &Profile,
+        workdir: &Path,
+        args: &SandboxArgs,
+        loaded_policy: &policy::Policy,
+    ) -> Result<(CapabilitySet, bool)> {
         let mut caps = CapabilitySet::new();
         let protected_roots = ProtectedRoots::from_defaults()?;
 
         // Resolve policy groups from profile
         // All profiles must have groups; if empty, use base_groups() as fallback
-        let loaded_policy = policy::load_embedded_policy()?;
         let groups = if profile.security.groups.is_empty() {
-            policy::base_groups()?
+            policy::base_groups_from_policy(loaded_policy)
         } else {
             profile.security.groups.clone()
         };
-        let resolved = policy::resolve_groups(&loaded_policy, &groups, &mut caps)?;
+        let resolved = policy::resolve_groups(loaded_policy, &groups, &mut caps)?;
         let needs_unlink_overrides = resolved.needs_unlink_overrides;
         debug!("Resolved {} policy groups", resolved.names.len());
 
@@ -412,6 +444,7 @@ mod tests {
             block_command: vec![],
             env_credential: None,
             profile: None,
+            sandbox_policy: None,
             allow_cwd: false,
             workdir: None,
             config: None,
@@ -444,6 +477,7 @@ mod tests {
             block_command: vec![],
             env_credential: None,
             profile: None,
+            sandbox_policy: None,
             allow_cwd: false,
             workdir: None,
             config: None,
@@ -475,6 +509,7 @@ mod tests {
             external_proxy: None,
             env_credential: None,
             profile: None,
+            sandbox_policy: None,
             allow_cwd: false,
             workdir: None,
             config: None,
@@ -510,6 +545,7 @@ mod tests {
             block_command: vec![],
             env_credential: None,
             profile: None,
+            sandbox_policy: None,
             allow_cwd: false,
             workdir: None,
             config: None,
@@ -559,6 +595,7 @@ mod tests {
             block_command: vec![],
             env_credential: None,
             profile: None,
+            sandbox_policy: None,
             allow_cwd: false,
             workdir: None,
             config: None,
@@ -602,6 +639,7 @@ mod tests {
             block_command: vec![],
             env_credential: None,
             profile: None,
+            sandbox_policy: None,
             allow_cwd: false,
             workdir: None,
             config: None,

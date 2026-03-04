@@ -43,6 +43,10 @@ nono run --allow-cwd --net-block -- command
 # Use a built-in profile
 nono run --profile claude-code -- claude
 
+# Export embedded sandbox policy, then run with a customized policy file
+nono setup --export-policy ./policy.json
+nono run --sandbox-policy ./policy.json --profile claude-code -- claude
+
 # Start an interactive shell inside the sandbox
 nono shell --allow-cwd
 

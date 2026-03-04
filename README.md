@@ -45,6 +45,22 @@ nono run --read ./src --write ./output -- cargo build
 
 Built-in profiles for [Claude Code](https://docs.nono.sh/clients/claude-code), [OpenCode](https://docs.nono.sh/clients/opencode), and [OpenClaw](https://docs.nono.sh/clients/openclaw) — or define your own with custom permissions.
 
+### Policy Customization
+
+`policy.json` is embedded in the binary by default. You can export it, customize it, and run with your customized policy:
+
+```bash
+# Export embedded policy to ./policy.json
+nono setup --export-policy
+
+# Or export to a specific path
+nono setup --export-policy ./my-policy.json
+
+# Use custom policy for one run/shell invocation
+nono run --sandbox-policy ./my-policy.json --profile claude-code -- claude
+nono shell --sandbox-policy ./my-policy.json --profile claude-code
+```
+
 ## Library
 
 The core is a Rust library that can be embedded into any application via native bindings. The library is a policy-free sandbox primitive -- it applies only what clients explicitly request.

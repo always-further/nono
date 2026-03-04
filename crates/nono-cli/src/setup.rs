@@ -2,7 +2,7 @@ use crate::cli::SetupArgs;
 use crate::profile;
 use nono::{NonoError, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 use nix::libc;
@@ -11,6 +11,7 @@ pub struct SetupRunner {
     check_only: bool,
     generate_profiles: bool,
     show_shell_integration: bool,
+    export_policy_path: Option<PathBuf>,
     #[allow(dead_code)]
     verbose: u8,
 }
@@ -21,6 +22,7 @@ impl SetupRunner {
             check_only: args.check_only,
             generate_profiles: args.profiles,
             show_shell_integration: args.shell_integration,
+            export_policy_path: args.export_policy.clone(),
             verbose: args.verbose,
         }
     }
@@ -45,6 +47,10 @@ impl SetupRunner {
             // Directory setup
             if self.generate_profiles {
                 self.setup_profiles()?;
+            }
+
+            if let Some(path) = self.export_policy_path.as_deref() {
+                self.export_policy(path)?;
             }
 
             // Shell integration
@@ -333,7 +339,11 @@ impl SetupRunner {
     }
 
     fn setup_profiles(&self) -> Result<()> {
-        println!("[5/{}] Setting up example profiles...", self.total_phases());
+        println!(
+            "[{}/{}] Setting up example profiles...",
+            self.setup_profiles_phase(),
+            self.total_phases()
+        );
 
         // Create profile directory
         let profile_dir = crate::profile::resolve_user_config_dir()?
@@ -371,8 +381,42 @@ impl SetupRunner {
         Ok(())
     }
 
+    fn export_policy(&self, path: &Path) -> Result<()> {
+        println!(
+            "[{}/{}] Exporting embedded policy...",
+            self.export_policy_phase(),
+            self.total_phases()
+        );
+
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    NonoError::Setup(format!(
+                        "Failed to create policy directory {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
+        }
+
+        let policy_json = crate::config::embedded::embedded_policy_json();
+        fs::write(path, policy_json).map_err(|e| NonoError::ConfigWrite {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+
+        println!("  * Wrote {}", path.display());
+        println!();
+        Ok(())
+    }
+
     fn show_shell_help(&self) {
-        println!("[6/{}] Shell integration...", self.total_phases());
+        println!(
+            "[{}/{}] Shell integration...",
+            self.shell_phase(),
+            self.total_phases()
+        );
 
         // Detect shell
         let shell = std::env::var("SHELL")
@@ -440,12 +484,41 @@ impl SetupRunner {
             if self.generate_profiles {
                 count += 1;
             }
+            if self.export_policy_path.is_some() {
+                count += 1;
+            }
             if self.show_shell_integration {
                 count += 1;
             }
         }
 
         count
+    }
+
+    #[must_use]
+    fn setup_profiles_phase(&self) -> usize {
+        5
+    }
+
+    #[must_use]
+    fn export_policy_phase(&self) -> usize {
+        let mut phase = 5;
+        if self.generate_profiles {
+            phase += 1;
+        }
+        phase
+    }
+
+    #[must_use]
+    fn shell_phase(&self) -> usize {
+        let mut phase = 5;
+        if self.generate_profiles {
+            phase += 1;
+        }
+        if self.export_policy_path.is_some() {
+            phase += 1;
+        }
+        phase
     }
 }
 
@@ -504,6 +577,7 @@ const DATA_PROCESSING_PROFILE: &str = r#"{
 mod tests {
     use super::*;
     use std::env;
+    use std::fs;
     use tempfile::tempdir;
 
     /// Profiles written by `setup --profiles` must be loadable by `load_profile()`.
@@ -530,6 +604,7 @@ mod tests {
             check_only: false,
             generate_profiles: true,
             show_shell_integration: false,
+            export_policy_path: None,
             verbose: 0,
         };
         runner.setup_profiles().expect("setup_profiles failed");
@@ -548,5 +623,26 @@ mod tests {
         if let Some(xdg) = original_xdg {
             env::set_var("XDG_CONFIG_HOME", xdg);
         }
+    }
+
+    #[test]
+    fn test_export_policy_writes_json_file() {
+        let tmp = tempdir().expect("tempdir");
+        let export_path = tmp.path().join("nested").join("policy.json");
+
+        let runner = SetupRunner {
+            check_only: false,
+            generate_profiles: false,
+            show_shell_integration: false,
+            export_policy_path: Some(export_path.clone()),
+            verbose: 0,
+        };
+
+        runner.export_policy(&export_path).expect("export policy");
+        assert!(export_path.exists(), "exported policy file should exist");
+
+        let content = fs::read_to_string(&export_path).expect("read exported policy");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("valid json");
+        assert!(parsed.get("groups").is_some(), "policy must contain groups");
     }
 }

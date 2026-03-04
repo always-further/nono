@@ -7,6 +7,7 @@ use crate::profile;
 use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
@@ -254,6 +255,26 @@ fn escape_seatbelt_path(path: &str) -> Result<String> {
 pub fn load_policy(json: &str) -> Result<Policy> {
     serde_json::from_str(json)
         .map_err(|e| NonoError::ConfigParse(format!("Failed to parse policy.json: {}", e)))
+}
+
+/// Load policy from a JSON file on disk.
+pub fn load_policy_from_path(path: &Path) -> Result<Policy> {
+    let json = fs::read_to_string(path).map_err(|e| NonoError::ConfigRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    load_policy(&json)
+}
+
+/// Load effective policy with override precedence.
+///
+/// If `policy_path` is provided, that file is loaded. Otherwise, the embedded
+/// policy compiled into the binary is used.
+pub fn load_effective_policy(policy_path: Option<&Path>) -> Result<Policy> {
+    if let Some(path) = policy_path {
+        return load_policy_from_path(path);
+    }
+    load_embedded_policy()
 }
 
 /// Result of resolving policy groups
@@ -788,13 +809,27 @@ pub fn base_groups() -> Result<Vec<String>> {
     Ok(policy.base_groups)
 }
 
+/// Common deny + system groups from an already-loaded policy.
+#[must_use]
+pub fn base_groups_from_policy(policy: &Policy) -> Vec<String> {
+    policy.base_groups.clone()
+}
+
 /// Get a built-in profile from embedded policy.json.
 ///
 /// Returns `None` if the profile name is not defined in policy.json.
 pub fn get_policy_profile(name: &str) -> Result<Option<profile::Profile>> {
     let policy = load_embedded_policy()?;
+    get_policy_profile_from_policy(name, &policy)
+}
+
+/// Get a profile by name from an already-loaded policy.
+pub fn get_policy_profile_from_policy(
+    name: &str,
+    policy: &Policy,
+) -> Result<Option<profile::Profile>> {
     match policy.profiles.get(name) {
-        Some(def) => Ok(Some(def.to_profile(&policy.base_groups, &policy)?)),
+        Some(def) => Ok(Some(def.to_profile(&policy.base_groups, policy)?)),
         None => Ok(None),
     }
 }
@@ -802,9 +837,15 @@ pub fn get_policy_profile(name: &str) -> Result<Option<profile::Profile>> {
 /// List all built-in profile names from embedded policy.json.
 pub fn list_policy_profiles() -> Result<Vec<String>> {
     let policy = load_embedded_policy()?;
+    Ok(list_policy_profiles_from_policy(&policy))
+}
+
+/// List all profile names from an already-loaded policy.
+#[must_use]
+pub fn list_policy_profiles_from_policy(policy: &Policy) -> Vec<String> {
     let mut names: Vec<String> = policy.profiles.keys().cloned().collect();
     names.sort();
-    Ok(names)
+    names
 }
 
 /// Load the embedded policy and return the parsed Policy struct.
@@ -822,6 +863,8 @@ pub fn load_embedded_policy() -> Result<Policy> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     fn sample_policy_json() -> &'static str {
         r#"{
@@ -873,6 +916,28 @@ mod tests {
         let policy = policy.expect("parse failed");
         assert_eq!(policy.meta.version, 2);
         assert_eq!(policy.groups.len(), 8);
+    }
+
+    #[test]
+    fn test_load_policy_from_path() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("policy.json");
+        fs::write(&path, sample_policy_json()).expect("write policy");
+
+        let policy = load_policy_from_path(&path).expect("load policy from path");
+        assert_eq!(policy.meta.version, 2);
+        assert_eq!(policy.groups.len(), 8);
+    }
+
+    #[test]
+    fn test_load_effective_policy_prefers_override_path() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("policy.json");
+        fs::write(&path, sample_policy_json()).expect("write policy");
+
+        let policy = load_effective_policy(Some(&path)).expect("load effective policy");
+        assert_eq!(policy.meta.version, 2);
+        assert!(policy.groups.contains_key("test_read"));
     }
 
     #[test]
@@ -1372,6 +1437,54 @@ mod tests {
                 "{} must be included in system_read_linux capabilities, got: {:?}",
                 device,
                 resolved_paths
+            );
+        }
+    }
+
+    #[test]
+    fn test_embedded_policy_narrows_linux_run_paths() {
+        let policy = load_embedded_policy().expect("embedded policy");
+        let system_read_linux = policy
+            .groups
+            .get("system_read_linux")
+            .expect("system_read_linux group must exist");
+        let allow = system_read_linux
+            .allow
+            .as_ref()
+            .expect("system_read_linux must define allow paths");
+
+        assert!(
+            !allow.read.iter().any(|p| p == "/run" || p == "/var/run"),
+            "system_read_linux must not grant broad /run or /var/run access: {:?}",
+            allow.read
+        );
+
+        for required in [
+            "/run/systemd/resolve/resolv.conf",
+            "/run/systemd/resolve/stub-resolv.conf",
+            "/run/systemd/resolve/io.systemd.Resolve",
+            "/run/resolvconf/resolv.conf",
+            "/run/NetworkManager/resolv.conf",
+            "/run/NetworkManager/no-stub-resolv.conf",
+            "/run/netconfig/resolv.conf",
+            "/run/dbus/system_bus_socket",
+            "/run/udev/data",
+            "/run/nscd/socket",
+            "/var/run/systemd/resolve/resolv.conf",
+            "/var/run/systemd/resolve/stub-resolv.conf",
+            "/var/run/systemd/resolve/io.systemd.Resolve",
+            "/var/run/resolvconf/resolv.conf",
+            "/var/run/NetworkManager/resolv.conf",
+            "/var/run/NetworkManager/no-stub-resolv.conf",
+            "/var/run/netconfig/resolv.conf",
+            "/var/run/dbus/system_bus_socket",
+            "/var/run/udev/data",
+            "/var/run/nscd/socket",
+        ] {
+            assert!(
+                allow.read.iter().any(|p| p == required),
+                "system_read_linux must include '{}' to preserve runtime compatibility",
+                required
             );
         }
     }

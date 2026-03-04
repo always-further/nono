@@ -53,6 +53,9 @@ pub enum Commands {
     # Profile with explicit working directory
     nono run --profile claude-code --workdir ./my-project claude
 
+    # Load sandbox policy from disk (overrides embedded policy)
+    nono run --sandbox-policy ./policy.json --profile claude-code claude
+
     # Profile + additional permissions
     nono run --profile openclaw --read /tmp/extra openclaw gateway
 
@@ -121,6 +124,9 @@ pub enum Commands {
 
     # Verbose setup
     nono setup -v --profiles
+
+    # Export embedded sandbox policy to disk
+    nono setup --export-policy
 ")]
     Setup(SetupArgs),
 
@@ -292,6 +298,11 @@ pub struct SandboxArgs {
     #[arg(long, short = 'p', value_name = "NAME_OR_PATH")]
     pub profile: Option<String>,
 
+    /// Load sandbox policy from JSON file instead of embedded policy.
+    /// When set, this policy takes precedence for groups, profiles, and denies.
+    #[arg(long, value_name = "FILE")]
+    pub sandbox_policy: Option<PathBuf>,
+
     /// Allow access to current working directory without prompting.
     /// Access level determined by profile or defaults to read-only.
     #[arg(long)]
@@ -415,6 +426,16 @@ pub struct SetupArgs {
     /// Show shell integration instructions
     #[arg(long)]
     pub shell_integration: bool,
+
+    /// Export embedded policy.json to disk.
+    /// If FILE is omitted, writes ./policy.json.
+    #[arg(
+        long,
+        value_name = "FILE",
+        num_args = 0..=1,
+        default_missing_value = "policy.json"
+    )]
+    pub export_policy: Option<PathBuf>,
 
     /// Show detailed information during setup
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -823,6 +844,30 @@ mod tests {
     }
 
     #[test]
+    fn test_run_with_sandbox_policy_flag() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--sandbox-policy",
+            "./policy.json",
+            "--allow",
+            ".",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(
+                    args.sandbox.sandbox_policy,
+                    Some(PathBuf::from("./policy.json"))
+                );
+                assert_eq!(args.command, vec!["echo", "hello"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
     fn test_run_multiple_paths() {
         let cli = Cli::parse_from([
             "nono",
@@ -885,6 +930,36 @@ mod tests {
                 assert!(args.shell.is_none());
             }
             _ => panic!("Expected Shell command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_export_policy_default_path() {
+        let cli = Cli::parse_from(["nono", "setup", "--export-policy"]);
+        match cli.command {
+            Commands::Setup(args) => {
+                assert_eq!(args.export_policy, Some(PathBuf::from("policy.json")));
+            }
+            _ => panic!("Expected Setup command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_export_policy_custom_path() {
+        let cli = Cli::parse_from([
+            "nono",
+            "setup",
+            "--export-policy",
+            "/tmp/custom-policy.json",
+        ]);
+        match cli.command {
+            Commands::Setup(args) => {
+                assert_eq!(
+                    args.export_policy,
+                    Some(PathBuf::from("/tmp/custom-policy.json"))
+                );
+            }
+            _ => panic!("Expected Setup command"),
         }
     }
 

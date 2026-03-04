@@ -38,7 +38,22 @@ See [Profiles & Groups](/cli/features/profiles-groups) for all built-in profiles
 | `nono rollback` | [Manage rollback sessions](/cli/features/atomic-rollbacks) - list, show, restore, verify, cleanup snapshots |
 | `nono audit` | [View audit trail](/cli/features/audit) - list and inspect past sandboxed sessions |
 | `nono learn` | [Discover required paths](/cli/features/learn) - trace a command to find what it accesses (Linux only) |
-| `nono setup` | System setup and verification - generate profiles, check shell integration |
+| `nono setup` | System setup and verification - generate profiles, check shell integration, export policy.json |
+
+## Custom Sandbox Policy
+
+The sandbox policy is embedded in `nono` by default. To customize it without recompiling:
+
+1. Export the embedded policy:
+   ```bash
+   nono setup --export-policy ./policy.json
+   ```
+2. Edit `policy.json` (groups, profiles, command blocklist, deny paths).
+3. Use it for a specific invocation:
+   ```bash
+   nono run --sandbox-policy ./policy.json --profile claude-code -- claude
+   nono shell --sandbox-policy ./policy.json --profile claude-code
+   ```
 
 ## Permissions
 

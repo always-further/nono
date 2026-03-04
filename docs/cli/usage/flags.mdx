@@ -56,7 +56,7 @@ nono learn [OPTIONS] -- <COMMAND> [ARGS...]
 
 ### `nono setup`
 
-Set up nono on this system. Verifies installation, tests sandbox support, and optionally generates example profiles.
+Set up nono on this system. Verifies installation, tests sandbox support, optionally generates example profiles, and can export the embedded sandbox policy.
 
 ```bash
 nono setup [OPTIONS]
@@ -320,7 +320,7 @@ On Linux with Landlock ABI v4+, per-port filtering is enforced and only the spec
 
 ## `nono shell` Options
 
-`nono shell` supports the same permission, profile, secrets, and dry-run flags as `nono run`, plus:
+`nono shell` supports the same permission, profile, policy (`--sandbox-policy`), secrets, and dry-run flags as `nono run`, plus:
 
 ### `--shell`
 
@@ -411,6 +411,15 @@ Use a named profile (built-in or from `~/.config/nono/profiles/`).
 ```bash
 nono run --profile claude-code -- claude
 nono run -p openclaw -- openclaw gateway
+```
+
+#### `--sandbox-policy`
+
+Load sandbox policy from a JSON file instead of the embedded policy. When set, this file takes precedence for groups, profiles, deny paths, and blocked commands for that invocation.
+
+```bash
+nono run --sandbox-policy ./policy.json --profile claude-code -- claude
+nono shell --sandbox-policy ./policy.json --profile claude-code
 ```
 
 #### `--workdir`
@@ -764,6 +773,18 @@ Show shell integration instructions (aliases, etc.).
 
 ```bash
 nono setup --shell-integration
+```
+
+### `--export-policy [FILE]`
+
+Export embedded `policy.json` to disk. If `FILE` is omitted, writes `./policy.json`.
+
+```bash
+# Export to current directory
+nono setup --export-policy
+
+# Export to a custom path
+nono setup --export-policy ./my-policy.json
 ```
 
 ### `--verbose`, `-v`
