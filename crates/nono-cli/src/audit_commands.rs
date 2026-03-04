@@ -270,23 +270,23 @@ fn cmd_show(args: AuditShowArgs) -> Result<()> {
                 nono::undo::NetworkAuditDecision::Deny => "deny".red(),
             };
             let mode = network_mode_label(&event.mode);
-            let mut target = event.target.clone();
+            let mut target = sanitize_for_terminal(&event.target);
             if let Some(port) = event.port {
                 target = format!("{target}:{port}");
             }
 
             let mut details = Vec::new();
             if let Some(ref method) = event.method {
-                details.push(format!("method={method}"));
+                details.push(format!("method={}", sanitize_for_terminal(method)));
             }
             if let Some(ref path) = event.path {
-                details.push(format!("path={path}"));
+                details.push(format!("path={}", sanitize_for_terminal(path)));
             }
             if let Some(status) = event.status {
                 details.push(format!("status={status}"));
             }
             if let Some(ref reason) = event.reason {
-                details.push(format!("reason={reason}"));
+                details.push(format!("reason={}", sanitize_for_terminal(reason)));
             }
 
             if details.is_empty() {
@@ -410,5 +410,80 @@ fn network_mode_label(mode: &nono::undo::NetworkAuditMode) -> &'static str {
         nono::undo::NetworkAuditMode::Connect => "connect",
         nono::undo::NetworkAuditMode::Reverse => "reverse",
         nono::undo::NetworkAuditMode::External => "external",
+    }
+}
+
+/// Strip control characters and ANSI escape sequences from untrusted text
+/// before printing to the terminal.
+fn sanitize_for_terminal(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if let Some(&next) = chars.peek() {
+                if next == '[' {
+                    // CSI sequence: consume until final byte 0x40-0x7E
+                    chars.next();
+                    for seq_c in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&seq_c) {
+                            break;
+                        }
+                    }
+                } else if matches!(next, ']' | 'P' | '_' | '^' | 'X') {
+                    // OSC/DCS/APC/PM/SOS: consume until ST (ESC \) or BEL
+                    chars.next();
+                    let mut prev = '\0';
+                    for seq_c in chars.by_ref() {
+                        if seq_c == '\x07' || (prev == '\x1b' && seq_c == '\\') {
+                            break;
+                        }
+                        prev = seq_c;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if c.is_control() {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_for_terminal;
+
+    #[test]
+    fn sanitize_for_terminal_removes_carriage_return() {
+        let input = "good\rbad";
+        let sanitized = sanitize_for_terminal(input);
+        assert!(!sanitized.contains('\r'));
+        assert!(sanitized.contains("good"));
+        assert!(sanitized.contains("bad"));
+    }
+
+    #[test]
+    fn sanitize_for_terminal_removes_ansi_escape_sequences() {
+        let input = "x\x1b[2K\x1b[1Apath";
+        let sanitized = sanitize_for_terminal(input);
+        assert!(!sanitized.contains('\x1b'));
+        assert!(sanitized.contains("x"));
+        assert!(sanitized.contains("path"));
+    }
+
+    #[test]
+    fn sanitize_for_terminal_removes_osc_sequences() {
+        let input = "x\x1b]0;evil\x07path";
+        let sanitized = sanitize_for_terminal(input);
+        assert!(!sanitized.contains('\x1b'));
+        assert!(!sanitized.contains('\x07'));
+        assert!(sanitized.contains("x"));
+        assert!(sanitized.contains("path"));
     }
 }

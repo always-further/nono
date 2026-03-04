@@ -7,7 +7,7 @@
 use nono::undo::{NetworkAuditDecision, NetworkAuditEvent, NetworkAuditMode};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Maximum number of in-memory network audit events kept per proxy session.
 const MAX_AUDIT_EVENTS: usize = 4096;
@@ -47,7 +47,13 @@ pub fn new_audit_log() -> SharedAuditLog {
 pub fn drain_audit_events(audit_log: &SharedAuditLog) -> Vec<NetworkAuditEvent> {
     match audit_log.lock() {
         Ok(mut events) => events.drain(..).collect(),
-        Err(_) => Vec::new(),
+        Err(e) => {
+            warn!(
+                "Network audit log mutex poisoned while draining events: {}",
+                e
+            );
+            Vec::new()
+        }
     }
 }
 
@@ -56,12 +62,19 @@ fn now_unix_millis() -> u64 {
         Ok(duration) => {
             let millis = duration.as_millis();
             if millis > u128::from(u64::MAX) {
+                warn!("System clock millis exceeded u64::MAX; clamping audit timestamp");
                 u64::MAX
             } else {
                 millis as u64
             }
         }
-        Err(_) => 0,
+        Err(e) => {
+            warn!(
+                "System clock before UNIX_EPOCH while generating audit timestamp: {}",
+                e
+            );
+            0
+        }
     }
 }
 
@@ -78,9 +91,22 @@ fn push_event(audit_log: Option<&SharedAuditLog>, event: NetworkAuditEvent) {
         return;
     };
 
-    if let Ok(mut events) = audit_log.lock() {
-        if events.len() < MAX_AUDIT_EVENTS {
-            events.push(event);
+    match audit_log.lock() {
+        Ok(mut events) => {
+            if events.len() < MAX_AUDIT_EVENTS {
+                events.push(event);
+            } else {
+                warn!(
+                    "Network audit buffer full ({} events); dropping event",
+                    MAX_AUDIT_EVENTS
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Network audit log mutex poisoned while recording event: {}",
+                e
+            );
         }
     }
 }
