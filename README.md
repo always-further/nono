@@ -112,11 +112,11 @@ nono run --network-profile claude-code --proxy-credential openai -- my-agent
 # Env mode — simpler, but secret is in the process environment
 nono run --env-credential openai_api_key --allow-cwd -- my-agent
 
-# 1Password — use op:// URIs with an explicit env var name
-nono run --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' --allow-cwd -- my-agent
+# 1Password — map URI reference to destination env var
+nono run --env-credential-map 'op://Development/OpenAI/credential' OPENAI_API_KEY --allow-cwd -- my-agent
 
-# Apple Passwords (macOS) — use apple-password:// URIs with an explicit env var name
-nono run --env-credential 'apple-password://github.com/alice@example.com=GITHUB_PASSWORD' --allow-cwd -- my-agent
+# Apple Passwords (macOS) — map URI reference to destination env var
+nono run --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD --allow-cwd -- my-agent
 ```
 
 ### Agent SKILL Provenance and Supply Chain Security

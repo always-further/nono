@@ -216,6 +216,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
@@ -249,6 +250,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
@@ -1248,6 +1250,38 @@ struct PreparedSandbox {
     custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
 }
 
+fn parse_env_credential_map_args(values: &[String]) -> Result<Vec<(String, String)>> {
+    // Clap enforces 2 values per occurrence for --env-credential-map, but keep
+    // this check fail-secure in case argument wiring changes.
+    if values.len() % 2 != 0 {
+        return Err(NonoError::ConfigParse(
+            "--env-credential-map expects pairs: <CREDENTIAL_REF> <ENV_VAR>".to_string(),
+        ));
+    }
+
+    let mut pairs = Vec::with_capacity(values.len() / 2);
+    for chunk in values.chunks_exact(2) {
+        let credential_ref = chunk[0].trim();
+        let env_var = chunk[1].trim();
+
+        if credential_ref.is_empty() {
+            return Err(NonoError::ConfigParse(
+                "--env-credential-map has an empty credential reference".to_string(),
+            ));
+        }
+
+        if env_var.is_empty() {
+            return Err(NonoError::ConfigParse(
+                "--env-credential-map has an empty destination env var".to_string(),
+            ));
+        }
+
+        pairs.push((credential_ref.to_string(), env_var.to_string()));
+    }
+
+    Ok(pairs)
+}
+
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
     // Reinitialize tracing with verbose level if requested.
     // Uses tracing_subscriber directly instead of mutating process env vars
@@ -1455,9 +1489,13 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     let profile_secrets = loaded_profile
         .map(|p| p.env_credentials.mappings)
         .unwrap_or_default();
+    let cli_secret_mappings = parse_env_credential_map_args(&args.env_credential_map)?;
 
-    let secret_mappings =
-        nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets)?;
+    let secret_mappings = nono::keystore::build_secret_mappings(
+        args.env_credential.as_deref(),
+        &cli_secret_mappings,
+        &profile_secrets,
+    )?;
 
     // Load credentials from keystore/URI managers BEFORE sandbox is applied
     let loaded_secrets = if !secret_mappings.is_empty() {
@@ -1506,7 +1544,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
                     account.to_string()
                 };
                 eprintln!(
-                    "  {}: --env-credential '{}' exposes the secret directly to the sandboxed process.\n\
+                    "  {}: env credential '{}' exposes the secret directly to the sandboxed process.\n\
                      {}  For network API keys, use a profile with proxy_credentials for credential isolation.",
                     "warning".yellow(),
                     display_account,
