@@ -1118,6 +1118,69 @@ mod tests {
         assert_eq!(surviving.resolved, real_path);
     }
 
+    #[test]
+    fn test_deduplicate_user_upgrades_group_read_to_readwrite() {
+        // Group sets ~/.npm as Read, user passes --allow ~/.npm (ReadWrite).
+        // User intent must win: surviving entry should be ReadWrite with User source.
+        let path = PathBuf::from("/some/path");
+
+        let mut caps = CapabilitySet::new();
+        // Group entry first (e.g., from node_runtime security group)
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::Group("node_runtime".to_string()),
+        });
+        // User entry second (e.g., from --allow CLI flag)
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        let surviving = &caps.fs_capabilities()[0];
+        assert_eq!(surviving.access, AccessMode::ReadWrite);
+        assert!(matches!(surviving.source, CapabilitySource::User));
+    }
+
+    #[test]
+    fn test_deduplicate_user_write_merges_with_group_read() {
+        // Group sets a path as Read, user passes --write for same path.
+        // Should merge to ReadWrite since User wins and Read+Write=ReadWrite.
+        let path = PathBuf::from("/some/path");
+
+        let mut caps = CapabilitySet::new();
+        // Group entry first (e.g., from profile security group)
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::Group("node_runtime".to_string()),
+        });
+        // User entry second (e.g., from --write CLI flag)
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Write,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        let surviving = &caps.fs_capabilities()[0];
+        // User wins, and Read+Write should merge to ReadWrite
+        assert_eq!(surviving.access, AccessMode::ReadWrite);
+        assert!(matches!(surviving.source, CapabilitySource::User));
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_fs_capability_symlink_resolution() {
