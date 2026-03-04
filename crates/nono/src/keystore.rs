@@ -554,9 +554,9 @@ fn load_from_apple_password(uri: &str) -> Result<Zeroizing<String>> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = uri;
-        return Err(NonoError::KeystoreAccess(
+        Err(NonoError::KeystoreAccess(
             "Apple Passwords credentials are only supported on macOS".to_string(),
-        ));
+        ))
     }
 
     #[cfg(target_os = "macos")]
