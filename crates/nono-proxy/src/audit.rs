@@ -11,6 +11,8 @@ use tracing::info;
 pub enum ProxyMode {
     /// CONNECT tunnel (host filtering only)
     Connect,
+    /// Forward proxy for non-CONNECT HTTP requests
+    Forward,
     /// Reverse proxy (credential injection)
     Reverse,
     /// External proxy passthrough (enterprise)
@@ -21,6 +23,7 @@ impl std::fmt::Display for ProxyMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProxyMode::Connect => write!(f, "connect"),
+            ProxyMode::Forward => write!(f, "forward"),
             ProxyMode::Reverse => write!(f, "reverse"),
             ProxyMode::External => write!(f, "external"),
         }

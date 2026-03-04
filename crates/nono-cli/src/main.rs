@@ -222,6 +222,8 @@ fn run_why(args: WhyArgs) -> Result<()> {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
@@ -254,6 +256,8 @@ fn run_why(args: WhyArgs) -> Result<()> {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
@@ -312,6 +316,37 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let mut command_iter = command.into_iter();
     let program = OsString::from(command_iter.next().ok_or(NonoError::NoCommand)?);
     let cmd_args: Vec<OsString> = command_iter.map(OsString::from).collect();
+
+    let localhost_relay_active = args.experimental_localhost_relay && !args.expose_port.is_empty();
+    if args.experimental_localhost_relay && args.expose_port.is_empty() {
+        return Err(NonoError::ConfigParse(
+            "--experimental-localhost-relay requires at least one --expose-port".to_string(),
+        ));
+    }
+    if !args.expose_port.is_empty() && !args.experimental_localhost_relay {
+        return Err(NonoError::ConfigParse(
+            "--expose-port is experimental and requires --experimental-localhost-relay".to_string(),
+        ));
+    }
+    if localhost_relay_active && !args.net_block {
+        return Err(NonoError::ConfigParse(
+            "--experimental-localhost-relay currently requires --net-block".to_string(),
+        ));
+    }
+    if localhost_relay_active
+        && (args.network_profile.is_some()
+            || !args.proxy_allow.is_empty()
+            || !args.proxy_credential.is_empty()
+            || args.external_proxy.is_some()
+            || args.proxy_port.is_some())
+    {
+        return Err(NonoError::ConfigParse(
+            "--experimental-localhost-relay MVP cannot be combined with \
+             --network-profile, --proxy-allow, --proxy-credential, \
+             --external-proxy, or --proxy-port"
+                .to_string(),
+        ));
+    }
 
     // Dry run mode - just show what would happen
     if args.dry_run {
@@ -426,11 +461,30 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let mut proxy_credentials = prepared.proxy_credentials.clone();
     proxy_credentials.extend(args.proxy_credential.clone());
 
+    // MVP scope: localhost relay is intentionally narrow to keep behavior explicit.
+    // Do not mix with host allowlists or credential routes yet.
+    if localhost_relay_active
+        && (network_profile.is_some()
+            || !proxy_allow_hosts.is_empty()
+            || !proxy_credentials.is_empty()
+            || args.external_proxy.is_some()
+            || args.proxy_port.is_some())
+    {
+        return Err(NonoError::ConfigParse(
+            "--experimental-localhost-relay MVP cannot be combined with \
+             --network-profile, --proxy-allow, --proxy-credential, \
+             --external-proxy, or --proxy-port"
+                .to_string(),
+        ));
+    }
+
     // The proxy is needed when the network mode is ProxyOnly OR when there are
     // credential routes to inject. However, --net-block takes precedence: if
     // network is explicitly blocked, the proxy must NOT activate since that
     // would re-enable network access through the proxy's localhost listener.
-    let proxy_active = if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
+    let proxy_active = if localhost_relay_active {
+        true
+    } else if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
         if !proxy_credentials.is_empty() || network_profile.is_some() {
             warn!(
                 "--net-block is active; ignoring proxy configuration \
@@ -493,6 +547,8 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             custom_credentials: prepared.custom_credentials,
             external_proxy: args.external_proxy.clone(),
             allow_bind_ports: args.allow_bind,
+            exposed_local_ports: args.expose_port,
+            experimental_localhost_relay: args.experimental_localhost_relay,
             proxy_port: args.proxy_port,
         },
     )
@@ -500,6 +556,12 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 
 /// Run an interactive shell inside the sandbox
 fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
+    if args.sandbox.experimental_localhost_relay || !args.sandbox.expose_port.is_empty() {
+        return Err(NonoError::ConfigParse(
+            "--experimental-localhost-relay is currently supported only for `nono run`".to_string(),
+        ));
+    }
+
     let shell_path = args
         .shell
         .or_else(|| {
@@ -563,6 +625,8 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
             allow_bind_ports: Vec::new(),
+            exposed_local_ports: Vec::new(),
+            experimental_localhost_relay: false,
             proxy_port: None,
         },
     )
@@ -607,6 +671,10 @@ struct ExecutionFlags {
     external_proxy: Option<String>,
     /// Ports the sandboxed process is allowed to bind (from --allow-bind)
     allow_bind_ports: Vec<u16>,
+    /// Localhost destination ports exposed via experimental relay mode.
+    exposed_local_ports: Vec<u16>,
+    /// Enables experimental localhost relay behavior.
+    experimental_localhost_relay: bool,
     /// Fixed port for the credential proxy (from --proxy-port)
     proxy_port: Option<u16>,
 }
@@ -683,11 +751,36 @@ fn build_proxy_config_from_flags(
 
     // Expand --proxy-allow entries: group names become their hosts,
     // literal hostnames pass through as-is.
-    let expanded_proxy_allow =
+    let mut expanded_proxy_allow =
         network_policy::expand_proxy_allow(&net_policy, &flags.proxy_allow_hosts);
+
+    let localhost_relay_active =
+        flags.experimental_localhost_relay && !flags.exposed_local_ports.is_empty();
+    if localhost_relay_active {
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "0.0.0.0",
+            "::",
+            "[::]",
+        ] {
+            if !expanded_proxy_allow.iter().any(|h| h == host) {
+                expanded_proxy_allow.push(host.to_string());
+            }
+        }
+    }
 
     // Build the proxy config with expanded extra hosts
     let mut proxy_config = network_policy::build_proxy_config(&resolved, &expanded_proxy_allow);
+
+    if localhost_relay_active {
+        let mut ports = flags.exposed_local_ports.clone();
+        ports.sort_unstable();
+        ports.dedup();
+        proxy_config.localhost_connect_ports = ports;
+    }
 
     // Wire in external proxy if specified
     if let Some(ref addr) = flags.external_proxy {
@@ -805,6 +898,12 @@ fn execute_sandboxed(
                 port, flags.allow_bind_ports
             );
         }
+        if flags.experimental_localhost_relay && !flags.exposed_local_ports.is_empty() {
+            info!(
+                "Experimental localhost relay active for ports: {:?}",
+                flags.exposed_local_ports
+            );
+        }
         caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
             port,
             bind_ports: flags.allow_bind_ports,
@@ -819,6 +918,17 @@ fn execute_sandboxed(
         // (e.g., OPENAI_BASE_URL=http://127.0.0.1:<port>/openai)
         for (k, v) in handle.credential_env_vars(&proxy_config) {
             proxy_env_vars.push((k, v));
+        }
+
+        // Localhost relay needs localhost destinations to go through the proxy.
+        // Standard NO_PROXY defaults bypass localhost, so override when enabled.
+        if flags.experimental_localhost_relay && !flags.exposed_local_ports.is_empty() {
+            for (k, v) in &mut proxy_env_vars {
+                if k == "NO_PROXY" || k == "no_proxy" {
+                    *v = String::new();
+                }
+            }
+            proxy_env_vars.push(("NONO_LOCALHOST_RELAY".to_string(), "1".to_string()));
         }
 
         // Leak the runtime so it keeps running in the parent after fork.
@@ -1650,6 +1760,57 @@ fn write_capability_state_file(caps: &CapabilitySet, silent: bool) -> Option<std
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_execution_flags() -> ExecutionFlags {
+        ExecutionFlags {
+            interactive: false,
+            no_diagnostics: true,
+            direct_exec: false,
+            rollback: false,
+            no_rollback: false,
+            supervised: false,
+            no_rollback_prompt: true,
+            trust_override: false,
+            silent: true,
+            rollback_all: false,
+            rollback_include: Vec::new(),
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            scan_root: std::path::PathBuf::from("."),
+            trust_scan_verified: false,
+            protected_paths: Vec::new(),
+            proxy_active: true,
+            network_profile: None,
+            proxy_allow_hosts: Vec::new(),
+            proxy_credentials: Vec::new(),
+            custom_credentials: std::collections::HashMap::new(),
+            external_proxy: None,
+            allow_bind_ports: Vec::new(),
+            exposed_local_ports: Vec::new(),
+            experimental_localhost_relay: false,
+            proxy_port: None,
+        }
+    }
+
+    #[test]
+    fn test_build_proxy_config_localhost_relay_adds_loopback_hosts_and_ports() {
+        let mut flags = test_execution_flags();
+        flags.experimental_localhost_relay = true;
+        flags.exposed_local_ports = vec![11434, 11435, 11434];
+
+        let cfg = build_proxy_config_from_flags(&flags).expect("proxy config should build");
+        assert_eq!(cfg.localhost_connect_ports, vec![11434, 11435]);
+        assert!(cfg.allowed_hosts.iter().any(|h| h == "localhost"));
+        assert!(cfg.allowed_hosts.iter().any(|h| h == "127.0.0.1"));
+        assert!(cfg.allowed_hosts.iter().any(|h| h == "::1"));
+    }
+
+    #[test]
+    fn test_build_proxy_config_without_localhost_relay_has_no_local_port_guard() {
+        let flags = test_execution_flags();
+        let cfg = build_proxy_config_from_flags(&flags).expect("proxy config should build");
+        assert!(cfg.localhost_connect_ports.is_empty());
+    }
 
     #[test]
     fn test_sensitive_paths_defined() {

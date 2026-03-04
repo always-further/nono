@@ -63,6 +63,32 @@ fn validate_requested_file(
     )
 }
 
+fn localhost_relay_requested(args: &SandboxArgs) -> bool {
+    args.experimental_localhost_relay && !args.expose_port.is_empty()
+}
+
+fn validate_localhost_relay_args(args: &SandboxArgs) -> Result<()> {
+    if args.experimental_localhost_relay && args.expose_port.is_empty() {
+        return Err(NonoError::ConfigParse(
+            "--experimental-localhost-relay requires at least one --expose-port".to_string(),
+        ));
+    }
+    if args.expose_port.is_empty() {
+        return Ok(());
+    }
+    if !args.experimental_localhost_relay {
+        return Err(NonoError::ConfigParse(
+            "--expose-port is experimental and requires --experimental-localhost-relay".to_string(),
+        ));
+    }
+    if !args.net_block {
+        return Err(NonoError::ConfigParse(
+            "--experimental-localhost-relay currently requires --net-block".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Extension trait for CapabilitySet to add CLI-specific construction methods.
 ///
 /// Both methods return `(CapabilitySet, bool)` where the bool indicates whether
@@ -86,6 +112,7 @@ impl CapabilitySetExt for CapabilitySet {
     fn from_args(args: &SandboxArgs) -> Result<(CapabilitySet, bool)> {
         let mut caps = CapabilitySet::new();
         let protected_roots = ProtectedRoots::from_defaults()?;
+        validate_localhost_relay_args(args)?;
 
         // Resolve base policy groups (system paths, deny rules, dangerous commands)
         let loaded_policy = policy::load_embedded_policy()?;
@@ -142,8 +169,15 @@ impl CapabilitySetExt for CapabilitySet {
             }
         }
 
-        // Network blocking or proxy mode
-        if args.net_block {
+        // Network mode
+        if localhost_relay_requested(args) {
+            // Localhost relay runs through the parent proxy listener.
+            // Use ProxyOnly so the child can only reach localhost:proxy_port.
+            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
+                port: 0,
+                bind_ports: args.allow_bind.clone(),
+            });
+        } else if args.net_block {
             caps.set_network_blocked(true);
         } else if args.has_proxy_flags() {
             // Proxy mode: port 0 is a placeholder, updated when proxy starts.
@@ -185,6 +219,7 @@ impl CapabilitySetExt for CapabilitySet {
     ) -> Result<(CapabilitySet, bool)> {
         let mut caps = CapabilitySet::new();
         let protected_roots = ProtectedRoots::from_defaults()?;
+        validate_localhost_relay_args(args)?;
 
         // Resolve policy groups from profile
         // All profiles must have groups; if empty, use base_groups() as fallback
@@ -270,8 +305,13 @@ impl CapabilitySetExt for CapabilitySet {
             }
         }
 
-        // Network blocking or proxy mode from profile
-        if profile.network.block {
+        // Network mode from profile (CLI localhost-relay has highest priority).
+        if localhost_relay_requested(args) {
+            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
+                port: 0,
+                bind_ports: args.allow_bind.clone(),
+            });
+        } else if profile.network.block {
             caps.set_network_blocked(true);
         } else if profile.network.has_proxy_flags() {
             // Profile requests proxy mode; port 0 is a placeholder.
@@ -314,6 +354,7 @@ impl CapabilitySetExt for CapabilitySet {
 /// complementary access modes (Read + Write = ReadWrite).
 fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()> {
     let protected_roots = ProtectedRoots::from_defaults()?;
+    validate_localhost_relay_args(args)?;
 
     // Additional directories from CLI
     for path in &args.allow {
@@ -360,8 +401,13 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
         }
     }
 
-    // CLI network blocking overrides profile
-    if args.net_block {
+    // CLI network mode overrides profile
+    if localhost_relay_requested(args) {
+        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
+            port: 0,
+            bind_ports: args.allow_bind.clone(),
+        });
+    } else if args.net_block {
         caps.set_network_blocked(true);
     } else if args.has_proxy_flags() {
         // CLI proxy flags override profile network settings.
@@ -415,6 +461,8 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
@@ -447,11 +495,87 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
         assert!(caps.is_network_blocked());
+    }
+
+    #[test]
+    fn test_from_args_expose_port_requires_experimental_flag() {
+        let args = SandboxArgs {
+            allow: vec![],
+            read: vec![],
+            write: vec![],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![],
+            net_block: true,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
+            allow_command: vec![],
+            block_command: vec![],
+            env_credential: None,
+            profile: None,
+            allow_cwd: false,
+            workdir: None,
+            config: None,
+            verbose: 0,
+            dry_run: false,
+            allow_bind: vec![],
+            expose_port: vec![11434],
+            experimental_localhost_relay: false,
+            proxy_port: None,
+        };
+
+        let err =
+            CapabilitySet::from_args(&args).expect_err("must reject missing experimental flag");
+        assert!(
+            err.to_string()
+                .contains("--expose-port is experimental and requires"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_from_args_localhost_relay_sets_proxy_mode() {
+        let args = SandboxArgs {
+            allow: vec![],
+            read: vec![],
+            write: vec![],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![],
+            net_block: true,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
+            allow_command: vec![],
+            block_command: vec![],
+            env_credential: None,
+            profile: None,
+            allow_cwd: false,
+            workdir: None,
+            config: None,
+            verbose: 0,
+            dry_run: false,
+            allow_bind: vec![],
+            expose_port: vec![11434],
+            experimental_localhost_relay: true,
+            proxy_port: None,
+        };
+
+        let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
+        assert!(matches!(
+            caps.network_mode(),
+            nono::NetworkMode::ProxyOnly { .. }
+        ));
     }
 
     #[test]
@@ -478,6 +602,8 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
@@ -513,6 +639,8 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
@@ -562,6 +690,8 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
@@ -605,6 +735,8 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
@@ -693,6 +825,8 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 
@@ -759,6 +893,8 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            expose_port: vec![],
+            experimental_localhost_relay: false,
             proxy_port: None,
         };
 

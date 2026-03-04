@@ -37,6 +37,11 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
 
+    /// Allowed destination ports when CONNECT target is localhost/loopback.
+    /// Empty means no localhost-specific port restriction at proxy layer.
+    #[serde(default)]
+    pub localhost_connect_ports: Vec<u16>,
+
     /// Reverse proxy credential routes.
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
@@ -57,6 +62,7 @@ impl Default for ProxyConfig {
             bind_addr: default_bind_addr(),
             bind_port: 0,
             allowed_hosts: Vec::new(),
+            localhost_connect_ports: Vec::new(),
             routes: Vec::new(),
             external_proxy: None,
             max_connections: 256,
@@ -169,6 +175,7 @@ mod tests {
         assert_eq!(config.bind_addr, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         assert_eq!(config.bind_port, 0);
         assert!(config.allowed_hosts.is_empty());
+        assert!(config.localhost_connect_ports.is_empty());
         assert!(config.routes.is_empty());
         assert!(config.external_proxy.is_none());
     }

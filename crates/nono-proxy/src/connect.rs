@@ -34,10 +34,22 @@ pub async fn handle_connect(
     filter: &ProxyFilter,
     session_token: &Zeroizing<String>,
     remaining_header: &[u8],
+    localhost_connect_ports: &[u16],
 ) -> Result<()> {
     // Parse host:port from CONNECT line
     let (host, port) = parse_connect_target(first_line)?;
     debug!("CONNECT request to {}:{}", host, port);
+
+    // Optional localhost port guard (MVP relay mode).
+    if !localhost_connect_ports.is_empty()
+        && is_loopback_host(&host)
+        && !localhost_connect_ports.contains(&port)
+    {
+        let reason = format!("localhost port {} is not exposed", port);
+        audit::log_denied(audit::ProxyMode::Connect, &host, port, &reason);
+        send_response(stream, 403, &format!("Forbidden: {}", reason)).await?;
+        return Err(ProxyError::HostDenied { host, reason });
+    }
 
     // Validate session token from Proxy-Authorization header.
     // Non-fatal for CONNECT: Node.js undici doesn't send Proxy-Authorization
@@ -80,6 +92,15 @@ pub async fn handle_connect(
     debug!("CONNECT tunnel closed for {}:{}: {:?}", host, port, result);
 
     Ok(())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    normalized == "localhost"
+        || normalized == "127.0.0.1"
+        || normalized == "::1"
+        || normalized == "0.0.0.0"
+        || normalized == "::"
 }
 
 /// Connect to one of the pre-resolved socket addresses with timeout.
@@ -177,6 +198,15 @@ mod tests {
     fn test_parse_connect_malformed() {
         assert!(parse_connect_target("GET /").is_err());
         assert!(parse_connect_target("").is_err());
+    }
+
+    #[test]
+    fn test_is_loopback_host() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+        assert!(!is_loopback_host("api.openai.com"));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! dispatches to the appropriate handler.
 //!
 //! CONNECT method -> [`connect`] or [`external`] handler
-//! Other methods  -> [`reverse`] handler (credential injection)
+//! Other methods  -> [`reverse`] (credential injection) or [`forward`] handler
 
 use crate::config::ProxyConfig;
 use crate::connect;
@@ -13,6 +13,7 @@ use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
 use crate::external;
 use crate::filter::ProxyFilter;
+use crate::forward;
 use crate::reverse;
 use crate::token;
 use std::net::SocketAddr;
@@ -266,7 +267,7 @@ async fn accept_loop(
 ///
 /// Reads the first HTTP line to determine the proxy mode:
 /// - CONNECT method -> tunnel (Mode 1 or 3)
-/// - Other methods  -> reverse proxy (Mode 2)
+/// - Other methods  -> reverse proxy (Mode 2) or forward proxy (Mode 4)
 async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState) -> Result<()> {
     // Read the first line and headers through a BufReader.
     // We keep the BufReader alive until we've consumed the full header
@@ -298,8 +299,8 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
 
     // Extract any data buffered beyond headers before dropping BufReader.
     // BufReader may have read ahead into the request body. We capture
-    // those bytes and pass them to the reverse proxy handler so no body
-    // data is lost. For CONNECT requests this is always empty (no body).
+    // those bytes and pass them to downstream handlers so no body data
+    // is lost. For CONNECT requests this is always empty (no body).
     let buffered = buf_reader.buffer().to_vec();
     drop(buf_reader);
 
@@ -325,6 +326,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                 &state.filter,
                 &state.session_token,
                 &header_bytes,
+                &state.config.localhost_connect_ports,
             )
             .await
         }
@@ -338,10 +340,18 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
         };
         reverse::handle_reverse_proxy(first_line, &mut stream, &header_bytes, &ctx, &buffered).await
     } else {
-        // No credential routes configured, reject non-CONNECT requests
-        let response = "HTTP/1.1 400 Bad Request\r\n\r\n";
-        stream.write_all(response.as_bytes()).await?;
-        Ok(())
+        // No credential routes configured -> standard HTTP forward proxy.
+        // This path is used by localhost relay mode for plain HTTP traffic.
+        forward::handle_forward_proxy(
+            first_line,
+            &mut stream,
+            &state.filter,
+            &state.session_token,
+            &header_bytes,
+            &buffered,
+            &state.config.localhost_connect_ports,
+        )
+        .await
     }
 }
 
