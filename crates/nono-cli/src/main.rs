@@ -324,6 +324,9 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 
     let localhost_relay_active = localhost_relay_requested(&args);
     validate_localhost_relay_args(&args)?;
+    // Phase 1: validate direct CLI inputs early so dry-run reports fast and
+    // we fail before doing heavy setup work. Phase 2 (below) revalidates after
+    // profile-merging because profiles can introduce proxy settings.
     validate_localhost_relay_mvp_conflicts(
         localhost_relay_active,
         &args.network_profile,

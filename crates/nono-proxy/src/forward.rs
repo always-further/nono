@@ -32,10 +32,23 @@ pub async fn handle_forward_proxy(
     buffered: &[u8],
     localhost_connect_ports: &[u16],
 ) -> Result<()> {
-    let (method, target, version) = parse_request_line(first_line)?;
-    let parsed = Url::parse(&target).map_err(|e| {
-        ProxyError::HttpParse(format!("invalid absolute URL in request target: {}", e))
-    })?;
+    let (method, target, version) = match parse_request_line(first_line) {
+        Ok(parts) => parts,
+        Err(e) => {
+            send_response(stream, 400, "Bad Request").await?;
+            return Err(e);
+        }
+    };
+    let parsed = match Url::parse(&target) {
+        Ok(url) => url,
+        Err(e) => {
+            send_response(stream, 400, "Bad Request").await?;
+            return Err(ProxyError::HttpParse(format!(
+                "invalid absolute URL in request target: {}",
+                e
+            )));
+        }
+    };
 
     if parsed.scheme() != "http" {
         send_response(stream, 400, "Bad Request").await?;
@@ -45,13 +58,24 @@ pub async fn handle_forward_proxy(
         )));
     }
 
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ProxyError::HttpParse("missing host in absolute URL".to_string()))?
-        .to_string();
-    let port = parsed.port_or_known_default().ok_or_else(|| {
-        ProxyError::HttpParse("unable to determine destination port for request".to_string())
-    })?;
+    let host = match parsed.host_str() {
+        Some(host) => host.to_string(),
+        None => {
+            send_response(stream, 400, "Bad Request").await?;
+            return Err(ProxyError::HttpParse(
+                "missing host in absolute URL".to_string(),
+            ));
+        }
+    };
+    let port = match parsed.port_or_known_default() {
+        Some(port) => port,
+        None => {
+            send_response(stream, 400, "Bad Request").await?;
+            return Err(ProxyError::HttpParse(
+                "unable to determine destination port for request".to_string(),
+            ));
+        }
+    };
 
     if !localhost_connect_ports.is_empty()
         && is_loopback_host(&host)

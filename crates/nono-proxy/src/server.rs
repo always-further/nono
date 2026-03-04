@@ -339,9 +339,10 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             tls_connector: &state.tls_connector,
         };
         reverse::handle_reverse_proxy(first_line, &mut stream, &header_bytes, &ctx, &buffered).await
-    } else {
-        // No credential routes configured -> standard HTTP forward proxy.
-        // This path is used by localhost relay mode for plain HTTP traffic.
+    } else if !state.config.localhost_connect_ports.is_empty() {
+        // Forward proxying for plain HTTP is enabled only in localhost relay mode.
+        // Without relay configuration, preserve legacy behavior and reject
+        // non-CONNECT requests when no credential routes are configured.
         forward::handle_forward_proxy(
             first_line,
             &mut stream,
@@ -352,6 +353,10 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             &state.config.localhost_connect_ports,
         )
         .await
+    } else {
+        let response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        stream.write_all(response.as_bytes()).await?;
+        Ok(())
     }
 }
 
@@ -359,6 +364,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn test_proxy_starts_and_binds() {
@@ -387,6 +393,51 @@ mod tests {
         let token_var = vars.iter().find(|(k, _)| k == "NONO_PROXY_TOKEN");
         assert!(token_var.is_some());
         assert_eq!(token_var.unwrap().1.len(), 64);
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_non_connect_rejected_without_relay_or_routes() {
+        let config = ProxyConfig::default();
+        let handle = start(config).await.unwrap();
+
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", handle.port))
+            .await
+            .unwrap();
+        client
+            .write_all(b"GET http://localhost:11434/v1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 400"));
+
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_forward_proxy_malformed_absolute_url_returns_400_in_relay_mode() {
+        let config = ProxyConfig {
+            localhost_connect_ports: vec![11434],
+            ..Default::default()
+        };
+        let handle = start(config).await.unwrap();
+
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", handle.port))
+            .await
+            .unwrap();
+        client
+            .write_all(b"GET not-a-url HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 400"));
 
         handle.shutdown();
     }
