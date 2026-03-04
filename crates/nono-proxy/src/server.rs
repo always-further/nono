@@ -106,7 +106,7 @@ impl ProxyHandle {
             }
 
             // API key set to session token (phantom token pattern).
-            // Use explicit env_var if set (required for op:// URIs), otherwise
+            // Use explicit env_var if set (required for URI manager refs), otherwise
             // fall back to uppercasing the credential_key (e.g., "openai_api_key" -> "OPENAI_API_KEY").
             if let Some(ref env_var) = route.env_var {
                 vars.push((env_var.clone(), self.token.to_string()));
@@ -453,7 +453,8 @@ mod tests {
     #[test]
     fn test_proxy_credential_env_vars_with_explicit_env_var() {
         // When env_var is set on a route, it should be used instead of
-        // deriving from credential_key. This is essential for op:// URIs
+        // deriving from credential_key. This is essential for URI manager
+        // credential refs (e.g., op://, apple-password://)
         // where uppercasing produces nonsensical env var names.
         //
         // We construct a ProxyHandle directly to test env var generation

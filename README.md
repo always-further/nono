@@ -103,7 +103,7 @@ nono run --read ./src --write ./output -- cargo build
 
 ### Credential Injection
 
-Two modes: **proxy injection** keeps credentials entirely outside the sandbox — the agent connects to `localhost` and the proxy injects real API keys into upstream requests. **Env injection** loads secrets from the OS keystore or 1Password and injects them as environment variables before the sandbox locks.
+Two modes: **proxy injection** keeps credentials entirely outside the sandbox — the agent connects to `localhost` and the proxy injects real API keys into upstream requests. **Env injection** loads secrets from the OS keystore, 1Password, or Apple Passwords and injects them as environment variables before the sandbox locks.
 
 ```bash
 # Proxy mode — agent never sees the API key, even in its own memory
@@ -114,6 +114,9 @@ nono run --env-credential openai_api_key --allow-cwd -- my-agent
 
 # 1Password — use op:// URIs with an explicit env var name
 nono run --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' --allow-cwd -- my-agent
+
+# Apple Passwords (macOS) — use apple-password:// URIs with an explicit env var name
+nono run --env-credential 'apple-password://github.com/alice@example.com=GITHUB_PASSWORD' --allow-cwd -- my-agent
 ```
 
 ### Agent SKILL Provenance and Supply Chain Security

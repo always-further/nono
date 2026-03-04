@@ -120,7 +120,8 @@ pub struct RouteConfig {
     ///
     /// When set, this is used as the SDK API key env var name instead of deriving
     /// it from `credential_key.to_uppercase()`. Required when `credential_key` is
-    /// an `op://` URI (which would produce a nonsensical env var name).
+    /// a URI manager reference (e.g., `op://`, `apple-password://`) which would
+    /// otherwise produce a nonsensical env var name.
     #[serde(default)]
     pub env_var: Option<String>,
 }
