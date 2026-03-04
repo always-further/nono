@@ -526,13 +526,10 @@ fn verify_landlock_network_rule_support(abi: landlock::ABI) -> Result<bool> {
         .create()
         .map_err(|e| NonoError::Setup(format!("Failed to create network probe ruleset: {}", e)))?;
 
-    let ruleset = ruleset
-        .set_compatibility(CompatLevel::HardRequirement)
-        .add_rule(NetPort::new(443, AccessNet::ConnectTcp))
-        .map_err(|e| NonoError::Setup(format!("Failed to add TCP connect probe rule: {}", e)))?;
-
     ruleset
         .set_compatibility(CompatLevel::HardRequirement)
+        .add_rule(NetPort::new(443, AccessNet::ConnectTcp))
+        .map_err(|e| NonoError::Setup(format!("Failed to add TCP connect probe rule: {}", e)))?
         .add_rule(NetPort::new(444, AccessNet::BindTcp))
         .map_err(|e| NonoError::Setup(format!("Failed to add TCP bind probe rule: {}", e)))?;
 
