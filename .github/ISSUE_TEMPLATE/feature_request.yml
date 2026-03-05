@@ -1,0 +1,48 @@
+name: Feature request
+description: Suggest something for nono to support or do better
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are welcome. The more you can tell us about the use case behind the request, the better.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation where nono falls short today. Don't jump to the solution yet.
+      placeholder: "When I'm running agents that need to make outbound HTTP calls to a known set of endpoints, there's no way to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like to see?
+      description: Your idea for how nono could address this. Could be a policy syntax change, a new enforcement mode, a CLI flag — anything.
+      placeholder: "It would be useful if the policy file could specify allowed outbound domains so that..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Workarounds you've considered, or other tools you've looked at for this.
+
+  - type: dropdown
+    id: priority-signal
+    attributes:
+      label: How is this blocking you?
+      options:
+        - It's blocking production use of nono
+        - It's slowing down my evaluation of nono
+        - It would be a nice improvement but I have a workaround
+        - Just an idea — low urgency
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Agent framework, deployment environment, or anything else relevant to the request.
