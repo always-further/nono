@@ -584,6 +584,81 @@ pub struct Profile {
     pub interactive: bool,
 }
 
+fn is_profile_path(name_or_path: &str) -> bool {
+    name_or_path.contains('/') || name_or_path.ends_with(".json")
+}
+
+fn ensure_profile_path_exists(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    Err(NonoError::ProfileRead {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "profile file not found"),
+    })
+}
+
+fn load_named_profile_internal(
+    name: &str,
+    policy: Option<&crate::policy::Policy>,
+) -> Result<Profile> {
+    // Validate profile name (alphanumeric + hyphen only)
+    if !is_valid_profile_name(name) {
+        return Err(NonoError::ProfileParse(format!(
+            "Invalid profile name '{}': must be alphanumeric with hyphens only",
+            name
+        )));
+    }
+
+    // 1. Check user profiles first (allows overriding built-ins)
+    let profile_path = get_user_profile_path(name)?;
+    if profile_path.exists() {
+        tracing::info!("Loading user profile from: {}", profile_path.display());
+        let mut profile = match policy {
+            Some(policy) => load_from_file_with_policy(&profile_path, policy)?,
+            None => load_from_file(&profile_path)?,
+        };
+
+        match policy {
+            Some(policy) => merge_base_groups_with_policy(&mut profile, policy)?,
+            None => merge_base_groups(&mut profile)?,
+        }
+
+        return Ok(profile);
+    }
+
+    // 2. Fall back to built-in profiles
+    let builtin_profile = match policy {
+        Some(policy) => crate::policy::get_policy_profile_from_policy(name, policy)?,
+        None => builtin::get_builtin(name),
+    };
+    if let Some(profile) = builtin_profile {
+        tracing::info!("Using built-in profile: {}", name);
+        return Ok(profile);
+    }
+
+    Err(NonoError::ProfileNotFound(name.to_string()))
+}
+
+fn load_profile_from_path_internal(
+    path: &Path,
+    policy: Option<&crate::policy::Policy>,
+) -> Result<Profile> {
+    ensure_profile_path_exists(path)?;
+
+    tracing::info!("Loading profile from path: {}", path.display());
+    let mut profile = match policy {
+        Some(policy) => load_from_file_with_policy(path, policy)?,
+        None => load_from_file(path)?,
+    };
+    match policy {
+        Some(policy) => merge_base_groups_with_policy(&mut profile, policy)?,
+        None => merge_base_groups(&mut profile)?,
+    }
+    Ok(profile)
+}
+
 /// Load a profile by name or file path
 ///
 /// If `name_or_path` contains a path separator or ends with `.json`, it is
@@ -593,35 +668,11 @@ pub struct Profile {
 /// 1. User profiles from ~/.config/nono/profiles/<name>.json (allows customization)
 /// 2. Built-in profiles (compiled into binary, fallback)
 pub fn load_profile(name_or_path: &str) -> Result<Profile> {
-    // Direct file path: contains separator or ends with .json
-    if name_or_path.contains('/') || name_or_path.ends_with(".json") {
+    if is_profile_path(name_or_path) {
         return load_profile_from_path(Path::new(name_or_path));
     }
 
-    // Validate profile name (alphanumeric + hyphen only)
-    if !is_valid_profile_name(name_or_path) {
-        return Err(NonoError::ProfileParse(format!(
-            "Invalid profile name '{}': must be alphanumeric with hyphens only",
-            name_or_path
-        )));
-    }
-
-    // 1. Check user profiles first (allows overriding built-ins)
-    let profile_path = get_user_profile_path(name_or_path)?;
-    if profile_path.exists() {
-        tracing::info!("Loading user profile from: {}", profile_path.display());
-        let mut profile = load_from_file(&profile_path)?;
-        merge_base_groups(&mut profile)?;
-        return Ok(profile);
-    }
-
-    // 2. Fall back to built-in profiles
-    if let Some(profile) = builtin::get_builtin(name_or_path) {
-        tracing::info!("Using built-in profile: {}", name_or_path);
-        return Ok(profile);
-    }
-
-    Err(NonoError::ProfileNotFound(name_or_path.to_string()))
+    load_named_profile_internal(name_or_path, None)
 }
 
 /// Load a profile by name or file path using a provided policy.
@@ -633,35 +684,10 @@ pub fn load_profile_with_policy(
     name_or_path: &str,
     policy: &crate::policy::Policy,
 ) -> Result<Profile> {
-    // Direct file path: contains separator or ends with .json
-    if name_or_path.contains('/') || name_or_path.ends_with(".json") {
+    if is_profile_path(name_or_path) {
         return load_profile_from_path_with_policy(Path::new(name_or_path), policy);
     }
-
-    // Validate profile name (alphanumeric + hyphen only)
-    if !is_valid_profile_name(name_or_path) {
-        return Err(NonoError::ProfileParse(format!(
-            "Invalid profile name '{}': must be alphanumeric with hyphens only",
-            name_or_path
-        )));
-    }
-
-    // 1. Check user profiles first (allows overriding built-ins)
-    let profile_path = get_user_profile_path(name_or_path)?;
-    if profile_path.exists() {
-        tracing::info!("Loading user profile from: {}", profile_path.display());
-        let mut profile = load_from_file_with_policy(&profile_path, policy)?;
-        merge_base_groups_with_policy(&mut profile, policy)?;
-        return Ok(profile);
-    }
-
-    // 2. Fall back to profiles from provided policy
-    if let Some(profile) = crate::policy::get_policy_profile_from_policy(name_or_path, policy)? {
-        tracing::info!("Using built-in profile: {}", name_or_path);
-        return Ok(profile);
-    }
-
-    Err(NonoError::ProfileNotFound(name_or_path.to_string()))
+    load_named_profile_internal(name_or_path, Some(policy))
 }
 
 /// Load a profile from a direct file path.
@@ -669,17 +695,7 @@ pub fn load_profile_with_policy(
 /// The path must exist and point to a valid JSON profile file.
 /// Base groups are merged automatically.
 pub fn load_profile_from_path(path: &Path) -> Result<Profile> {
-    if !path.exists() {
-        return Err(NonoError::ProfileRead {
-            path: path.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "profile file not found"),
-        });
-    }
-
-    tracing::info!("Loading profile from path: {}", path.display());
-    let mut profile = load_from_file(path)?;
-    merge_base_groups(&mut profile)?;
-    Ok(profile)
+    load_profile_from_path_internal(path, None)
 }
 
 /// Load a profile from a direct file path using a provided policy.
@@ -687,17 +703,7 @@ pub fn load_profile_from_path_with_policy(
     path: &Path,
     policy: &crate::policy::Policy,
 ) -> Result<Profile> {
-    if !path.exists() {
-        return Err(NonoError::ProfileRead {
-            path: path.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "profile file not found"),
-        });
-    }
-
-    tracing::info!("Loading profile from path: {}", path.display());
-    let mut profile = load_from_file_with_policy(path, policy)?;
-    merge_base_groups_with_policy(&mut profile, policy)?;
-    Ok(profile)
+    load_profile_from_path_internal(path, Some(policy))
 }
 
 /// Merge base_groups from policy.json into a user profile.
