@@ -30,7 +30,7 @@
 > This is an early alpha release that has not undergone comprehensive security audits. While we have taken care to implement robust security measures, there may still be undiscovered issues. We do not recommend using this in production until we release a stable version of 1.0.
 
 > [!NOTE]
-> :tada: v0.6.1 has shipped! :tada: we have completed work to separate the CLI from the core library!
+> Latest release: `v0.11.0`. See [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
 AI agents get filesystem access, run shell commands, and are inherently open to prompt injection. The standard response is guardrails and policies. The problem is that policies can be bypassed and guardrails linguistically overcome.
 
