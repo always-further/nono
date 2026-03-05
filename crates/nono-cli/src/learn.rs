@@ -539,12 +539,16 @@ fn run_fs_usage(command: &[String], timeout: Option<u64>) -> Result<Vec<FileAcce
         let child_id = child.id();
         std::thread::spawn(move || {
             std::thread::sleep(timeout);
-            warn!("Timeout reached, killing child PID {}", child_id);
-            // Send SIGTERM via kill(2) — child.kill() isn't accessible here
+            warn!("Timeout reached, sending SIGTERM to child PID {}", child_id);
             // SAFETY: sending a signal to a known child PID. If the process
             // has already exited, kill() returns ESRCH which we ignore.
             unsafe {
                 nix::libc::kill(child_id as i32, nix::libc::SIGTERM);
+            }
+            // Grace period: if the child ignores SIGTERM, escalate to SIGKILL
+            std::thread::sleep(Duration::from_secs(3));
+            unsafe {
+                nix::libc::kill(child_id as i32, nix::libc::SIGKILL);
             }
         });
     }

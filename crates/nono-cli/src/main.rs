@@ -195,10 +195,6 @@ fn offer_save_profile(result: &learn::LearnResult, command: &[String]) -> Result
         .map_err(|e| NonoError::LearnError(format!("Failed to read input: {}", e)))?;
 
     let input = input.trim();
-    if input.is_empty() {
-        // Use the default (cmd_name) — just press Enter
-    }
-
     let profile_name = if input.is_empty() { cmd_name } else { input };
 
     // Validate profile name: alphanumeric, hyphens, underscores only
