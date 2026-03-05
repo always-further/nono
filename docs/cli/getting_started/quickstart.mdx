@@ -68,9 +68,17 @@ Network is **allowed by default**. Use `--net-block` to disable outbound connect
 nono run --allow-cwd --net-block -- cargo build
 ```
 
-<Note>
-  Network access is currently all-or-nothing. You can either allow all network access (default) or block it entirely with `--net-block`.
-</Note>
+For granular control, use `--network-profile` for host-level filtering or `--allow-port` for localhost IPC between sandboxes:
+
+```bash
+# Host-level filtering via proxy
+nono run --allow-cwd --network-profile claude-code -- claude
+
+# Localhost IPC (e.g., MCP server on port 3000)
+nono run --net-block --allow-port 3000 --allow-cwd -- my-agent
+```
+
+See [Network Filtering](/cli/features/network-proxy) and [CLI Reference](/cli/usage/flags) for details.
 
 ## Interactive Shell (`nono shell`)
 

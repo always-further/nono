@@ -318,6 +318,35 @@ On Linux with Landlock ABI v4+, per-port filtering is enforced and only the spec
 `--allow-bind` only has effect in proxy mode (when `--network-profile` or `--proxy-allow` is active). Without proxy mode, network operations use the default OS-level allow/deny and bind is not restricted.
 </Note>
 
+#### `--allow-port`
+
+Allow bidirectional localhost TCP on a specific port. The sandboxed process can both **connect to** and **bind/listen on** `127.0.0.1:<PORT>`. Use this for IPC between sandboxed processes (e.g., MCP servers, dev tools, AI agents running in separate sandboxes).
+
+```bash
+# MCP server in one sandbox, client in another — both can use port 3000
+nono run --net-block --allow-port 3000 --allow ./mcp-server -- node server.js
+nono run --net-block --allow-port 3000 --allow ./client -- claude
+
+# Multiple IPC ports
+nono run --net-block --allow-port 3000 --allow-port 5000 --allow-cwd -- my-agent
+
+# Combine with proxy mode — outbound filtered + localhost IPC on port 4000
+nono run --network-profile claude-code --allow-port 4000 --allow-cwd -- claude
+```
+
+Works across all network modes:
+- **`--net-block`**: The port becomes an exception to the block (localhost only)
+- **Proxy mode**: The port is allowed in addition to the proxy port
+- **Default (AllowAll)**: No-op — all ports are already reachable
+
+Can be specified multiple times for multiple ports.
+
+<Warning>
+**macOS limitation:** Seatbelt cannot filter bind/inbound by port number. When `--allow-port` is specified on macOS, the sandbox permits binding to **any** port (same tradeoff as `--allow-bind`). Outbound connections are still restricted to only the specified localhost ports.
+
+On Linux with Landlock ABI v4+, both connect and bind are enforced per-port.
+</Warning>
+
 ## `nono shell` Options
 
 `nono shell` supports the same permission, profile, secrets, and dry-run flags as `nono run`, plus:
