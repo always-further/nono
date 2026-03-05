@@ -118,6 +118,16 @@ If you want to prevent any outbound connections (e.g., for reviewing local code 
 nono run --profile claude-code --net-block -- claude
 ```
 
+### Temporarily Allow Unrestricted Network
+
+If you want to keep the Claude Code profile's filesystem and command restrictions, but bypass its proxy filtering for a single session:
+
+```bash
+nono run --profile claude-code --net-allow -- claude
+```
+
+This also disables any proxy-based credential injection configured by the profile for that run.
+
 ## Enabling LSPs, Linters, and Dev Tools
 
 Claude Code's LSP plugins (pyright, rust-analyzer, etc.) spawn language servers as child processes. These spawns use `posix_spawnp()` which searches your `PATH` for the binary. If any `PATH` directory is unreadable to the sandbox, `posix_spawnp()` receives `EPERM` from the kernel and stops searching immediately (unlike `ENOENT`, which continues to the next entry).
@@ -197,6 +207,9 @@ nono run --profile claude-code --allow ~/other-project -- claude
 
 # Use profile but block network
 nono run --profile claude-code --net-block -- claude
+
+# Use profile but temporarily allow unrestricted network
+nono run --profile claude-code --net-allow -- claude
 ```
 
 See [Security Profiles](/cli/features/profiles-groups) for details on profile format and precedence rules.

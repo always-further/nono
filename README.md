@@ -40,6 +40,7 @@ Kernel-enforced sandboxing (Landlock/Seatbelt) blocks unauthorized access at the
 
 ```bash
 nono run --profile claude-code -- claude
+nono run --profile claude-code --net-allow -- claude
 nono run --read ./src --write ./output -- cargo build
 ```
 
@@ -134,6 +135,9 @@ Allowlist-based host filtering via a local proxy. The sandbox blocks all direct 
 
 ```bash
 nono run --supervised --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+
+# Keep the claude-code profile, but allow unrestricted network for this session
+nono run --profile claude-code --net-allow -- claude
 ```
 
 ### Supervisor and Capability Expansion

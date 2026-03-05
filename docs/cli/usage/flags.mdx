@@ -203,6 +203,19 @@ Block all network access. Network is **allowed by default**.
 nono run --allow-cwd --net-block -- cargo build
 ```
 
+#### `--net-allow`
+
+Force unrestricted outbound network access for this session. This is mainly useful when a selected profile would otherwise enable proxy filtering.
+
+```bash
+# Keep the claude-code profile, but bypass its proxy filtering for one run
+nono run --profile claude-code --net-allow -- claude
+```
+
+<Note>
+  `--net-allow` disables proxy mode for that run, so it also disables proxy-based credential injection. It conflicts with `--net-block`, `--network-profile`, `--proxy-allow`, `--proxy-credential`, `--external-proxy`, and `--proxy-port`.
+</Note>
+
 #### `--network-profile`
 
 Use a predefined network profile for host-level filtering. When set, outbound traffic is routed through a localhost proxy that only allows connections to hosts in the profile.
@@ -733,6 +746,7 @@ Available context flags:
 - `--read-file` - Single files with read-only access
 - `--write-file` - Single files with write-only access
 - `--net-block` - Block network access
+- `--net-allow` - Force unrestricted network access for this run
 - `--profile`, `-p` - Use a named profile
 - `--workdir` - Working directory for `$WORKDIR` expansion
 

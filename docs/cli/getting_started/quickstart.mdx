@@ -74,6 +74,9 @@ For granular control, use `--network-profile` for host-level filtering or `--all
 # Host-level filtering via proxy
 nono run --allow-cwd --network-profile claude-code -- claude
 
+# Keep a built-in profile but temporarily disable its proxy filtering
+nono run --profile claude-code --net-allow -- claude
+
 # Localhost IPC (e.g., MCP server on port 3000)
 nono run --net-block --allow-port 3000 --allow-cwd -- my-agent
 ```
