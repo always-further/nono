@@ -129,7 +129,7 @@ The `network` section controls network access and credential injection:
 | Field | Description |
 |-------|-------------|
 | `block` | Block all network access (default: `false`) |
-| `network_profile` | Network profile name for host filtering (e.g., `minimal`, `claude-code`, `enterprise`) |
+| `network_profile` | Network profile name for host filtering (e.g., `minimal`, `claude-code`, `enterprise`). Set to `null` in a child profile to clear an inherited value. |
 | `proxy_allow` | Additional hosts to allow through the proxy |
 | `proxy_credentials` | Credential services to enable via reverse proxy (e.g., `openai`, `anthropic`) |
 | `custom_credentials` | Custom credential service definitions for APIs not in the built-in list |
@@ -254,6 +254,16 @@ nono run --profile claude-code --net-block -- claude
 
 # Add extra directory access
 nono run --profile claude-code --allow ~/other-project -- claude
+```
+
+To keep a base profile but clear an inherited network profile, set `network.network_profile` to `null` in the child:
+
+```json
+{
+  "meta": { "name": "claude-code-netopen" },
+  "extends": "claude-code",
+  "network": { "network_profile": null }
+}
 ```
 
 You can also create a user profile with the same name to override a built-in profile entirely.

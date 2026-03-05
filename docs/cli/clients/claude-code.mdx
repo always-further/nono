@@ -62,6 +62,22 @@ If you need different permissions, create a custom profile at `~/.config/nono/pr
 }
 ```
 
+If you want to inherit the built-in Claude Code profile but remove its network filtering, create a separate extending profile and explicitly clear the inherited network profile:
+
+```json
+{
+  "meta": { "name": "claude-code-netopen" },
+  "extends": "claude-code",
+  "network": { "network_profile": null }
+}
+```
+
+Then run:
+
+```bash
+nono run --profile claude-code-netopen -- claude
+```
+
 **Usage:**
 ```bash
 nono run --profile claude-code --env-credential -- claude

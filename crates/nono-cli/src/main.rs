@@ -1346,9 +1346,11 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .as_ref()
         .map(|p| p.rollback.exclude_globs.clone())
         .unwrap_or_default();
-    let profile_network_profile = loaded_profile
-        .as_ref()
-        .and_then(|p| p.network.network_profile.clone());
+    let profile_network_profile = loaded_profile.as_ref().and_then(|p| {
+        p.network
+            .resolved_network_profile()
+            .map(|value| value.to_string())
+    });
     let profile_proxy_allow = loaded_profile
         .as_ref()
         .map(|p| p.network.proxy_allow.clone())
