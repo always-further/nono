@@ -531,6 +531,7 @@ mod tests {
         let handle = ProxyHandle {
             port: 12345,
             token: Zeroizing::new("test_token".to_string()),
+            audit_log: audit::new_audit_log(),
             shutdown_tx,
             // Only "openai" was loaded; "github" credential was unavailable
             loaded_routes: ["openai".to_string()].into_iter().collect(),
