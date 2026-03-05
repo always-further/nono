@@ -40,6 +40,15 @@ nono run --allow-cwd --proxy-allow api.openai.com --proxy-allow api.anthropic.co
 nono run --allow-cwd --network-profile claude-code -- claude
 ```
 
+### Disable Proxy Filtering For One Session
+
+```bash
+# Keep the profile's filesystem policy, but skip proxy filtering this run
+nono run --profile claude-code --net-allow -- claude
+```
+
+`--net-allow` is a per-session override. It keeps the selected profile's filesystem and command policy, but disables proxy filtering and proxy-based credential injection for that run.
+
 ## How It Works
 
 When proxy mode is active, nono:
