@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.11.0] - 2026-03-05
+
+### Features
+
+- Add --allow-port for bidirectional localhost IPC between sandboxes (#248) ([#248](https://github.com/always-further/nono/pull/248))
+
+- Unify proxy network audit with session audit trail (#231) ([#231](https://github.com/always-further/nono/pull/231))
+
+
+### Miscellaneous
+
+- Add GitHub issue templates for bugs, features, and onboarding (#247) ([#247](https://github.com/always-further/nono/pull/247))
+
+- Add GitHub issue templates for bugs, features, and onboarding
+
 ## [0.10.0] - 2026-03-04
 
 ### Bug Fixes

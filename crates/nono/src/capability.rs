@@ -412,6 +412,14 @@ pub struct CapabilitySet {
     tcp_connect_ports: Vec<u16>,
     /// Per-port TCP bind allowlist (Linux Landlock V4+ only).
     tcp_bind_ports: Vec<u16>,
+    /// TCP ports allowed for bidirectional IPC (connect + bind).
+    /// These apply regardless of NetworkMode.
+    ///
+    /// On macOS (Seatbelt), outbound is scoped to localhost per-port.
+    /// On Linux (Landlock), ConnectTcp/BindTcp filter by port only, not
+    /// by destination IP. Use with `--net-block` or proxy mode to ensure
+    /// only localhost is reachable.
+    localhost_ports: Vec<u16>,
     /// Commands explicitly allowed (overrides blocklists - for CLI use)
     allowed_commands: Vec<String>,
     /// Additional commands to block (extends blocklists - for CLI use)
@@ -523,6 +531,20 @@ impl CapabilitySet {
         self
     }
 
+    /// Allow bidirectional localhost TCP on a specific port (builder pattern).
+    ///
+    /// The sandboxed process can both connect to and bind/listen on
+    /// `127.0.0.1:port`. Works across all network modes.
+    ///
+    /// On macOS: outbound is per-port via Seatbelt; bind/inbound is blanket
+    /// (same tradeoff as `--allow-bind`).
+    /// On Linux: per-port ConnectTcp + BindTcp via Landlock.
+    #[must_use]
+    pub fn allow_localhost_port(mut self, port: u16) -> Self {
+        self.localhost_ports.push(port);
+        self
+    }
+
     /// Allow TCP connect to standard HTTPS ports (443, 8443)
     ///
     /// Convenience method. Linux Landlock V4+ only.
@@ -610,6 +632,11 @@ impl CapabilitySet {
         self.tcp_bind_ports.push(port);
     }
 
+    /// Add a localhost IPC port (mutable)
+    pub fn add_localhost_port(&mut self, port: u16) {
+        self.localhost_ports.push(port);
+    }
+
     /// Set sandbox extensions state
     pub fn set_extensions_enabled(&mut self, enabled: bool) {
         self.extensions_enabled = enabled;
@@ -671,6 +698,12 @@ impl CapabilitySet {
     #[must_use]
     pub fn tcp_bind_ports(&self) -> &[u16] {
         &self.tcp_bind_ports
+    }
+
+    /// Get localhost IPC ports
+    #[must_use]
+    pub fn localhost_ports(&self) -> &[u16] {
+        &self.localhost_ports
     }
 
     /// Check if sandbox extensions are enabled for runtime capability expansion
@@ -1395,6 +1428,22 @@ mod tests {
         caps.add_tcp_bind_port(8080);
         assert_eq!(caps.tcp_connect_ports(), &[443]);
         assert_eq!(caps.tcp_bind_ports(), &[8080]);
+    }
+
+    #[test]
+    fn test_localhost_port_builder() {
+        let caps = CapabilitySet::new()
+            .allow_localhost_port(3000)
+            .allow_localhost_port(5000);
+        assert_eq!(caps.localhost_ports(), &[3000, 5000]);
+    }
+
+    #[test]
+    fn test_localhost_port_mutable() {
+        let mut caps = CapabilitySet::new();
+        caps.add_localhost_port(8080);
+        caps.add_localhost_port(9090);
+        assert_eq!(caps.localhost_ports(), &[8080, 9090]);
     }
 
     #[test]

@@ -464,10 +464,11 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     // credential routes to inject. However, --net-block takes precedence: if
     // network is explicitly blocked, the proxy must NOT activate since that
     // would re-enable network access through the proxy's localhost listener.
-    let proxy_active = if localhost_relay_active {
-        true
-    } else if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
-        if !proxy_credentials.is_empty() || network_profile.is_some() {
+    let proxy_active = if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
+        if !proxy_credentials.is_empty()
+            || network_profile.is_some()
+            || !proxy_allow_hosts.is_empty()
+        {
             warn!(
                 "--net-block is active; ignoring proxy configuration \
                  that would re-enable network access"
@@ -486,6 +487,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             nono::NetworkMode::ProxyOnly { .. }
         ) || !proxy_credentials.is_empty()
             || network_profile.is_some()
+            || !proxy_allow_hosts.is_empty()
     };
 
     // Split --rollback-exclude values: glob metacharacters route to filename
@@ -538,7 +540,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 
 /// Run an interactive shell inside the sandbox
 fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
-    if args.sandbox.experimental_localhost_relay || !args.sandbox.allow_port.is_empty() {
+    if args.sandbox.experimental_localhost_relay {
         return Err(NonoError::ConfigParse(
             "--experimental-localhost-relay is currently supported only for `nono run`".to_string(),
         ));
@@ -842,7 +844,7 @@ fn execute_sandboxed(
     // ephemeral port on localhost. The child is sandboxed to only connect to
     // that port via ProxyOnly mode.
     let mut proxy_env_vars: Vec<(String, String)> = Vec::new();
-    let _proxy_handle: Option<nono_proxy::server::ProxyHandle> = if flags.proxy_active {
+    let proxy_handle: Option<nono_proxy::server::ProxyHandle> = if flags.proxy_active {
         let proxy_config = build_proxy_config_from_flags(&flags)?;
 
         // Use multi-thread runtime so the accept loop and connection handlers
@@ -1240,6 +1242,10 @@ fn execute_sandboxed(
                 let merkle_roots = vec![baseline.merkle_root, final_manifest.merkle_root];
 
                 // Save session metadata
+                let network_events = proxy_handle.as_ref().map_or_else(
+                    Vec::new,
+                    nono_proxy::server::ProxyHandle::drain_audit_events,
+                );
                 let meta = nono::undo::SessionMetadata {
                     session_id,
                     started,
@@ -1249,6 +1255,7 @@ fn execute_sandboxed(
                     snapshot_count: manager.snapshot_count(),
                     exit_code: Some(exit_code),
                     merkle_roots,
+                    network_events,
                 };
                 manager.save_session_metadata(&meta)?;
 

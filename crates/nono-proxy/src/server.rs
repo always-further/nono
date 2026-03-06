@@ -7,6 +7,7 @@
 //! CONNECT method -> [`connect`] or [`external`] handler
 //! Other methods  -> [`reverse`] (credential injection) or [`forward`] handler
 
+use crate::audit;
 use crate::config::ProxyConfig;
 use crate::connect;
 use crate::credential::CredentialStore;
@@ -38,6 +39,8 @@ pub struct ProxyHandle {
     pub port: u16,
     /// Session token for client authentication
     pub token: Zeroizing<String>,
+    /// Shared in-memory network audit log
+    audit_log: audit::SharedAuditLog,
     /// Send `true` to trigger graceful shutdown
     shutdown_tx: watch::Sender<bool>,
     /// Route prefixes that have credentials actually loaded.
@@ -50,6 +53,12 @@ impl ProxyHandle {
     /// Signal the proxy to shut down gracefully.
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
+    }
+
+    /// Drain and return collected network audit events.
+    #[must_use]
+    pub fn drain_audit_events(&self) -> Vec<nono::undo::NetworkAuditEvent> {
+        audit::drain_audit_events(&self.audit_log)
     }
 
     /// Environment variables to inject into the child process.
@@ -131,6 +140,8 @@ struct ProxyState {
     tls_connector: tokio_rustls::TlsConnector,
     /// Active connection count for connection limiting.
     active_connections: AtomicUsize,
+    /// Shared network audit log for this proxy session.
+    audit_log: audit::SharedAuditLog,
 }
 
 /// Start the proxy server.
@@ -192,6 +203,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
 
     // Shutdown channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let audit_log = audit::new_audit_log();
 
     let state = Arc::new(ProxyState {
         filter,
@@ -200,6 +212,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         config,
         tls_connector,
         active_connections: AtomicUsize::new(0),
+        audit_log: Arc::clone(&audit_log),
     });
 
     // Spawn accept loop as a task within the current runtime.
@@ -210,6 +223,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     Ok(ProxyHandle {
         port,
         token: session_token,
+        audit_log,
         shutdown_tx,
         loaded_routes,
     })
@@ -317,6 +331,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                 &state.filter,
                 &state.session_token,
                 ext_config,
+                Some(&state.audit_log),
             )
             .await
         } else {
@@ -327,6 +342,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                 &state.session_token,
                 &header_bytes,
                 &state.config.localhost_connect_ports,
+                Some(&state.audit_log),
             )
             .await
         }
@@ -337,6 +353,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             session_token: &state.session_token,
             filter: &state.filter,
             tls_connector: &state.tls_connector,
+            audit_log: Some(&state.audit_log),
         };
         reverse::handle_reverse_proxy(first_line, &mut stream, &header_bytes, &ctx, &buffered).await
     } else if !state.config.localhost_connect_ports.is_empty() {
@@ -351,6 +368,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             &header_bytes,
             &buffered,
             &state.config.localhost_connect_ports,
+            Some(&state.audit_log),
         )
         .await
     } else {
@@ -478,6 +496,7 @@ mod tests {
         let handle = ProxyHandle {
             port: 12345,
             token: Zeroizing::new("test_token".to_string()),
+            audit_log: audit::new_audit_log(),
             shutdown_tx,
             loaded_routes: ["openai".to_string()].into_iter().collect(),
         };
@@ -523,6 +542,7 @@ mod tests {
         let handle = ProxyHandle {
             port: 12345,
             token: Zeroizing::new("test_token".to_string()),
+            audit_log: audit::new_audit_log(),
             shutdown_tx,
             loaded_routes: ["openai".to_string()].into_iter().collect(),
         };
@@ -573,6 +593,7 @@ mod tests {
         let handle = ProxyHandle {
             port: 12345,
             token: Zeroizing::new("test_token".to_string()),
+            audit_log: audit::new_audit_log(),
             shutdown_tx,
             // Only "openai" was loaded; "github" credential was unavailable
             loaded_routes: ["openai".to_string()].into_iter().collect(),

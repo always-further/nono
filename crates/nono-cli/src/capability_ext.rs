@@ -73,19 +73,16 @@ pub(crate) fn localhost_relay_requested(args: &SandboxArgs) -> bool {
 }
 
 pub(crate) fn validate_localhost_relay_args(args: &SandboxArgs) -> Result<()> {
-    if args.experimental_localhost_relay && args.allow_port.is_empty() {
+    if !args.experimental_localhost_relay {
+        return Ok(());
+    }
+
+    if args.allow_port.is_empty() {
         return Err(NonoError::ConfigParse(
             "--experimental-localhost-relay requires at least one --allow-port".to_string(),
         ));
     }
-    if args.allow_port.is_empty() {
-        return Ok(());
-    }
-    if !args.experimental_localhost_relay {
-        return Err(NonoError::ConfigParse(
-            "--allow-port is experimental and requires --experimental-localhost-relay".to_string(),
-        ));
-    }
+
     if !args.net_block {
         return Err(NonoError::ConfigParse(
             "--experimental-localhost-relay currently requires --net-block".to_string(),
@@ -221,6 +218,14 @@ impl CapabilitySetExt for CapabilitySet {
         }
 
         apply_network_mode(&mut caps, args, args.net_block, args.has_proxy_flags());
+
+        // Direct localhost IPC uses kernel-level per-port allowances.
+        // Relay mode keeps localhost traffic mediated by the parent proxy.
+        if !localhost_relay_requested(args) {
+            for port in &args.allow_port {
+                caps.add_localhost_port(*port);
+            }
+        }
 
         // Command allow/block lists
         for cmd in &args.allow_command {
@@ -439,6 +444,14 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
     // CLI network mode overrides profile.
     apply_network_mode(caps, args, args.net_block, args.has_proxy_flags());
 
+    // Direct localhost IPC uses kernel-level per-port allowances.
+    // Relay mode keeps localhost traffic mediated by the parent proxy.
+    if !localhost_relay_requested(args) {
+        for port in &args.allow_port {
+            caps.add_localhost_port(*port);
+        }
+    }
+
     // Command allow/block from CLI
     for cmd in &args.allow_command {
         caps.add_allowed_command(cmd.clone());
@@ -528,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_args_allow_port_requires_experimental_flag() {
+    fn test_from_args_allow_port_grants_direct_localhost_access() {
         let args = SandboxArgs {
             allow: vec![],
             read: vec![],
@@ -557,13 +570,8 @@ mod tests {
             proxy_port: None,
         };
 
-        let err =
-            CapabilitySet::from_args(&args).expect_err("must reject missing experimental flag");
-        assert!(
-            err.to_string()
-                .contains("--allow-port is experimental and requires"),
-            "unexpected error: {err}"
-        );
+        let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
+        assert_eq!(caps.localhost_ports(), &[11434]);
     }
 
     #[test]
@@ -601,6 +609,7 @@ mod tests {
             caps.network_mode(),
             nono::NetworkMode::ProxyOnly { .. }
         ));
+        assert!(caps.localhost_ports().is_empty());
     }
 
     #[test]

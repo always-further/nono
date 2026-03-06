@@ -322,3 +322,18 @@ nono run \
   --net-block \
   -- make release
 ```
+
+### IPC Between Sandboxed Processes
+
+Run an MCP server and a client in separate sandboxes, communicating over localhost:
+
+```bash
+# Terminal 1: MCP server on port 3000 (network blocked except IPC port)
+nono run --net-block --allow-port 3000 --allow ./mcp-server -- node server.js
+
+# Terminal 2: Agent connects to the MCP server on port 3000
+nono run --net-block --allow-port 3000 --allow ./agent -- my-agent
+
+# With proxy filtering + localhost IPC
+nono run --network-profile claude-code --allow-port 3000 --allow-cwd -- claude
+```

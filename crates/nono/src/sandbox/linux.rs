@@ -178,6 +178,32 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
             })?;
     }
 
+    // Add localhost IPC port rules (connect + bind per port).
+    // Only meaningful in Blocked/ProxyOnly modes. In AllowAll mode, all ports are
+    // already reachable and adding Landlock network handling would restrict them.
+    if !matches!(caps.network_mode(), NetworkMode::AllowAll) {
+        for port in caps.localhost_ports() {
+            debug!("Adding localhost TCP connect rule for port {}", port);
+            ruleset = ruleset
+                .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+                .map_err(|e| {
+                    NonoError::SandboxInit(format!(
+                        "Cannot add TCP connect rule for localhost port {}: {}",
+                        port, e
+                    ))
+                })?;
+            debug!("Adding localhost TCP bind rule for port {}", port);
+            ruleset = ruleset
+                .add_rule(NetPort::new(*port, AccessNet::BindTcp))
+                .map_err(|e| {
+                    NonoError::SandboxInit(format!(
+                        "Cannot add TCP bind rule for localhost port {}: {}",
+                        port, e
+                    ))
+                })?;
+        }
+    }
+
     // Add rules for each filesystem capability
     // These MUST succeed - caller explicitly requested these capabilities
     // Failing silently would violate the principle of least surprise and fail-secure design

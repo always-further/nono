@@ -31,6 +31,7 @@ pub async fn handle_forward_proxy(
     remaining_header: &[u8],
     buffered: &[u8],
     localhost_connect_ports: &[u16],
+    audit_log: Option<&audit::SharedAuditLog>,
 ) -> Result<()> {
     let (method, target, version) = match parse_request_line(first_line) {
         Ok(parts) => parts,
@@ -82,7 +83,7 @@ pub async fn handle_forward_proxy(
         && !localhost_connect_ports.contains(&port)
     {
         let reason = format!("localhost port {} is not allowed", port);
-        audit::log_denied(audit::ProxyMode::Forward, &host, port, &reason);
+        audit::log_denied(audit_log, audit::ProxyMode::Forward, &host, port, &reason);
         send_response(stream, 403, &format!("Forbidden: {}", reason)).await?;
         return Err(ProxyError::HostDenied { host, reason });
     }
@@ -97,7 +98,7 @@ pub async fn handle_forward_proxy(
     let check = filter.check_host(&host, port).await?;
     if !check.result.is_allowed() {
         let reason = check.result.reason();
-        audit::log_denied(audit::ProxyMode::Forward, &host, port, &reason);
+        audit::log_denied(audit_log, audit::ProxyMode::Forward, &host, port, &reason);
         send_response(stream, 403, &format!("Forbidden: {}", reason)).await?;
         return Err(ProxyError::HostDenied { host, reason });
     }
@@ -105,7 +106,7 @@ pub async fn handle_forward_proxy(
     let resolved = &check.resolved_addrs;
     if resolved.is_empty() {
         let reason = "DNS resolution returned no addresses".to_string();
-        audit::log_denied(audit::ProxyMode::Forward, &host, port, &reason);
+        audit::log_denied(audit_log, audit::ProxyMode::Forward, &host, port, &reason);
         send_response(stream, 502, "DNS resolution failed").await?;
         return Err(ProxyError::UpstreamConnect { host, reason });
     }
@@ -118,7 +119,7 @@ pub async fn handle_forward_proxy(
         upstream.write_all(buffered).await?;
     }
 
-    audit::log_allowed(audit::ProxyMode::Forward, &host, port, &method);
+    audit::log_allowed(audit_log, audit::ProxyMode::Forward, &host, port, &method);
     let _ = tokio::io::copy_bidirectional(stream, &mut upstream).await;
     Ok(())
 }

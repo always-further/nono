@@ -255,13 +255,16 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "PORT")]
     pub allow_bind: Vec<u16>,
 
-    /// Allow outbound connectivity to localhost on specific ports via parent relay.
-    /// Repeatable. Requires `--experimental-localhost-relay`.
+    /// Allow bidirectional TCP on a specific port (connect + bind).
+    /// On macOS, scoped to localhost. On Linux, port-only (use with
+    /// --net-block or proxy mode to restrict to localhost).
+    /// Use for IPC between sandboxed processes (e.g., MCP servers).
+    /// Can be specified multiple times for multiple ports.
     #[arg(long, value_name = "PORT")]
     pub allow_port: Vec<u16>,
 
-    /// EXPERIMENTAL: route localhost traffic through the parent proxy so
-    /// sandbox-to-sandbox localhost services can be reached in restricted mode.
+    /// EXPERIMENTAL: route localhost HTTP/CONNECT traffic through the parent
+    /// proxy using the `--allow-port` allowlist for destination ports.
     ///
     /// MVP constraints:
     /// - Requires `--net-block` and at least one `--allow-port`.
@@ -269,7 +272,6 @@ pub struct SandboxArgs {
     /// - Localhost requests rely on proxy env var behavior.
     #[arg(long, hide = true)]
     pub experimental_localhost_relay: bool,
-
     /// Chain through an external (enterprise) proxy.
     /// Format: host:port (e.g., squid.corp.internal:3128)
     #[arg(long, value_name = "HOST:PORT")]
@@ -1324,6 +1326,27 @@ mod tests {
         match cli.command {
             Commands::Run(args) => {
                 assert_eq!(args.sandbox.override_deny.len(), 2);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_allow_port_parsing() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow-port",
+            "3000",
+            "--allow-port",
+            "5000",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.sandbox.allow_port, vec![3000, 5000]);
             }
             _ => panic!("Expected Run command"),
         }

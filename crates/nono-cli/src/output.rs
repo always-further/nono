@@ -147,6 +147,14 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
             eprintln!("    outbound: {}", "allowed".green());
         }
     }
+    if !caps.localhost_ports().is_empty() {
+        let ports_str: Vec<String> = caps
+            .localhost_ports()
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        eprintln!("    localhost IPC: {}", ports_str.join(", ").cyan());
+    }
 
     eprintln!();
 }

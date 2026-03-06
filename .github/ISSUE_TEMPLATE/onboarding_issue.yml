@@ -1,0 +1,88 @@
+name: Onboarding / setup issue
+description: You couldn't get nono installed or running for the first time
+labels: ["onboarding", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Couldn't get nono working? We want to know about it — these reports directly improve the install experience for everyone.
+
+        If you hit an error after nono was already working, use the **Bug report** template instead.
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where did you get stuck?
+      description: Pick the furthest step you reached before things went wrong.
+      options:
+        - Installation (Homebrew / cargo / binary download)
+        - First run (`nono run` returned an error immediately)
+        - Writing or loading a profile (JSON)
+        - Using a built-in profile (e.g. `--profile claude-code`)
+        - nono ran but didn't seem to enforce anything
+        - Something else (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you try, and what went wrong?
+      placeholder: "I followed the quickstart and ran `nono run --profile claude-code -- claude` but got..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Error message or output
+      description: Paste the exact error or output you saw.
+      render: shell
+
+  - type: textarea
+    id: install-method
+    attributes:
+      label: How did you install nono?
+      placeholder: "e.g. Homebrew tap, cargo install, downloaded binary from GitHub releases..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Other (specify below)
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version / distro
+      placeholder: "e.g. Ubuntu 24.04, macOS 15.2"
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel version (Linux only)
+      description: Run `uname -r`
+      placeholder: "e.g. 6.8.0-51-generic"
+
+  - type: textarea
+    id: docs-used
+    attributes:
+      label: What documentation or guide were you following?
+      description: Link to the README section, blog post, or Discord thread that brought you here.
+      placeholder: "https://nono.sh/docs/quickstart"
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Any other context — what you were trying to sandbox, what agent framework you're using, etc.

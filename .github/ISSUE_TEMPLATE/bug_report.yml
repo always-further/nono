@@ -1,0 +1,91 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more detail you can give us, the faster we can fix it.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of what went wrong.
+      placeholder: "When I run `nono run --profile my-agent -- python script.py`, it exits immediately with..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      placeholder: "I expected the process to start and the policy to be applied..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to reproduce the issue. Include the exact command you ran.
+      placeholder: |
+        1. Create profile at ~/.config/nono/profiles/my-agent.json with...
+        2. Run `nono run --profile my-agent -- ...`
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or logs
+      description: Paste any error messages, stack traces, or nono output here.
+      render: shell
+
+  - type: input
+    id: nono-version
+    attributes:
+      label: nono version
+      placeholder: "e.g. 0.2.1 — run `nono --version`"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Other (specify in additional context)
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version / distro
+      placeholder: "e.g. Ubuntu 24.04, macOS 15.2"
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel version (Linux only)
+      description: Run `uname -r`
+      placeholder: "e.g. 6.8.0-51-generic"
+
+  - type: textarea
+    id: profile
+    attributes:
+      label: Profile (if relevant)
+      description: Paste the profile JSON you were using, or a minimal version of it. Profiles live in `~/.config/nono/profiles/` or can be passed via `--profile`.
+      render: json
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might be relevant — how nono was installed, what the agent/process was doing, etc.

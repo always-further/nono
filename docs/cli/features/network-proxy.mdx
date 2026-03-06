@@ -127,6 +127,29 @@ User profiles can specify a network profile in the `network` section:
 }
 ```
 
+## Localhost IPC Between Sandboxes
+
+When running multiple sandboxed processes that need to communicate (e.g., an MCP server in one sandbox, an AI agent in another), use `--allow-port` to open a specific localhost TCP port for bidirectional communication.
+
+```bash
+# Terminal 1: MCP server listening on port 3000
+nono run --net-block --allow-port 3000 --allow ./mcp-server -- node server.js
+
+# Terminal 2: Agent connecting to the MCP server
+nono run --net-block --allow-port 3000 --allow ./client -- claude
+```
+
+`--allow-port` works alongside the proxy. Outbound to allowed hosts goes through the proxy; IPC stays on localhost:
+
+```bash
+# Proxy filters outbound + localhost IPC on port 3000
+nono run --network-profile claude-code --allow-port 3000 --allow-cwd -- claude
+```
+
+This generates Seatbelt rules (macOS) or Landlock rules (Linux) that allow both `connect()` and `bind()` on the specified port, in addition to the proxy port.
+
+See [CLI Reference](/cli/usage/flags#--allow-port) for full details and platform limitations.
+
 ## Default Deny List
 
 The following cloud metadata destinations are always blocked, regardless of configuration. These cannot be overridden.
