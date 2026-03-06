@@ -54,6 +54,9 @@ PLATFORM NOTES:
     # Use a named profile (built-in)
     nono run --profile claude-code claude
 
+    # Use a named profile but temporarily allow unrestricted network
+    nono run --profile claude-code --net-allow claude
+
     # Profile with explicit working directory
     nono run --profile claude-code --workdir ./my-project claude
 
@@ -230,8 +233,24 @@ pub struct SandboxArgs {
     pub write_file: Vec<PathBuf>,
 
     /// Block network access (network allowed by default; use this flag to block)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "net_allow")]
     pub net_block: bool,
+
+    /// Allow unrestricted network access, even when a selected profile enables
+    /// proxy filtering. This disables proxy filtering and credential injection
+    /// for the current session only.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "net_block",
+            "network_profile",
+            "proxy_allow",
+            "proxy_credential",
+            "external_proxy",
+            "proxy_port"
+        ]
+    )]
+    pub net_allow: bool,
 
     // === Network proxy filtering ===
     /// Enable network proxy filtering with a named profile (e.g., claude-code, minimal, enterprise).
@@ -1255,6 +1274,61 @@ mod tests {
         assert!(
             result.is_err(),
             "--rollback-all and --rollback-include should conflict"
+        );
+    }
+
+    #[test]
+    fn test_net_allow_parsing() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--net-allow",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert!(args.sandbox.net_allow);
+                assert!(!args.sandbox.net_block);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_net_allow_conflicts_with_net_block() {
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--net-allow",
+            "--net-block",
+            "echo",
+        ]);
+        assert!(
+            result.is_err(),
+            "--net-allow and --net-block should conflict"
+        );
+    }
+
+    #[test]
+    fn test_net_allow_conflicts_with_network_profile() {
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--net-allow",
+            "--network-profile",
+            "developer",
+            "echo",
+        ]);
+        assert!(
+            result.is_err(),
+            "--net-allow and --network-profile should conflict"
         );
     }
 

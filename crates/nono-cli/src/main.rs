@@ -302,6 +302,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             read_file: args.read_file.clone(),
             write_file: args.write_file.clone(),
             net_block: args.net_block,
+            net_allow: false,
             network_profile: None,
             proxy_allow: vec![],
             proxy_credential: vec![],
@@ -336,6 +337,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             read_file: args.read_file.clone(),
             write_file: args.write_file.clone(),
             net_block: args.net_block,
+            net_allow: false,
             network_profile: None,
             proxy_allow: vec![],
             proxy_credential: vec![],
@@ -514,15 +516,10 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         .map(|r| r.verified_paths())
         .unwrap_or_default();
 
-    // Merge network profile from CLI args and profile config
-    let network_profile = args
-        .network_profile
-        .clone()
-        .or_else(|| prepared.network_profile.clone());
-    let mut proxy_allow_hosts = prepared.proxy_allow_hosts.clone();
-    proxy_allow_hosts.extend(args.proxy_allow.clone());
-    let mut proxy_credentials = prepared.proxy_credentials.clone();
-    proxy_credentials.extend(args.proxy_credential.clone());
+    let effective_proxy = resolve_effective_proxy_settings(&args, &prepared);
+    let network_profile = effective_proxy.network_profile;
+    let proxy_allow_hosts = effective_proxy.proxy_allow_hosts;
+    let proxy_credentials = effective_proxy.proxy_credentials;
 
     // The proxy is needed when the network mode is ProxyOnly OR when there are
     // credential routes to inject. However, --net-block takes precedence: if
@@ -711,6 +708,41 @@ struct ExecutionFlags {
     allow_bind_ports: Vec<u16>,
     /// Fixed port for the credential proxy (from --proxy-port)
     proxy_port: Option<u16>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct EffectiveProxySettings {
+    network_profile: Option<String>,
+    proxy_allow_hosts: Vec<String>,
+    proxy_credentials: Vec<String>,
+}
+
+fn resolve_effective_proxy_settings(
+    args: &SandboxArgs,
+    prepared: &PreparedSandbox,
+) -> EffectiveProxySettings {
+    if args.net_allow {
+        return EffectiveProxySettings {
+            network_profile: None,
+            proxy_allow_hosts: Vec::new(),
+            proxy_credentials: Vec::new(),
+        };
+    }
+
+    let network_profile = args
+        .network_profile
+        .clone()
+        .or_else(|| prepared.network_profile.clone());
+    let mut proxy_allow_hosts = prepared.proxy_allow_hosts.clone();
+    proxy_allow_hosts.extend(args.proxy_allow.clone());
+    let mut proxy_credentials = prepared.proxy_credentials.clone();
+    proxy_credentials.extend(args.proxy_credential.clone());
+
+    EffectiveProxySettings {
+        network_profile,
+        proxy_allow_hosts,
+        proxy_credentials,
+    }
 }
 
 /// Select execution strategy from user/runtime flags.
@@ -1758,6 +1790,36 @@ fn write_capability_state_file(caps: &CapabilitySet, silent: bool) -> Option<std
 mod tests {
     use super::*;
 
+    fn sandbox_args() -> SandboxArgs {
+        SandboxArgs {
+            allow: vec![],
+            read: vec![],
+            write: vec![],
+            allow_file: vec![],
+            read_file: vec![],
+            write_file: vec![],
+            net_block: false,
+            net_allow: false,
+            network_profile: None,
+            proxy_allow: vec![],
+            proxy_credential: vec![],
+            external_proxy: None,
+            override_deny: vec![],
+            allow_command: vec![],
+            block_command: vec![],
+            env_credential: None,
+            profile: None,
+            allow_cwd: false,
+            workdir: None,
+            config: None,
+            verbose: 0,
+            dry_run: false,
+            allow_bind: vec![],
+            allow_port: vec![],
+            proxy_port: None,
+        }
+    }
+
     #[test]
     fn test_sensitive_paths_defined() {
         let loaded_policy = policy::load_embedded_policy().expect("policy must load");
@@ -1853,5 +1915,67 @@ mod tests {
         assert!(config::check_sensitive_path("~/Documents")
             .expect("policy must load")
             .is_none());
+    }
+
+    #[test]
+    fn test_resolve_effective_proxy_settings_net_allow_clears_profile_proxy_state() {
+        let args = SandboxArgs {
+            net_allow: true,
+            ..sandbox_args()
+        };
+        let prepared = PreparedSandbox {
+            caps: CapabilitySet::new(),
+            secrets: Vec::new(),
+            interactive: false,
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            network_profile: Some("developer".to_string()),
+            proxy_allow_hosts: vec!["docs.python.org".to_string()],
+            proxy_credentials: vec!["github".to_string()],
+            custom_credentials: std::collections::HashMap::new(),
+        };
+
+        let effective = resolve_effective_proxy_settings(&args, &prepared);
+
+        assert_eq!(
+            effective,
+            EffectiveProxySettings {
+                network_profile: None,
+                proxy_allow_hosts: Vec::new(),
+                proxy_credentials: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_effective_proxy_settings_merges_cli_and_profile() {
+        let args = SandboxArgs {
+            network_profile: Some("minimal".to_string()),
+            proxy_allow: vec!["example.com".to_string()],
+            proxy_credential: vec!["openai".to_string()],
+            ..sandbox_args()
+        };
+        let prepared = PreparedSandbox {
+            caps: CapabilitySet::new(),
+            secrets: Vec::new(),
+            interactive: false,
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            network_profile: Some("developer".to_string()),
+            proxy_allow_hosts: vec!["docs.python.org".to_string()],
+            proxy_credentials: vec!["github".to_string()],
+            custom_credentials: std::collections::HashMap::new(),
+        };
+
+        let effective = resolve_effective_proxy_settings(&args, &prepared);
+
+        assert_eq!(
+            effective,
+            EffectiveProxySettings {
+                network_profile: Some("minimal".to_string()),
+                proxy_allow_hosts: vec!["docs.python.org".to_string(), "example.com".to_string()],
+                proxy_credentials: vec!["github".to_string(), "openai".to_string()],
+            }
+        );
     }
 }

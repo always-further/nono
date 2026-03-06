@@ -179,7 +179,7 @@ impl<'a> DiagnosticFormatter<'a> {
 
             if self.caps.is_network_blocked() {
                 lines.push(
-                    "[nono]   --allow-net        network access (remove --net-block)".to_string(),
+                    "[nono]   --net-allow        unrestricted network for this session".to_string(),
                 );
             }
         }
@@ -212,7 +212,7 @@ impl<'a> DiagnosticFormatter<'a> {
             lines.push("[nono]   --write <path>     write-only access to directory".to_string());
             if self.caps.is_network_blocked() {
                 lines.push(
-                    "[nono]   --allow-net        network access (remove --net-block)".to_string(),
+                    "[nono]   --net-allow        unrestricted network for this session".to_string(),
                 );
             }
             return lines.join("\n");
@@ -598,7 +598,7 @@ mod tests {
         let formatter = DiagnosticFormatter::new(&caps);
         let output = formatter.format_footer(1);
 
-        assert!(output.contains("--allow-net"));
+        assert!(output.contains("--net-allow"));
     }
 
     #[test]
@@ -614,7 +614,7 @@ mod tests {
         let formatter = DiagnosticFormatter::new(&caps);
         let output = formatter.format_footer(1);
 
-        assert!(!output.contains("--allow-net"));
+        assert!(!output.contains("--net-allow"));
     }
 
     #[test]

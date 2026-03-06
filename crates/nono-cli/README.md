@@ -43,6 +43,9 @@ nono run --allow-cwd --net-block -- command
 # Use a built-in profile
 nono run --profile claude-code -- claude
 
+# Keep a profile but temporarily allow unrestricted network
+nono run --profile claude-code --net-allow -- claude
+
 # Start an interactive shell inside the sandbox
 nono shell --allow-cwd
 
