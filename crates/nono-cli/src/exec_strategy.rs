@@ -716,17 +716,17 @@ fn wait_for_child(child: Pid) -> Result<WaitStatus> {
 /// Unix signal handlers cannot access thread-local or instance-specific state.
 /// This means:
 ///
-/// - Only one `execute_monitor` invocation can be active at a time
+/// - Only one `execute_supervised` invocation can be active at a time
 /// - Concurrent calls from different threads would corrupt the child PID
-/// - This is enforced by the single-threaded check in `execute_monitor`
+/// - This is enforced by the thread count check in `execute_supervised`
 ///
 /// This is acceptable because:
-/// 1. `execute_monitor` is CLI code, not library code (per DESIGN-supervisor.md)
+/// 1. `execute_supervised` is CLI code, not library code (per DESIGN-supervisor.md)
 /// 2. The fork+wait model inherently requires single-threaded execution
 /// 3. Library consumers would use `Sandbox::apply()` directly, not the fork machinery
 fn setup_signal_forwarding(child: Pid) {
     // ==================== SAFETY INVARIANT ====================
-    // This static variable is ONLY safe because execute_monitor()
+    // This static variable is ONLY safe because execute_supervised()
     // verifies single-threaded execution BEFORE calling this function.
     //
     // DO NOT call this function without first verifying:
