@@ -142,6 +142,16 @@ fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
         eprintln!();
     }
 
+    #[cfg(target_os = "macos")]
+    if !silent {
+        eprintln!(
+            "{}",
+            "NOTE: On macOS, nono learn requires admin group membership to read kernel logs."
+                .yellow()
+        );
+        eprintln!();
+    }
+
     eprintln!("nono learn - Tracing file accesses and network activity...\n");
 
     let result = learn::run_learn(&args)?;

@@ -1,228 +1,23 @@
-//! Learn mode: trace file accesses to discover required paths
-//!
-//! Uses strace to monitor a command's file system accesses and produces
-//! a list of paths that would need to be allowed in a nono profile.
+//! Linux learn mode implementation using strace
 
+use super::{FileAccess, NetworkAccess, NetworkAccessKind};
 use crate::cli::LearnArgs;
+use crate::profile;
 use nono::{NonoError, Result};
-use std::collections::BTreeSet;
-use std::net::IpAddr;
-use std::path::PathBuf;
-
-#[cfg(target_os = "linux")]
-use crate::profile::{self, Profile};
-#[cfg(target_os = "linux")]
-use std::collections::{HashMap, HashSet};
-#[cfg(target_os = "linux")]
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-#[cfg(target_os = "linux")]
-use std::path::Path;
-#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
-#[cfg(target_os = "linux")]
 use tracing::{debug, info, warn};
 
-/// Result of learning file access patterns
-#[derive(Debug)]
-pub struct LearnResult {
-    /// Paths that need read access
-    pub read_paths: BTreeSet<PathBuf>,
-    /// Paths that need write access
-    pub write_paths: BTreeSet<PathBuf>,
-    /// Paths that need read+write access
-    pub readwrite_paths: BTreeSet<PathBuf>,
-    /// Paths that were accessed but are already covered by system paths
-    pub system_covered: BTreeSet<PathBuf>,
-    /// Paths that were accessed but are already covered by profile
-    pub profile_covered: BTreeSet<PathBuf>,
-    /// Outbound network connections observed
-    pub outbound_connections: Vec<NetworkConnectionSummary>,
-    /// Listening ports observed
-    pub listening_ports: Vec<NetworkConnectionSummary>,
-}
-
-impl LearnResult {
-    #[cfg(target_os = "linux")]
-    fn new() -> Self {
-        Self {
-            read_paths: BTreeSet::new(),
-            write_paths: BTreeSet::new(),
-            readwrite_paths: BTreeSet::new(),
-            system_covered: BTreeSet::new(),
-            profile_covered: BTreeSet::new(),
-            outbound_connections: Vec::new(),
-            listening_ports: Vec::new(),
-        }
-    }
-
-    /// Check if any paths were discovered
-    pub fn has_paths(&self) -> bool {
-        !self.read_paths.is_empty()
-            || !self.write_paths.is_empty()
-            || !self.readwrite_paths.is_empty()
-    }
-
-    /// Check if any network activity was observed
-    pub fn has_network_activity(&self) -> bool {
-        !self.outbound_connections.is_empty() || !self.listening_ports.is_empty()
-    }
-
-    /// Format as JSON fragment for profile
-    pub fn to_json(&self) -> String {
-        let allow: Vec<String> = self
-            .readwrite_paths
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect();
-        let read: Vec<String> = self
-            .read_paths
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect();
-        let write: Vec<String> = self
-            .write_paths
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect();
-
-        let outbound: Vec<serde_json::Value> = self
-            .outbound_connections
-            .iter()
-            .map(|c| {
-                let mut obj = serde_json::json!({
-                    "addr": c.endpoint.addr.to_string(),
-                    "port": c.endpoint.port,
-                    "count": c.count,
-                });
-                if let Some(ref hostname) = c.endpoint.hostname {
-                    obj["hostname"] = serde_json::Value::String(hostname.clone());
-                }
-                obj
-            })
-            .collect();
-
-        let listening: Vec<serde_json::Value> = self
-            .listening_ports
-            .iter()
-            .map(|c| {
-                let mut obj = serde_json::json!({
-                    "addr": c.endpoint.addr.to_string(),
-                    "port": c.endpoint.port,
-                    "count": c.count,
-                });
-                if let Some(ref hostname) = c.endpoint.hostname {
-                    obj["hostname"] = serde_json::Value::String(hostname.clone());
-                }
-                obj
-            })
-            .collect();
-
-        let fragment = serde_json::json!({
-            "filesystem": {
-                "allow": allow,
-                "read": read,
-                "write": write
-            },
-            "network": {
-                "outbound": outbound,
-                "listening": listening
-            }
-        });
-
-        serde_json::to_string_pretty(&fragment).unwrap_or_else(|_| "{}".to_string())
-    }
-
-    /// Format as human-readable summary
-    pub fn to_summary(&self) -> String {
-        let mut lines = Vec::new();
-
-        if !self.read_paths.is_empty() {
-            lines.push("Read access needed:".to_string());
-            for path in &self.read_paths {
-                lines.push(format!("  {}", path.display()));
-            }
-        }
-
-        if !self.write_paths.is_empty() {
-            lines.push("Write access needed:".to_string());
-            for path in &self.write_paths {
-                lines.push(format!("  {}", path.display()));
-            }
-        }
-
-        if !self.readwrite_paths.is_empty() {
-            lines.push("Read+Write access needed:".to_string());
-            for path in &self.readwrite_paths {
-                lines.push(format!("  {}", path.display()));
-            }
-        }
-
-        if !self.system_covered.is_empty() {
-            lines.push(format!(
-                "\n({} paths already covered by system defaults)",
-                self.system_covered.len()
-            ));
-        }
-
-        if !self.profile_covered.is_empty() {
-            lines.push(format!(
-                "({} paths already covered by profile)",
-                self.profile_covered.len()
-            ));
-        }
-
-        // Network sections
-        if !self.outbound_connections.is_empty() {
-            if !lines.is_empty() {
-                lines.push(String::new());
-            }
-            lines.push("Outbound connections:".to_string());
-            for conn in &self.outbound_connections {
-                lines.push(format_network_summary(conn));
-            }
-        }
-
-        if !self.listening_ports.is_empty() {
-            if !lines.is_empty() {
-                lines.push(String::new());
-            }
-            lines.push("Listening ports:".to_string());
-            for conn in &self.listening_ports {
-                lines.push(format_network_summary(conn));
-            }
-        }
-
-        if lines.is_empty() {
-            lines.push("No additional paths needed.".to_string());
-        }
-
-        lines.join("\n")
-    }
-}
-
-/// Format a single network connection summary line
-fn format_network_summary(conn: &NetworkConnectionSummary) -> String {
-    let count_str = if conn.count > 1 {
-        format!(" ({}x)", conn.count)
-    } else {
-        String::new()
-    };
-
-    if let Some(ref hostname) = conn.endpoint.hostname {
-        format!(
-            "  {} ({}):{}{}",
-            hostname, conn.endpoint.addr, conn.endpoint.port, count_str
-        )
-    } else {
-        format!(
-            "  {}:{}{}",
-            conn.endpoint.addr, conn.endpoint.port, count_str
-        )
-    }
+/// Unified type for parsed strace accesses
+#[derive(Debug, Clone)]
+enum TracedAccess {
+    File(FileAccess),
+    Network(NetworkAccess),
+    DnsQuery(String),
 }
 
 /// Check if strace is available
-#[cfg(target_os = "linux")]
 fn check_strace() -> Result<()> {
     match Command::new("strace").arg("--version").output() {
         Ok(output) if output.status.success() => Ok(()),
@@ -232,17 +27,8 @@ fn check_strace() -> Result<()> {
     }
 }
 
-/// Run learn mode (non-Linux stub)
-#[cfg(not(target_os = "linux"))]
-pub fn run_learn(_args: &LearnArgs) -> Result<LearnResult> {
-    Err(NonoError::LearnError(
-        "nono learn is only available on Linux (requires strace)".to_string(),
-    ))
-}
-
 /// Run learn mode (Linux implementation)
-#[cfg(target_os = "linux")]
-pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
+pub fn run_learn(args: &LearnArgs) -> Result<super::LearnResult> {
     check_strace()?;
 
     // Load profile if specified
@@ -257,70 +43,18 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
         run_strace(&args.command, args.timeout)?;
 
     // Process and categorize file paths
-    let mut result = process_accesses(raw_file_accesses, profile.as_ref(), args.all)?;
+    let mut result = super::process_accesses(raw_file_accesses, profile.as_ref(), args.all)?;
 
     // Process network accesses with forward DNS correlation
     let (outbound, listening) =
-        process_network_accesses(raw_network_accesses, dns_queries, !args.no_rdns);
+        super::process_network_accesses(raw_network_accesses, dns_queries, !args.no_rdns);
     result.outbound_connections = outbound;
     result.listening_ports = listening;
 
     Ok(result)
 }
 
-/// Represents a file access from strace
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-struct FileAccess {
-    path: PathBuf,
-    is_write: bool,
-}
-
-/// Kind of network access observed via strace
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-enum NetworkAccessKind {
-    Connect,
-    Bind,
-}
-
-/// A single network access observed via strace
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-struct NetworkAccess {
-    addr: IpAddr,
-    port: u16,
-    kind: NetworkAccessKind,
-    /// Hostname from the most recent DNS query (timing-based correlation)
-    queried_hostname: Option<String>,
-}
-
-/// A resolved network endpoint with optional reverse DNS hostname
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NetworkEndpoint {
-    pub addr: IpAddr,
-    pub port: u16,
-    pub hostname: Option<String>,
-}
-
-/// Summary of connections to a single endpoint (with count)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NetworkConnectionSummary {
-    pub endpoint: NetworkEndpoint,
-    pub count: usize,
-}
-
-/// Unified type for parsed strace accesses
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-enum TracedAccess {
-    File(FileAccess),
-    Network(NetworkAccess),
-    DnsQuery(String),
-}
-
 /// Run strace on the command and collect file accesses, network accesses, and DNS queries
-#[cfg(target_os = "linux")]
 fn run_strace(
     command: &[String],
     timeout: Option<u64>,
@@ -431,7 +165,6 @@ fn run_strace(
 ///
 /// strace prefixes multi-process lines with `[pid NNNNN] `. Returns None
 /// for single-process traces (no prefix).
-#[cfg(target_os = "linux")]
 fn extract_strace_pid(line: &str) -> Option<u32> {
     let trimmed = line.trim_start();
     let rest = trimmed.strip_prefix("[pid ")?;
@@ -440,7 +173,6 @@ fn extract_strace_pid(line: &str) -> Option<u32> {
 }
 
 /// Parse a single strace line to extract file or network access
-#[cfg(target_os = "linux")]
 fn parse_strace_line(line: &str) -> Option<TracedAccess> {
     // strace output format examples:
     // openat(AT_FDCWD, "/etc/passwd", O_RDONLY|O_CLOEXEC) = 3
@@ -501,13 +233,12 @@ fn parse_strace_line(line: &str) -> Option<TracedAccess> {
     }
 
     Some(TracedAccess::File(FileAccess {
-        path: PathBuf::from(path),
+        path: std::path::PathBuf::from(path),
         is_write,
     }))
 }
 
 /// Extract path from strace syscall line
-#[cfg(target_os = "linux")]
 fn extract_path_from_syscall(line: &str, syscall: &str) -> Option<String> {
     // Find the opening paren after syscall
     let start_idx = line.find(&format!("{}(", syscall))?;
@@ -547,7 +278,6 @@ fn extract_path_from_syscall(line: &str, syscall: &str) -> Option<String> {
 ///
 /// Invalid or incomplete escape sequences are passed through literally
 /// to avoid data loss.
-#[cfg(target_os = "linux")]
 fn unescape_strace_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -634,7 +364,6 @@ fn unescape_strace_string(s: &str) -> String {
 }
 
 /// Determine if a syscall represents a write access
-#[cfg(target_os = "linux")]
 fn is_write_access(line: &str, syscall: &str) -> bool {
     match syscall {
         "creat" | "mkdir" | "unlink" | "rename" => true,
@@ -649,155 +378,7 @@ fn is_write_access(line: &str, syscall: &str) -> bool {
     }
 }
 
-/// Process raw accesses into categorized result
-#[cfg(target_os = "linux")]
-fn process_accesses(
-    accesses: Vec<FileAccess>,
-    profile: Option<&Profile>,
-    show_all: bool,
-) -> Result<LearnResult> {
-    let mut result = LearnResult::new();
-
-    // Get system paths that are already allowed (from policy.json groups)
-    let loaded_policy = crate::policy::load_embedded_policy()?;
-    let system_read_paths = crate::policy::get_system_read_paths(&loaded_policy);
-    let system_read_set: HashSet<&str> = system_read_paths.iter().map(|s| s.as_str()).collect();
-
-    // Get profile paths if available
-    let profile_paths: HashSet<String> = if let Some(prof) = profile {
-        let mut paths = HashSet::new();
-        paths.extend(prof.filesystem.allow.iter().cloned());
-        paths.extend(prof.filesystem.read.iter().cloned());
-        paths.extend(prof.filesystem.write.iter().cloned());
-        paths
-    } else {
-        HashSet::new()
-    };
-
-    // Track unique paths (canonicalized where possible)
-    let mut seen_paths: HashSet<PathBuf> = HashSet::new();
-
-    for access in accesses {
-        // Try to canonicalize, fall back to original
-        let canonical = access.path.canonicalize().unwrap_or(access.path.clone());
-
-        // Skip if we've seen this path
-        if seen_paths.contains(&canonical) {
-            continue;
-        }
-        seen_paths.insert(canonical.clone());
-
-        // Check if covered by system paths
-        if is_covered_by_set(&canonical, &system_read_set)? {
-            if show_all {
-                result.system_covered.insert(canonical);
-            }
-            continue;
-        }
-
-        // Check if covered by profile
-        if is_covered_by_profile(&canonical, &profile_paths)? {
-            if show_all {
-                result.profile_covered.insert(canonical);
-            }
-            continue;
-        }
-
-        // Categorize by access type
-        // Collapse to parent directories for cleaner output
-        let collapsed = collapse_to_parent(&canonical);
-
-        if access.is_write {
-            // Check if already in read, upgrade to readwrite
-            if result.read_paths.contains(&collapsed) {
-                result.read_paths.remove(&collapsed);
-                result.readwrite_paths.insert(collapsed);
-            } else if !result.readwrite_paths.contains(&collapsed) {
-                result.write_paths.insert(collapsed);
-            }
-        } else {
-            // Read access
-            if result.write_paths.contains(&collapsed) {
-                result.write_paths.remove(&collapsed);
-                result.readwrite_paths.insert(collapsed);
-            } else if !result.readwrite_paths.contains(&collapsed) {
-                result.read_paths.insert(collapsed);
-            }
-        }
-    }
-
-    Ok(result)
-}
-
-/// Check if a path is covered by a set of allowed paths
-#[cfg(target_os = "linux")]
-fn is_covered_by_set(path: &Path, allowed: &HashSet<&str>) -> Result<bool> {
-    for allowed_path in allowed {
-        let allowed_expanded = expand_home(allowed_path)?;
-        if let Ok(allowed_canonical) = std::fs::canonicalize(&allowed_expanded) {
-            if path.starts_with(&allowed_canonical) {
-                return Ok(true);
-            }
-        }
-        // Also check without canonicalization for paths that may not exist
-        let allowed_path_buf = PathBuf::from(&allowed_expanded);
-        if path.starts_with(&allowed_path_buf) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Check if a path is covered by profile paths
-#[cfg(target_os = "linux")]
-fn is_covered_by_profile(path: &Path, profile_paths: &HashSet<String>) -> Result<bool> {
-    for profile_path in profile_paths {
-        let expanded = expand_home(profile_path)?;
-        if let Ok(canonical) = std::fs::canonicalize(&expanded) {
-            if path.starts_with(&canonical) {
-                return Ok(true);
-            }
-        }
-        let path_buf = PathBuf::from(&expanded);
-        if path.starts_with(&path_buf) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Expand ~ to home directory
-#[cfg(target_os = "linux")]
-fn expand_home(path: &str) -> Result<String> {
-    use crate::config;
-
-    if path.starts_with('~') {
-        let home = config::validated_home()?;
-        return Ok(path.replacen('~', &home, 1));
-    }
-    if path.starts_with("$HOME") {
-        let home = config::validated_home()?;
-        return Ok(path.replacen("$HOME", &home, 1));
-    }
-    Ok(path.to_string())
-}
-
-/// Collapse a file path to its parent directory for cleaner output
-#[cfg(target_os = "linux")]
-fn collapse_to_parent(path: &Path) -> PathBuf {
-    // Don't collapse if it's already a directory
-    if path.is_dir() {
-        return path.to_path_buf();
-    }
-
-    // Collapse files to their parent directory
-    path.parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| path.to_path_buf())
-}
-
 /// Extract a substring between a prefix and suffix
-#[cfg(target_os = "linux")]
 fn extract_between<'a>(s: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
     let start = s.find(prefix)?;
     let after = &s[start + prefix.len()..];
@@ -806,8 +387,9 @@ fn extract_between<'a>(s: &'a str, prefix: &str, suffix: &str) -> Option<&'a str
 }
 
 /// Parse a network syscall (connect or bind) from strace output
-#[cfg(target_os = "linux")]
 fn parse_network_syscall(line: &str, kind: NetworkAccessKind) -> Option<NetworkAccess> {
+    use std::net::IpAddr;
+
     // Skip Unix domain sockets — local IPC, not network
     if line.contains("sa_family=AF_UNIX") || line.contains("sa_family=AF_LOCAL") {
         return None;
@@ -848,7 +430,6 @@ fn parse_network_syscall(line: &str, kind: NetworkAccessKind) -> Option<NetworkA
 ///
 /// Only processes sendto calls to port 53 (DNS). Extracts the query
 /// hostname from the DNS wire format in the buffer argument.
-#[cfg(target_os = "linux")]
 fn parse_dns_sendto(line: &str) -> Option<String> {
     // Only interested in DNS (port 53)
     if !line.contains("htons(53)") {
@@ -872,7 +453,6 @@ fn parse_dns_sendto(line: &str) -> Option<String> {
 ///
 /// In strace output, quotes inside the buffer are C-escaped as `\"`, so we
 /// must extract and unescape the buffer before parsing the JSON.
-#[cfg(target_os = "linux")]
 fn parse_resolved_sendto(line: &str) -> Option<String> {
     // Quick filter: ResolveHostname is plain ASCII, visible in raw strace output
     if !line.contains("ResolveHostname") {
@@ -910,7 +490,6 @@ fn parse_resolved_sendto(line: &str) -> Option<String> {
 /// For `sendto(fd, "BUFFER", len, ...)`, extracts BUFFER from the second arg.
 /// For `sendmsg(fd, {msg_name=..., msg_iov=[{iov_base="BUFFER", ...}], ...})`,
 /// extracts BUFFER from the iov_base field.
-#[cfg(target_os = "linux")]
 fn extract_sendto_buffer(line: &str) -> Option<String> {
     // Determine where to start looking for the quoted buffer
     let search_start = if let Some(pos) = line.find("iov_base=") {
@@ -948,7 +527,6 @@ fn extract_sendto_buffer(line: &str) -> Option<String> {
 ///
 /// Reuses the char-level unescaping from `unescape_strace_string` and
 /// converts each char back to its byte value (all values are 0–255).
-#[cfg(target_os = "linux")]
 fn unescape_strace_bytes(s: &str) -> Vec<u8> {
     unescape_strace_string(s).chars().map(|c| c as u8).collect()
 }
@@ -958,7 +536,6 @@ fn unescape_strace_bytes(s: &str) -> Vec<u8> {
 /// Expects at least the 12-byte DNS header followed by the question section.
 /// Returns the queried hostname (e.g., "example.com") or None if the data
 /// is malformed or truncated.
-#[cfg(target_os = "linux")]
 fn parse_dns_query_hostname(data: &[u8]) -> Option<String> {
     // Minimum: 12-byte header + at least 1 label byte
     if data.len() < 13 {
@@ -1016,154 +593,11 @@ fn parse_dns_query_hostname(data: &[u8]) -> Option<String> {
     Some(labels.join("."))
 }
 
-/// Process raw network accesses into categorized summaries.
-///
-/// Uses forward DNS correlation from captured DNS queries to map IPs to
-/// hostnames. Falls back to reverse DNS for unmatched IPs when `resolve_dns`
-/// is true.
-#[cfg(target_os = "linux")]
-fn process_network_accesses(
-    accesses: Vec<NetworkAccess>,
-    dns_queries: Vec<String>,
-    resolve_dns: bool,
-) -> (Vec<NetworkConnectionSummary>, Vec<NetworkConnectionSummary>) {
-    let mut connect_counts: HashMap<(IpAddr, u16), usize> = HashMap::new();
-    let mut bind_counts: HashMap<(IpAddr, u16), usize> = HashMap::new();
-
-    for access in &accesses {
-        let key = (access.addr, access.port);
-        match access.kind {
-            NetworkAccessKind::Connect => {
-                *connect_counts.entry(key).or_insert(0) += 1;
-            }
-            NetworkAccessKind::Bind => {
-                *bind_counts.entry(key).or_insert(0) += 1;
-            }
-        }
-    }
-
-    // Build IP → hostname mapping using three strategies (in priority order):
-    // 1. Timing-based: hostname attached directly from preceding DNS query
-    // 2. Forward DNS: resolve captured hostnames to IPs
-    // 3. Reverse DNS: lookup IP → hostname as last resort
-    let hostnames = if resolve_dns {
-        // Strategy 1: Use hostnames attached during tracing (timing correlation)
-        let mut map: HashMap<IpAddr, String> = HashMap::new();
-        for access in &accesses {
-            if let Some(ref hostname) = access.queried_hostname {
-                map.entry(access.addr).or_insert_with(|| hostname.clone());
-            }
-        }
-
-        // Strategy 2: Forward DNS for IPs not covered by timing correlation
-        let all_ips: HashSet<IpAddr> = accesses.iter().map(|a| a.addr).collect();
-        let unresolved_after_timing: HashSet<IpAddr> = all_ips
-            .iter()
-            .filter(|ip| !map.contains_key(ip))
-            .copied()
-            .collect();
-
-        if !unresolved_after_timing.is_empty() && !dns_queries.is_empty() {
-            let forward = resolve_forward_dns(&dns_queries);
-            for (ip, hostname) in forward {
-                map.entry(ip).or_insert(hostname);
-            }
-        }
-
-        // Strategy 3: Reverse DNS for anything still unresolved
-        let unresolved_after_forward: HashSet<IpAddr> = all_ips
-            .iter()
-            .filter(|ip| !map.contains_key(ip))
-            .copied()
-            .collect();
-
-        if !unresolved_after_forward.is_empty() {
-            let reverse = resolve_reverse_dns(&unresolved_after_forward);
-            map.extend(reverse);
-        }
-
-        map
-    } else {
-        HashMap::new()
-    };
-
-    let build_summaries =
-        |counts: &HashMap<(IpAddr, u16), usize>| -> Vec<NetworkConnectionSummary> {
-            let mut summaries: Vec<NetworkConnectionSummary> = counts
-                .iter()
-                .map(|(&(addr, port), &count)| NetworkConnectionSummary {
-                    endpoint: NetworkEndpoint {
-                        addr,
-                        port,
-                        hostname: hostnames.get(&addr).cloned(),
-                    },
-                    count,
-                })
-                .collect();
-            summaries.sort();
-            summaries
-        };
-
-    (
-        build_summaries(&connect_counts),
-        build_summaries(&bind_counts),
-    )
-}
-
-/// Resolve captured DNS query hostnames to IPs via forward DNS lookup.
-///
-/// For each hostname the traced program queried, resolves it to its current
-/// IPs to build an IP→hostname mapping. This gives the actual hostname the
-/// program intended to reach (e.g., "google.com") rather than infrastructure
-/// names from reverse DNS (e.g., "jr-in-f100.1e100.net").
-#[cfg(target_os = "linux")]
-fn resolve_forward_dns(hostnames: &[String]) -> HashMap<IpAddr, String> {
-    let mut result = HashMap::new();
-    let unique: HashSet<&String> = hostnames.iter().collect();
-
-    for hostname in unique {
-        match dns_lookup::lookup_host(hostname) {
-            Ok(ips) => {
-                for ip in ips {
-                    // First hostname to resolve to this IP wins
-                    result.entry(ip).or_insert_with(|| hostname.clone());
-                }
-            }
-            Err(e) => {
-                debug!("Forward DNS lookup failed for {}: {}", hostname, e);
-            }
-        }
-    }
-
-    result
-}
-
-/// Resolve IP addresses to hostnames via reverse DNS (fallback)
-#[cfg(target_os = "linux")]
-fn resolve_reverse_dns(ips: &HashSet<IpAddr>) -> HashMap<IpAddr, String> {
-    let mut result = HashMap::new();
-
-    for &ip in ips {
-        match dns_lookup::lookup_addr(&ip) {
-            Ok(hostname) => {
-                // Skip if the hostname is just the IP address stringified
-                if hostname != ip.to_string() {
-                    result.insert(ip, hostname);
-                }
-            }
-            Err(e) => {
-                debug!("Reverse DNS lookup failed for {}: {}", ip, e);
-            }
-        }
-    }
-
-    result
-}
-
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// Helper to extract FileAccess from TracedAccess
     fn expect_file_access(traced: Option<TracedAccess>) -> FileAccess {
@@ -1230,48 +664,6 @@ mod tests {
         assert!(!is_write_access("openat(..., O_RDONLY, ...)", "openat"));
         assert!(is_write_access("creat(...)", "creat"));
         assert!(is_write_access("mkdir(...)", "mkdir"));
-    }
-
-    #[test]
-    fn test_expand_home() {
-        // Save original HOME to restore after test (avoid polluting other parallel tests)
-        let original_home = std::env::var("HOME").ok();
-
-        std::env::set_var("HOME", "/home/test");
-        assert_eq!(expand_home("~/foo").expect("valid home"), "/home/test/foo");
-        assert_eq!(
-            expand_home("$HOME/bar").expect("valid home"),
-            "/home/test/bar"
-        );
-        assert_eq!(
-            expand_home("/absolute/path").expect("no expansion needed"),
-            "/absolute/path"
-        );
-
-        // Restore original HOME
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        }
-    }
-
-    #[test]
-    fn test_collapse_to_parent() {
-        // For a file that doesn't exist, collapse to parent
-        let path = PathBuf::from("/some/dir/file.txt");
-        let collapsed = collapse_to_parent(&path);
-        assert_eq!(collapsed, PathBuf::from("/some/dir"));
-    }
-
-    #[test]
-    fn test_learn_result_to_json() {
-        let mut result = LearnResult::new();
-        result.read_paths.insert(PathBuf::from("/some/read/path"));
-        result.write_paths.insert(PathBuf::from("/some/write/path"));
-
-        let json = result.to_json();
-        assert!(json.contains("filesystem"));
-        assert!(json.contains("/some/read/path"));
-        assert!(json.contains("/some/write/path"));
     }
 
     #[test]
@@ -1342,6 +734,7 @@ mod tests {
 
     #[test]
     fn test_parse_connect_ipv4() {
+        use std::net::IpAddr;
         let line = r#"connect(3, {sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("93.184.216.34")}, 16) = 0"#;
         let access = expect_network_access(parse_strace_line(line));
         assert_eq!(access.addr, "93.184.216.34".parse::<IpAddr>().unwrap());
@@ -1351,6 +744,7 @@ mod tests {
 
     #[test]
     fn test_parse_connect_ipv6() {
+        use std::net::IpAddr;
         let line = r#"connect(3, {sa_family=AF_INET6, sin6_port=htons(443), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, "2606:2800:220:1:248:1893:25c8:1946"), sin6_scope_id=0}, 28) = 0"#;
         let access = expect_network_access(parse_strace_line(line));
         assert_eq!(
@@ -1372,6 +766,7 @@ mod tests {
 
     #[test]
     fn test_parse_bind_ipv4() {
+        use std::net::IpAddr;
         let line = r#"bind(4, {sa_family=AF_INET, sin_port=htons(8080), sin_addr=inet_addr("0.0.0.0")}, 16) = 0"#;
         let access = expect_network_access(parse_strace_line(line));
         assert_eq!(access.addr, "0.0.0.0".parse::<IpAddr>().unwrap());
@@ -1381,6 +776,7 @@ mod tests {
 
     #[test]
     fn test_parse_bind_ipv6() {
+        use std::net::IpAddr;
         let line = r#"bind(4, {sa_family=AF_INET6, sin6_port=htons(3000), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, "::"), sin6_scope_id=0}, 28) = 0"#;
         let access = expect_network_access(parse_strace_line(line));
         assert_eq!(access.addr, "::".parse::<IpAddr>().unwrap());
@@ -1390,6 +786,7 @@ mod tests {
 
     #[test]
     fn test_parse_connect_failed() {
+        use std::net::IpAddr;
         // Failed connections should still be captured — they reveal intent
         let line = r#"connect(3, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("10.0.0.1")}, 16) = -1 ECONNREFUSED (Connection refused)"#;
         let access = expect_network_access(parse_strace_line(line));
@@ -1428,123 +825,6 @@ mod tests {
     }
 
     #[test]
-    fn test_network_dedup() {
-        // Duplicate endpoints should be merged with count
-        let accesses = vec![
-            NetworkAccess {
-                addr: "93.184.216.34".parse().unwrap(),
-                port: 443,
-                kind: NetworkAccessKind::Connect,
-                queried_hostname: None,
-            },
-            NetworkAccess {
-                addr: "93.184.216.34".parse().unwrap(),
-                port: 443,
-                kind: NetworkAccessKind::Connect,
-                queried_hostname: None,
-            },
-            NetworkAccess {
-                addr: "93.184.216.34".parse().unwrap(),
-                port: 443,
-                kind: NetworkAccessKind::Connect,
-                queried_hostname: None,
-            },
-        ];
-
-        let (outbound, listening) = process_network_accesses(accesses, vec![], false);
-        assert_eq!(outbound.len(), 1);
-        assert_eq!(outbound[0].count, 3);
-        assert!(listening.is_empty());
-    }
-
-    #[test]
-    fn test_learn_result_network_json() {
-        let mut result = LearnResult::new();
-        result.outbound_connections.push(NetworkConnectionSummary {
-            endpoint: NetworkEndpoint {
-                addr: "93.184.216.34".parse().unwrap(),
-                port: 443,
-                hostname: Some("example.com".to_string()),
-            },
-            count: 5,
-        });
-        result.listening_ports.push(NetworkConnectionSummary {
-            endpoint: NetworkEndpoint {
-                addr: "0.0.0.0".parse().unwrap(),
-                port: 3000,
-                hostname: None,
-            },
-            count: 1,
-        });
-
-        let json = result.to_json();
-        assert!(json.contains("\"network\""));
-        assert!(json.contains("\"outbound\""));
-        assert!(json.contains("\"listening\""));
-        assert!(json.contains("93.184.216.34"));
-        assert!(json.contains("443"));
-        assert!(json.contains("example.com"));
-        assert!(json.contains("0.0.0.0"));
-        assert!(json.contains("3000"));
-    }
-
-    #[test]
-    fn test_learn_result_network_summary() {
-        let mut result = LearnResult::new();
-        result.outbound_connections.push(NetworkConnectionSummary {
-            endpoint: NetworkEndpoint {
-                addr: "93.184.216.34".parse().unwrap(),
-                port: 443,
-                hostname: Some("example.com".to_string()),
-            },
-            count: 12,
-        });
-        result.listening_ports.push(NetworkConnectionSummary {
-            endpoint: NetworkEndpoint {
-                addr: "0.0.0.0".parse().unwrap(),
-                port: 3000,
-                hostname: None,
-            },
-            count: 1,
-        });
-
-        let summary = result.to_summary();
-        assert!(summary.contains("Outbound connections:"));
-        assert!(summary.contains("example.com (93.184.216.34):443 (12x)"));
-        assert!(summary.contains("Listening ports:"));
-        assert!(summary.contains("0.0.0.0:3000"));
-        // Count of 1 should NOT show "(1x)"
-        assert!(!summary.contains("(1x)"));
-    }
-
-    #[test]
-    fn test_has_network_activity() {
-        let mut result = LearnResult::new();
-        assert!(!result.has_network_activity());
-
-        result.outbound_connections.push(NetworkConnectionSummary {
-            endpoint: NetworkEndpoint {
-                addr: "10.0.0.1".parse().unwrap(),
-                port: 80,
-                hostname: None,
-            },
-            count: 1,
-        });
-        assert!(result.has_network_activity());
-
-        let mut result2 = LearnResult::new();
-        result2.listening_ports.push(NetworkConnectionSummary {
-            endpoint: NetworkEndpoint {
-                addr: "0.0.0.0".parse().unwrap(),
-                port: 8080,
-                hostname: None,
-            },
-            count: 1,
-        });
-        assert!(result2.has_network_activity());
-    }
-
-    #[test]
     fn test_extract_between() {
         assert_eq!(extract_between("htons(443)", "htons(", ")"), Some("443"));
         assert_eq!(
@@ -1560,34 +840,6 @@ mod tests {
         // AF_LOCAL is an alias for AF_UNIX, should also be ignored
         let line = r#"connect(3, {sa_family=AF_LOCAL, sun_path="/tmp/socket"}, 110) = 0"#;
         assert!(parse_strace_line(line).is_none());
-    }
-
-    #[test]
-    fn test_format_network_summary_with_hostname() {
-        let conn = NetworkConnectionSummary {
-            endpoint: NetworkEndpoint {
-                addr: "93.184.216.34".parse().unwrap(),
-                port: 443,
-                hostname: Some("example.com".to_string()),
-            },
-            count: 5,
-        };
-        let line = format_network_summary(&conn);
-        assert_eq!(line, "  example.com (93.184.216.34):443 (5x)");
-    }
-
-    #[test]
-    fn test_format_network_summary_without_hostname() {
-        let conn = NetworkConnectionSummary {
-            endpoint: NetworkEndpoint {
-                addr: "10.0.0.1".parse().unwrap(),
-                port: 8080,
-                hostname: None,
-            },
-            count: 1,
-        };
-        let line = format_network_summary(&conn);
-        assert_eq!(line, "  10.0.0.1:8080");
     }
 
     // --- DNS query parsing tests ---
@@ -1700,6 +952,7 @@ mod tests {
 
     #[test]
     fn test_dns_timing_correlation_maps_hostname() {
+        use super::super::{NetworkAccess, NetworkAccessKind};
         // Simulate: program queried "example.com", then connected to an IP.
         // The queried_hostname attached during tracing should map directly.
         let accesses = vec![NetworkAccess {
@@ -1710,7 +963,7 @@ mod tests {
         }];
         let dns_queries = vec!["example.com".to_string()];
 
-        let (outbound, _) = process_network_accesses(accesses, dns_queries, true);
+        let (outbound, _) = super::super::process_network_accesses(accesses, dns_queries, true);
         assert_eq!(outbound.len(), 1);
         // Timing correlation attaches the hostname directly — no DNS lookup needed
         assert_eq!(

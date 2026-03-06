@@ -879,8 +879,7 @@ pub fn get_dangerous_commands(policy: &Policy) -> HashSet<String> {
 ///
 /// Collects `allow.read` entries from all platform-matching groups. Paths are
 /// returned unexpanded (with `~` and `$TMPDIR` intact) for caller to expand.
-/// Used by learn mode (Linux only).
-#[cfg(target_os = "linux")]
+/// Used by learn mode.
 pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
     let mut result = Vec::new();
 

@@ -24,7 +24,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Trace a command to discover required filesystem paths (Linux only)
+    /// Trace a command to discover required filesystem paths
     #[command(trailing_var_arg = true)]
     #[command(after_help = "EXAMPLES:
     # Discover paths needed by a command
