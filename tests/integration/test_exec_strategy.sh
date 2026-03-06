@@ -70,12 +70,13 @@ run_test "direct mode preserves exit code 1" 1 \
 echo ""
 echo "--- Signal Forwarding ---"
 
-# Test SIGTERM forwarding: use timeout to cap the entire test at 10 seconds.
-# Start nono with a long sleep, send SIGTERM, verify it exits promptly.
+# Test SIGTERM forwarding: use supervised mode so the unsandboxed parent can
+# forward signals to the sandboxed child. Monitor mode cannot forward signals
+# on macOS because Seatbelt (target self) restricts kill() to the caller's PID.
 TESTS_RUN=$((TESTS_RUN + 1))
 
 SIGNAL_RESULT=$(
-    "$NONO_BIN" run --allow "$TMPDIR" -- sleep 60 </dev/null >/dev/null 2>&1 &
+    "$NONO_BIN" run --supervised --allow "$TMPDIR" -- sleep 60 </dev/null >/dev/null 2>&1 &
     NONO_PID=$!
     sleep 1
 
