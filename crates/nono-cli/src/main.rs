@@ -30,7 +30,9 @@ mod update_check;
 
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
-use cli::{Cli, Commands, LearnArgs, RunArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp};
+use cli::{
+    Cli, Commands, LearnArgs, RunArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp, WrapArgs,
+};
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
@@ -75,6 +77,11 @@ fn run() -> Result<()> {
             output::print_banner(cli.silent);
             show_update_notification(&mut update_handle, cli.silent);
             run_shell(*args, cli.silent)
+        }
+        Commands::Wrap(args) => {
+            output::print_banner(cli.silent);
+            show_update_notification(&mut update_handle, cli.silent);
+            run_wrap(*args, cli.silent)
         }
         Commands::Why(args) => {
             show_update_notification(&mut update_handle, cli.silent);
@@ -398,9 +405,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let args = run_args.sandbox;
     let command = run_args.command;
     let no_diagnostics = run_args.no_diagnostics;
-    let direct_exec = run_args.direct_exec;
     let rollback = run_args.rollback;
-    let supervised = run_args.supervised;
     let no_rollback_prompt = run_args.no_rollback_prompt;
     let trust_override = run_args.trust_override;
 
@@ -504,9 +509,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     // On Linux, seccomp-notify intercepts syscalls at the kernel level -- this flag is
     // informational only (seccomp is installed separately in the child process).
     #[cfg(target_os = "linux")]
-    if supervised {
-        prepared.caps.set_extensions_enabled(true);
-    }
+    prepared.caps.set_extensions_enabled(true);
 
     let trust_scan_verified = scan_result.as_ref().is_some_and(|r| r.verified > 0);
 
@@ -569,12 +572,10 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         prepared.caps,
         prepared.secrets,
         ExecutionFlags {
-            interactive: prepared.interactive,
+            strategy: exec_strategy::ExecStrategy::Supervised,
             no_diagnostics,
-            direct_exec,
             rollback,
             no_rollback: run_args.no_rollback,
-            supervised,
             no_rollback_prompt,
             trust_override,
             silent,
@@ -632,19 +633,90 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         eprintln!();
     }
 
-    // Shell is always interactive - needs TTY preservation
     execute_sandboxed(
         shell_path.into_os_string(),
         vec![],
         prepared.caps,
         prepared.secrets,
         ExecutionFlags {
-            interactive: true,
+            strategy: exec_strategy::ExecStrategy::Supervised,
             no_diagnostics: true,
-            direct_exec: false,
             rollback: false,
             no_rollback: false,
-            supervised: false,
+            no_rollback_prompt: false,
+            trust_override: false,
+            silent,
+            rollback_all: false,
+            rollback_include: Vec::new(),
+            scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            trust_scan_verified: false,
+            protected_paths: Vec::new(),
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            proxy_active: false,
+            network_profile: None,
+            proxy_allow_hosts: Vec::new(),
+            proxy_credentials: Vec::new(),
+            custom_credentials: std::collections::HashMap::new(),
+            external_proxy: None,
+            allow_bind_ports: Vec::new(),
+            proxy_port: None,
+        },
+    )
+}
+
+/// Apply sandbox and exec into command (nono disappears).
+/// For scripts, piping, and embedding where no parent process is wanted.
+fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
+    let args = wrap_args.sandbox;
+    let command = wrap_args.command;
+    let no_diagnostics = wrap_args.no_diagnostics;
+
+    // Validate: proxy flags are incompatible with Direct mode (no parent to run proxy)
+    if args.network_profile.is_some()
+        || !args.proxy_allow.is_empty()
+        || !args.proxy_credential.is_empty()
+        || args.external_proxy.is_some()
+    {
+        return Err(NonoError::ConfigParse(
+            "nono wrap does not support proxy flags (--network-profile, --proxy-allow, \
+             --proxy-credential, --external-proxy). Use `nono run` instead."
+                .to_string(),
+        ));
+    }
+
+    if command.is_empty() {
+        return Err(NonoError::NoCommand);
+    }
+
+    let mut command_iter = command.into_iter();
+    let program = OsString::from(command_iter.next().ok_or(NonoError::NoCommand)?);
+    let cmd_args: Vec<OsString> = command_iter.map(OsString::from).collect();
+
+    if args.dry_run {
+        let prepared = prepare_sandbox(&args, silent)?;
+        if !prepared.secrets.is_empty() && !silent {
+            eprintln!(
+                "  Would inject {} credential(s) as environment variables",
+                prepared.secrets.len()
+            );
+        }
+        output::print_dry_run(&program, &cmd_args, silent);
+        return Ok(());
+    }
+
+    let prepared = prepare_sandbox(&args, silent)?;
+
+    execute_sandboxed(
+        program,
+        cmd_args,
+        prepared.caps,
+        prepared.secrets,
+        ExecutionFlags {
+            strategy: exec_strategy::ExecStrategy::Direct,
+            no_diagnostics,
+            rollback: false,
+            no_rollback: false,
             no_rollback_prompt: false,
             trust_override: false,
             silent,
@@ -669,12 +741,10 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
 
 /// Flags controlling sandboxed execution behavior.
 struct ExecutionFlags {
-    interactive: bool,
+    strategy: exec_strategy::ExecStrategy,
     no_diagnostics: bool,
-    direct_exec: bool,
     rollback: bool,
     no_rollback: bool,
-    supervised: bool,
     no_rollback_prompt: bool,
     trust_override: bool,
     silent: bool,
@@ -745,30 +815,13 @@ fn resolve_effective_proxy_settings(
     }
 }
 
-/// Select execution strategy from user/runtime flags.
-///
-/// Threat-model boundary:
-/// - `Supervised` is selected when `--rollback` (snapshots) or `--supervised`
-///   (approval sidecar) is active. Both require an unsandboxed parent.
-/// - `Direct` is used for interactive/direct-exec paths.
-/// - `Monitor` is the default safer parent-sandboxed mode.
-fn select_execution_strategy(flags: &ExecutionFlags) -> exec_strategy::ExecStrategy {
-    if flags.rollback || flags.supervised || flags.proxy_active {
-        exec_strategy::ExecStrategy::Supervised
-    } else if flags.interactive || flags.direct_exec {
-        exec_strategy::ExecStrategy::Direct
-    } else {
-        exec_strategy::ExecStrategy::Monitor
-    }
-}
-
-/// Apply sandbox pre-fork for strategies that require both parent+child confinement.
+/// Apply sandbox pre-fork for Direct mode (both parent+child confined).
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
     caps: &CapabilitySet,
     silent: bool,
 ) -> Result<()> {
-    if !matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
+    if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
         output::print_applying_sandbox(silent);
         Sandbox::apply(caps)?;
         output::print_sandbox_active(silent);
@@ -892,16 +945,10 @@ fn execute_sandboxed(
         }
     }
 
-    // Determine execution strategy.
-    let strategy = select_execution_strategy(&flags);
+    let strategy = flags.strategy;
 
     if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
-        output::print_supervised_info(
-            flags.silent,
-            flags.rollback,
-            flags.supervised,
-            flags.proxy_active,
-        );
+        output::print_supervised_info(flags.silent, flags.rollback, flags.proxy_active);
     }
 
     // Start network proxy if proxy mode is active.
@@ -964,7 +1011,7 @@ fn execute_sandboxed(
         None
     };
 
-    // Apply sandbox BEFORE fork for Direct and Monitor modes.
+    // Apply sandbox BEFORE fork for Direct mode.
     apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 
     // Build environment variables for the command
@@ -1020,15 +1067,6 @@ fn execute_sandboxed(
         exec_strategy::ExecStrategy::Direct => {
             exec_strategy::execute_direct(&config)?;
             unreachable!("execute_direct only returns on error");
-        }
-        exec_strategy::ExecStrategy::Monitor => {
-            let exit_code = exec_strategy::execute_monitor(&config)?;
-            cleanup_capability_state_file(&cap_file_path);
-            // Explicitly drop borrows then secrets so Zeroizing destructors
-            // run before std::process::exit() which skips destructors.
-            drop(config);
-            drop(loaded_secrets);
-            std::process::exit(exit_code);
         }
         exec_strategy::ExecStrategy::Supervised => {
             output::print_applying_sandbox(flags.silent);
@@ -1198,20 +1236,15 @@ fn execute_sandboxed(
                 None
             };
 
-            // --- Supervisor IPC setup (only when --supervised is active) ---
-            let supervisor_cfg_data = if flags.supervised {
-                let policy_data = policy::load_embedded_policy()?;
-                let mut never_grant = policy_data.never_grant;
-                let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
-                never_grant.extend(protected_roots.as_strings()?);
-                never_grant.sort();
-                never_grant.dedup();
-                let never_grant_checker = nono::NeverGrantChecker::new(&never_grant)?;
-                let approval_backend = terminal_approval::TerminalApproval;
-                Some((never_grant_checker, approval_backend))
-            } else {
-                None
-            };
+            // --- Supervisor IPC setup (always active in Supervised mode) ---
+            let policy_data = policy::load_embedded_policy()?;
+            let mut never_grant = policy_data.never_grant;
+            let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
+            never_grant.extend(protected_roots.as_strings()?);
+            never_grant.sort();
+            never_grant.dedup();
+            let never_grant_checker = nono::NeverGrantChecker::new(&never_grant)?;
+            let approval_backend = terminal_approval::TerminalApproval;
             let supervisor_session_id = rollback_state
                 .as_ref()
                 .map(|(_, _, session_id, _, _, _)| session_id.clone())
@@ -1222,13 +1255,11 @@ fn execute_sandboxed(
                         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
                     )
                 });
-            let supervisor_cfg = supervisor_cfg_data.as_ref().map(|(checker, backend)| {
-                exec_strategy::SupervisorConfig {
-                    never_grant: checker,
-                    approval_backend: backend,
-                    session_id: &supervisor_session_id,
-                }
-            });
+            let supervisor_cfg = exec_strategy::SupervisorConfig {
+                never_grant: &never_grant_checker,
+                approval_backend: &approval_backend,
+                session_id: &supervisor_session_id,
+            };
 
             let trust_interceptor = if !flags.trust_override {
                 match trust_scan::load_scan_policy(&flags.scan_root, false) {
@@ -1269,7 +1300,7 @@ fn execute_sandboxed(
             let started = chrono::Local::now().to_rfc3339();
             let exit_code = exec_strategy::execute_supervised(
                 &config,
-                supervisor_cfg.as_ref(),
+                Some(&supervisor_cfg),
                 trust_interceptor,
             )?;
             let ended = chrono::Local::now().to_rfc3339();
@@ -1369,8 +1400,6 @@ pub(crate) fn rollback_base_exclusions() -> Vec<String> {
 struct PreparedSandbox {
     caps: CapabilitySet,
     secrets: Vec<nono::LoadedSecret>,
-    /// Whether the profile indicates interactive mode (needs TTY)
-    interactive: bool,
     /// Profile-specific rollback exclusion patterns (additive on base patterns)
     rollback_exclude_patterns: Vec<String>,
     /// Profile-specific rollback exclusion globs (filename matching)
@@ -1460,10 +1489,6 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
 
     // Extract config before profile is consumed for secrets
     let profile_workdir_access = loaded_profile.as_ref().map(|p| p.workdir.access.clone());
-    let profile_interactive = loaded_profile
-        .as_ref()
-        .map(|p| p.interactive)
-        .unwrap_or(false);
     let profile_rollback_patterns = loaded_profile
         .as_ref()
         .map(|p| p.rollback.exclude_patterns.clone())
@@ -1665,7 +1690,6 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     Ok(PreparedSandbox {
         caps,
         secrets: loaded_secrets,
-        interactive: profile_interactive,
         rollback_exclude_patterns: profile_rollback_patterns,
         rollback_exclude_globs: profile_rollback_globs,
         network_profile: profile_network_profile,
@@ -1928,7 +1952,6 @@ mod tests {
         let prepared = PreparedSandbox {
             caps: CapabilitySet::new(),
             secrets: Vec::new(),
-            interactive: false,
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
@@ -1960,7 +1983,6 @@ mod tests {
         let prepared = PreparedSandbox {
             caps: CapabilitySet::new(),
             secrets: Vec::new(),
-            interactive: false,
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),

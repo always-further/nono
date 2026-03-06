@@ -160,18 +160,15 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
 }
 
 /// Print supervised mode status
-pub fn print_supervised_info(silent: bool, rollback: bool, supervised: bool, proxy_active: bool) {
+pub fn print_supervised_info(silent: bool, rollback: bool, proxy_active: bool) {
     if silent {
         return;
     }
-    let detail = match (rollback, supervised, proxy_active) {
-        (true, true, _) => "rollback snapshots + approval sidecar",
-        (true, false, true) => "rollback snapshots + network proxy",
-        (true, false, false) => "rollback snapshots",
-        (false, true, true) => "approval sidecar + network proxy",
-        (false, true, false) => "approval sidecar",
-        (false, false, true) => "network proxy",
-        (false, false, false) => return, // shouldn't happen
+    let detail = match (rollback, proxy_active) {
+        (true, true) => "rollback snapshots + network proxy + supervisor",
+        (true, false) => "rollback snapshots + supervisor",
+        (false, true) => "network proxy + supervisor",
+        (false, false) => "supervisor",
     };
     eprintln!(
         "{}",

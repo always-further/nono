@@ -2,7 +2,7 @@
 //!
 //! Prompts the user at the terminal when the sandboxed child requests
 //! additional filesystem access. This is the default approval backend
-//! for `nono run --supervised`.
+//! for `nono run`.
 
 use nono::{AccessMode, ApprovalBackend, ApprovalDecision, CapabilityRequest, NonoError, Result};
 use std::io::{BufRead, IsTerminal, Write};

@@ -5,7 +5,7 @@
 //!
 //! # Async-Signal-Safety
 //!
-//! The Monitor strategy uses `fork()` to create a child process. After fork in a
+//! The Supervised strategy uses `fork()` to create a child process. After fork in a
 //! multi-threaded program, the child can only safely call async-signal-safe functions
 //! until `exec()`. This module carefully prepares all data in the parent (where
 //! allocation is safe) and uses only raw libc calls in the child.
@@ -25,15 +25,11 @@ use nono::{
 };
 use std::collections::HashSet;
 use std::ffi::CString;
-use std::io::{BufRead, BufReader, Write};
-use std::mem::ManuallyDrop;
 use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 pub(crate) use env_sanitization::is_dangerous_env_var;
@@ -86,7 +82,10 @@ pub enum ThreadingContext {
 
     /// Allow elevated thread count for known-safe keyring backends.
     /// Fork proceeds if thread count <= MAX_KEYRING_THREADS.
-    /// NOT allowed in supervised mode (keyring may hold allocator locks).
+    /// Keyring threads are idle XPC dispatch workers (macOS) or D-Bus workers
+    /// (Linux) after the synchronous keyring call completes — parked, not
+    /// holding allocator locks. Safe for Supervised mode's post-fork
+    /// Sandbox::apply() allocation.
     KeyringExpected,
 
     /// Allow elevated thread count for crypto library thread pools.
@@ -109,18 +108,8 @@ pub enum ExecStrategy {
     /// - Minimal attack surface (no persistent parent)
     /// - No diagnostic footer on error
     /// - No rollback support
-    /// - For backward compatibility and scripts
+    /// - Used by `nono wrap` for scripts and embedding
     Direct,
-
-    /// Monitor mode: apply sandbox, fork, wait, diagnose on error.
-    /// Both parent and child are sandboxed.
-    ///
-    /// - Small attack surface (parent sandboxed too)
-    /// - Diagnostic footer on non-zero exit
-    /// - No rollback support (parent can't write to ~/.nono/rollbacks)
-    /// - Default for interactive use
-    #[default]
-    Monitor,
 
     /// Supervised mode: fork first, sandbox only child.
     /// Parent is unsandboxed.
@@ -128,7 +117,9 @@ pub enum ExecStrategy {
     /// - Larger attack surface (requires hardening)
     /// - Diagnostic footer on non-zero exit
     /// - Undo support (parent can write snapshots)
-    /// - Future: IPC for capability expansion
+    /// - IPC for capability expansion
+    /// - Default for `nono run` and `nono shell`
+    #[default]
     Supervised,
 }
 
@@ -204,334 +195,38 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<()> {
     Err(NonoError::CommandExecution(err))
 }
 
-/// Execute a command using the Monitor strategy (fork+wait, both sandboxed).
-///
-/// The sandbox is applied BEFORE forking, so both parent and child are
-/// equally restricted. This minimizes attack surface while enabling
-/// diagnostic output on failure.
-///
-/// # Security Properties
-///
-/// - Both parent and child are sandboxed with identical restrictions
-/// - Even if child compromises parent via ptrace, parent has no additional privileges
-/// - Platform-specific ptrace hardening is applied:
-///   - Linux: PR_SET_DUMPABLE(0) prevents core dumps and ptrace attachment
-///   - macOS: PT_DENY_ATTACH prevents debugger attachment (Seatbelt also blocks process-info)
-///
-/// # Stderr Interception
-///
-/// In Monitor mode, nono intercepts the child's stderr and watches for permission
-/// error patterns. When detected, it immediately injects a diagnostic footer so
-/// AI agents can understand the sandbox restrictions without checking env vars.
-///
-/// # Concurrency Limitations
-///
-/// This function is **not reentrant** and requires single-threaded execution:
-/// - Uses process-global state for signal forwarding (Unix signal handlers cannot
-///   access thread-local state)
-/// - Calls `fork()` which is unsafe in multi-threaded programs
-/// - Returns an error if called with multiple threads active
-///
-/// This is CLI-only code. Library consumers should use `Sandbox::apply()` directly
-/// and implement their own process management if needed.
-///
-/// # Process Flow
-///
-/// 1. Program path already resolved by caller (before sandbox applied)
-/// 2. Sandbox is already applied (caller's responsibility)
-/// 3. Prepare all data for exec in parent (CString conversion)
-/// 4. Apply platform-specific ptrace hardening
-/// 5. Verify threading context allows fork
-/// 6. Create pipes for output interception
-/// 7. Fork into parent and child
-/// 8. Child: close FDs, redirect output to pipes, exec using prepared data
-/// 9. Parent: read pipes, inject diagnostic on permission errors, wait for exit
-///
-/// # Async-Signal-Safety
-///
-/// After fork() in a potentially multi-threaded process, the child can only safely
-/// call async-signal-safe functions until exec(). This implementation:
-/// - Uses the pre-resolved program path from ExecConfig
-/// - Converts all strings to CString in the parent
-/// - Uses only raw libc calls in the child (no Rust allocations)
-/// - Exits with `libc::_exit()` on error (not `std::process::exit()` or panic)
-pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
-    let program = &config.command[0];
-    let cmd_args = &config.command[1..];
-
-    info!("Executing (monitor): {} {:?}", program, cmd_args);
-
-    // Use pre-resolved program path (resolved before sandbox was applied)
-    // This ensures the program can be found even if its directory is not
-    // in the sandbox's allowed paths.
-    let program_path = config.resolved_program;
-
-    // Convert program path to CString for execve
-    let program_c = CString::new(program_path.to_string_lossy().as_bytes())
-        .map_err(|_| NonoError::SandboxInit("Program path contains null byte".to_string()))?;
-
-    // Build argv: [program, args..., NULL]
-    let mut argv_c: Vec<CString> = Vec::with_capacity(1 + cmd_args.len());
-    argv_c.push(program_c.clone());
-    for arg in cmd_args {
-        argv_c.push(CString::new(arg.as_bytes()).map_err(|_| {
-            NonoError::SandboxInit(format!("Argument contains null byte: {}", arg))
-        })?);
-    }
-
-    // Build environment: inherit current env + add our vars
-    let mut env_c: Vec<CString> = Vec::new();
-
-    // Copy current environment, filtering dangerous and overridden vars
-    for (key, value) in std::env::vars_os() {
-        if let (Some(k), Some(v)) = (key.to_str(), value.to_str()) {
-            let should_skip = should_skip_env_var(k, &config.env_vars, &["NONO_CAP_FILE"]);
-            if !should_skip {
-                if let Ok(cstr) = CString::new(format!("{}={}", k, v)) {
-                    env_c.push(cstr);
-                }
-            }
-        }
-    }
-
-    // Add NONO_CAP_FILE
-    if let Some(cap_file_str) = config.cap_file.to_str() {
-        if let Ok(cstr) = CString::new(format!("NONO_CAP_FILE={}", cap_file_str)) {
-            env_c.push(cstr);
-        }
-    }
-
-    // Add user-specified environment variables (secrets, etc.)
-    // Pre-allocate with room for the null terminator to prevent CString::new
-    // from reallocating, which would leave a non-zeroized copy of secret values.
-    for (key, value) in &config.env_vars {
-        let mut kv = Vec::with_capacity(key.len() + 1 + value.len() + 1);
-        kv.extend_from_slice(key.as_bytes());
-        kv.push(b'=');
-        kv.extend_from_slice(value.as_bytes());
-        if let Ok(cstr) = CString::new(kv) {
-            env_c.push(cstr);
-        }
-    }
-
-    // Create null-terminated pointer arrays for execve
-    let argv_ptrs: Vec<*const libc::c_char> = argv_c
-        .iter()
-        .map(|s| s.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
-
-    let envp_ptrs: Vec<*const libc::c_char> = env_c
-        .iter()
-        .map(|s| s.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
-
-    // Platform-specific ptrace hardening
-    #[cfg(target_os = "linux")]
-    {
-        use nix::sys::prctl;
-        if let Err(e) = prctl::set_dumpable(false) {
-            warn!("Failed to set PR_SET_DUMPABLE(0): {}", e);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        const PT_DENY_ATTACH: libc::c_int = 31;
-        let result =
-            unsafe { libc::ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut::<libc::c_char>(), 0) };
-        if result != 0 {
-            warn!(
-                "Failed to set PT_DENY_ATTACH: {} (errno: {})",
-                result,
-                std::io::Error::last_os_error()
-            );
-        }
-    }
-
-    // Validate threading context before fork
-    let thread_count = get_thread_count()?;
-    match (config.threading, thread_count) {
-        (_, 1) => {}
-        (ThreadingContext::KeyringExpected, n) if n <= MAX_KEYRING_THREADS => {
-            debug!(
-                "Proceeding with fork despite {} threads (keyring backend threads expected)",
-                n
-            );
-        }
-        (ThreadingContext::CryptoExpected, n) if n <= MAX_CRYPTO_THREADS => {
-            debug!(
-                "Proceeding with fork despite {} threads (crypto pool threads expected, idle on condvar)",
-                n
-            );
-        }
-        (ThreadingContext::Strict, n) => {
-            return Err(NonoError::SandboxInit(format!(
-                "Cannot fork: process has {} threads (expected 1). \
-                 This is a bug - fork() requires single-threaded execution.",
-                n
-            )));
-        }
-        (ThreadingContext::KeyringExpected, n) => {
-            return Err(NonoError::SandboxInit(format!(
-                "Cannot fork: process has {} threads (max {} with keyring). \
-                 Unexpected threading detected.",
-                n, MAX_KEYRING_THREADS
-            )));
-        }
-        (ThreadingContext::CryptoExpected, n) => {
-            return Err(NonoError::SandboxInit(format!(
-                "Cannot fork: process has {} threads (max {} with crypto pool). \
-                 Unexpected threading detected.",
-                n, MAX_CRYPTO_THREADS
-            )));
-        }
-    }
-
-    // Create pipes for stdout and stderr interception
-    let (stdout_read, stdout_write): (OwnedFd, OwnedFd) = nix::unistd::pipe()
-        .map_err(|e| NonoError::SandboxInit(format!("pipe() for stdout failed: {}", e)))?;
-    let (stderr_read, stderr_write): (OwnedFd, OwnedFd) = nix::unistd::pipe()
-        .map_err(|e| NonoError::SandboxInit(format!("pipe() for stderr failed: {}", e)))?;
-
-    // Extract raw FDs before fork
-    let stdout_write_fd = stdout_write.as_raw_fd();
-    let stderr_write_fd = stderr_write.as_raw_fd();
-    let stdout_read_fd = stdout_read.as_raw_fd();
-    let stderr_read_fd = stderr_read.as_raw_fd();
-
-    // Wrap in ManuallyDrop to prevent Drop from running in child
-    // (Drop may allocate, which is unsafe after fork)
-    let stdout_read = ManuallyDrop::new(stdout_read);
-    let stdout_write = ManuallyDrop::new(stdout_write);
-    let stderr_read = ManuallyDrop::new(stderr_read);
-    let stderr_write = ManuallyDrop::new(stderr_write);
-
-    // Compute max FD in parent (get_max_fd may allocate on Linux)
-    let max_fd = get_max_fd();
-
-    // Clear any stale forwarding target before forking.
-    clear_signal_forwarding_target();
-
-    // SAFETY: fork() is safe here because we validated threading context
-    // and child will only use async-signal-safe functions until exec()
-    let fork_result = unsafe { fork() };
-
-    match fork_result {
-        Ok(ForkResult::Child) => {
-            // CHILD: No allocations allowed from here until exec()
-
-            // Prevent /proc/pid/environ from being readable during the
-            // fork-to-exec window (secrets may be in the environment).
-            // prctl() is async-signal-safe so this is safe after fork.
-            // Note: execve() resets dumpable to 1, so this only protects
-            // the interval between fork and exec.
-            #[cfg(target_os = "linux")]
-            unsafe {
-                libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
-            }
-
-            // Close read ends of pipes
-            unsafe {
-                libc::close(stdout_read_fd);
-                libc::close(stderr_read_fd);
-            }
-
-            // Close inherited FDs from keyring/other sources
-            close_inherited_fds(max_fd, &[stdout_write_fd, stderr_write_fd]);
-
-            // Redirect stdout to pipe
-            unsafe {
-                if stdout_write_fd != libc::STDOUT_FILENO {
-                    libc::dup2(stdout_write_fd, libc::STDOUT_FILENO);
-                    libc::close(stdout_write_fd);
-                }
-            }
-
-            // Redirect stderr to pipe
-            unsafe {
-                if stderr_write_fd != libc::STDERR_FILENO {
-                    libc::dup2(stderr_write_fd, libc::STDERR_FILENO);
-                    libc::close(stderr_write_fd);
-                }
-            }
-
-            // Execute using pre-prepared CStrings (no allocation)
-            unsafe {
-                libc::execve(program_c.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
-            }
-
-            // execve only returns on error - exit without cleanup
-            unsafe { libc::_exit(127) }
-        }
-        Ok(ForkResult::Parent { child }) => {
-            // PARENT: Close write ends, read from pipes, wait for child
-            unsafe {
-                ManuallyDrop::drop(&mut { stdout_write });
-                ManuallyDrop::drop(&mut { stderr_write });
-            }
-
-            let stdout_read = ManuallyDrop::into_inner(stdout_read);
-            let stderr_read = ManuallyDrop::into_inner(stderr_read);
-
-            let stdout_file = std::fs::File::from(stdout_read);
-            let stderr_file = std::fs::File::from(stderr_read);
-
-            execute_parent_monitor(child, config, stdout_file, stderr_file)
-        }
-        Err(e) => {
-            unsafe {
-                ManuallyDrop::drop(&mut { stdout_read });
-                ManuallyDrop::drop(&mut { stdout_write });
-                ManuallyDrop::drop(&mut { stderr_read });
-                ManuallyDrop::drop(&mut { stderr_write });
-            }
-            Err(NonoError::SandboxInit(format!("fork() failed: {}", e)))
-        }
-    }
-}
-
 /// Execute a command using the Supervised strategy (fork first, sandbox only child).
 ///
-/// Unlike Monitor mode where the sandbox is applied before forking (both processes
-/// sandboxed), Supervised mode forks first and applies the sandbox only in the child.
-/// The parent remains unsandboxed, enabling rollback snapshots and IPC capability
-/// expansion.
+/// Forks first and applies the sandbox only in the child. The parent remains
+/// unsandboxed, enabling rollback snapshots and IPC capability expansion.
 ///
 /// # Security Properties
 ///
-/// - Child is sandboxed with full restrictions (identical to Monitor's child)
+/// - Child is sandboxed with full restrictions
 /// - Parent is NOT sandboxed - requires additional hardening:
 ///   - Linux: PR_SET_DUMPABLE(0) applied BEFORE fork (inherited by both processes,
 ///     closes TOCTOU window). Failure is fatal.
 ///   - macOS: PT_DENY_ATTACH applied in parent immediately after fork (not inherited
 ///     across fork on macOS). Failure is fatal - child is killed and error returned.
-/// - Parent attack surface is larger than Monitor (unsandboxed parent)
-/// - Keyring secrets (--secrets) are NOT supported with Supervised mode to prevent
-///   deadlock from keyring threads holding allocator locks at fork time
 ///
 /// # Sandbox Application in Child
 ///
 /// The child calls `Sandbox::apply()` after fork, which allocates memory (generating
 /// Seatbelt profile strings on macOS, opening Landlock PathFds on Linux). This is safe
-/// because we validate single-threaded execution before fork, giving the child a clean
-/// copy of the parent's heap with no contended locks.
+/// because we validate threading context before fork — known-safe thread contexts
+/// (keyring workers, crypto pool) are idle and not holding allocator locks.
 ///
 /// # Process Flow
 ///
 /// 1. Prepare all data for exec in parent (CString conversion)
-/// 2. Reject keyring threading context (deadlock risk)
-/// 3. Verify single-threaded execution
-/// 4. Fork into parent and child
-/// 5. Child: apply Landlock, install seccomp-notify, close inherited FDs, exec
-/// 6. Parent: apply PR_SET_DUMPABLE(0) + PT_DENY_ATTACH, receive seccomp fd, run supervisor loop
+/// 2. Verify threading context allows fork
+/// 3. Fork into parent and child
+/// 4. Child: apply Landlock, install seccomp-notify, close inherited FDs, exec
+/// 5. Parent: apply PR_SET_DUMPABLE(0) + PT_DENY_ATTACH, receive seccomp fd, run supervisor loop
 ///
-/// Unlike Monitor mode, Supervised mode does NOT pipe stdout/stderr. The child
-/// inherits the parent's terminal directly, preserving TTY semantics for
-/// interactive programs (e.g., Claude Code, vim). Diagnostic injection is not
-/// needed because the parent is alive after the child exits and can print
-/// diagnostics and rollback UI directly.
+/// Does NOT pipe stdout/stderr. The child inherits the parent's terminal directly,
+/// preserving TTY semantics for interactive programs (e.g., Claude Code, vim).
+/// The parent prints diagnostics and rollback UI after the child exits.
 pub fn execute_supervised(
     config: &ExecConfig<'_>,
     supervisor: Option<&SupervisorConfig<'_>>,
@@ -624,45 +319,52 @@ pub fn execute_supervised(
         .chain(std::iter::once(std::ptr::null()))
         .collect();
 
-    // Supervised mode REQUIRES single-threaded execution (Strict context).
-    // Unlike Monitor mode (where sandbox is applied before fork and keyring
-    // threads are tolerable), Supervised mode calls Sandbox::apply() in the
-    // child after fork. If keyring threads hold allocator locks at fork time,
-    // the child's Sandbox::apply() will deadlock when it tries to allocate.
-    if matches!(config.threading, ThreadingContext::KeyringExpected) {
-        return Err(NonoError::SandboxInit(
-            "Supervised mode is incompatible with keyring secrets. \
-             Keyring threads may hold allocator locks at fork time, causing \
-             deadlock when the child applies the sandbox. Use Monitor mode \
-             (remove --supervised) or avoid --secrets with --supervised."
-                .to_string(),
-        ));
-    }
-
     // Validate threading before fork.
     // Supervised mode applies sandbox in child (allocates), so threads holding
-    // allocator locks would cause deadlock. CryptoExpected threads are safe:
-    // they are idle aws-lc-rs pool workers parked on condvars.
+    // allocator locks would cause deadlock. Both KeyringExpected and CryptoExpected
+    // threads are safe: keyring threads are idle XPC dispatch workers (macOS) or
+    // D-Bus workers (Linux) parked after the synchronous call completes; crypto
+    // threads are idle aws-lc-rs pool workers parked on condvars. Neither holds
+    // allocator locks.
     let thread_count = get_thread_count()?;
     match (config.threading, thread_count) {
         (_, 1) => {}
+        (ThreadingContext::KeyringExpected, n) if n <= MAX_KEYRING_THREADS => {
+            debug!(
+                "Supervised fork with {} threads (keyring workers, idle after sync call)",
+                n
+            );
+        }
         (ThreadingContext::CryptoExpected, n) if n <= MAX_CRYPTO_THREADS => {
             debug!(
                 "Supervised fork with {} threads (crypto pool workers, idle on condvar)",
                 n
             );
         }
-        (_, n) => {
+        (ThreadingContext::Strict, n) => {
             return Err(NonoError::SandboxInit(format!(
                 "Cannot fork in supervised mode: process has {} threads (expected 1). \
-                 Supervised mode requires single-threaded execution because the child \
-                 calls Sandbox::apply() after fork, which allocates.",
+                 This is a bug - fork() requires single-threaded execution.",
                 n
+            )));
+        }
+        (ThreadingContext::KeyringExpected, n) => {
+            return Err(NonoError::SandboxInit(format!(
+                "Cannot fork: process has {} threads (max {} with keyring). \
+                 Unexpected threading detected.",
+                n, MAX_KEYRING_THREADS
+            )));
+        }
+        (ThreadingContext::CryptoExpected, n) => {
+            return Err(NonoError::SandboxInit(format!(
+                "Cannot fork: process has {} threads (max {} with crypto pool). \
+                 Unexpected threading detected.",
+                n, MAX_CRYPTO_THREADS
             )));
         }
     }
 
-    // NOTE: In supervised mode with IPC (--supervised), we do NOT set
+    // NOTE: In supervised mode with IPC, we do NOT set
     // PR_SET_DUMPABLE(0) before fork. The child must remain dumpable so
     // the parent can read /proc/CHILD/mem for seccomp-notify path extraction.
     // In rollback-only mode (no IPC), the child is made non-dumpable after
@@ -689,7 +391,7 @@ pub fn execute_supervised(
         Ok(ForkResult::Child) => {
             // CHILD: Apply sandbox, then exec.
             //
-            // Unlike Monitor mode, the child must apply the sandbox itself.
+            // The child applies the sandbox itself before exec.
             // Sandbox::apply() allocates (Seatbelt profile generation, Landlock
             // PathFd opens) but this is safe because we validated single-threaded
             // execution before fork, giving us a clean heap.
@@ -932,9 +634,8 @@ pub fn execute_supervised(
             };
 
             // Print diagnostic footer on non-zero exit.
-            // Unlike Monitor mode (which intercepts stderr for inline injection),
             // Supervised mode inherits the terminal directly, so the footer is
-            // only printed here after the child exits.
+            // printed here after the child exits.
             if exit_code != 0 && !config.no_diagnostics {
                 let mode = if supervisor.is_some() {
                     DiagnosticMode::Supervised
@@ -986,210 +687,6 @@ fn get_max_fd() -> i32 {
     } else {
         1024
     }
-}
-
-/// Patterns that indicate a permission error from sandbox restrictions.
-/// These are checked case-insensitively against stderr output.
-const PERMISSION_ERROR_PATTERNS: &[&str] = &[
-    "eperm",
-    "eacces",
-    "permission denied",
-    "operation not permitted",
-    "sandbox",
-];
-
-/// Minimum time between diagnostic injections (debounce).
-const DIAGNOSTIC_DEBOUNCE_MS: u128 = 2000;
-
-/// Parent process in Monitor mode: intercept stdout/stderr, inject diagnostics, wait for child.
-fn execute_parent_monitor(
-    child: Pid,
-    config: &ExecConfig<'_>,
-    stdout_pipe: std::fs::File,
-    stderr_pipe: std::fs::File,
-) -> Result<i32> {
-    debug!("Parent waiting for child pid {}", child);
-
-    // Set up signal forwarding
-    setup_signal_forwarding(child);
-    let _signal_forwarding_guard = SignalForwardingGuard;
-
-    // Shared flag to track if we've injected diagnostics recently
-    // This allows debouncing across both stdout and stderr
-    let diagnostic_injected = Arc::new(AtomicBool::new(false));
-
-    // Spawn threads to read stdout and stderr
-    // We need threads because we must read from both pipes while also waiting for the child
-    let caps_stdout = config.caps.clone();
-    let caps_stderr = config.caps.clone();
-    let protected_stdout = config.protected_paths.to_vec();
-    let protected_stderr = config.protected_paths.to_vec();
-    let no_diagnostics = config.no_diagnostics;
-    let diag_flag_stdout = Arc::clone(&diagnostic_injected);
-    let diag_flag_stderr = Arc::clone(&diagnostic_injected);
-
-    let stdout_handle = std::thread::spawn(move || {
-        process_output(
-            stdout_pipe,
-            &caps_stdout,
-            &protected_stdout,
-            no_diagnostics,
-            false,
-            diag_flag_stdout,
-        );
-    });
-
-    let stderr_handle = std::thread::spawn(move || {
-        process_output(
-            stderr_pipe,
-            &caps_stderr,
-            &protected_stderr,
-            no_diagnostics,
-            true,
-            diag_flag_stderr,
-        );
-    });
-
-    // Wait for child to exit
-    let status = wait_for_child(child)?;
-
-    // Wait for output threads to finish (they will exit when pipes close)
-    if let Err(e) = stdout_handle.join() {
-        warn!("stdout processing thread panicked: {:?}", e);
-    }
-    if let Err(e) = stderr_handle.join() {
-        warn!("stderr processing thread panicked: {:?}", e);
-    }
-
-    // Determine exit code
-    let exit_code = match status {
-        WaitStatus::Exited(_, code) => {
-            debug!("Child exited with code {}", code);
-            code
-        }
-        WaitStatus::Signaled(_, signal, _) => {
-            debug!("Child killed by signal {:?}", signal);
-            // Exit code convention: 128 + signal number
-            128 + signal as i32
-        }
-        other => {
-            warn!("Unexpected wait status: {:?}", other);
-            1
-        }
-    };
-
-    // Print diagnostic footer on non-zero exit if not already injected
-    if exit_code != 0
-        && !config.no_diagnostics
-        && diagnostic_injected
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    {
-        let formatter =
-            DiagnosticFormatter::new(config.caps).with_protected_paths(config.protected_paths);
-        let footer = formatter.format_footer(exit_code);
-        eprintln!("\n{}", footer);
-    }
-
-    Ok(exit_code)
-}
-
-/// Process output from the child (stdout or stderr), forwarding and injecting diagnostics.
-///
-/// When a permission error is detected on either stream, the diagnostic is written to stdout.
-/// This ensures AI agents like Claude Code see the diagnostic since they typically capture
-/// and re-render subprocess output through their TUI.
-fn process_output(
-    pipe: std::fs::File,
-    caps: &CapabilitySet,
-    protected_paths: &[std::path::PathBuf],
-    no_diagnostics: bool,
-    is_stderr: bool,
-    diagnostic_injected: Arc<AtomicBool>,
-) {
-    let reader = BufReader::new(pipe);
-    let mut stdout = std::io::stdout();
-    let mut stderr = std::io::stderr();
-    let stream_name = if is_stderr { "stderr" } else { "stdout" };
-
-    for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(e) => {
-                debug!("Error reading {}: {}", stream_name, e);
-                break;
-            }
-        };
-
-        // Forward line to the appropriate real output
-        if is_stderr {
-            if writeln!(stderr, "{}", line).is_err() {
-                debug!("Failed to write to stderr");
-            }
-        } else if writeln!(stdout, "{}", line).is_err() {
-            debug!("Failed to write to stdout");
-        }
-
-        // Check for permission error patterns (skip if diagnostics disabled)
-        if no_diagnostics {
-            continue;
-        }
-
-        let line_lower = line.to_lowercase();
-        let is_permission_error = PERMISSION_ERROR_PATTERNS
-            .iter()
-            .any(|pattern| line_lower.contains(pattern));
-
-        if is_permission_error {
-            // Use compare_exchange to ensure only one thread injects diagnostics
-            // This prevents duplicate diagnostics when errors appear on both streams
-            if diagnostic_injected
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                // Check if the error mentions a protected file
-                let blocked_file = detect_protected_file_in_line(&line, protected_paths);
-
-                // We won the race - inject diagnostic to stdout only
-                // Writing to stdout ensures AI agents (like Claude Code) see the diagnostic
-                // since they may capture and re-render subprocess output through their TUI
-                let formatter = DiagnosticFormatter::new(caps)
-                    .with_protected_paths(protected_paths)
-                    .with_blocked_protected_file(blocked_file);
-                let footer = formatter.format_footer(1);
-
-                // Write to stdout (for agents that capture stdout)
-                for footer_line in footer.lines() {
-                    let _ = writeln!(stdout, "{}", footer_line);
-                }
-                let _ = stdout.flush();
-
-                // Reset the flag after debounce period in a background thread
-                let flag = Arc::clone(&diagnostic_injected);
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        DIAGNOSTIC_DEBOUNCE_MS as u64,
-                    ));
-                    flag.store(false, Ordering::SeqCst);
-                });
-            }
-        }
-    }
-}
-
-/// Check if an error line mentions any protected file and return the filename.
-fn detect_protected_file_in_line(
-    line: &str,
-    protected_paths: &[std::path::PathBuf],
-) -> Option<String> {
-    for path in protected_paths {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if line.contains(name) {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
 }
 
 /// Wait for child process, handling EINTR from signals.
@@ -2046,15 +1543,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_exec_strategy_default_is_monitor() {
-        assert_eq!(ExecStrategy::default(), ExecStrategy::Monitor);
+    fn test_exec_strategy_default_is_supervised() {
+        assert_eq!(ExecStrategy::default(), ExecStrategy::Supervised);
     }
 
     #[test]
     fn test_exec_strategy_variants() {
-        // Just verify all variants exist and are distinct
-        assert_ne!(ExecStrategy::Direct, ExecStrategy::Monitor);
-        assert_ne!(ExecStrategy::Monitor, ExecStrategy::Supervised);
         assert_ne!(ExecStrategy::Direct, ExecStrategy::Supervised);
     }
 
@@ -2107,16 +1601,9 @@ mod tests {
 
     #[test]
     fn test_exec_strategy_supervised_selection() {
-        // Verify the strategy selection logic from main.rs:
-        // interactive || direct_exec -> Direct
-        // supervised -> Supervised
-        // else -> Monitor
         let strategy = ExecStrategy::Supervised;
         assert_eq!(strategy, ExecStrategy::Supervised);
-
-        // Supervised is distinct from both Monitor and Direct
         assert_ne!(ExecStrategy::Supervised, ExecStrategy::Direct);
-        assert_ne!(ExecStrategy::Supervised, ExecStrategy::Monitor);
     }
 
     #[test]

@@ -96,6 +96,18 @@ PLATFORM NOTES:
 ")]
     Shell(Box<ShellArgs>),
 
+    /// Apply sandbox and exec into command (nono disappears).
+    /// For scripts, piping, and embedding where no parent process is wanted.
+    #[command(trailing_var_arg = true)]
+    #[command(after_help = "EXAMPLES:
+    # Apply sandbox and exec into cargo build
+    nono wrap --allow . -- cargo build
+
+    # Use a named profile
+    nono wrap --profile developer -- cargo test
+")]
+    Wrap(Box<WrapArgs>),
+
     /// Check why a path or network operation would be allowed or denied
     #[command(after_help = "EXAMPLES:
     # Check if ~/.ssh is readable (sensitive path check)
@@ -373,22 +385,11 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_diagnostics: bool,
 
-    /// Preserve TTY for interactive apps (e.g., Claude Code, vim, htop).
-    /// Without this flag, nono monitors output which can break interactive UIs.
-    #[arg(long = "exec")]
-    pub direct_exec: bool,
-
     /// Enable atomic rollback snapshots for the session.
     /// Takes content-addressable snapshots of writable directories so you
     /// can restore to the pre-session state after the command exits.
     #[arg(long, conflicts_with = "no_rollback")]
     pub rollback: bool,
-
-    /// Use supervised execution mode for capability expansion approval.
-    /// Fork first, sandbox only the child. The parent stays unsandboxed
-    /// to handle approval prompts for additional path access requests.
-    #[arg(long)]
-    pub supervised: bool,
 
     /// Skip the post-exit rollback review prompt.
     /// Snapshots are still taken for audit purposes, but the interactive
@@ -439,6 +440,20 @@ pub struct ShellArgs {
     /// Shell to execute (defaults to $SHELL or /bin/sh)
     #[arg(long, value_name = "SHELL")]
     pub shell: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct WrapArgs {
+    #[command(flatten)]
+    pub sandbox: SandboxArgs,
+
+    /// Suppress diagnostic footer on command failure.
+    #[arg(long)]
+    pub no_diagnostics: bool,
+
+    /// Command to run inside the sandbox
+    #[arg(required = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -884,34 +899,15 @@ mod tests {
     }
 
     #[test]
-    fn test_run_with_supervised_flag() {
-        let cli = Cli::parse_from([
-            "nono",
-            "run",
-            "--allow",
-            ".",
-            "--supervised",
-            "--",
-            "echo",
-            "hello",
-        ]);
+    fn test_wrap_basic() {
+        let cli = Cli::parse_from(["nono", "wrap", "--allow", ".", "--", "cargo", "build"]);
         match cli.command {
-            Commands::Run(args) => {
-                assert!(args.supervised);
-                assert_eq!(args.command, vec!["echo", "hello"]);
+            Commands::Wrap(args) => {
+                assert_eq!(args.command, vec!["cargo", "build"]);
+                assert_eq!(args.sandbox.allow.len(), 1);
+                assert!(!args.no_diagnostics);
             }
-            _ => panic!("Expected Run command"),
-        }
-    }
-
-    #[test]
-    fn test_run_without_supervised_flag() {
-        let cli = Cli::parse_from(["nono", "run", "--allow", ".", "echo", "hello"]);
-        match cli.command {
-            Commands::Run(args) => {
-                assert!(!args.supervised);
-            }
-            _ => panic!("Expected Run command"),
+            _ => panic!("Expected Wrap command"),
         }
     }
 

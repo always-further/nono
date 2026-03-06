@@ -658,7 +658,8 @@ pub struct Profile {
     pub hooks: HooksConfig,
     #[serde(default, alias = "undo")]
     pub rollback: RollbackConfig,
-    /// App has interactive UI that needs TTY preserved (implies --exec mode)
+    /// Deprecated: Parsed for backward compatibility but ignored.
+    /// Supervised mode preserves TTY by default, making this unnecessary.
     #[serde(default)]
     pub interactive: bool,
 }
