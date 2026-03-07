@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "swift run" },
+  "tool_result": "Error Domain=NSPOSIXErrorDomain Code=13 \"Permission denied\" UserInfo={NSFilePath=/Users/testuser/secrets/keyfile}"
+}

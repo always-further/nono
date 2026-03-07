@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser",
+  "tool_input": { "command": "cat /Users/testuser/.npmrc" },
+  "tool_result": "cat: /Users/testuser/.npmrc: Operation not permitted"
+}

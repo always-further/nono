@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "ssh user@server" },
+  "tool_result": "user@server: Permission denied (publickey)."
+}

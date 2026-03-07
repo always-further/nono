@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "cat /Users/testuser/project/missing.txt" },
+  "tool_result": "cat: /Users/testuser/project/missing.txt: No such file or directory"
+}

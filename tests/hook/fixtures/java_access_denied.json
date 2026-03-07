@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "java -jar app.jar" },
+  "tool_result": "java.nio.file.AccessDeniedException: /Users/testuser/secrets/data.db"
+}

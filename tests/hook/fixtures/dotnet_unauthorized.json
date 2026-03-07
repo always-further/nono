@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "dotnet run" },
+  "tool_result": "System.UnauthorizedAccessException: Access to the path '/Users/testuser/secrets/app.cfg' is denied."
+}

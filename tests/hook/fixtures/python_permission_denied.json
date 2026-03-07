@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "python3 open_file.py" },
+  "tool_result": "PermissionError: [Errno 13] Permission denied: '/Users/testuser/secrets/config.py'"
+}

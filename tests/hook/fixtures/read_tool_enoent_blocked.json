@@ -1,0 +1,7 @@
+{
+  "tool_name": "Read",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "file_path": "/Users/testuser/secrets/config.json" },
+  "tool_result": "No such file or directory: /Users/testuser/secrets/config.json"
+}

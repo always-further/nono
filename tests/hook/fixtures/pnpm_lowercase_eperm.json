@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "pnpm install" },
+  "tool_result": " ERROR  EPERM: operation not permitted, symlink '/Users/testuser/secrets/.pnpmfile' -> '/Users/testuser/project/node_modules/.pnpmfile'"
+}

@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "node -e \"require('./dist/index.js')\"" },
+  "tool_result": "Error: Cannot find module './dist/index.js'\n    at Function.Module._resolveFilename (internal/modules/cjs/loader.js:902:15)\n    at Object.<anonymous> (/Users/testuser/project/src/app.js:1:1)"
+}
