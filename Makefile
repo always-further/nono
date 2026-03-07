@@ -6,7 +6,7 @@
 #   make check        Run clippy and format check
 #   make release      Build release binaries
 
-.PHONY: all build build-lib build-cli build-ffi test test-lib test-cli test-ffi check clippy clippy-ci fmt clean install audit help
+.PHONY: all build build-lib build-cli build-ffi test test-lib test-cli test-ffi test-hook check clippy clippy-ci fmt clean install audit help
 
 # Default target
 all: build
@@ -43,6 +43,15 @@ test-cli:
 
 test-ffi:
 	cargo test -p nono-ffi
+
+test-hook:
+	@if command -v bats >/dev/null 2>&1; then \
+		bats tests/hook/*.bats; \
+	else \
+		echo "Skipping hook tests: bats not found."; \
+		echo "Install: brew install bats-core  (macOS)"; \
+		echo "         apt install bats         (Debian/Ubuntu)"; \
+	fi
 
 test-doc:
 	cargo test --doc

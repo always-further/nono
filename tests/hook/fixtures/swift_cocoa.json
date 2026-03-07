@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "swift run" },
+  "tool_result": "Error Domain=NSCocoaErrorDomain Code=513 \"You don't have permission to save the file in the folder\" UserInfo={NSFilePath=/Users/testuser/secrets/keyfile, NSUserStringVariant=Save}"
+}

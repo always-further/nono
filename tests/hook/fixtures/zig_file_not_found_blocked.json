@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "hook_event_name": "PostToolUseFailure",
+  "cwd": "/Users/testuser/project",
+  "tool_input": { "command": "zig build" },
+  "tool_result": "error: error.FileNotFound\n    Unable to open file '/Users/testuser/secrets/build.zig'"
+}
