@@ -1241,7 +1241,7 @@ mod tests {
     fn test_exit_sigsys_platform_correct() {
         let caps = make_test_caps();
         let formatter = DiagnosticFormatter::new(&caps);
-        let output = formatter.format_footer(128 + libc::SIGSYS as i32);
+        let output = formatter.format_footer(128 + libc::SIGSYS);
 
         assert!(output.contains("SIGSYS"));
         assert!(output.contains("blocked system call"));
