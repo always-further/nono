@@ -39,9 +39,31 @@ Kernel-enforced sandboxing (Landlock/Seatbelt) blocks unauthorized access at the
 ## CLI
 
 ```bash
-nono run --profile claude-code -- claude
-nono run --profile claude-code --net-allow -- claude
-nono run --read ./src --write ./output -- cargo build
+# Any CLI agent — just put your command after --
+nono run --allow-cwd -- claude
+nono run --allow-cwd -- aider --model sonnet
+nono run --allow-cwd -- python3 my_agent.py
+nono run --allow-cwd -- npx @anthropic/agent-framework
+
+# MCP servers, custom profiles, any framework
+nono run --read /data -- npx @modelcontextprotocol/server-filesystem /data
+nono run --profile pydantic-ai-agent --allow logs/ -- uv run my_agent.py
+nono run --profile custom-profile -- node agent.js
+
+# Rollback snapshots — undo everything the agent did
+nono run --rollback --allow-cwd -- claude
+
+# Combine rollback, network filtering, and port binding
+nono run --rollback --proxy-allow api.anthropic.ai --allow-port 8000 -- uv run uvicorn myagent.main:app --port 8000
+
+# Network proxy — allowlist hosts, inject credentials without exposing keys
+nono run --proxy-allow api.openai.com --proxy-credential openai -- python3 agent.py
+
+# Audit trail on every session — opt out with --no-audit
+nono run --no-audit --allow-cwd -- npm test
+
+# Direct exec for scripts and piping (no parent process)
+nono wrap --read ./src --write ./output -- cargo build
 ```
 
 Built-in profiles for [Claude Code](https://docs.nono.sh/clients/claude-code), [OpenCode](https://docs.nono.sh/clients/opencode), and [OpenClaw](https://docs.nono.sh/clients/openclaw) — or define your own with custom permissions.
@@ -134,7 +156,7 @@ Sign instruction files directly within GitHub Actions workflows. Users can then 
 Allowlist-based host filtering via a local proxy. The sandbox blocks all direct outbound connections — the agent can only reach explicitly allowed hosts. Cloud metadata endpoints are hardcoded as denied.
 
 ```bash
-nono run --supervised --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+nono run --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
 
 # Keep the claude-code profile, but allow unrestricted network for this session
 nono run --profile claude-code --net-allow -- claude
@@ -145,7 +167,7 @@ nono run --profile claude-code --net-allow -- claude
 On Linux, seccomp user notification intercepts syscalls when the agent needs access outside its sandbox. The supervisor prompts the user, then injects the file descriptor directly — the agent never executes its own `open()`. Sensitive paths are never-grantable regardless of approval.
 
 ```bash
-nono run --rollback --supervised --allow-cwd -- claude
+nono run --rollback --allow-cwd -- claude
 ```
 
 ### Undo and Snapshots
@@ -205,9 +227,10 @@ nono run --profile my-profile -- rm /tmp/old-file.txt
 
 ### Audit Trail
 
-Every session records command, timing, exit code, tracked paths, and cryptographic snapshot commitments as structured JSON.
+Every supervised session automatically records command, timing, exit code, network events, and cryptographic snapshot commitments as structured JSON. Opt out with `--no-audit`.
 
 ```bash
+nono audit list
 nono audit show 20260216-193311-20751 --json
 ```
 

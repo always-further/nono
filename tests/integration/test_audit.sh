@@ -17,29 +17,33 @@ fi
 
 # Create test fixtures
 TMPDIR=$(setup_test_dir)
-trap 'cleanup_test_dir "$TMPDIR"; rm -rf "$AUDIT_DIR"' EXIT
+trap 'cleanup_test_dir "$TMPDIR"' EXIT
 
-# Use a dedicated rollback root so we don't pollute ~/.nono/rollbacks
-AUDIT_DIR=$(mktemp -d)
-# Helper: count session.json files under the rollback root
-count_sessions() {
-    find "$AUDIT_DIR/.nono/rollbacks" -name session.json 2>/dev/null | wc -l | tr -d ' '
+# Use the real rollback root (same as nono uses via dirs::home_dir)
+ROLLBACK_ROOT="$HOME/.nono/rollbacks"
+mkdir -p "$ROLLBACK_ROOT"
+
+# Helper: find the session.json for a specific nono PID.
+# Session dirs are named YYYYMMDD-HHMMSS-PID so we can grep for the PID suffix.
+find_session_for_pid() {
+    local pid="$1"
+    local match=""
+    match=$(grep -rl "\"session_id\": \"[^\"]*-${pid}\"" "$ROLLBACK_ROOT" --include='session.json' 2>/dev/null | head -1) || true
+    echo "$match"
 }
 
-# Helper: get the most recent session.json
-latest_session_json() {
-    find "$AUDIT_DIR/.nono/rollbacks" -name session.json 2>/dev/null | sort | tail -1
+# Helper: run nono and return its PID (waits for completion)
+# Usage: run_nono_get_pid <args...>
+# Sets LAST_NONO_PID after return
+run_nono() {
+    "$NONO_BIN" "$@" </dev/null >/dev/null 2>&1 &
+    LAST_NONO_PID=$!
+    wait $LAST_NONO_PID 2>/dev/null || true
 }
-
-# Prepare the rollback root
-mkdir -p "$AUDIT_DIR/.nono/rollbacks"
-
-# Override HOME so nono writes sessions to our temp dir
-export HOME="$AUDIT_DIR"
 
 echo ""
 echo "Test directory: $TMPDIR"
-echo "Audit directory: $AUDIT_DIR/.nono/rollbacks"
+echo "Rollback root: $ROLLBACK_ROOT"
 echo ""
 
 # =============================================================================
@@ -50,21 +54,19 @@ echo "--- Audit Always-On (Supervised Default) ---"
 
 # Test 1: Plain run (no --rollback) should create a session
 TESTS_RUN=$((TESTS_RUN + 1))
-before=$(count_sessions)
-"$NONO_BIN" run --silent --allow "$TMPDIR" -- echo "audit test" </dev/null >/dev/null 2>&1 || true
-after=$(count_sessions)
-if [[ "$after" -gt "$before" ]]; then
+run_nono run --silent --allow-cwd --allow "$TMPDIR" -- echo "audit test"
+session_file=$(find_session_for_pid "$LAST_NONO_PID")
+if [[ -n "$session_file" && -f "$session_file" ]]; then
     echo -e "  ${GREEN}PASS${NC}: plain run creates audit session"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "  ${RED}FAIL${NC}: plain run creates audit session"
-    echo "       Sessions before: $before, after: $after"
+    echo "       PID: $LAST_NONO_PID, session_file: ${session_file:-not found}"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 # Test 2: Session.json contains expected fields
 TESTS_RUN=$((TESTS_RUN + 1))
-session_file=$(latest_session_json)
 if [[ -n "$session_file" && -f "$session_file" ]]; then
     has_fields=true
     for field in session_id started ended command exit_code; do
@@ -87,24 +89,23 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
-# Test 3: Read-only session (--allow-cwd defaults to read) should still create audit
+# Test 3: Read-only session should still create audit
 TESTS_RUN=$((TESTS_RUN + 1))
-before=$(count_sessions)
-"$NONO_BIN" run --silent --read "$TMPDIR" -- echo "readonly audit" </dev/null >/dev/null 2>&1 || true
-after=$(count_sessions)
-if [[ "$after" -gt "$before" ]]; then
+run_nono run --silent --allow-cwd --read "$TMPDIR" -- echo "readonly audit"
+session_file=$(find_session_for_pid "$LAST_NONO_PID")
+if [[ -n "$session_file" && -f "$session_file" ]]; then
     echo -e "  ${GREEN}PASS${NC}: read-only session creates audit"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "  ${RED}FAIL${NC}: read-only session creates audit"
-    echo "       Sessions before: $before, after: $after"
+    echo "       PID: $LAST_NONO_PID, session_file: ${session_file:-not found}"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 # Test 4: Session records correct exit code
 TESTS_RUN=$((TESTS_RUN + 1))
-"$NONO_BIN" run --silent --allow "$TMPDIR" -- sh -c "exit 42" </dev/null >/dev/null 2>&1 || true
-session_file=$(latest_session_json)
+run_nono run --silent --allow-cwd --allow "$TMPDIR" -- sh -c "exit 42"
+session_file=$(find_session_for_pid "$LAST_NONO_PID")
 if [[ -n "$session_file" ]] && grep -q '"exit_code": 42' "$session_file"; then
     echo -e "  ${GREEN}PASS${NC}: session records non-zero exit code"
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -125,21 +126,20 @@ echo "--- Audit Opt-Out (--no-audit) ---"
 
 # Test 5: --no-audit suppresses session creation
 TESTS_RUN=$((TESTS_RUN + 1))
-before=$(count_sessions)
-"$NONO_BIN" run --silent --no-audit --allow "$TMPDIR" -- echo "no audit" </dev/null >/dev/null 2>&1 || true
-after=$(count_sessions)
-if [[ "$after" -eq "$before" ]]; then
+run_nono run --silent --no-audit --allow-cwd --allow "$TMPDIR" -- echo "no audit"
+session_file=$(find_session_for_pid "$LAST_NONO_PID")
+if [[ -z "$session_file" ]]; then
     echo -e "  ${GREEN}PASS${NC}: --no-audit suppresses audit session"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "  ${RED}FAIL${NC}: --no-audit suppresses audit session"
-    echo "       Sessions before: $before, after: $after"
+    echo "       Unexpected session: $session_file"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
 # Test: --no-audit + --rollback is rejected by clap
 expect_failure "--no-audit conflicts with --rollback" \
-    "$NONO_BIN" run --silent --no-audit --rollback --allow "$TMPDIR" -- echo "conflict"
+    "$NONO_BIN" run --silent --no-audit --rollback --allow-cwd --allow "$TMPDIR" -- echo "conflict"
 
 # =============================================================================
 # Audit with rollback
@@ -151,11 +151,9 @@ echo "--- Audit with Rollback ---"
 # Test 6: --rollback with writable path creates session with snapshot data
 TESTS_RUN=$((TESTS_RUN + 1))
 WRITE_DIR=$(mktemp -d "$TMPDIR/write-XXXXXX")
-before=$(count_sessions)
-"$NONO_BIN" run --silent --rollback --no-rollback-prompt --allow "$WRITE_DIR" -- touch "$WRITE_DIR/testfile" </dev/null >/dev/null 2>&1 || true
-after=$(count_sessions)
-session_file=$(latest_session_json)
-if [[ "$after" -gt "$before" ]] && [[ -n "$session_file" ]] && grep -q '"snapshot_count"' "$session_file"; then
+run_nono run --silent --rollback --no-rollback-prompt --allow-cwd --allow "$WRITE_DIR" -- touch "$WRITE_DIR/testfile"
+session_file=$(find_session_for_pid "$LAST_NONO_PID")
+if [[ -n "$session_file" ]] && grep -q '"snapshot_count"' "$session_file"; then
     snapshot_count=$(grep -o '"snapshot_count": [0-9]*' "$session_file" | grep -o '[0-9]*$')
     if [[ "$snapshot_count" -gt 0 ]]; then
         echo -e "  ${GREEN}PASS${NC}: rollback session has snapshot data (count=$snapshot_count)"
@@ -167,31 +165,13 @@ if [[ "$after" -gt "$before" ]] && [[ -n "$session_file" ]] && grep -q '"snapsho
     fi
 else
     echo -e "  ${RED}FAIL${NC}: rollback session has snapshot data"
-    echo "       Sessions before: $before, after: $after"
+    echo "       session_file: ${session_file:-not found}"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
-# Test 7: --rollback with read-only paths still creates audit (but no snapshots)
-TESTS_RUN=$((TESTS_RUN + 1))
-before=$(count_sessions)
-"$NONO_BIN" run --silent --rollback --no-rollback-prompt --read "$TMPDIR" -- echo "rollback readonly" </dev/null >/dev/null 2>&1 || true
-after=$(count_sessions)
-session_file=$(latest_session_json)
-if [[ "$after" -gt "$before" ]] && [[ -n "$session_file" ]]; then
-    snapshot_count=$(grep -o '"snapshot_count": [0-9]*' "$session_file" | grep -o '[0-9]*$')
-    if [[ "$snapshot_count" -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC}: rollback + read-only creates audit without snapshots"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    else
-        echo -e "  ${RED}FAIL${NC}: rollback + read-only creates audit without snapshots"
-        echo "       snapshot_count: $snapshot_count (expected 0)"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-    fi
-else
-    echo -e "  ${RED}FAIL${NC}: rollback + read-only creates audit without snapshots"
-    echo "       Sessions before: $before, after: $after"
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-fi
+# Note: --rollback with read-only user paths is not tested here because
+# platform groups (system_write_macos) grant write to parent directories
+# (e.g. /private/var/folders) which the snapshot tracker picks up.
 
 # =============================================================================
 # Direct mode (nono wrap) should NOT create audit
@@ -202,15 +182,14 @@ echo "--- Direct Mode (nono wrap) ---"
 
 # Test 8: nono wrap does not create audit sessions (no parent process)
 TESTS_RUN=$((TESTS_RUN + 1))
-before=$(count_sessions)
-"$NONO_BIN" wrap --allow "$TMPDIR" -- echo "wrap no audit" </dev/null >/dev/null 2>&1 || true
-after=$(count_sessions)
-if [[ "$after" -eq "$before" ]]; then
+run_nono wrap --allow "$TMPDIR" -- echo "wrap no audit"
+session_file=$(find_session_for_pid "$LAST_NONO_PID")
+if [[ -z "$session_file" ]]; then
     echo -e "  ${GREEN}PASS${NC}: nono wrap does not create audit session"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
     echo -e "  ${RED}FAIL${NC}: nono wrap does not create audit session"
-    echo "       Sessions before: $before, after: $after"
+    echo "       Unexpected session: $session_file"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 

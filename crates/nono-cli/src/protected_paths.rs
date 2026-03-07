@@ -19,8 +19,8 @@ impl ProtectedRoots {
     ///
     /// Today this protects the full `~/.nono` subtree.
     pub fn from_defaults() -> Result<Self> {
-        let home = crate::config::validated_home()?;
-        let state_root = resolve_path(&PathBuf::from(home).join(".nono"));
+        let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+        let state_root = resolve_path(&home.join(".nono"));
         Ok(Self {
             roots: vec![state_root],
         })

@@ -27,8 +27,8 @@ pub struct SessionInfo {
 
 /// Get the rollback root directory (`~/.nono/rollbacks/`)
 pub fn rollback_root() -> Result<PathBuf> {
-    let home = crate::config::validated_home()?;
-    Ok(PathBuf::from(home).join(".nono").join("rollbacks"))
+    let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+    Ok(home.join(".nono").join("rollbacks"))
 }
 
 /// Discover all rollback sessions in `~/.nono/rollbacks/`.

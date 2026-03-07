@@ -1080,8 +1080,8 @@ fn execute_sandboxed(
                     std::process::id()
                 );
 
-                let rollback_root = rollback_session::rollback_root()?;
-                let session_dir = rollback_root.join(&session_id);
+                let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+                let session_dir = home.join(".nono").join("rollbacks").join(&session_id);
                 std::fs::create_dir_all(&session_dir).map_err(|e| {
                     NonoError::Snapshot(format!(
                         "Failed to create session directory {}: {}",
