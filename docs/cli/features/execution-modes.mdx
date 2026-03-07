@@ -1,106 +1,72 @@
 ---
 title: Execution Modes
-description: Direct, Monitor, and Supervised execution strategies
+description: Supervised and Direct execution strategies
 ---
 
-nono provides three execution modes that trade off between attack surface, features, and use case. Understanding them helps you choose the right mode for your situation.
+nono provides two execution modes that trade off between features and attack surface. Understanding them helps you choose the right mode for your situation.
 
 ## Overview
 
-| Mode | Flag | Parent Sandboxed | Rollback | Expansion | Attack Surface |
-|------|------|-----------------|----------|-----------|----------------|
-| Direct | `--exec` | N/A (no parent) | No | No | Minimal |
-| Monitor | (default) | Yes | No | No | Small |
-| Supervised | `--rollback` / `--supervised` | No | `--rollback` only | Linux only | Larger |
+| Mode | Command | Parent Sandboxed | Rollback | Expansion | Attack Surface |
+|------|---------|-----------------|----------|-----------|----------------|
+| Supervised | `nono run` / `nono shell` | No | Yes | Linux only | Larger |
+| Direct | `nono wrap` | N/A (no parent) | No | No | Minimal |
 
-## Direct Mode
+## Supervised Mode (default)
 
 ```bash
-nono run --exec --allow-cwd -- my-command
+nono run --allow-cwd -- my-command
+```
+
+nono forks first, then sandboxes only the child. The parent remains unsandboxed to provide runtime services: rollback snapshots, capability expansion (Linux), network proxy, and diagnostic output.
+
+**When to use:**
+- Interactive AI agents (default for `nono run` and `nono shell`)
+- When you want diagnostic output on failures
+- When you need rollback snapshots (`--rollback`)
+- When you need capability expansion (Linux)
+- When you need network proxy filtering
+
+**Trade-offs:**
+- Larger attack surface (unsandboxed parent, mitigated by ptrace hardening)
+
+**Features:**
+- Diagnostic footer on non-zero exit explaining what went wrong
+- Signal forwarding to child process
+- Rollback snapshots (baseline + final) with `--rollback`
+- Interactive post-exit review of changes with `--rollback`
+- Capability expansion prompts (Linux only)
+- Network proxy filtering with `--network-profile` or `--proxy-allow`
+
+## Direct Mode (`nono wrap`)
+
+```bash
+nono wrap --allow-cwd -- my-command
 ```
 
 nono applies the sandbox and then `exec()`s directly into the target command. nono disappears from the process tree entirely - there is no parent process.
 
 **When to use:**
 - Scripts and CI/CD where you want minimal overhead
-- Backward compatibility with tools that expect to be PID 1
+- Piping and embedding where no parent process is wanted
 - Maximum security (smallest attack surface)
 
 **Trade-offs:**
 - No diagnostic footer on errors
 - No rollback snapshots
 - No capability expansion
-
-Profiles with `interactive = true` (like `claude-code`) use Direct mode by default to preserve TTY behavior.
-
-## Monitor Mode (default)
-
-```bash
-nono run --allow-cwd -- my-command
-```
-
-nono applies the sandbox to itself, then forks. Both the parent and child are sandboxed with identical restrictions. The parent waits for the child to exit.
-
-**When to use:**
-- Interactive AI agents (default for most usage)
-- When you want diagnostic output on failures
-
-**Trade-offs:**
-- Small overhead (parent process stays alive)
-- Cannot write rollback snapshots (parent is sandboxed too)
-- Cannot do capability expansion (parent is sandboxed too)
-
-**Features:**
-- Diagnostic footer on non-zero exit explaining what went wrong
-- Signal forwarding to child process
-
-## Supervised Mode
-
-```bash
-# Enable rollback snapshots
-nono run --rollback --allow-cwd -- my-command
-
-# Enable approval sidecar (capability expansion on Linux)
-nono run --supervised --allow-cwd -- my-command
-
-# Both: rollback snapshots + approval sidecar
-nono run --rollback --supervised --allow-cwd -- my-command
-```
-
-nono forks first, then sandboxes only the child. The parent remains unsandboxed to provide runtime services. Either `--rollback` or `--supervised` (or both) triggers supervised execution.
-
-**`--rollback`** enables [atomic rollback snapshots](/cli/features/atomic-rollbacks) - content-addressable filesystem snapshots that let you restore files to their pre-session state.
-
-**`--supervised`** enables the [approval sidecar](/cli/features/supervisor) - on Linux, the parent can grant additional capabilities at runtime via seccomp user notification.
-
-**Trade-offs:**
-- Larger attack surface (unsandboxed parent, mitigated by ptrace hardening)
-- Incompatible with `--env-credential` (keyring threads deadlock across fork)
-
-**Features:**
-- Rollback snapshots (baseline + final) with `--rollback`
-- Interactive post-exit review of changes with `--rollback`
-- Capability expansion prompts (Linux only) with `--supervised`
-- Diagnostic footer on non-zero exit
+- No network proxy (incompatible — proxy requires a parent process)
 
 ## Choosing a Mode
 
 ```
-Do you need rollback snapshots?
-├── Yes → --rollback
+Do you need rollback, expansion, proxy, or diagnostics?
+├── Yes → nono run (Supervised, default)
 └── No
     │
-    Do you need capability expansion (Linux)?
-    ├── Yes → --supervised
-    └── No
-        │
-        Do you need diagnostic output on errors?
-        ├── Yes → Monitor (default, no flag needed)
-        └── No
-            │
-            Do you need minimal overhead or TTY preservation?
-            ├── Yes → Direct (--exec)
-            └── No → Monitor (default)
+    Do you need minimal overhead or no parent process?
+    ├── Yes → nono wrap (Direct)
+    └── No → nono run (Supervised, default)
 ```
 
-For most users running AI agents interactively, the default Monitor mode is the right choice. Add `--rollback` when you want the safety net of atomic rollback snapshots.
+For most users running AI agents interactively, the default `nono run` (Supervised mode) is the right choice. Use `nono wrap` when you need a minimal, no-parent execution for scripts or embedding.

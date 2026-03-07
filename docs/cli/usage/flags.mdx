@@ -36,6 +36,18 @@ Start an interactive shell inside the sandbox.
 nono shell [OPTIONS]
 ```
 
+### `nono wrap`
+
+Apply sandbox and exec into command. nono disappears from the process tree — no parent process remains. For scripts, piping, and embedding where no parent process is wanted.
+
+```bash
+nono wrap [OPTIONS] -- <COMMAND> [ARGS...]
+```
+
+<Note>
+  `nono wrap` does not support proxy flags (`--network-profile`, `--proxy-allow`, `--proxy-credential`, `--external-proxy`). The network proxy requires a parent process. Use `nono run` instead.
+</Note>
+
 ### `nono why`
 
 Check why a path or network operation would be allowed or denied. Designed for both human debugging and programmatic use by AI agents.
@@ -524,20 +536,6 @@ nono run --rollback --profile claude-code -- claude
 nono run --rollback --allow-cwd -- my-agent
 ```
 
-#### `--supervised`
-
-Enable the approval sidecar for runtime capability expansion. On Linux, the supervisor can grant additional filesystem access via seccomp user notification when the sandboxed process requests it.
-
-```bash
-nono run --supervised --allow-cwd -- my-agent
-```
-
-Can be combined with `--rollback` for both snapshots and capability expansion:
-
-```bash
-nono run --rollback --supervised --allow-cwd -- my-agent
-```
-
 #### `--no-rollback-prompt`
 
 Suppress the interactive post-exit review when using `--rollback`. Snapshots are still taken but the user is not prompted to review or restore changes. Useful for scripting.
@@ -592,14 +590,6 @@ Include ALL directories in rollback snapshots, overriding all auto-exclusions. T
 ```bash
 # Full rollback coverage (may be slow)
 nono run --rollback --rollback-all -- cargo test
-```
-
-#### `--exec`
-
-Use direct execution mode. nono applies the sandbox and then `exec()`s directly into the target command. No parent process remains.
-
-```bash
-nono run --exec --allow-cwd -- my-command
 ```
 
 #### `--no-diagnostics`

@@ -165,9 +165,9 @@ The `hooks` section defines hooks that nono will automatically install for speci
 
 Hook installation is idempotent - nono only installs or updates when needed.
 
-### Interactive Mode
+### Interactive Mode (deprecated)
 
-The `interactive` field (default: `false`) indicates whether the application has an interactive terminal UI that requires TTY preservation:
+The `interactive` field is parsed for backward compatibility but ignored. Supervised mode (the default) preserves the TTY, making this field unnecessary.
 
 ```json
 {
@@ -175,8 +175,6 @@ The `interactive` field (default: `false`) indicates whether the application has
   "interactive": true
 }
 ```
-
-When `true`, nono uses direct exec mode (equivalent to `--exec` flag), which preserves the terminal for apps like Claude Code, vim, or htop.
 
 ### Rollback Exclusions
 
@@ -401,7 +399,7 @@ nono run --profile claude-code -- claude
 
 **Network:** Allowed
 
-**Special:** `interactive = true` (preserves TTY), auto-installs Claude Code hooks
+**Special:** Auto-installs Claude Code hooks
 
 ### opencode
 
