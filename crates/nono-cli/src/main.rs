@@ -639,28 +639,8 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         prepared.caps,
         prepared.secrets,
         ExecutionFlags {
-            strategy: exec_strategy::ExecStrategy::Supervised,
             no_diagnostics: true,
-            rollback: false,
-            no_rollback: false,
-            no_rollback_prompt: false,
-            trust_override: false,
-            silent,
-            rollback_all: false,
-            rollback_include: Vec::new(),
-            scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            trust_scan_verified: false,
-            protected_paths: Vec::new(),
-            rollback_exclude_patterns: Vec::new(),
-            rollback_exclude_globs: Vec::new(),
-            proxy_active: false,
-            network_profile: None,
-            proxy_allow_hosts: Vec::new(),
-            proxy_credentials: Vec::new(),
-            custom_credentials: std::collections::HashMap::new(),
-            external_proxy: None,
-            allow_bind_ports: Vec::new(),
-            proxy_port: None,
+            ..ExecutionFlags::defaults(silent)?
         },
     )
 }
@@ -715,26 +695,7 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
         ExecutionFlags {
             strategy: exec_strategy::ExecStrategy::Direct,
             no_diagnostics,
-            rollback: false,
-            no_rollback: false,
-            no_rollback_prompt: false,
-            trust_override: false,
-            silent,
-            rollback_all: false,
-            rollback_include: Vec::new(),
-            scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            trust_scan_verified: false,
-            protected_paths: Vec::new(),
-            rollback_exclude_patterns: Vec::new(),
-            rollback_exclude_globs: Vec::new(),
-            proxy_active: false,
-            network_profile: None,
-            proxy_allow_hosts: Vec::new(),
-            proxy_credentials: Vec::new(),
-            custom_credentials: std::collections::HashMap::new(),
-            external_proxy: None,
-            allow_bind_ports: Vec::new(),
-            proxy_port: None,
+            ..ExecutionFlags::defaults(silent)?
         },
     )
 }
@@ -778,6 +739,39 @@ struct ExecutionFlags {
     allow_bind_ports: Vec<u16>,
     /// Fixed port for the credential proxy (from --proxy-port)
     proxy_port: Option<u16>,
+}
+
+impl ExecutionFlags {
+    /// Create flags with sensible defaults.
+    /// Fields that vary per call site (strategy, silent, no_diagnostics, etc.)
+    /// are overridden via struct update syntax.
+    fn defaults(silent: bool) -> Result<Self> {
+        Ok(Self {
+            strategy: exec_strategy::ExecStrategy::Supervised,
+            no_diagnostics: false,
+            rollback: false,
+            no_rollback: false,
+            no_rollback_prompt: false,
+            trust_override: false,
+            silent,
+            rollback_all: false,
+            rollback_include: Vec::new(),
+            scan_root: std::env::current_dir()
+                .map_err(|e| NonoError::SandboxInit(format!("Failed to get cwd: {e}")))?,
+            trust_scan_verified: false,
+            protected_paths: Vec::new(),
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            proxy_active: false,
+            network_profile: None,
+            proxy_allow_hosts: Vec::new(),
+            proxy_credentials: Vec::new(),
+            custom_credentials: std::collections::HashMap::new(),
+            external_proxy: None,
+            allow_bind_ports: Vec::new(),
+            proxy_port: None,
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
