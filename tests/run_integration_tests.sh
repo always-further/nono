@@ -75,6 +75,7 @@ SUITES=(
     "test_env_sanitization.sh:Env Sanitization"
     "test_exec_strategy.sh:Exec Strategy"
     "test_trust_cli.sh:Trust CLI"
+    "test_audit.sh:Audit Trail"
     "test_rollback.sh:Rollback"
     "test_setup.sh:Setup"
     "test_learn.sh:Learn Mode"

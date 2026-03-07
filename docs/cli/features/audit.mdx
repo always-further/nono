@@ -7,16 +7,23 @@ Every sandboxed execution is recorded as an audit session. The audit trail captu
 
 ## How It Works
 
-Audit data is a natural byproduct of the snapshot system. Each session records:
+Each session records:
 
 - **Command**: The exact command and arguments
 - **Timestamps**: Start time, end time, duration
-- **Tracked paths**: Which directories were monitored
-- **Changes**: Files created, modified, or deleted
-- **Merkle roots**: Cryptographic commitment to filesystem state at each snapshot
+- **Tracked paths**: Which directories were tracked for rollback (if enabled)
+- **Changes**: Files created, modified, or deleted (when rollback is active)
+- **Merkle roots**: Cryptographic commitment to filesystem state at each snapshot (when rollback is active)
 - **Exit code**: How the process terminated
+- **Network events**: Proxy audit log (when network proxy is active)
 
-No additional configuration is needed - audit trails are captured automatically when rollback snapshots are enabled (i.e., with `--rollback`).
+Audit is enabled by default for all supervised executions (`nono run`, `nono shell`). No flags are needed.
+
+To disable audit recording for a session, use `--no-audit`:
+
+```bash
+nono run --no-audit --allow-cwd -- my-command
+```
 
 ## Commands
 
@@ -119,13 +126,19 @@ nono audit show <session-id> --json
 
 ## Relationship to Rollbacks
 
-Audit and rollback share the same underlying session data:
+Audit and rollback are independent features that share the same session directory and ID:
 
 | Aspect | Audit | Rollback |
 |--------|-------|----------|
-| Scope | All sessions with `--rollback` | Sessions with file changes |
+| Default | Always on | Opt-in (`--rollback`) |
+| Opt-out | `--no-audit` | `--no-rollback` |
+| Scope | All supervised sessions | Sessions with writable tracked paths |
 | Purpose | Record keeping | Recovery |
+| Data | Command, timestamps, exit code, network events | Full file content snapshots + Merkle roots |
 | Commands | `nono audit list/show` | `nono rollback list/show/restore/verify/cleanup` |
-| Data | Metadata + change summary | Metadata + full file content |
 
-The `nono audit` commands are read-only - they report on session history. The `nono rollback` commands can additionally restore files and manage storage.
+When both are active, rollback enriches the audit record with snapshot data (tracked paths, change details, Merkle roots). When only audit is active, the session records metadata without file content.
+
+## Storage
+
+Audit sessions are stored in `~/.nono/rollbacks/`. Audit-only sessions are tiny (a single `session.json` file) and are not subject to rollback storage limits. They accumulate freely and can be cleaned up with `nono rollback cleanup`.

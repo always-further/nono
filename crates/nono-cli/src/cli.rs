@@ -421,6 +421,13 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "rollback_include")]
     pub rollback_all: bool,
 
+    /// Disable the audit trail for this session.
+    /// By default, every supervised execution records session metadata
+    /// (command, timestamps, exit code, network events) to ~/.nono/rollbacks/.
+    /// Use this flag to suppress audit recording entirely.
+    #[arg(long, conflicts_with = "rollback")]
+    pub no_audit: bool,
+
     /// Disable trust verification for instruction files.
     /// For development and testing only. Logs a warning and skips the
     /// pre-exec trust scan. Not recommended for production use.

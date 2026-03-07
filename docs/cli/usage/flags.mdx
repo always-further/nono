@@ -552,6 +552,18 @@ Disable rollback entirely for this session. No snapshots are taken and no restor
 nono run --no-rollback --allow-cwd -- npm test
 ```
 
+#### `--no-audit`
+
+Disable the audit trail for this session. By default, every supervised execution records session metadata (command, timestamps, exit code, network events) to `~/.nono/rollbacks/`. Use this flag to suppress audit recording entirely.
+
+```bash
+nono run --no-audit --allow-cwd -- my-command
+```
+
+<Note>
+  `--no-audit` conflicts with `--rollback`. Rollback requires an audit session directory for snapshot storage.
+</Note>
+
 #### `--rollback-exclude`
 
 Exclude from rollback snapshots. Repeatable. Values containing glob characters (`*`, `?`, `[`) are matched against filenames. Plain names match exact path components; names with `/` match as path substrings. Does NOT affect sandbox permissions — excluded directories are still sandboxed.

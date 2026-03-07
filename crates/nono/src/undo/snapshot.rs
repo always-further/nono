@@ -381,6 +381,17 @@ impl SnapshotManager {
         self.snapshot_count
     }
 
+    /// Write session metadata to a session directory without requiring a
+    /// `SnapshotManager` instance. Used for audit-only sessions where no
+    /// rollback snapshots are taken.
+    pub fn write_session_metadata(session_dir: &Path, meta: &SessionMetadata) -> Result<()> {
+        let path = session_dir.join("session.json");
+        let json = serde_json::to_string_pretty(meta).map_err(|e| {
+            NonoError::Snapshot(format!("Failed to serialize session metadata: {e}"))
+        })?;
+        atomic_write(&path, json.as_bytes())
+    }
+
     /// Load session metadata from a session directory.
     ///
     /// Does not require tracked paths or exclusion filter — reads `session.json`
