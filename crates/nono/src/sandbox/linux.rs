@@ -648,6 +648,61 @@ pub fn read_notif_path(pid: u32, addr: u64) -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(path_str))
 }
 
+/// Resolve a path from a seccomp notification, accounting for dirfd-relative paths.
+///
+/// When the child uses `openat(dirfd, "relative/path", ...)`, the raw pathname
+/// read from memory is relative. This function resolves it to an absolute path
+/// using `/proc/PID/fd/DIRFD` (or `/proc/PID/cwd` when dirfd is `AT_FDCWD`).
+///
+/// If the path is already absolute, it is returned unchanged.
+///
+/// # Arguments
+///
+/// * `pid` - The child process ID
+/// * `dirfd` - The dirfd argument from the openat/openat2 syscall (args[0])
+/// * `raw_path` - The pathname read from the child's memory via `read_notif_path`
+///
+/// # Errors
+///
+/// Returns an error if the `/proc` symlink cannot be read.
+pub fn resolve_notif_path(
+    pid: u32,
+    dirfd: u64,
+    raw_path: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    // Absolute paths need no resolution
+    if raw_path.is_absolute() {
+        return Ok(raw_path.to_path_buf());
+    }
+
+    // AT_FDCWD (-100 as i32, but stored as u64 in seccomp args via sign extension)
+    let at_fdcwd_u64 = libc::AT_FDCWD as i32 as u32 as u64;
+    // Also handle sign-extended 64-bit representation
+    let at_fdcwd_u64_extended = libc::AT_FDCWD as i64 as u64;
+
+    let base_dir = if dirfd == at_fdcwd_u64 || dirfd == at_fdcwd_u64_extended {
+        // Use the child's current working directory
+        let cwd_link = format!("/proc/{}/cwd", pid);
+        std::fs::read_link(&cwd_link).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to read {} for dirfd-relative path resolution: {}",
+                cwd_link, e
+            ))
+        })?
+    } else {
+        // Read the directory path from /proc/PID/fd/DIRFD
+        let fd_link = format!("/proc/{}/fd/{}", pid, dirfd);
+        std::fs::read_link(&fd_link).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to read {} for dirfd-relative path resolution: {}",
+                fd_link, e
+            ))
+        })?
+    };
+
+    Ok(base_dir.join(raw_path))
+}
+
 /// Read the open_how struct from a seccomp notification for openat2 syscalls.
 ///
 /// For openat2, args[2] is a pointer to `struct open_how`, NOT the flags integer.
@@ -1011,5 +1066,69 @@ mod tests {
     fn test_validate_openat2_size_rejects_unreasonably_large() {
         assert!(!validate_openat2_size(4097));
         assert!(!validate_openat2_size(usize::MAX));
+    }
+
+    #[test]
+    fn test_resolve_notif_path_absolute_unchanged() {
+        // Absolute paths should be returned unchanged regardless of dirfd
+        let abs_path = std::path::PathBuf::from("/usr/lib/libc.so.6");
+        let result = resolve_notif_path(1, 42, &abs_path);
+        let path = match result {
+            Ok(p) => p,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(path, abs_path);
+    }
+
+    #[test]
+    fn test_resolve_notif_path_absolute_with_at_fdcwd() {
+        // Absolute paths should be returned unchanged even with AT_FDCWD
+        let abs_path = std::path::PathBuf::from("/etc/passwd");
+        let at_fdcwd = libc::AT_FDCWD as i64 as u64;
+        let path = match resolve_notif_path(1, at_fdcwd, &abs_path) {
+            Ok(p) => p,
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+        assert_eq!(path, abs_path);
+    }
+
+    #[test]
+    fn test_resolve_notif_path_relative_with_invalid_pid_fails() {
+        // Relative path with non-existent PID should fail (can't read /proc/PID/cwd)
+        let rel_path = std::path::PathBuf::from("relative/path.so");
+        let at_fdcwd = libc::AT_FDCWD as i64 as u64;
+        let result = resolve_notif_path(u32::MAX, at_fdcwd, &rel_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_notif_path_relative_with_invalid_fd_fails() {
+        // Relative path with non-existent PID/fd should fail
+        let rel_path = std::path::PathBuf::from("some_lib.so");
+        let result = resolve_notif_path(u32::MAX, 999, &rel_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_notif_path_at_fdcwd_both_representations() {
+        // AT_FDCWD is -100. When stored as u64 in seccomp args, it may be
+        // sign-extended to 0xFFFFFFFFFFFFFF9C or truncated to 0xFFFFFF9C.
+        // Both should be recognized.
+        let abs_path = std::path::PathBuf::from("/absolute");
+        let at_fdcwd_32 = libc::AT_FDCWD as i32 as u32 as u64; // 0xFFFFFF9C
+        let at_fdcwd_64 = libc::AT_FDCWD as i64 as u64; // 0xFFFFFFFFFFFFFF9C
+
+        // Both should work for absolute paths (early return)
+        let path_32 = match resolve_notif_path(1, at_fdcwd_32, &abs_path) {
+            Ok(p) => p,
+            Err(e) => panic!("unexpected error for 32-bit AT_FDCWD: {e}"),
+        };
+        assert_eq!(path_32, abs_path);
+
+        let path_64 = match resolve_notif_path(1, at_fdcwd_64, &abs_path) {
+            Ok(p) => p,
+            Err(e) => panic!("unexpected error for 64-bit AT_FDCWD: {e}"),
+        };
+        assert_eq!(path_64, abs_path);
     }
 }

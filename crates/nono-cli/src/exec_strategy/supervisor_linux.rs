@@ -100,15 +100,31 @@ pub(super) fn handle_seccomp_notification(
 ) -> Result<()> {
     use nono::sandbox::{
         classify_access_from_flags, deny_notif, inject_fd, notif_id_valid, read_notif_path,
-        read_open_how, recv_notif, validate_openat2_size, SYS_OPENAT, SYS_OPENAT2,
+        read_open_how, recv_notif, resolve_notif_path, validate_openat2_size, SYS_OPENAT,
+        SYS_OPENAT2,
     };
 
     // 1. Receive the notification
     let notif = recv_notif(notify_fd)?;
 
     // 2. Read the path from the child's memory (args[1] = pathname for openat/openat2)
+    //    Then resolve dirfd-relative paths using /proc/PID/fd/DIRFD or /proc/PID/cwd.
     let path = match read_notif_path(notif.pid, notif.data.args[1]) {
-        Ok(p) => p,
+        Ok(raw_path) => {
+            // args[0] is dirfd for both openat and openat2
+            match resolve_notif_path(notif.pid, notif.data.args[0], &raw_path) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    debug!(
+                        "Failed to resolve dirfd-relative path '{}': {}",
+                        raw_path.display(),
+                        e
+                    );
+                    let _ = deny_notif(notify_fd, notif.id);
+                    return Ok(());
+                }
+            }
+        }
         Err(e) => {
             debug!("Failed to read path from seccomp notification: {}", e);
             let _ = deny_notif(notify_fd, notif.id);
@@ -216,11 +232,26 @@ pub(super) fn handle_seccomp_notification(
         match open_path_for_access(&canonicalized, &access, config.never_grant, None) {
             Ok(file) => {
                 if notif_id_valid(notify_fd, notif.id)? {
-                    inject_fd(notify_fd, notif.id, file.as_raw_fd())?;
+                    if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
+                        debug!(
+                            "inject_fd failed for initial-set path {}: {}",
+                            path.display(),
+                            e
+                        );
+                        let _ = deny_notif(notify_fd, notif.id);
+                    }
                 }
             }
             Err(e) => {
                 debug!("Failed to open initial-set path {}: {}", path.display(), e);
+                record_denial(
+                    denials,
+                    DenialRecord {
+                        path: canonicalized.clone(),
+                        access,
+                        reason: DenialReason::PolicyBlocked,
+                    },
+                );
                 let _ = deny_notif(notify_fd, notif.id);
             }
         }
@@ -336,7 +367,14 @@ pub(super) fn handle_seccomp_notification(
             verified_digest.as_deref(),
         ) {
             Ok(file) => {
-                inject_fd(notify_fd, notif.id, file.as_raw_fd())?;
+                if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
+                    debug!(
+                        "inject_fd failed for approved path {}: {}",
+                        canonicalized.display(),
+                        e
+                    );
+                    let _ = deny_notif(notify_fd, notif.id);
+                }
             }
             Err(e) => {
                 warn!(

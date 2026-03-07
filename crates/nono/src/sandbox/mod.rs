@@ -22,8 +22,8 @@ pub use macos::{extension_consume, extension_issue_file, extension_release};
 #[cfg(target_os = "linux")]
 pub use linux::{
     classify_access_from_flags, deny_notif, inject_fd, install_seccomp_notify, notif_id_valid,
-    read_notif_path, read_open_how, recv_notif, validate_openat2_size, OpenHow, SeccompData,
-    SeccompNotif, SYS_OPENAT, SYS_OPENAT2,
+    read_notif_path, read_open_how, recv_notif, resolve_notif_path, validate_openat2_size, OpenHow,
+    SeccompData, SeccompNotif, SYS_OPENAT, SYS_OPENAT2,
 };
 
 /// Information about sandbox support on this platform
