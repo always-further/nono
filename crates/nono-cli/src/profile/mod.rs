@@ -902,25 +902,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 .network_profile
                 .merge(base.network.network_profile),
             proxy_allow: dedup_append(&base.network.proxy_allow, &child.network.proxy_allow),
-            port_allow: {
-                let mut seen = std::collections::HashSet::with_capacity(
-                    base.network.port_allow.len() + child.network.port_allow.len(),
-                );
-                let mut result = Vec::with_capacity(
-                    base.network.port_allow.len() + child.network.port_allow.len(),
-                );
-                for port in base
-                    .network
-                    .port_allow
-                    .iter()
-                    .chain(child.network.port_allow.iter())
-                {
-                    if seen.insert(port) {
-                        result.push(*port);
-                    }
-                }
-                result
-            },
+            port_allow: dedup_append(&base.network.port_allow, &child.network.port_allow),
             proxy_credentials: dedup_append(
                 &base.network.proxy_credentials,
                 &child.network.proxy_credentials,
@@ -968,7 +950,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
 }
 
 /// Append child items after base items, deduplicating while preserving order.
-fn dedup_append(base: &[String], child: &[String]) -> Vec<String> {
+fn dedup_append<T: Eq + std::hash::Hash + Clone>(base: &[T], child: &[T]) -> Vec<T> {
     let mut seen = std::collections::HashSet::with_capacity(base.len() + child.len());
     let mut result = Vec::with_capacity(base.len() + child.len());
     for item in base.iter().chain(child.iter()) {
