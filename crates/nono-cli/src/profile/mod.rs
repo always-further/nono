@@ -488,6 +488,10 @@ pub struct NetworkConfig {
     /// Credential services to enable via reverse proxy
     #[serde(default)]
     pub proxy_credentials: Vec<String>,
+    /// Localhost TCP ports to allow bidirectional IPC (connect + bind).
+    /// Equivalent to `--allow-port` CLI flag.
+    #[serde(default)]
+    pub port_allow: Vec<u16>,
     /// Custom credential definitions for services not in network-policy.json.
     /// Keys are service names (used with --proxy-credential), values define
     /// how to route and inject credentials for that service.
@@ -898,6 +902,25 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 .network_profile
                 .merge(base.network.network_profile),
             proxy_allow: dedup_append(&base.network.proxy_allow, &child.network.proxy_allow),
+            port_allow: {
+                let mut seen = std::collections::HashSet::with_capacity(
+                    base.network.port_allow.len() + child.network.port_allow.len(),
+                );
+                let mut result = Vec::with_capacity(
+                    base.network.port_allow.len() + child.network.port_allow.len(),
+                );
+                for port in base
+                    .network
+                    .port_allow
+                    .iter()
+                    .chain(child.network.port_allow.iter())
+                {
+                    if seen.insert(port) {
+                        result.push(*port);
+                    }
+                }
+                result
+            },
             proxy_credentials: dedup_append(
                 &base.network.proxy_credentials,
                 &child.network.proxy_credentials,
@@ -1882,6 +1905,7 @@ mod tests {
                 block: false,
                 network_profile: InheritableValue::Set("base-net".to_string()),
                 proxy_allow: vec!["base.example.com".to_string()],
+                port_allow: vec![3000],
                 proxy_credentials: vec!["base_cred".to_string()],
                 custom_credentials: HashMap::new(),
             },
@@ -1932,6 +1956,7 @@ mod tests {
                 block: false,
                 network_profile: InheritableValue::Inherit,
                 proxy_allow: vec!["child.example.com".to_string()],
+                port_allow: vec![3000, 5000],
                 proxy_credentials: vec![],
                 custom_credentials: HashMap::new(),
             },
@@ -1968,6 +1993,13 @@ mod tests {
             .filesystem
             .read_file
             .contains(&"/base/file.txt".to_string()));
+    }
+
+    #[test]
+    fn test_merge_profiles_deduplicates_port_allow() {
+        let merged = merge_profiles(base_profile(), child_profile());
+        // base has [3000], child has [3000, 5000] — merged should dedup to [3000, 5000]
+        assert_eq!(merged.network.port_allow, vec![3000, 5000]);
     }
 
     #[test]

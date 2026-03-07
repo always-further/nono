@@ -113,6 +113,7 @@ The `network` section controls network access and credential injection:
     "block": false,
     "network_profile": "claude-code",
     "proxy_allow": ["my-internal-api.example.com"],
+    "port_allow": [3000],
     "proxy_credentials": ["openai", "anthropic"],
     "custom_credentials": {
       "telegram": {
@@ -131,6 +132,7 @@ The `network` section controls network access and credential injection:
 | `block` | Block all network access (default: `false`) |
 | `network_profile` | Network profile name for host filtering (e.g., `minimal`, `claude-code`, `enterprise`). Set to `null` in a child profile to clear an inherited value. |
 | `proxy_allow` | Additional hosts to allow through the proxy |
+| `port_allow` | Localhost TCP ports to allow bidirectional IPC (equivalent to `--allow-port`) |
 | `proxy_credentials` | Credential services to enable via reverse proxy (e.g., `openai`, `anthropic`) |
 | `custom_credentials` | Custom credential service definitions for APIs not in the built-in list |
 

@@ -265,6 +265,11 @@ impl CapabilitySetExt for CapabilitySet {
             });
         }
 
+        // Localhost IPC ports from profile
+        for port in &profile.network.port_allow {
+            caps.add_localhost_port(*port);
+        }
+
         // Apply allowed commands from profile
         for cmd in &profile.security.allowed_commands {
             caps.add_allowed_command(cmd.as_str());
