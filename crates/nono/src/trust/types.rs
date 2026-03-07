@@ -400,7 +400,9 @@ pub enum SignerIdentity {
         issuer: String,
         /// Source repository (e.g., `org/repo`)
         repository: String,
-        /// Workflow file that performed the signing
+        /// Workflow or CI config path reference that performed the signing
+        /// (e.g., `.github/workflows/sign.yml` or
+        /// `gitlab.example.com/group/project//.gitlab-ci.yml@refs/heads/main`)
         workflow: String,
         /// Git ref at signing time
         git_ref: String,
@@ -653,6 +655,96 @@ mod tests {
             repository: "my-org/any-repo".to_string(),
             workflow: ".github/workflows/anything.yml".to_string(),
             git_ref: "refs/heads/main".to_string(),
+        };
+        assert!(publisher.matches(&identity));
+    }
+
+    #[test]
+    fn publisher_matches_gitlab_keyless() {
+        let publisher = Publisher {
+            name: "gitlab-ci".to_string(),
+            issuer: Some("https://gitlab.com".to_string()),
+            repository: Some("my-group/my-project".to_string()),
+            workflow: Some(
+                "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/main".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.com".to_string(),
+            repository: "my-group/my-project".to_string(),
+            workflow: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        assert!(publisher.matches(&identity));
+    }
+
+    #[test]
+    fn publisher_matches_gitlab_self_managed_keyless() {
+        let publisher = Publisher {
+            name: "gitlab-self-managed".to_string(),
+            issuer: Some("https://gitlab.example.com".to_string()),
+            repository: Some("internal/project".to_string()),
+            workflow: Some(
+                "gitlab.example.com/internal/project//.gitlab-ci.yml@refs/heads/*".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/*".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com".to_string(),
+            repository: "internal/project".to_string(),
+            workflow: "gitlab.example.com/internal/project//.gitlab-ci.yml@refs/heads/main"
+                .to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        assert!(publisher.matches(&identity));
+    }
+
+    #[test]
+    fn publisher_no_match_gitlab_wrong_issuer() {
+        let publisher = Publisher {
+            name: "gitlab-ci".to_string(),
+            issuer: Some("https://gitlab.com".to_string()),
+            repository: Some("my-group/my-project".to_string()),
+            workflow: Some(
+                "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/*".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/*".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com".to_string(),
+            repository: "my-group/my-project".to_string(),
+            workflow: "gitlab.example.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+                .to_string(),
+            git_ref: "refs/heads/main".to_string(),
+        };
+        assert!(!publisher.matches(&identity));
+    }
+
+    #[test]
+    fn publisher_matches_gitlab_tag_ref() {
+        let publisher = Publisher {
+            name: "gitlab-release".to_string(),
+            issuer: Some("https://gitlab.example.com".to_string()),
+            repository: Some("release/app".to_string()),
+            workflow: Some(
+                "gitlab.example.com/release/app//.gitlab-ci.yml@refs/tags/*".to_string(),
+            ),
+            ref_pattern: Some("refs/tags/*".to_string()),
+            key_id: None,
+            public_key: None,
+        };
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com".to_string(),
+            repository: "release/app".to_string(),
+            workflow: "gitlab.example.com/release/app//.gitlab-ci.yml@refs/tags/v2.0.0".to_string(),
+            git_ref: "refs/tags/v2.0.0".to_string(),
         };
         assert!(publisher.matches(&identity));
     }
