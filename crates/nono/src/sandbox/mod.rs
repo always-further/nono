@@ -21,9 +21,10 @@ pub use macos::{extension_consume, extension_issue_file, extension_release};
 // Re-export Linux seccomp-notify primitives for supervisor use
 #[cfg(target_os = "linux")]
 pub use linux::{
-    classify_access_from_flags, deny_notif, inject_fd, install_seccomp_notify, notif_id_valid,
-    read_notif_path, read_open_how, recv_notif, resolve_notif_path, validate_openat2_size, OpenHow,
-    SeccompData, SeccompNotif, SYS_OPENAT, SYS_OPENAT2,
+    classify_access_from_flags, continue_notif, deny_notif, inject_fd, install_seccomp_notify,
+    notif_id_valid, read_notif_path, read_open_how, recv_notif, resolve_notif_path,
+    respond_notif_errno, validate_openat2_size, OpenHow, SeccompData, SeccompNotif, SYS_OPENAT,
+    SYS_OPENAT2,
 };
 
 /// Information about sandbox support on this platform

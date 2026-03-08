@@ -24,11 +24,11 @@ use nono::{
     DiagnosticMode, NeverGrantChecker, NonoError, Result, Sandbox, SupervisorSocket,
 };
 use std::collections::HashSet;
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use tracing::{debug, info, warn};
 
@@ -63,6 +63,26 @@ const MAX_CRYPTO_THREADS: usize = 7;
 const MAX_DENIAL_RECORDS: usize = 1000;
 /// Hard cap on request IDs tracked for replay detection.
 const MAX_TRACKED_REQUEST_IDS: usize = 4096;
+
+/// Linux procfs context for resolving child-relative procfs paths in the supervisor.
+///
+/// `/proc/self/...` must refer to the sandboxed child process, not the unsandboxed
+/// supervisor. For seccomp interceptions we may also know the calling TID, which
+/// lets us resolve `/proc/thread-self/...` accurately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcfsAccessContext {
+    process_pid: u32,
+    thread_pid: Option<u32>,
+}
+
+impl ProcfsAccessContext {
+    fn new(process_pid: u32, thread_pid: Option<u32>) -> Self {
+        Self {
+            process_pid,
+            thread_pid,
+        }
+    }
+}
 
 /// Threading context for fork safety validation.
 ///
@@ -887,6 +907,7 @@ fn run_supervisor_loop(
                         if let Err(e) = handle_supervisor_message(
                             sock,
                             msg,
+                            child,
                             config,
                             &mut denials,
                             &mut seen_request_ids,
@@ -1004,6 +1025,7 @@ fn run_supervisor_loop(
                             if let Err(e) = handle_supervisor_message(
                                 sock,
                                 msg,
+                                child,
                                 config,
                                 &mut denials,
                                 &mut seen_request_ids,
@@ -1081,6 +1103,7 @@ fn run_supervisor_loop(
 fn handle_supervisor_message(
     sock: &mut SupervisorSocket,
     msg: SupervisorMessage,
+    child: Pid,
     config: &SupervisorConfig<'_>,
     denials: &mut Vec<DenialRecord>,
     seen_request_ids: &mut HashSet<String>,
@@ -1247,6 +1270,7 @@ fn handle_supervisor_message(
                     &request.access,
                     config.never_grant,
                     verified_digest.as_deref(),
+                    Some(ProcfsAccessContext::new(child.as_raw() as u32, None)),
                 ) {
                     Ok(file) => {
                         if let Err(e) = sock.send_fd(file.as_raw_fd()) {
@@ -1313,6 +1337,159 @@ fn unique_request_id() -> String {
     format!("{:x}-{:x}", nanos, seq)
 }
 
+/// Resolve `/proc/self` and `/proc/thread-self` against the sandboxed child.
+///
+/// Without this rewrite, canonicalizing `/proc/self/...` in the supervisor would
+/// resolve to the supervisor's procfs view instead of the child's.
+fn resolve_procfs_path_for_child(
+    path: &Path,
+    procfs_context: Option<ProcfsAccessContext>,
+) -> Result<PathBuf> {
+    let Some(procfs_context) = procfs_context else {
+        return Ok(path.to_path_buf());
+    };
+
+    let mut components = path.components();
+    if components.next() != Some(Component::RootDir)
+        || components.next() != Some(Component::Normal(OsStr::new("proc")))
+    {
+        return Ok(path.to_path_buf());
+    }
+
+    let Some(proc_component) = components.next() else {
+        return Ok(path.to_path_buf());
+    };
+
+    let mut rewritten = PathBuf::from("/proc");
+    match proc_component {
+        Component::Normal(part) if part == OsStr::new("self") => {
+            rewritten.push(procfs_context.process_pid.to_string());
+        }
+        Component::Normal(part) if part == OsStr::new("thread-self") => {
+            let thread_pid = procfs_context.thread_pid.ok_or_else(|| {
+                NonoError::SandboxInit(
+                    "Cannot resolve /proc/thread-self without a requesting thread ID".to_string(),
+                )
+            })?;
+            rewritten.push(procfs_context.process_pid.to_string());
+            rewritten.push("task");
+            rewritten.push(thread_pid.to_string());
+        }
+        _ => return Ok(path.to_path_buf()),
+    }
+
+    for component in components {
+        match component {
+            Component::Normal(part) => rewritten.push(part),
+            Component::CurDir => rewritten.push("."),
+            Component::ParentDir => rewritten.push(".."),
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+
+    Ok(rewritten)
+}
+
+/// Enforce the supervisor's sensitive procfs deny rules.
+///
+/// Same-process procfs access is allowed after `/proc/self` rewriting. Foreign
+/// process reads stay blocked.
+fn validate_procfs_access(
+    canonical: &Path,
+    procfs_context: Option<ProcfsAccessContext>,
+) -> std::result::Result<(), OpenPathError> {
+    const SENSITIVE_PROC_FILES: &[&str] =
+        &["mem", "environ", "maps", "syscall", "stack", "cmdline"];
+
+    let Some(suffix) = canonical.to_str().and_then(|s| s.strip_prefix("/proc/")) else {
+        return Ok(());
+    };
+
+    let allowed_pid = procfs_context.map(|ctx| ctx.process_pid.to_string());
+    let components: Vec<&str> = suffix.split('/').collect();
+
+    if components.len() == 2
+        && components[0].chars().all(|c| c.is_ascii_digit())
+        && SENSITIVE_PROC_FILES.contains(&components[1])
+    {
+        if allowed_pid.as_deref() == Some(components[0]) {
+            return Ok(());
+        }
+        return Err(OpenPathError::policy_blocked(format!(
+            "Access to /proc/{}/{} is blocked by policy",
+            components[0], components[1],
+        )));
+    }
+
+    if components.len() == 4
+        && components[0].chars().all(|c| c.is_ascii_digit())
+        && components[1] == "task"
+        && components[2].chars().all(|c| c.is_ascii_digit())
+        && SENSITIVE_PROC_FILES.contains(&components[3])
+    {
+        if allowed_pid.as_deref() == Some(components[0]) {
+            return Ok(());
+        }
+        return Err(OpenPathError::policy_blocked(format!(
+            "Access to /proc/{}/task/{}/{} is blocked by policy",
+            components[0], components[2], components[3],
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug)]
+struct OpenPathError {
+    errno: i32,
+    message: String,
+    policy_blocked: bool,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl OpenPathError {
+    fn policy_blocked(message: String) -> Self {
+        Self {
+            errno: libc::EPERM,
+            message,
+            policy_blocked: true,
+        }
+    }
+
+    fn io(message: String, source: &std::io::Error) -> Self {
+        Self {
+            errno: source.raw_os_error().unwrap_or(libc::EIO),
+            message,
+            policy_blocked: false,
+        }
+    }
+
+    fn internal(message: String) -> Self {
+        Self {
+            errno: libc::EIO,
+            message,
+            policy_blocked: false,
+        }
+    }
+
+    fn errno(&self) -> i32 {
+        self.errno
+    }
+
+    fn is_policy_blocked(&self) -> bool {
+        self.policy_blocked
+    }
+}
+
+impl std::fmt::Display for OpenPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for OpenPathError {}
+
 /// Open a filesystem path with the requested access mode.
 ///
 /// Used by the supervisor to open files on behalf of the sandboxed child
@@ -1329,84 +1506,51 @@ fn unique_request_id() -> String {
 /// supervisor only grants access to existing files. File creation should
 /// go through the initial capability set, not capability expansion.
 fn open_path_for_access(
-    path: &std::path::Path,
+    path: &Path,
     access: &nono::AccessMode,
     never_grant: &NeverGrantChecker,
     trust_digest: Option<&str>,
-) -> Result<std::fs::File> {
+    procfs_context: Option<ProcfsAccessContext>,
+) -> std::result::Result<std::fs::File, OpenPathError> {
+    let resolved_path = resolve_procfs_path_for_child(path, procfs_context)
+        .map_err(|e| OpenPathError::internal(e.to_string()))?;
+
     // Canonicalize to resolve symlinks before opening. This ensures
     // we check and open the real target, not a symlink alias.
-    let canonical = std::fs::canonicalize(path).map_err(|e| {
-        NonoError::SandboxInit(format!(
-            "Failed to canonicalize {} for access: {}",
-            path.display(),
-            e
-        ))
+    let canonical = std::fs::canonicalize(&resolved_path).map_err(|e| {
+        OpenPathError::io(
+            format!(
+                "Failed to canonicalize {} for access: {}",
+                path.display(),
+                e
+            ),
+            &e,
+        )
     })?;
 
     // Re-check never_grant on the resolved path. A symlink could point
     // from an innocuous path to a never_grant target.
     let check = never_grant.check(&canonical);
     if check.is_blocked() {
-        return Err(NonoError::SandboxInit(format!(
+        return Err(OpenPathError::policy_blocked(format!(
             "Path {} resolves to {} which is blocked by never_grant policy",
             path.display(),
             canonical.display(),
         )));
     }
 
-    // Block sensitive per-PID /proc paths that can't be enumerated in never_grant
-    // (they contain dynamic PIDs). These expose process memory/environment of
-    // arbitrary processes. Covers both /proc/<pid>/<file> and the equivalent
-    // /proc/<pid>/task/<tid>/<file> paths.
-    #[cfg(target_os = "linux")]
-    {
-        const SENSITIVE_PROC_FILES: &[&str] =
-            &["mem", "environ", "maps", "syscall", "stack", "cmdline"];
-        if let Some(suffix) = canonical.to_str().and_then(|s| s.strip_prefix("/proc/")) {
-            let components: Vec<&str> = suffix.split('/').collect();
-            // /proc/<pid>/<sensitive>
-            if components.len() == 2
-                && components[0].chars().all(|c| c.is_ascii_digit())
-                && SENSITIVE_PROC_FILES.contains(&components[1])
-            {
-                return Err(NonoError::SandboxInit(format!(
-                    "Access to /proc/{}/{} is blocked by policy",
-                    components[0], components[1],
-                )));
-            }
-            // /proc/<pid>/task/<tid>/<sensitive>
-            if components.len() == 4
-                && components[0].chars().all(|c| c.is_ascii_digit())
-                && components[1] == "task"
-                && components[2].chars().all(|c| c.is_ascii_digit())
-                && SENSITIVE_PROC_FILES.contains(&components[3])
-            {
-                return Err(NonoError::SandboxInit(format!(
-                    "Access to /proc/{}/task/{}/{} is blocked by policy",
-                    components[0], components[2], components[3],
-                )));
-            }
-            // /proc/self/<sensitive> and /proc/thread-self/<sensitive>
-            if components.len() == 2
-                && (components[0] == "self" || components[0] == "thread-self")
-                && SENSITIVE_PROC_FILES.contains(&components[1])
-            {
-                return Err(NonoError::SandboxInit(format!(
-                    "Access to /proc/{}/{} is blocked by policy",
-                    components[0], components[1],
-                )));
-            }
-        }
-    }
+    validate_procfs_access(&canonical, procfs_context)?;
 
     let file = open_canonical_path_no_symlinks(&canonical, access).map_err(|e| {
-        NonoError::SandboxInit(format!(
-            "Failed to open {} for {:?} access: {}",
-            canonical.display(),
-            access,
-            e
-        ))
+        OpenPathError::io(
+            format!(
+                "Failed to open {} for {:?} access: {}",
+                canonical.display(),
+                access,
+                e
+            ),
+            &e,
+        )
     })?;
 
     // TOCTOU re-verification: if this file was trust-verified, re-compute the
@@ -1421,11 +1565,14 @@ fn open_path_for_access(
         let mut buf = [0u8; 8192];
         loop {
             let n = (&file).read(&mut buf).map_err(|e| {
-                NonoError::SandboxInit(format!(
-                    "Failed to read {} for digest re-check: {}",
-                    canonical.display(),
-                    e,
-                ))
+                OpenPathError::io(
+                    format!(
+                        "Failed to read {} for digest re-check: {}",
+                        canonical.display(),
+                        e,
+                    ),
+                    &e,
+                )
             })?;
             if n == 0 {
                 break;
@@ -1443,7 +1590,7 @@ fn open_path_for_access(
             })
             .collect();
         if actual_digest != expected_digest {
-            return Err(NonoError::SandboxInit(format!(
+            return Err(OpenPathError::policy_blocked(format!(
                 "Instruction file {} was modified between trust verification and open \
                  (expected digest {}, got {}). Possible TOCTOU attack.",
                 path.display(),
@@ -1453,11 +1600,14 @@ fn open_path_for_access(
         }
         // Seek back to start so the child reads from the beginning
         (&file).seek(std::io::SeekFrom::Start(0)).map_err(|e| {
-            NonoError::SandboxInit(format!(
-                "Failed to seek {} after digest re-check: {}",
-                canonical.display(),
-                e,
-            ))
+            OpenPathError::io(
+                format!(
+                    "Failed to seek {} after digest re-check: {}",
+                    canonical.display(),
+                    e,
+                ),
+                &e,
+            )
         })?;
     }
 
@@ -1642,5 +1792,59 @@ mod tests {
             );
         }
         assert_eq!(denials.len(), MAX_DENIAL_RECORDS);
+    }
+
+    #[test]
+    fn test_resolve_procfs_self_for_child() {
+        let path = resolve_procfs_path_for_child(
+            Path::new("/proc/self/maps"),
+            Some(ProcfsAccessContext::new(4242, Some(4343))),
+        );
+        assert_eq!(path.ok(), Some(PathBuf::from("/proc/4242/maps")));
+    }
+
+    #[test]
+    fn test_resolve_procfs_thread_self_for_child() {
+        let path = resolve_procfs_path_for_child(
+            Path::new("/proc/thread-self/maps"),
+            Some(ProcfsAccessContext::new(4242, Some(4343))),
+        );
+        assert_eq!(path.ok(), Some(PathBuf::from("/proc/4242/task/4343/maps")));
+    }
+
+    #[test]
+    fn test_resolve_procfs_thread_self_requires_thread_context() {
+        let result = resolve_procfs_path_for_child(
+            Path::new("/proc/thread-self/maps"),
+            Some(ProcfsAccessContext::new(4242, None)),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_procfs_access_allows_child_sensitive_proc_path() {
+        let result = validate_procfs_access(
+            Path::new("/proc/4242/maps"),
+            Some(ProcfsAccessContext::new(4242, Some(4343))),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_procfs_access_blocks_foreign_sensitive_proc_path() {
+        let result = validate_procfs_access(
+            Path::new("/proc/1/maps"),
+            Some(ProcfsAccessContext::new(4242, Some(4343))),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_procfs_access_allows_child_task_sensitive_proc_path() {
+        let result = validate_procfs_access(
+            Path::new("/proc/4242/task/9999/maps"),
+            Some(ProcfsAccessContext::new(4242, Some(4343))),
+        );
+        assert!(result.is_ok());
     }
 }

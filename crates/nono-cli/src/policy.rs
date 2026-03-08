@@ -1092,6 +1092,122 @@ mod tests {
     }
 
     #[test]
+    fn test_embedded_claude_code_profile_uses_platform_groups_for_os_paths() {
+        let policy = load_embedded_policy().expect("embedded policy");
+        let profile = policy
+            .profiles
+            .get("claude-code")
+            .expect("claude-code profile missing");
+
+        assert!(profile
+            .security
+            .groups
+            .contains(&"claude_code_macos".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"claude_code_linux".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"vscode_macos".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"vscode_linux".to_string()));
+        assert!(!profile
+            .filesystem
+            .read
+            .contains(&"$HOME/.local/share/claude".to_string()));
+        assert!(!profile
+            .filesystem
+            .read_file
+            .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
+    }
+
+    #[test]
+    fn test_embedded_claude_code_platform_groups_have_expected_paths() {
+        let policy = load_embedded_policy().expect("embedded policy");
+
+        let claude_code_macos = policy
+            .groups
+            .get("claude_code_macos")
+            .expect("claude_code_macos group missing");
+        assert_eq!(claude_code_macos.platform.as_deref(), Some("macos"));
+        assert!(claude_code_macos
+            .allow
+            .as_ref()
+            .expect("claude_code_macos allow missing")
+            .read
+            .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
+
+        let claude_code_linux = policy
+            .groups
+            .get("claude_code_linux")
+            .expect("claude_code_linux group missing");
+        assert_eq!(claude_code_linux.platform.as_deref(), Some("linux"));
+        assert!(claude_code_linux
+            .allow
+            .as_ref()
+            .expect("claude_code_linux allow missing")
+            .read
+            .contains(&"$HOME/.local/share/claude".to_string()));
+
+        let vscode_macos = policy
+            .groups
+            .get("vscode_macos")
+            .expect("vscode_macos group missing");
+        assert_eq!(vscode_macos.platform.as_deref(), Some("macos"));
+        let vscode_macos_paths = &vscode_macos
+            .allow
+            .as_ref()
+            .expect("vscode_macos allow missing")
+            .write;
+        assert!(vscode_macos_paths.contains(&"$HOME/.vscode".to_string()));
+        assert!(vscode_macos_paths.contains(&"$HOME/Library/Application Support/Code".to_string()));
+
+        let vscode_linux = policy
+            .groups
+            .get("vscode_linux")
+            .expect("vscode_linux group missing");
+        assert_eq!(vscode_linux.platform.as_deref(), Some("linux"));
+        let vscode_linux_paths = &vscode_linux
+            .allow
+            .as_ref()
+            .expect("vscode_linux allow missing")
+            .write;
+        assert!(vscode_linux_paths.contains(&"$HOME/.vscode".to_string()));
+        assert!(vscode_linux_paths.contains(&"$HOME/.config/Code".to_string()));
+    }
+
+    #[test]
+    fn test_embedded_claude_code_platform_groups_filter_by_os() {
+        let policy = load_embedded_policy().expect("embedded policy");
+        let mut caps = CapabilitySet::new();
+        let resolved = resolve_groups(
+            &policy,
+            &[
+                "claude_code_macos".to_string(),
+                "claude_code_linux".to_string(),
+                "vscode_macos".to_string(),
+                "vscode_linux".to_string(),
+            ],
+            &mut caps,
+        )
+        .expect("resolve failed");
+
+        assert_eq!(resolved.names.len(), 2);
+
+        if cfg!(target_os = "macos") {
+            assert!(resolved.names.contains(&"claude_code_macos".to_string()));
+            assert!(resolved.names.contains(&"vscode_macos".to_string()));
+        } else {
+            assert!(resolved.names.contains(&"claude_code_linux".to_string()));
+            assert!(resolved.names.contains(&"vscode_linux".to_string()));
+        }
+    }
+
+    #[test]
     fn test_resolve_read_group() {
         let policy = load_policy(sample_policy_json()).expect("parse failed");
         let mut caps = CapabilitySet::new();
