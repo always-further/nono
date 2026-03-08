@@ -386,13 +386,41 @@
         ]
       }
     },
-    "vscode": {
-      "description": "Visual Studio Code configuration and extension directories",
+    "claude_code_macos": {
+      "description": "Claude Code macOS-specific state and credential paths",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "$HOME/Library/Keychains/login.keychain-db"
+        ]
+      }
+    },
+    "claude_code_linux": {
+      "description": "Claude Code Linux-specific state paths",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "$HOME/.local/share/claude"
+        ]
+      }
+    },
+    "vscode_macos": {
+      "description": "Visual Studio Code configuration and extension directories for macOS",
       "platform": "macos",
       "allow": {
         "write": [
           "$HOME/.vscode",
           "$HOME/Library/Application Support/Code"
+        ]
+      }
+    },
+    "vscode_linux": {
+      "description": "Visual Studio Code configuration and extension directories for Linux",
+      "platform": "linux",
+      "allow": {
+        "write": [
+          "$HOME/.vscode",
+          "$HOME/.config/Code"
         ]
       }
     },
@@ -484,15 +512,24 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "python_runtime", "vscode", "unlink_protection"],
+        "groups": [
+          "claude_code_macos",
+          "claude_code_linux",
+          "user_caches_macos",
+          "node_runtime",
+          "rust_runtime",
+          "python_runtime",
+          "vscode_macos",
+          "vscode_linux",
+          "unlink_protection"
+        ],
         "signal_mode": "isolated"
       },
       "trust_groups": [],
       "filesystem": {
         "allow": ["$HOME/.claude"],
-        "read": ["$HOME/.local/share/claude"],
         "allow_file": ["$HOME/.claude.json", "$HOME/.claude.json.lock"],
-        "read_file": ["$HOME/Library/Keychains/login.keychain-db", "$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
+        "read_file": ["$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
       },
       "network": { "block": false },
       "workdir": { "access": "readwrite" },

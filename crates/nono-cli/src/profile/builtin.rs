@@ -34,6 +34,35 @@ mod tests {
     }
 
     #[test]
+    fn test_get_builtin_claude_code_uses_platform_groups_for_os_paths() {
+        let profile = get_builtin("claude-code").expect("Profile not found");
+        assert!(profile
+            .security
+            .groups
+            .contains(&"claude_code_macos".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"claude_code_linux".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"vscode_macos".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"vscode_linux".to_string()));
+        assert!(!profile
+            .filesystem
+            .read
+            .contains(&"$HOME/.local/share/claude".to_string()));
+        assert!(!profile
+            .filesystem
+            .read_file
+            .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
+    }
+
+    #[test]
     fn test_get_builtin_openclaw() {
         let profile = get_builtin("openclaw").expect("Profile not found");
         assert_eq!(profile.meta.name, "openclaw");
