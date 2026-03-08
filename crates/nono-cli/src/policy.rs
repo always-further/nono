@@ -214,6 +214,25 @@ fn expand_path(path_str: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(expanded))
 }
 
+/// Expand only `~` and `$HOME` using a caller-provided HOME snapshot.
+///
+/// This is used by sensitive-path checks so a single operation can use a
+/// consistent HOME value even if other tests mutate the environment in
+/// parallel.
+pub(crate) fn expand_home_path(path_str: &str, home: &str) -> PathBuf {
+    let expanded = if let Some(rest) = path_str.strip_prefix("~/") {
+        format!("{}/{}", home, rest)
+    } else if path_str == "~" || path_str == "$HOME" {
+        home.to_string()
+    } else if let Some(rest) = path_str.strip_prefix("$HOME/") {
+        format!("{}/{}", home, rest)
+    } else {
+        path_str.to_string()
+    };
+
+    PathBuf::from(expanded)
+}
+
 /// Convert a PathBuf to a UTF-8 string, returning an error for non-UTF-8 paths.
 ///
 /// Non-UTF-8 paths would produce incorrect Seatbelt rules via lossy conversion,
@@ -883,7 +902,10 @@ pub fn group_description<'a>(policy: &'a Policy, name: &str) -> Option<&'a str> 
 ///
 /// Returns a list of `(expanded_path, group_description)` tuples suitable for
 /// display in `nono why`. Paths are expanded (~ -> $HOME, $TMPDIR -> value).
-pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<(String, String)>> {
+fn collect_sensitive_paths<F>(policy: &Policy, mut expand: F) -> Result<Vec<(String, String)>>
+where
+    F: FnMut(&str) -> Result<PathBuf>,
+{
     let mut result = Vec::new();
 
     for group in policy.groups.values() {
@@ -892,7 +914,7 @@ pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<(String, String)>> {
         }
         if let Some(deny) = &group.deny {
             for path_str in &deny.access {
-                let expanded = expand_path(path_str)?;
+                let expanded = expand(path_str)?;
                 result.push((
                     expanded.to_string_lossy().into_owned(),
                     group.description.clone(),
@@ -916,6 +938,26 @@ pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<(String, String)>> {
     }
 
     Ok(result)
+}
+
+pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<(String, String)>> {
+    collect_sensitive_paths(policy, expand_path)
+}
+
+/// Like [`get_sensitive_paths`], but expands `~` and `$HOME` using a caller-supplied
+/// HOME snapshot.
+pub fn get_sensitive_paths_with_home(policy: &Policy, home: &str) -> Result<Vec<(String, String)>> {
+    collect_sensitive_paths(policy, |path_str| {
+        if path_str.starts_with("~/")
+            || path_str == "~"
+            || path_str == "$HOME"
+            || path_str.starts_with("$HOME/")
+        {
+            Ok(expand_home_path(path_str, home))
+        } else {
+            expand_path(path_str)
+        }
+    })
 }
 
 /// Get all dangerous (deny.commands) from platform-matching policy groups.

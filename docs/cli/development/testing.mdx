@@ -21,6 +21,32 @@ This script:
 3. Reports results with pass/fail/skip counts
 4. Exits with non-zero status if any tests fail
 
+### Cached Linux Container Workflow
+
+For repeated Linux verification on macOS or Windows hosts, use the cached Docker helper:
+
+```bash
+make test-linux-container
+```
+
+This uses:
+- `tools/docker/linux-dev.Dockerfile` for a reusable Linux dev image with required system packages
+- Docker volumes for Cargo registry, Cargo git cache, and a Linux-only `target` directory
+- `scripts/test-linux-container.sh` as the wrapper
+
+Run a custom Linux command inside the same cached environment:
+
+```bash
+./scripts/test-linux-container.sh cargo test -p nono-cli
+./scripts/test-linux-container.sh bash -c 'cargo run -q -p nono-cli -- run --profile claude-code --dry-run -- echo ok'
+```
+
+Set `NONO_LINUX_REBUILD_IMAGE=1` to rebuild the helper image after changing the Dockerfile.
+
+<Note>
+This container workflow is ideal for Linux builds and unit tests, but it does not replace running `scripts/test-linux.sh` on a real Linux host when you need to verify Landlock/kernel behavior directly.
+</Note>
+
 ### Individual Test Suites
 
 Run a specific test suite:
