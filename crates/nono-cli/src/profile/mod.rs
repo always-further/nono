@@ -620,6 +620,12 @@ pub struct SecurityConfig {
     /// (defaults to `Isolated` if no base sets it).
     #[serde(default)]
     pub signal_mode: Option<ProfileSignalMode>,
+    /// Enable runtime capability elevation via seccomp-notify (Linux).
+    /// When true, the supervisor intercepts file opens and can grant access
+    /// to paths not in the initial capability set. When false (default),
+    /// the sandbox is static — no seccomp interception, no PTY mux, no prompts.
+    #[serde(default)]
+    pub capability_elevation: Option<bool>,
 }
 
 /// Rollback snapshot configuration in a profile
@@ -853,6 +859,7 @@ fn load_base_profile_raw(name: &str) -> Result<Profile> {
                 trust_groups: def.trust_groups.clone(),
                 allowed_commands: def.security.allowed_commands.clone(),
                 signal_mode: def.security.signal_mode,
+                capability_elevation: def.security.capability_elevation,
             },
             filesystem: def.filesystem.clone(),
             network: def.network.clone(),
@@ -886,6 +893,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &child.security.allowed_commands,
             ),
             signal_mode: child.security.signal_mode.or(base.security.signal_mode),
+            capability_elevation: child
+                .security
+                .capability_elevation
+                .or(base.security.capability_elevation),
         },
         filesystem: FilesystemConfig {
             allow: dedup_append(&base.filesystem.allow, &child.filesystem.allow),

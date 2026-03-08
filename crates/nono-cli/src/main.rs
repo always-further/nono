@@ -434,6 +434,11 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 
     let mut prepared = prepare_sandbox(&args, silent)?;
 
+    // CLI --capability-elevation overrides profile setting
+    if run_args.capability_elevation {
+        prepared.capability_elevation = true;
+    }
+
     // Compute scan root for trust policy discovery and instruction file scanning.
     let scan_root = args
         .workdir
@@ -506,11 +511,13 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     };
     let _ = &scan_result; // suppress unused warning on non-macOS
 
-    // Enable sandbox extensions for transparent capability expansion in supervised mode.
-    // On Linux, seccomp-notify intercepts syscalls at the kernel level -- this flag is
-    // informational only (seccomp is installed separately in the child process).
+    // Enable sandbox extensions for transparent capability expansion in supervised mode,
+    // but only when the profile opts into capability elevation. Without elevation,
+    // supervised mode runs with static capabilities (no seccomp, no PTY, no prompts).
     #[cfg(target_os = "linux")]
-    prepared.caps.set_extensions_enabled(true);
+    if prepared.capability_elevation {
+        prepared.caps.set_extensions_enabled(true);
+    }
 
     let trust_scan_verified = scan_result.as_ref().is_some_and(|r| r.verified > 0);
 
@@ -588,6 +595,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             protected_paths: verified_protected_paths,
             rollback_exclude_patterns: merged_patterns,
             rollback_exclude_globs: merged_globs,
+            capability_elevation: prepared.capability_elevation,
             proxy_active,
             network_profile,
             proxy_allow_hosts,
@@ -642,6 +650,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         prepared.secrets,
         ExecutionFlags {
             no_diagnostics: true,
+            capability_elevation: prepared.capability_elevation,
             ..ExecutionFlags::defaults(silent)?
         },
     )
@@ -727,6 +736,9 @@ struct ExecutionFlags {
     rollback_exclude_patterns: Vec<String>,
     /// Profile-specific rollback exclusion globs (filename matching)
     rollback_exclude_globs: Vec<String>,
+    /// Whether runtime capability elevation is enabled (seccomp-notify + PTY mux).
+    /// When false, supervised mode runs with static capabilities only.
+    capability_elevation: bool,
     /// Whether proxy-based network filtering is active (forces Supervised mode)
     proxy_active: bool,
     /// Network profile name for proxy filtering (from --network-profile or profile config)
@@ -767,6 +779,7 @@ impl ExecutionFlags {
             protected_paths: Vec::new(),
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
+            capability_elevation: false,
             proxy_active: false,
             network_profile: None,
             proxy_allow_hosts: Vec::new(),
@@ -1059,6 +1072,7 @@ fn execute_sandboxed(
         no_diagnostics: flags.no_diagnostics || flags.silent,
         threading,
         protected_paths: &flags.protected_paths,
+        capability_elevation: flags.capability_elevation,
     };
 
     // Execute based on strategy
@@ -1436,6 +1450,8 @@ struct PreparedSandbox {
     proxy_credentials: Vec<String>,
     /// Custom credential definitions from profile config
     custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
+    /// Whether the profile enables runtime capability elevation (seccomp-notify + PTY)
+    capability_elevation: bool,
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
@@ -1512,6 +1528,10 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     // Extract config before profile is consumed for secrets
+    let capability_elevation = loaded_profile
+        .as_ref()
+        .and_then(|p| p.security.capability_elevation)
+        .unwrap_or(false);
     let profile_workdir_access = loaded_profile.as_ref().map(|p| p.workdir.access.clone());
     let profile_rollback_patterns = loaded_profile
         .as_ref()
@@ -1539,18 +1559,32 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .map(|p| p.network.custom_credentials.clone())
         .unwrap_or_default();
 
-    // On Linux, pre-create the Claude Code config lock file before building
-    // capabilities. Claude Code's saveConfigWithLock creates ~/.claude.json.lock
-    // next to ~/.claude.json. Landlock cannot grant permission to create new
-    // files in ~/ without opening the entire directory, so we pre-create the
-    // lock file and grant access to it via the profile's allow_file list.
+    // On Linux, pre-create paths that the claude-code profile grants but
+    // may not exist yet. Non-existent paths are skipped during capability
+    // construction (capability_ext.rs:14), so they must exist before we
+    // build the CapabilitySet.
     #[cfg(target_os = "linux")]
     if args.profile.as_deref() == Some("claude-code") {
         let home = config::validated_home()?;
-        let lock_path = std::path::Path::new(&home).join(".claude.json.lock");
+        let home_path = std::path::Path::new(&home);
+
+        // ~/.claude.json.lock — Claude Code's saveConfigWithLock creates this
+        // next to ~/.claude.json. Landlock cannot grant permission to create
+        // new files in ~/ without opening the entire directory.
+        let lock_path = home_path.join(".claude.json.lock");
         if !lock_path.exists() {
             if let Err(e) = std::fs::File::create(&lock_path) {
                 warn!("Failed to pre-create {}: {}", lock_path.display(), e);
+            }
+        }
+
+        // ~/.cache/claude-cli-nodejs — MCP server logs and CLI cache.
+        // The claude_cache_linux group grants this directory, but it may
+        // not exist on a fresh system.
+        let cache_dir = home_path.join(".cache/claude-cli-nodejs");
+        if !cache_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+                warn!("Failed to pre-create {}: {}", cache_dir.display(), e);
             }
         }
     }
@@ -1720,6 +1754,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         proxy_allow_hosts: profile_proxy_allow,
         proxy_credentials: profile_proxy_credentials,
         custom_credentials: profile_custom_credentials,
+        capability_elevation,
     })
 }
 
@@ -1982,6 +2017,7 @@ mod tests {
             proxy_allow_hosts: vec!["docs.python.org".to_string()],
             proxy_credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
+            capability_elevation: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -2013,6 +2049,7 @@ mod tests {
             proxy_allow_hosts: vec!["docs.python.org".to_string()],
             proxy_credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
+            capability_elevation: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);

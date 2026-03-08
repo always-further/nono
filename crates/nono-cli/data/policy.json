@@ -319,6 +319,27 @@
         ]
       }
     },
+    "user_caches_linux": {
+      "description": "User cache and log directories for Linux programs (XDG)",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "~/.cache"
+        ],
+        "read": [
+          "~/.local/state"
+        ]
+      }
+    },
+    "claude_cache_linux": {
+      "description": "Claude Code CLI cache and MCP log directories on Linux",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "~/.cache/claude-cli-nodejs"
+        ]
+      }
+    },
     "user_tools": {
       "description": "User-local executables, .desktop files, man pages, and shell completions",
       "allow": {
@@ -408,7 +429,7 @@
       "description": "Visual Studio Code configuration and extension directories for macOS",
       "platform": "macos",
       "allow": {
-        "write": [
+        "readwrite": [
           "$HOME/.vscode",
           "$HOME/Library/Application Support/Code"
         ]
@@ -418,9 +439,22 @@
       "description": "Visual Studio Code configuration and extension directories for Linux",
       "platform": "linux",
       "allow": {
-        "write": [
+        "readwrite": [
           "$HOME/.vscode",
           "$HOME/.config/Code"
+        ]
+      }
+    },
+    "nix_runtime": {
+      "description": "Nix package manager runtime paths",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "~/.nix-profile",
+          "~/.nix-defexpr",
+          "/run/current-system/sw",
+          "/etc/profiles/per-user",
+          "/nix/var/nix/profiles"
         ]
       }
     },
@@ -516,14 +550,17 @@
           "claude_code_macos",
           "claude_code_linux",
           "user_caches_macos",
+          "claude_cache_linux",
           "node_runtime",
           "rust_runtime",
           "python_runtime",
           "vscode_macos",
           "vscode_linux",
+          "nix_runtime",
           "unlink_protection"
         ],
-        "signal_mode": "isolated"
+        "signal_mode": "isolated",
+        "capability_elevation": false
       },
       "trust_groups": [],
       "filesystem": {
@@ -581,7 +618,7 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "node_runtime", "unlink_protection"],
+        "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "unlink_protection"],
         "signal_mode": "isolated"
       },
       "trust_groups": [],

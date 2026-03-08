@@ -449,6 +449,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub trust_override: bool,
 
+    /// Enable runtime capability elevation (seccomp-notify + approval prompts).
+    /// Overrides the profile's capability_elevation setting.
+    /// When enabled, the supervisor can grant access to paths not in the
+    /// initial capability set via interactive prompts.
+    #[arg(long, env = "NONO_CAPABILITY_ELEVATION")]
+    pub capability_elevation: bool,
+
     /// Command to run inside the sandbox
     #[arg(required = true)]
     pub command: Vec<String>,

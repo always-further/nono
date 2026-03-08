@@ -11,6 +11,7 @@
 //! allocation is safe) and uses only raw libc calls in the child.
 
 mod env_sanitization;
+mod pty_mux;
 #[cfg(target_os = "linux")]
 mod supervisor_linux;
 
@@ -82,6 +83,19 @@ impl ProcfsAccessContext {
             thread_pid,
         }
     }
+}
+
+/// PTY relay state passed to supervisor loops.
+///
+/// The supervisor poll loop uses these fds to relay I/O between the real
+/// terminal and the PTY master (which is connected to the child's PTY slave).
+struct PtyRelay<'a> {
+    /// PTY master fd (connected to child's stdin/stdout/stderr)
+    master_fd: std::os::fd::RawFd,
+    /// Real terminal fd (/dev/tty)
+    real_tty_fd: std::os::fd::RawFd,
+    /// Real terminal state (for save/restore during prompts)
+    real_term: &'a pty_mux::RealTerminal,
 }
 
 /// Threading context for fork safety validation.
@@ -163,6 +177,11 @@ pub struct ExecConfig<'a> {
     pub threading: ThreadingContext,
     /// Paths that are write-protected (signed instruction files).
     pub protected_paths: &'a [std::path::PathBuf],
+    /// Whether runtime capability elevation is enabled.
+    /// When true, the child installs seccomp-notify and the parent sets up
+    /// a PTY mux for terminal isolation during approval prompts.
+    /// When false, the child runs with static capabilities only.
+    pub capability_elevation: bool,
 }
 
 /// Configuration for supervisor IPC in supervised execution mode.
@@ -391,8 +410,26 @@ pub fn execute_supervised(
     // sandbox apply (see child branch below).
     // The parent sets itself non-dumpable immediately after fork.
 
-    // Compute child's FD keep list: supervisor socket fd if IPC is enabled
-    let child_keep_fds: Vec<i32> = child_sock_fd.into_iter().collect();
+    // Create PTY pair for terminal isolation, only when capability elevation
+    // is enabled. The PTY gives the child its own terminal so TUI apps can set
+    // raw mode without affecting the supervisor's approval prompts.
+    // Without elevation there are no prompts, so the child inherits the parent's
+    // terminal directly (simpler, avoids PTY relay complexity).
+    let pty_pair = if config.capability_elevation {
+        Some(pty_mux::create_pty_pair()?)
+    } else {
+        None
+    };
+    let pty_slave_fd = pty_pair.as_ref().map(|p| p.slave.as_raw_fd());
+
+    // Compute child's FD keep list: PTY slave (if elevation) + supervisor socket fd
+    let mut child_keep_fds: Vec<i32> = Vec::new();
+    if let Some(fd) = pty_slave_fd {
+        child_keep_fds.push(fd);
+    }
+    if let Some(fd) = child_sock_fd {
+        child_keep_fds.push(fd);
+    }
 
     let effective_caps: &CapabilitySet = config.caps;
 
@@ -409,16 +446,20 @@ pub fn execute_supervised(
 
     match fork_result {
         Ok(ForkResult::Child) => {
-            // CHILD: Apply sandbox, then exec.
+            // CHILD: Set up PTY, apply sandbox, then exec.
             //
             // The child applies the sandbox itself before exec.
             // Sandbox::apply() allocates (Seatbelt profile generation, Landlock
             // PathFd opens) but this is safe because we validated single-threaded
             // execution before fork, giving us a clean heap.
-            //
-            // The child inherits the parent's stdin/stdout/stderr directly
-            // (no pipe redirection). This preserves TTY semantics for
-            // interactive programs like Claude Code.
+
+            // Set up PTY slave as the child's controlling terminal (elevation only).
+            // This gives the child its own terminal so TUI apps can freely
+            // change terminal modes without affecting the supervisor.
+            // SAFETY: We are in the child after fork, slave_fd is valid.
+            if let Some(slave_fd) = pty_slave_fd {
+                unsafe { pty_mux::setup_child_pty(slave_fd) };
+            }
 
             // Apply Landlock FIRST. Landlock's restrict_self() opens path fds
             // for rule creation, so it must run before seccomp-notify is installed.
@@ -437,24 +478,47 @@ pub fn execute_supervised(
                 }
             }
 
-            // On Linux with supervisor enabled: install seccomp-notify filter
+            // On Linux with capability elevation: install seccomp-notify filter
             // AFTER Landlock. The kernel evaluates seccomp before LSM hooks
             // regardless of installation order, so the security properties are
             // identical. All openat/openat2 from exec'd child are routed to
             // the supervisor, which can inject fds for approved paths.
+            // Without elevation, seccomp is not installed — the child runs
+            // with static Landlock capabilities only.
             #[cfg(target_os = "linux")]
             {
-                if let Some(fd) = child_sock_fd {
-                    match nono::sandbox::install_seccomp_notify() {
-                        Ok(notify_fd) => {
-                            // Send the notify fd to the parent via SCM_RIGHTS
-                            // SAFETY: We own the child socket end and the notify fd
-                            // is valid. from_stream is safe with our inherited fd.
-                            let child_sock =
-                                unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
-                            let tmp_sock = SupervisorSocket::from_stream(child_sock);
-                            if let Err(_e) = tmp_sock.send_fd(notify_fd.as_raw_fd()) {
-                                let msg = b"nono: failed to send seccomp notify fd to supervisor\n";
+                if config.capability_elevation {
+                    if let Some(fd) = child_sock_fd {
+                        match nono::sandbox::install_seccomp_notify() {
+                            Ok(notify_fd) => {
+                                // Send the notify fd to the parent via SCM_RIGHTS
+                                // SAFETY: We own the child socket end and the notify fd
+                                // is valid. from_stream is safe with our inherited fd.
+                                let child_sock =
+                                    unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                                let tmp_sock = SupervisorSocket::from_stream(child_sock);
+                                if let Err(_e) = tmp_sock.send_fd(notify_fd.as_raw_fd()) {
+                                    let msg =
+                                        b"nono: failed to send seccomp notify fd to supervisor\n";
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDERR_FILENO,
+                                            msg.as_ptr().cast::<libc::c_void>(),
+                                            msg.len(),
+                                        );
+                                    }
+                                }
+                                // Leak the socket wrapper so it doesn't close the fd
+                                // (the fd is still needed for supervisor IPC)
+                                std::mem::forget(tmp_sock);
+                            }
+                            Err(e) => {
+                                // seccomp not available -- proceed without transparent expansion
+                                let detail = format!(
+                                    "nono: seccomp-notify not available, expansion disabled: {}\n",
+                                    e
+                                );
+                                let msg = detail.as_bytes();
                                 unsafe {
                                     libc::write(
                                         libc::STDERR_FILENO,
@@ -463,37 +527,18 @@ pub fn execute_supervised(
                                     );
                                 }
                             }
-                            // Leak the socket wrapper so it doesn't close the fd
-                            // (the fd is still needed for supervisor IPC)
-                            std::mem::forget(tmp_sock);
-                        }
-                        Err(e) => {
-                            // seccomp not available -- proceed without transparent expansion
-                            let detail = format!(
-                                "nono: seccomp-notify not available, expansion disabled: {}\n",
-                                e
-                            );
-                            let msg = detail.as_bytes();
-                            unsafe {
-                                libc::write(
-                                    libc::STDERR_FILENO,
-                                    msg.as_ptr().cast::<libc::c_void>(),
-                                    msg.len(),
-                                );
-                            }
                         }
                     }
                 }
             }
 
-            // In rollback-only mode (no supervisor IPC), make the child
-            // non-dumpable to prevent ptrace attachment from same-UID
-            // processes. When supervisor IPC is active, the child must stay
-            // dumpable so the parent can read /proc/CHILD/mem for
-            // seccomp-notify path extraction.
+            // When capability elevation is off, make the child non-dumpable
+            // to prevent ptrace attachment from same-UID processes. When
+            // elevation is active, the child must stay dumpable so the parent
+            // can read /proc/CHILD/mem for seccomp-notify path extraction.
             #[cfg(target_os = "linux")]
             {
-                if child_sock_fd.is_none() {
+                if !config.capability_elevation {
                     // No supervisor IPC — safe to drop dumpable
                     unsafe {
                         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
@@ -521,6 +566,14 @@ pub fn execute_supervised(
             unsafe { libc::_exit(127) }
         }
         Ok(ForkResult::Parent { child }) => {
+            // Close the PTY slave in the parent (only the child uses it).
+            // The master stays open for relay. Destructure to take ownership
+            // of master and drop slave.
+            let pty_master = pty_pair.map(|p| {
+                drop(p.slave);
+                p.master
+            });
+
             // Destructure socket pair: close child's end, keep supervisor's end
             let supervisor_sock = if let Some((sup, child_end)) = socket_pair {
                 drop(child_end);
@@ -568,11 +621,12 @@ pub fn execute_supervised(
                 }
             }
 
-            // On Linux with supervisor enabled: receive the seccomp notify fd
+            // On Linux with capability elevation: receive the seccomp notify fd
             // from the child. The child installed a seccomp-notify filter and
             // sent the fd via SCM_RIGHTS on the supervisor socket.
+            // Only attempt recv when elevation is active (child sends the fd).
             #[cfg(target_os = "linux")]
-            let seccomp_notify_fd: Option<OwnedFd> = if supervisor.is_some() {
+            let seccomp_notify_fd: Option<OwnedFd> = if config.capability_elevation {
                 if let Some(ref sup_sock) = supervisor_sock {
                     match sup_sock.recv_fd() {
                         Ok(fd) => {
@@ -592,9 +646,29 @@ pub fn execute_supervised(
             };
 
             // Set up signal forwarding.
-            // No output piping needed - child inherits the terminal directly.
             setup_signal_forwarding(child);
             let _signal_forwarding_guard = SignalForwardingGuard;
+
+            // Set up PTY relay when capability elevation is enabled.
+            // The real terminal is put into raw mode so keystrokes pass through
+            // to the child transparently. When the supervisor needs to prompt,
+            // it restores the terminal, prompts, then re-enters raw mode.
+            // Without elevation, the child inherits the parent's terminal directly.
+            let real_term = if pty_master.is_some() {
+                Some(pty_mux::RealTerminal::open()?)
+            } else {
+                None
+            };
+            let pty_master_fd = pty_master.as_ref().map(|m| m.as_raw_fd());
+            let real_tty_fd = real_term.as_ref().map(|t| t.as_raw_fd());
+
+            if let (Some(master_fd), Some(tty_fd)) = (pty_master_fd, real_tty_fd) {
+                pty_mux::set_nonblocking(master_fd)?;
+                pty_mux::setup_sigwinch_forwarding(tty_fd, master_fd);
+                if let Some(ref rt) = real_term {
+                    rt.enter_raw_mode()?;
+                }
+            }
 
             // NOTE: peer_pid() is NOT called here. For socketpair() created
             // before fork, LOCAL_PEERPID/SO_PEERCRED return the parent's own PID
@@ -615,7 +689,23 @@ pub fn execute_supervised(
                 .map(|cap| (cap.resolved.clone(), cap.is_file))
                 .collect();
 
-            // Run IPC event loop if supervisor is configured, otherwise just wait
+            // Build optional PTY relay (only when capability elevation allocates a PTY).
+            let relay = if let (Some(mfd), Some(tfd), Some(ref rt)) =
+                (pty_master_fd, real_tty_fd, &real_term)
+            {
+                Some(PtyRelay {
+                    master_fd: mfd,
+                    real_tty_fd: tfd,
+                    real_term: rt,
+                })
+            } else {
+                None
+            };
+
+            // Run supervisor IPC loop when configured, with or without PTY relay.
+            // Trust interception runs over the IPC socket regardless of
+            // capability_elevation. The PTY relay is only present when
+            // elevation is active (seccomp-notify + interactive prompts).
             let (status, denials) =
                 if let (Some(sup_cfg), Some(mut sup_sock)) = (supervisor, supervisor_sock) {
                     #[cfg(target_os = "linux")]
@@ -627,16 +717,38 @@ pub fn execute_supervised(
                             seccomp_notify_fd.as_ref(),
                             &initial_caps,
                             trust_interceptor,
+                            relay.as_ref(),
                         )?
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
-                        run_supervisor_loop(child, &mut sup_sock, sup_cfg, trust_interceptor)?
+                        run_supervisor_loop(
+                            child,
+                            &mut sup_sock,
+                            sup_cfg,
+                            trust_interceptor,
+                            relay.as_ref(),
+                        )?
                     }
+                } else if let Some(ref r) = relay {
+                    // PTY relay active but no supervisor — just relay I/O.
+                    let status = wait_for_child_with_relay(child, r)?;
+                    (status, Vec::new())
                 } else {
+                    // No supervisor, no PTY — simple wait.
                     let status = wait_for_child(child)?;
                     (status, Vec::new())
                 };
+
+            // Restore real terminal and clean up PTY state
+            if real_term.is_some() {
+                pty_mux::clear_sigwinch_forwarding();
+            }
+            if let Some(ref rt) = real_term {
+                let _ = rt.restore();
+            }
+            // Drop PTY master to send EOF to child (if still alive)
+            drop(pty_master);
 
             let exit_code = match status {
                 WaitStatus::Exited(_, code) => {
@@ -654,8 +766,6 @@ pub fn execute_supervised(
             };
 
             // Print diagnostic footer on non-zero exit.
-            // Supervised mode inherits the terminal directly, so the footer is
-            // printed here after the child exits.
             if exit_code != 0 && !config.no_diagnostics {
                 let mode = if supervisor.is_some() {
                     DiagnosticMode::Supervised
@@ -712,6 +822,59 @@ fn get_max_fd() -> i32 {
         std::cmp::min(max as i32, 65536)
     } else {
         1024
+    }
+}
+
+/// Wait for child process while relaying PTY I/O.
+///
+/// Used when no supervisor IPC is configured but we still need to relay
+/// the PTY for terminal isolation.
+fn wait_for_child_with_relay(child: Pid, relay: &PtyRelay<'_>) -> Result<WaitStatus> {
+    loop {
+        // Poll: real_tty (user input) + pty_master (child output)
+        let mut pfds = [
+            libc::pollfd {
+                fd: relay.real_tty_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: relay.master_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+
+        // SAFETY: pfds is a valid array on the stack
+        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 2, 200) };
+
+        if ret > 0 {
+            // User input -> PTY master (child's stdin)
+            if pfds[0].revents & libc::POLLIN != 0 {
+                pty_mux::relay_bytes(relay.real_tty_fd, relay.master_fd);
+            }
+            // Child output -> real terminal
+            if pfds[1].revents & libc::POLLIN != 0 {
+                pty_mux::relay_bytes(relay.master_fd, relay.real_tty_fd);
+            }
+        }
+
+        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => continue,
+            Ok(status) => {
+                // Drain any remaining output from PTY master
+                loop {
+                    if pty_mux::relay_bytes(relay.master_fd, relay.real_tty_fd) == 0 {
+                        break;
+                    }
+                }
+                return Ok(status);
+            }
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(e) => {
+                return Err(NonoError::SandboxInit(format!("waitpid() failed: {}", e)));
+            }
+        }
     }
 }
 
@@ -871,7 +1034,7 @@ fn get_thread_count() -> Result<usize> {
 
 /// Supervisor IPC event loop (non-Linux).
 ///
-/// Polls the supervisor socket for messages from the sandboxed child.
+/// Polls the supervisor socket and PTY relay fds for activity.
 /// Uses `poll(2)` with a 200ms timeout to periodically check child status.
 /// Returns the child's wait status and any denial records collected.
 #[cfg(not(target_os = "linux"))]
@@ -880,28 +1043,51 @@ fn run_supervisor_loop(
     sock: &mut SupervisorSocket,
     config: &SupervisorConfig<'_>,
     mut trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
+    relay: Option<&PtyRelay<'_>>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
     let _ = config.session_id;
     let sock_fd = sock.as_raw_fd();
     let mut denials = Vec::new();
     let mut seen_request_ids = HashSet::new();
 
-    loop {
-        let mut pfd = libc::pollfd {
-            fd: sock_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
+    // PTY relay fds: -1 when no relay (supervisor-only mode, no PTY mux)
+    let relay_tty_fd = relay.map_or(-1, |r| r.real_tty_fd);
+    let relay_master_fd = relay.map_or(-1, |r| r.master_fd);
 
-        // SAFETY: pfd is a valid pollfd struct on the stack, nfds=1 is correct.
-        let ret = unsafe { libc::poll(&mut pfd, 1, 200) };
+    loop {
+        // Poll: [0] supervisor socket, [1] real_tty (user input), [2] pty_master (child output)
+        let mut pfds = [
+            libc::pollfd {
+                fd: sock_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: relay_tty_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: relay_master_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+
+        // SAFETY: pfds is a valid array on the stack
+        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 3, 200) };
 
         if ret > 0 {
-            if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            // Supervisor socket
+            if pfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
                 debug!("Supervisor socket closed by child");
                 break;
             }
-            if pfd.revents & libc::POLLIN != 0 {
+            if pfds[0].revents & libc::POLLIN != 0 {
+                // Pause relay if active: restore terminal for interactive prompt
+                if let Some(r) = relay {
+                    let _ = r.real_term.restore();
+                }
                 match sock.recv_message() {
                     Ok(msg) => {
                         if let Err(e) = handle_supervisor_message(
@@ -921,6 +1107,19 @@ fn run_supervisor_loop(
                         break;
                     }
                 }
+                // Resume relay if active: re-enter raw mode
+                if let Some(r) = relay {
+                    let _ = r.real_term.enter_raw_mode();
+                }
+            }
+
+            // PTY relay: user input -> child
+            if relay.is_some() && pfds[1].revents & libc::POLLIN != 0 {
+                pty_mux::relay_bytes(relay_tty_fd, relay_master_fd);
+            }
+            // PTY relay: child output -> user
+            if relay.is_some() && pfds[2].revents & libc::POLLIN != 0 {
+                pty_mux::relay_bytes(relay_master_fd, relay_tty_fd);
             }
         } else if ret < 0 {
             let err = std::io::Error::last_os_error();
@@ -932,7 +1131,17 @@ fn run_supervisor_loop(
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => continue,
-            Ok(status) => return Ok((status, denials)),
+            Ok(status) => {
+                // Drain remaining child output
+                if relay.is_some() {
+                    loop {
+                        if pty_mux::relay_bytes(relay_master_fd, relay_tty_fd) == 0 {
+                            break;
+                        }
+                    }
+                }
+                return Ok((status, denials));
+            }
             Err(nix::errno::Errno::EINTR) => continue,
             Err(nix::errno::Errno::ECHILD) => {
                 warn!("Child already reaped in supervisor loop");
@@ -956,14 +1165,16 @@ fn run_supervisor_loop(
 /// Multiplexes between:
 /// - seccomp notify fd (openat/openat2 interceptions from the child)
 /// - supervisor socket (explicit capability requests from SDK clients)
+/// - PTY relay (real terminal <-> PTY master), when present
 /// - child process exit via non-blocking `waitpid()`
 ///
-/// Seccomp notifications for paths in the initial capability set are handled
-/// immediately (fast-path). Other paths go through the approval backend.
+/// When a seccomp notification requires interactive approval, the relay is
+/// paused (terminal restored to canonical mode) so the user can type a response.
+/// After the prompt, raw mode is re-entered and relay resumes.
 ///
-/// The initial_caps parameter contains (path, is_file) tuples:
-/// - For files (is_file=true): only exact path matches are allowed
-/// - For directories (is_file=false): subpath matches via starts_with are allowed
+/// The relay is optional: when `capability_elevation` is off, no PTY is
+/// allocated but the supervisor loop still runs for trust interception over
+/// the IPC socket.
 ///
 /// Returns the child's wait status and any denial records collected.
 #[cfg(target_os = "linux")]
@@ -974,43 +1185,55 @@ fn run_supervisor_loop(
     seccomp_fd: Option<&OwnedFd>,
     initial_caps: &[(std::path::PathBuf, bool)],
     mut trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
+    relay: Option<&PtyRelay<'_>>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
     let sock_fd = sock.as_raw_fd();
     let notify_raw_fd = seccomp_fd.map(|fd| fd.as_raw_fd());
     let mut rate_limiter = supervisor_linux::RateLimiter::new(10, 5);
     let mut denials = Vec::new();
     let mut seen_request_ids = HashSet::new();
-    // Track whether the supervisor socket is still alive. After exec,
-    // CLOEXEC closes the child's socket end, causing POLLHUP. We stop
-    // polling the dead socket but continue handling seccomp notifications.
     let mut sock_fd_active = true;
 
+    // PTY relay fds: -1 when no relay (supervisor-only mode, no PTY mux)
+    let relay_tty_fd = relay.map_or(-1, |r| r.real_tty_fd);
+    let relay_master_fd = relay.map_or(-1, |r| r.master_fd);
+
     loop {
-        // Build poll array: supervisor socket (if alive) + seccomp fd (if present)
-        let mut pfds: Vec<libc::pollfd> = vec![libc::pollfd {
-            // poll ignores negative fds, so set to -1 when socket is dead
-            fd: if sock_fd_active { sock_fd } else { -1 },
-            events: libc::POLLIN,
-            revents: 0,
-        }];
-        if let Some(nfd) = notify_raw_fd {
-            pfds.push(libc::pollfd {
-                fd: nfd,
+        // Build poll array:
+        // [0] supervisor socket (or -1 if dead)
+        // [1] seccomp notify fd (or -1 if absent)
+        // [2] real_tty (user input for relay, or -1 if no relay)
+        // [3] pty_master (child output for relay, or -1 if no relay)
+        let mut pfds = [
+            libc::pollfd {
+                fd: if sock_fd_active { sock_fd } else { -1 },
                 events: libc::POLLIN,
                 revents: 0,
-            });
-        }
+            },
+            libc::pollfd {
+                fd: notify_raw_fd.unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: relay_tty_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: relay_master_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
 
-        // SAFETY: pfds is a valid array of pollfd structs on the stack.
-        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 200) };
+        // SAFETY: pfds is a valid array on the stack
+        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 4, 200) };
 
         match ret.cmp(&0) {
             std::cmp::Ordering::Greater => {
-                // Check supervisor socket (only if still active)
+                // [0] Supervisor socket
                 if sock_fd_active && pfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                    // Supervisor socket closed (CLOEXEC closes child's end after exec).
-                    // If we have a seccomp notify fd, keep looping to handle
-                    // seccomp notifications -- just stop polling the dead socket.
                     if notify_raw_fd.is_some() {
                         debug!("Supervisor socket closed, continuing for seccomp notifications");
                         sock_fd_active = false;
@@ -1020,6 +1243,10 @@ fn run_supervisor_loop(
                     }
                 }
                 if sock_fd_active && pfds[0].revents & libc::POLLIN != 0 {
+                    // Pause relay if active: restore terminal for interactive prompt
+                    if let Some(r) = relay {
+                        let _ = r.real_term.restore();
+                    }
                     match sock.recv_message() {
                         Ok(msg) => {
                             if let Err(e) = handle_supervisor_message(
@@ -1037,16 +1264,28 @@ fn run_supervisor_loop(
                         Err(e) => {
                             debug!("Error receiving supervisor message: {}", e);
                             if notify_raw_fd.is_none() {
+                                if let Some(r) = relay {
+                                    let _ = r.real_term.enter_raw_mode();
+                                }
                                 break;
                             }
                             sock_fd_active = false;
                         }
                     }
+                    // Resume relay if active
+                    if let Some(r) = relay {
+                        let _ = r.real_term.enter_raw_mode();
+                    }
                 }
 
-                // Check seccomp notify fd (if present)
-                if pfds.len() > 1 && pfds[1].revents & libc::POLLIN != 0 {
+                // [1] Seccomp notify fd
+                if pfds[1].revents & libc::POLLIN != 0 {
                     if let Some(nfd) = notify_raw_fd {
+                        if let Some(r) = relay {
+                            if let Err(e) = r.real_term.restore() {
+                                warn!("Failed to restore terminal before seccomp prompt: {}", e);
+                            }
+                        }
                         if let Err(e) = supervisor_linux::handle_seccomp_notification(
                             nfd,
                             child,
@@ -1058,7 +1297,19 @@ fn run_supervisor_loop(
                         ) {
                             debug!("Error handling seccomp notification: {}", e);
                         }
+                        if let Some(r) = relay {
+                            let _ = r.real_term.enter_raw_mode();
+                        }
                     }
+                }
+
+                // [2] PTY relay: user input -> child
+                if relay.is_some() && pfds[2].revents & libc::POLLIN != 0 {
+                    pty_mux::relay_bytes(relay_tty_fd, relay_master_fd);
+                }
+                // [3] PTY relay: child output -> user
+                if relay.is_some() && pfds[3].revents & libc::POLLIN != 0 {
+                    pty_mux::relay_bytes(relay_master_fd, relay_tty_fd);
                 }
             }
             std::cmp::Ordering::Less => {
@@ -1073,7 +1324,17 @@ fn run_supervisor_loop(
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => continue,
-            Ok(status) => return Ok((status, denials)),
+            Ok(status) => {
+                // Drain remaining child output
+                if relay.is_some() {
+                    loop {
+                        if pty_mux::relay_bytes(relay_master_fd, relay_tty_fd) == 0 {
+                            break;
+                        }
+                    }
+                }
+                return Ok((status, denials));
+            }
             Err(nix::errno::Errno::EINTR) => continue,
             Err(nix::errno::Errno::ECHILD) => {
                 warn!("Child already reaped in supervisor loop");
@@ -1846,5 +2107,91 @@ mod tests {
             Some(ProcfsAccessContext::new(4242, Some(4343))),
         );
         assert!(result.is_ok());
+    }
+
+    /// Verify that the supervisor loop runs and exits cleanly without a PTY relay.
+    ///
+    /// This tests the `capability_elevation = false` code path where no PTY is
+    /// allocated but the supervisor loop must still service the IPC socket for
+    /// trust interception. The child fork closes its socket end and exits,
+    /// causing the loop to see POLLHUP and return.
+    #[test]
+    fn test_supervisor_loop_runs_without_pty_relay() {
+        use nono::NeverGrantChecker;
+        use std::os::unix::net::UnixStream;
+
+        struct DenyAll;
+        impl ApprovalBackend for DenyAll {
+            fn request_capability(
+                &self,
+                _req: &nono::supervisor::CapabilityRequest,
+            ) -> nono::Result<ApprovalDecision> {
+                Ok(ApprovalDecision::Denied {
+                    reason: "test".to_string(),
+                })
+            }
+            fn backend_name(&self) -> &str {
+                "deny-all-test"
+            }
+        }
+
+        let (parent_stream, child_stream) = UnixStream::pair()
+            .map_err(|e| format!("socketpair: {e}"))
+            .expect("socketpair failed in test");
+
+        let never_grant = NeverGrantChecker::new(&[])
+            .map_err(|e| format!("never_grant: {e}"))
+            .expect("NeverGrantChecker::new failed in test");
+        let backend = DenyAll;
+        let sup_cfg = SupervisorConfig {
+            never_grant: &never_grant,
+            approval_backend: &backend,
+            session_id: "test-session",
+        };
+
+        // Fork a child that closes its socket end and exits immediately.
+        // SAFETY: We are in a test; the child does minimal work and _exit()s.
+        match unsafe { fork() } {
+            Ok(ForkResult::Child) => {
+                drop(child_stream);
+                drop(parent_stream);
+                unsafe { libc::_exit(42) };
+            }
+            Ok(ForkResult::Parent { child }) => {
+                drop(child_stream);
+                let mut sock = SupervisorSocket::from_stream(parent_stream);
+
+                // Run supervisor loop with relay: None (the capability_elevation=false path).
+                // It should poll the socket, see POLLHUP when child exits, and return.
+                #[cfg(target_os = "linux")]
+                let result = run_supervisor_loop(
+                    child,
+                    &mut sock,
+                    &sup_cfg,
+                    None, // no seccomp
+                    &[],  // no initial caps
+                    None, // no trust interceptor
+                    None, // no PTY relay — this is what we're testing
+                );
+
+                #[cfg(not(target_os = "linux"))]
+                let result = run_supervisor_loop(
+                    child, &mut sock, &sup_cfg, None, // no trust interceptor
+                    None, // no PTY relay
+                );
+
+                let (status, denials) = result
+                    .map_err(|e| format!("supervisor loop: {e}"))
+                    .expect("supervisor loop failed");
+                assert!(denials.is_empty(), "no denials expected");
+
+                // Child exited with code 42
+                match status {
+                    WaitStatus::Exited(_, code) => assert_eq!(code, 42),
+                    other => panic!("unexpected wait status: {other:?}"),
+                }
+            }
+            Err(e) => panic!("fork failed: {e}"),
+        }
     }
 }
