@@ -119,17 +119,10 @@ pub fn check_blocked_command(
 /// bypass attacks like `~/.sshevil` matching `~/.ssh`.
 pub fn check_sensitive_path(path_str: &str) -> Result<Option<String>> {
     let home = validated_home()?;
-    let expanded = if path_str.starts_with("~/") {
-        path_str.replacen("~", &home, 1)
-    } else if path_str == "~" {
-        home.clone()
-    } else {
-        path_str.to_string()
-    };
-    let expanded_path = Path::new(&expanded);
+    let expanded_path = policy::expand_home_path(path_str, &home);
 
     let loaded_policy = policy::load_embedded_policy()?;
-    let sensitive = policy::get_sensitive_paths(&loaded_policy)?;
+    let sensitive = policy::get_sensitive_paths_with_home(&loaded_policy, &home)?;
 
     for (sensitive_expanded, description) in &sensitive {
         let sensitive_path = Path::new(sensitive_expanded);
@@ -202,7 +195,7 @@ mod tests {
         assert!(check_sensitive_path("~/.aws")
             .expect("should not fail")
             .is_some());
-        assert!(check_sensitive_path("~/.bashrc")
+        assert!(check_sensitive_path("~/.config/gcloud")
             .expect("should not fail")
             .is_some());
         // /tmp is a system path, not sensitive
