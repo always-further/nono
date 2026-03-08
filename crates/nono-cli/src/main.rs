@@ -2001,6 +2001,26 @@ mod tests {
     }
 
     #[test]
+    fn test_check_sensitive_path() {
+        assert!(config::check_sensitive_path("~/.ssh")
+            .expect("policy must load")
+            .is_some());
+        assert!(config::check_sensitive_path("~/.aws")
+            .expect("policy must load")
+            .is_some());
+        assert!(config::check_sensitive_path("~/.config/gcloud")
+            .expect("policy must load")
+            .is_some());
+
+        assert!(config::check_sensitive_path("/tmp")
+            .expect("policy must load")
+            .is_none());
+        assert!(config::check_sensitive_path("~/Documents")
+            .expect("policy must load")
+            .is_none());
+    }
+
+    #[test]
     fn test_resolve_effective_proxy_settings_net_allow_clears_profile_proxy_state() {
         let args = SandboxArgs {
             net_allow: true,

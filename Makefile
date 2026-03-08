@@ -6,7 +6,7 @@
 #   make check        Run clippy and format check
 #   make release      Build release binaries
 
-.PHONY: all build build-lib build-cli build-ffi test test-lib test-cli test-ffi check clippy fmt clean install audit help
+.PHONY: all build build-lib build-cli build-ffi test test-lib test-cli test-ffi test-linux-container check clippy fmt clean install audit help
 
 # Default target
 all: build
@@ -46,6 +46,9 @@ test-ffi:
 
 test-doc:
 	cargo test --doc
+
+test-linux-container:
+	./scripts/test-linux-container.sh
 
 # Check targets (lint + format)
 check: clippy fmt-check
@@ -119,6 +122,7 @@ help:
 	@echo "  make test-cli       Run CLI tests only"
 	@echo "  make test-ffi       Run C FFI tests only"
 	@echo "  make test-doc       Run doc tests only"
+	@echo "  make test-linux-container  Run workspace tests in cached Linux Docker image"
 	@echo ""
 	@echo "Check:"
 	@echo "  make check          Run clippy and format check"
