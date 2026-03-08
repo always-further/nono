@@ -1146,7 +1146,7 @@ mod tests {
             .allow
             .as_ref()
             .expect("vscode_macos allow missing")
-            .write;
+            .readwrite;
         assert!(vscode_macos_paths.contains(&"$HOME/.vscode".to_string()));
         assert!(vscode_macos_paths.contains(&"$HOME/Library/Application Support/Code".to_string()));
 
@@ -1159,7 +1159,7 @@ mod tests {
             .allow
             .as_ref()
             .expect("vscode_linux allow missing")
-            .write;
+            .readwrite;
         assert!(vscode_linux_paths.contains(&"$HOME/.vscode".to_string()));
         assert!(vscode_linux_paths.contains(&"$HOME/.config/Code".to_string()));
     }

@@ -399,7 +399,7 @@
       "description": "Visual Studio Code configuration and extension directories for macOS",
       "platform": "macos",
       "allow": {
-        "write": [
+        "readwrite": [
           "$HOME/.vscode",
           "$HOME/Library/Application Support/Code"
         ]
@@ -409,7 +409,7 @@
       "description": "Visual Studio Code configuration and extension directories for Linux",
       "platform": "linux",
       "allow": {
-        "write": [
+        "readwrite": [
           "$HOME/.vscode",
           "$HOME/.config/Code"
         ]
