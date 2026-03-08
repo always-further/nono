@@ -368,6 +368,15 @@
         ]
       }
     },
+    "opencode_linux": {
+      "description": "OpenCode binary directory (Landlock requires directory read to execute binaries)",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "~/.opencode/bin"
+        ]
+      }
+    },
     "python_runtime": {
       "description": "Python runtime paths",
       "allow": {
@@ -618,7 +627,7 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "unlink_protection"],
+        "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "opencode_linux", "unlink_protection"],
         "signal_mode": "isolated"
       },
       "trust_groups": [],

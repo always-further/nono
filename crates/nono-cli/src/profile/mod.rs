@@ -1057,6 +1057,15 @@ pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
 
     let home = config::validated_home()?;
 
+    // Expand ~/... to $HOME/... before other substitutions
+    let path = if let Some(rest) = path.strip_prefix("~/") {
+        format!("{}/{}", home, rest)
+    } else if path == "~" {
+        home.clone()
+    } else {
+        path.to_string()
+    };
+
     let expanded = path.replace("$WORKDIR", &workdir.to_string_lossy());
 
     // Expand $TMPDIR and $UID
