@@ -319,6 +319,15 @@
         ]
       }
     },
+    "claude_code_keychain_macos": {
+      "description": "Claude Code access to the macOS login keychain database",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "$HOME/Library/Keychains/login.keychain-db"
+        ]
+      }
+    },
     "user_tools": {
       "description": "User-local executables, .desktop files, man pages, and shell completions",
       "allow": {
@@ -484,7 +493,7 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "python_runtime", "vscode", "unlink_protection"],
+        "groups": ["user_caches_macos", "claude_code_keychain_macos", "node_runtime", "rust_runtime", "python_runtime", "vscode", "unlink_protection"],
         "signal_mode": "isolated"
       },
       "trust_groups": [],
@@ -492,7 +501,7 @@
         "allow": ["$HOME/.claude"],
         "read": ["$HOME/.local/share/claude"],
         "allow_file": ["$HOME/.claude.json", "$HOME/.claude.json.lock"],
-        "read_file": ["$HOME/Library/Keychains/login.keychain-db", "$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
+        "read_file": ["$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
       },
       "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },

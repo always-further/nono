@@ -1955,7 +1955,7 @@ mod tests {
         assert!(config::check_sensitive_path("~/.aws")
             .expect("policy must load")
             .is_some());
-        assert!(config::check_sensitive_path("~/.bashrc")
+        assert!(config::check_sensitive_path("~/.config/gcloud")
             .expect("policy must load")
             .is_some());
 
