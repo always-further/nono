@@ -3,7 +3,7 @@ title: Agent Instruction Attestation
 description: Cryptographic verification of AI agent instruction files
 ---
 
-AI agent instruction files (`SKILLS.md`, `CLAUDE.md`, `AGENT.MD`) are natural language files, formatted in markdown - that an LLM will use as a context source for orientation on the project, its structure, and how to execute commands. Because they are natural language based, they are vulnerable to prompt injection attacks - an attacker could modify an instruction file to trick the agent into executing harmful commands.
+AI agent instruction files (`SKILLS.md`, `CLAUDE.md`, `AGENTS.md`, `AGENT.MD`) are natural language files, formatted in markdown - that an LLM will use as a context source for orientation on the project, its structure, and how to execute commands. Because they are natural language based, they are vulnerable to prompt injection attacks - an attacker could modify an instruction file to trick the agent into executing harmful commands.
 
 One of the areas where Large Language Models (LLMs) are most vulnerable to prompt injection is in reading their own instruction files. Unlike traditional software, LLM's do not differentiate a control plane vs data plane - instruction and data are loaded into the same channel: the prompt. This means that if an attacker can modify an instruction file, they can inject malicious instructions that the LLM will execute with the same privileges as the original file.
 
@@ -497,7 +497,7 @@ Bundles are checked into version control. A missing bundle for a file that match
 
 Nono identifies instruction files by matching against configurable file name patterns (e.g., `SKILLS*`, `CLAUDE*`, `AGENT*`, `.claude/**/*.md`). This is a deliberate design choice rooted in how agent frameworks work in practice.
 
-Agent clients are purpose-built to discover and ingest files with these naming conventions. Claude Code reads `CLAUDE.md` and files under `.claude/`. Other frameworks look for `SKILLS.md`, `AGENT.MD`, or similar well-known names. The agent's system prompt or client code directs it to seek out these specific files and treat their contents as trusted instructions. An attacker exploiting this vector will name their payload to match the conventions the agent is already looking for -- there is no advantage to using an arbitrary filename, because the agent would not ingest it as instructions.
+Agent clients are purpose-built to discover and ingest files with these naming conventions. Claude Code reads `CLAUDE.md` and files under `.claude/`. Other frameworks look for `SKILLS.md`, `AGENT.MD`, `AGENTS.md`, or similar well-known names. The agent's system prompt or client code directs it to seek out these specific files and treat their contents as trusted instructions. An attacker exploiting this vector will name their payload to match the conventions the agent is already looking for -- there is no advantage to using an arbitrary filename, because the agent would not ingest it as instructions.
 
 Pattern matching is also what makes the system practical. It avoids requiring every file in the working directory to be signed, and it aligns the verification boundary with the actual attack surface: the files the agent will treat as authoritative.
 

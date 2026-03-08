@@ -8,7 +8,7 @@ nono wraps any command with an OS-level sandbox. You specify what the command is
 ## Your First Sandbox
 
 ```bash
-nono run --allow-cwd -- <COMMAND> [ARGS...]
+nono run --allow . -- <COMMAND> [ARGS...]
 ```
 
 <Note>
@@ -17,7 +17,7 @@ The `--` separator is recommended. Everything after it is the command to run.
 
 ```bash
 # Grant read+write access to current directory, run claude
-nono run --allow-cwd -- claude
+nono run --allow . -- claude
 ```
 
 Or use a built-in profile that bundles the right permissions for a known tool:
@@ -65,20 +65,20 @@ nono run --read-file ./config.toml -- command
 Network is **allowed by default**. Use `--net-block` to disable outbound connections:
 
 ```bash
-nono run --allow-cwd --net-block -- cargo build
+nono run --allow . --net-block -- cargo build
 ```
 
-For granular control, use `--network-profile` for host-level filtering or `--allow-port` for localhost IPC between sandboxes:
+For granular control, use `--network-profile` for host-level filtering, `--net-allow` to override proxy filtering for one session, or `--allow-port` for localhost IPC between sandboxes:
 
 ```bash
 # Host-level filtering via proxy
-nono run --allow-cwd --network-profile claude-code -- claude
+nono run --allow . --network-profile claude-code -- my-agent
 
 # Keep a built-in profile but temporarily disable its proxy filtering
 nono run --profile claude-code --net-allow -- claude
 
 # Localhost IPC (e.g., MCP server on port 3000)
-nono run --net-block --allow-port 3000 --allow-cwd -- my-agent
+nono run --net-block --allow-port 3000 --allow . -- my-agent
 ```
 
 See [Network Filtering](/cli/features/network-proxy) and [CLI Reference](/cli/usage/flags) for details.
