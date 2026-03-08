@@ -34,6 +34,11 @@ echo "--- Profile Dry Run ---"
 expect_success "claude-code profile dry-run exits 0" \
     "$NONO_BIN" run --profile claude-code --dry-run -- echo "test"
 
+if skip_unless_linux "claude-code profile dry-run omits macOS keychain warning on Linux"; then
+    expect_output_not_contains "claude-code profile dry-run omits macOS keychain warning on Linux" "login.keychain-db" \
+        "$NONO_BIN" run --profile claude-code --dry-run -- echo "test"
+fi
+
 expect_success "opencode profile dry-run exits 0" \
     "$NONO_BIN" run --profile opencode --dry-run -- echo "test"
 
