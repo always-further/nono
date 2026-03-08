@@ -1183,9 +1183,11 @@ mod tests {
             assert_eq!(resolved.names.len(), 2);
             assert!(resolved.names.contains(&"claude_code_macos".to_string()));
             assert!(resolved.names.contains(&"vscode_macos".to_string()));
-        } else {
+        } else if cfg!(target_os = "linux") {
             assert_eq!(resolved.names.len(), 1);
             assert!(resolved.names.contains(&"vscode_linux".to_string()));
+        } else {
+            assert_eq!(resolved.names.len(), 0);
         }
     }
 
