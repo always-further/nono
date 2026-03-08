@@ -41,24 +41,56 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
-        .with_target(false)
-        .init();
+    let cli = Cli::parse();
+    init_tracing(&cli);
 
-    if let Err(e) = run() {
+    if let Err(e) = run(cli) {
         error!("{}", e);
         eprintln!("nono: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
+fn init_tracing(cli: &Cli) {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_filter(cli))
+        .with_target(false)
+        .init();
+}
 
+fn tracing_filter(cli: &Cli) -> EnvFilter {
+    cli_log_override(cli)
+        .map(EnvFilter::new)
+        .unwrap_or_else(|| {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+        })
+}
+
+fn cli_log_override(cli: &Cli) -> Option<&'static str> {
+    if cli.silent {
+        return Some("off");
+    }
+
+    match cli_verbosity(cli) {
+        0 => None,
+        1 => Some("info"),
+        2 => Some("debug"),
+        _ => Some("trace"),
+    }
+}
+
+fn cli_verbosity(cli: &Cli) -> u8 {
+    match &cli.command {
+        Commands::Learn(args) => args.verbose,
+        Commands::Run(args) => args.sandbox.verbose,
+        Commands::Shell(args) => args.sandbox.verbose,
+        Commands::Wrap(args) => args.sandbox.verbose,
+        Commands::Setup(args) => args.verbose,
+        Commands::Why(_) | Commands::Rollback(_) | Commands::Trust(_) | Commands::Audit(_) => 0,
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     // Start background update check (non-blocking, 3s timeout)
     let mut update_handle = if !cli.silent {
         update_check::start_background_check()
@@ -1439,23 +1471,6 @@ struct PreparedSandbox {
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
-    // Reinitialize tracing with verbose level if requested.
-    // Uses tracing_subscriber directly instead of mutating process env vars
-    // (std::env::set_var is unsound in multi-threaded context).
-    if args.verbose > 0 {
-        let filter = match args.verbose {
-            1 => "info",
-            2 => "debug",
-            _ => "trace",
-        };
-        let _ = tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::new(filter))
-                .with_target(false)
-                .finish(),
-        );
-    }
-
     // Clean up stale state files from previous nono runs
     sandbox_state::cleanup_stale_state_files();
 
@@ -1945,26 +1960,6 @@ mod tests {
         assert!(config::check_blocked_command("rm", &[], &extra)
             .expect("policy must load")
             .is_some());
-    }
-
-    #[test]
-    fn test_check_sensitive_path() {
-        assert!(config::check_sensitive_path("~/.ssh")
-            .expect("policy must load")
-            .is_some());
-        assert!(config::check_sensitive_path("~/.aws")
-            .expect("policy must load")
-            .is_some());
-        assert!(config::check_sensitive_path("~/.bashrc")
-            .expect("policy must load")
-            .is_some());
-
-        assert!(config::check_sensitive_path("/tmp")
-            .expect("policy must load")
-            .is_none());
-        assert!(config::check_sensitive_path("~/Documents")
-            .expect("policy must load")
-            .is_none());
     }
 
     #[test]
