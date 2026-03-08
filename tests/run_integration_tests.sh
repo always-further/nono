@@ -72,6 +72,7 @@ SUITES=(
     "test_policy_queries.sh:Policy Queries"
     "test_shell.sh:Shell"
     "test_profiles.sh:Profiles"
+    "test_client_startup.sh:Client Startup"
     "test_env_sanitization.sh:Env Sanitization"
     "test_exec_strategy.sh:Exec Strategy"
     "test_trust_cli.sh:Trust CLI"
