@@ -113,6 +113,7 @@ The `network` section controls network access and credential injection:
     "block": false,
     "network_profile": "claude-code",
     "proxy_allow": ["my-internal-api.example.com"],
+    "port_allow": [3000],
     "proxy_credentials": ["openai", "anthropic"],
     "custom_credentials": {
       "telegram": {
@@ -129,8 +130,9 @@ The `network` section controls network access and credential injection:
 | Field | Description |
 |-------|-------------|
 | `block` | Block all network access (default: `false`) |
-| `network_profile` | Network profile name for host filtering (e.g., `minimal`, `claude-code`, `enterprise`) |
+| `network_profile` | Network profile name for host filtering (e.g., `minimal`, `claude-code`, `enterprise`). Set to `null` in a child profile to clear an inherited value. |
 | `proxy_allow` | Additional hosts to allow through the proxy |
+| `port_allow` | Localhost TCP ports to allow bidirectional IPC (equivalent to `--allow-port`) |
 | `proxy_credentials` | Credential services to enable via reverse proxy (e.g., `openai`, `anthropic`) |
 | `custom_credentials` | Custom credential service definitions for APIs not in the built-in list |
 
@@ -165,9 +167,9 @@ The `hooks` section defines hooks that nono will automatically install for speci
 
 Hook installation is idempotent - nono only installs or updates when needed.
 
-### Interactive Mode
+### Interactive Mode (deprecated)
 
-The `interactive` field (default: `false`) indicates whether the application has an interactive terminal UI that requires TTY preservation:
+The `interactive` field is parsed for backward compatibility but ignored. Supervised mode (the default) preserves the TTY, making this field unnecessary.
 
 ```json
 {
@@ -175,8 +177,6 @@ The `interactive` field (default: `false`) indicates whether the application has
   "interactive": true
 }
 ```
-
-When `true`, nono uses direct exec mode (equivalent to `--exec` flag), which preserves the terminal for apps like Claude Code, vim, or htop.
 
 ### Rollback Exclusions
 
@@ -252,8 +252,21 @@ CLI flags always take precedence over profile settings:
 # Use claude-code profile but block network
 nono run --profile claude-code --net-block -- claude
 
+# Use claude-code profile but temporarily allow unrestricted network
+nono run --profile claude-code --net-allow -- claude
+
 # Add extra directory access
 nono run --profile claude-code --allow ~/other-project -- claude
+```
+
+To keep a base profile but clear an inherited network profile, set `network.network_profile` to `null` in the child:
+
+```json
+{
+  "meta": { "name": "claude-code-netopen" },
+  "extends": "claude-code",
+  "network": { "network_profile": null }
+}
 ```
 
 You can also create a user profile with the same name to override a built-in profile entirely.
@@ -388,7 +401,7 @@ nono run --profile claude-code -- claude
 
 **Network:** Allowed
 
-**Special:** `interactive = true` (preserves TTY), auto-installs Claude Code hooks
+**Special:** Auto-installs Claude Code hooks
 
 ### opencode
 

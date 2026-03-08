@@ -425,6 +425,9 @@
           "su",
           "doas",
           "pip",
+          "kill",
+          "killall",
+          "pkill",
           "shutdown",
           "reboot",
           "halt",
@@ -481,7 +484,8 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "python_runtime", "vscode", "unlink_protection"]
+        "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "python_runtime", "vscode", "unlink_protection"],
+        "signal_mode": "isolated"
       },
       "trust_groups": [],
       "filesystem": {
@@ -513,7 +517,8 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["node_runtime"]
+        "groups": ["node_runtime"],
+        "signal_mode": "isolated"
       },
       "trust_groups": [],
       "filesystem": {
@@ -539,7 +544,8 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "node_runtime", "unlink_protection"]
+        "groups": ["user_caches_macos", "node_runtime", "unlink_protection"],
+        "signal_mode": "isolated"
       },
       "trust_groups": [],
       "filesystem": {
@@ -564,7 +570,8 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["python_runtime"]
+        "groups": ["python_runtime"],
+        "signal_mode": "isolated"
       },
       "trust_groups": [],
       "filesystem": {},
@@ -580,7 +587,8 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["node_runtime"]
+        "groups": ["node_runtime"],
+        "signal_mode": "isolated"
       },
       "trust_groups": [],
       "filesystem": {},
@@ -596,7 +604,8 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["go_runtime"]
+        "groups": ["go_runtime"],
+        "signal_mode": "isolated"
       },
       "trust_groups": [],
       "filesystem": {},
@@ -612,7 +621,8 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["rust_runtime"]
+        "groups": ["rust_runtime"],
+        "signal_mode": "isolated"
       },
       "trust_groups": [],
       "filesystem": {},

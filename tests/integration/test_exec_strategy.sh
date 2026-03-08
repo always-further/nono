@@ -1,6 +1,6 @@
 #!/bin/bash
 # Execution Strategy Tests
-# Tests Monitor (default), Direct (--exec), signal forwarding, and diagnostic footer
+# Tests Supervised (default), Direct (nono wrap), signal forwarding, and diagnostic footer
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/test_helpers.sh"
@@ -23,16 +23,16 @@ echo "Test directory: $TMPDIR"
 echo ""
 
 # =============================================================================
-# Monitor Mode (default)
+# Supervised Mode (default)
 # =============================================================================
 
-echo "--- Monitor Mode (default) ---"
+echo "--- Supervised Mode (default) ---"
 
 expect_success "default mode runs command successfully" \
-    "$NONO_BIN" run --allow "$TMPDIR" -- echo "monitor mode works"
+    "$NONO_BIN" run --allow "$TMPDIR" -- echo "supervised mode works"
 
-expect_output_contains "default mode output contains command output" "monitor mode works" \
-    "$NONO_BIN" run --allow "$TMPDIR" -- echo "monitor mode works"
+expect_output_contains "default mode output contains command output" "supervised mode works" \
+    "$NONO_BIN" run --allow "$TMPDIR" -- echo "supervised mode works"
 
 # Exit code preservation
 run_test "default mode preserves exit code 0" 0 \
@@ -45,23 +45,23 @@ run_test "default mode preserves exit code 42" 42 \
     "$NONO_BIN" run --allow "$TMPDIR" -- sh -c "exit 42"
 
 # =============================================================================
-# Direct Mode (--exec)
+# Direct Mode (nono wrap)
 # =============================================================================
 
 echo ""
-echo "--- Direct Mode (--exec) ---"
+echo "--- Direct Mode (nono wrap) ---"
 
 expect_success "direct mode runs command successfully" \
-    "$NONO_BIN" run --exec --allow "$TMPDIR" -- echo "direct mode works"
+    "$NONO_BIN" wrap --allow "$TMPDIR" -- echo "direct mode works"
 
 expect_output_contains "direct mode output contains command output" "direct mode works" \
-    "$NONO_BIN" run --exec --allow "$TMPDIR" -- echo "direct mode works"
+    "$NONO_BIN" wrap --allow "$TMPDIR" -- echo "direct mode works"
 
 run_test "direct mode preserves exit code 0" 0 \
-    "$NONO_BIN" run --exec --allow "$TMPDIR" -- true
+    "$NONO_BIN" wrap --allow "$TMPDIR" -- true
 
 run_test "direct mode preserves exit code 1" 1 \
-    "$NONO_BIN" run --exec --allow "$TMPDIR" -- false
+    "$NONO_BIN" wrap --allow "$TMPDIR" -- false
 
 # =============================================================================
 # Signal Forwarding
@@ -70,8 +70,8 @@ run_test "direct mode preserves exit code 1" 1 \
 echo ""
 echo "--- Signal Forwarding ---"
 
-# Test SIGTERM forwarding: use timeout to cap the entire test at 10 seconds.
-# Start nono with a long sleep, send SIGTERM, verify it exits promptly.
+# Test SIGTERM forwarding: supervised mode (default) keeps an unsandboxed parent
+# that can forward signals to the sandboxed child.
 TESTS_RUN=$((TESTS_RUN + 1))
 
 SIGNAL_RESULT=$(

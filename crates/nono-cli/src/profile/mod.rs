@@ -7,7 +7,7 @@
 mod builtin;
 
 use nono::{NonoError, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -424,6 +424,51 @@ fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
     Ok(())
 }
 
+/// Three-state value used for inheritable profile fields.
+///
+/// - `Inherit`: field was absent in the child profile, so keep the base value
+/// - `Clear`: field was explicitly set to `null`, so remove the base value
+/// - `Set(T)`: field was provided with a concrete override value
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum InheritableValue<T> {
+    #[default]
+    Inherit,
+    Clear,
+    Set(T),
+}
+
+impl<T> InheritableValue<T> {
+    fn merge(self, base: Self) -> Self {
+        match self {
+            Self::Inherit => base,
+            Self::Clear => Self::Clear,
+            Self::Set(value) => Self::Set(value),
+        }
+    }
+
+    pub fn as_ref(&self) -> Option<&T> {
+        match self {
+            Self::Set(value) => Some(value),
+            Self::Inherit | Self::Clear => None,
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for InheritableValue<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Option::<T>::deserialize(deserializer)? {
+            Some(value) => Ok(Self::Set(value)),
+            None => Ok(Self::Clear),
+        }
+    }
+}
+
 /// Network configuration in a profile
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NetworkConfig {
@@ -432,14 +477,21 @@ pub struct NetworkConfig {
     pub block: bool,
     /// Network proxy profile name (from network-policy.json).
     /// When set, outbound traffic is filtered through the proxy.
+    ///
+    /// `null` explicitly clears an inherited profile value, while an absent
+    /// field inherits the base profile's value.
     #[serde(default)]
-    pub network_profile: Option<String>,
+    pub network_profile: InheritableValue<String>,
     /// Additional hosts to allow through the proxy (on top of profile hosts)
     #[serde(default)]
     pub proxy_allow: Vec<String>,
     /// Credential services to enable via reverse proxy
     #[serde(default)]
     pub proxy_credentials: Vec<String>,
+    /// Localhost TCP ports to allow bidirectional IPC (connect + bind).
+    /// Equivalent to `--allow-port` CLI flag.
+    #[serde(default)]
+    pub port_allow: Vec<u16>,
     /// Custom credential definitions for services not in network-policy.json.
     /// Keys are service names (used with --proxy-credential), values define
     /// how to route and inject credentials for that service.
@@ -448,9 +500,13 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
+    pub fn resolved_network_profile(&self) -> Option<&str> {
+        self.network_profile.as_ref().map(String::as_str)
+    }
+
     /// Whether any profile setting requires proxy mode activation.
     pub fn has_proxy_flags(&self) -> bool {
-        self.network_profile.is_some()
+        self.resolved_network_profile().is_some()
             || !self.proxy_allow.is_empty()
             || !self.proxy_credentials.is_empty()
     }
@@ -499,6 +555,28 @@ pub struct HooksConfig {
 /// Controls whether and how the current working directory is automatically
 /// shared with the sandboxed process. This is profile-driven so each
 /// application can declare its own CWD requirements.
+/// Signal isolation mode as specified in a profile.
+///
+/// Maps to `nono::SignalMode` when building the `CapabilitySet`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileSignalMode {
+    /// Signals restricted to the current process only
+    Isolated,
+    /// Signals allowed to any process
+    #[serde(alias = "allow_all")]
+    AllowAll,
+}
+
+impl From<ProfileSignalMode> for nono::SignalMode {
+    fn from(val: ProfileSignalMode) -> Self {
+        match val {
+            ProfileSignalMode::Isolated => nono::SignalMode::Isolated,
+            ProfileSignalMode::AllowAll => nono::SignalMode::AllowAll,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkdirAccess {
@@ -537,6 +615,11 @@ pub struct SecurityConfig {
     /// Applied before CLI `--allow-command` overrides.
     #[serde(default)]
     pub allowed_commands: Vec<String>,
+    /// Signal isolation mode. Controls whether the sandboxed process can signal
+    /// other processes. When `None`, inherits from the base profile during merge
+    /// (defaults to `Isolated` if no base sets it).
+    #[serde(default)]
+    pub signal_mode: Option<ProfileSignalMode>,
 }
 
 /// Rollback snapshot configuration in a profile
@@ -579,7 +662,8 @@ pub struct Profile {
     pub hooks: HooksConfig,
     #[serde(default, alias = "undo")]
     pub rollback: RollbackConfig,
-    /// App has interactive UI that needs TTY preserved (implies --exec mode)
+    /// Deprecated: Parsed for backward compatibility but ignored.
+    /// Supervised mode preserves TTY by default, making this unnecessary.
     #[serde(default)]
     pub interactive: bool,
 }
@@ -768,6 +852,7 @@ fn load_base_profile_raw(name: &str) -> Result<Profile> {
                 groups: def.security.groups.clone(),
                 trust_groups: def.trust_groups.clone(),
                 allowed_commands: def.security.allowed_commands.clone(),
+                signal_mode: def.security.signal_mode,
             },
             filesystem: def.filesystem.clone(),
             network: def.network.clone(),
@@ -800,6 +885,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &base.security.allowed_commands,
                 &child.security.allowed_commands,
             ),
+            signal_mode: child.security.signal_mode.or(base.security.signal_mode),
         },
         filesystem: FilesystemConfig {
             allow: dedup_append(&base.filesystem.allow, &child.filesystem.allow),
@@ -814,8 +900,9 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             network_profile: child
                 .network
                 .network_profile
-                .or(base.network.network_profile),
+                .merge(base.network.network_profile),
             proxy_allow: dedup_append(&base.network.proxy_allow, &child.network.proxy_allow),
+            port_allow: dedup_append(&base.network.port_allow, &child.network.port_allow),
             proxy_credentials: dedup_append(
                 &base.network.proxy_credentials,
                 &child.network.proxy_credentials,
@@ -863,7 +950,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
 }
 
 /// Append child items after base items, deduplicating while preserving order.
-fn dedup_append(base: &[String], child: &[String]) -> Vec<String> {
+fn dedup_append<T: Eq + std::hash::Hash + Clone>(base: &[T], child: &[T]) -> Vec<T> {
     let mut seen = std::collections::HashSet::with_capacity(base.len() + child.len());
     let mut result = Vec::with_capacity(base.len() + child.len());
     for item in base.iter().chain(child.iter()) {
@@ -1798,8 +1885,9 @@ mod tests {
             },
             network: NetworkConfig {
                 block: false,
-                network_profile: Some("base-net".to_string()),
+                network_profile: InheritableValue::Set("base-net".to_string()),
                 proxy_allow: vec!["base.example.com".to_string()],
+                port_allow: vec![3000],
                 proxy_credentials: vec!["base_cred".to_string()],
                 custom_credentials: HashMap::new(),
             },
@@ -1848,8 +1936,9 @@ mod tests {
             },
             network: NetworkConfig {
                 block: false,
-                network_profile: None,
+                network_profile: InheritableValue::Inherit,
                 proxy_allow: vec!["child.example.com".to_string()],
+                port_allow: vec![3000, 5000],
                 proxy_credentials: vec![],
                 custom_credentials: HashMap::new(),
             },
@@ -1886,6 +1975,13 @@ mod tests {
             .filesystem
             .read_file
             .contains(&"/base/file.txt".to_string()));
+    }
+
+    #[test]
+    fn test_merge_profiles_deduplicates_port_allow() {
+        let merged = merge_profiles(base_profile(), child_profile());
+        // base has [3000], child has [3000, 5000] — merged should dedup to [3000, 5000]
+        assert_eq!(merged.network.port_allow, vec![3000, 5000]);
     }
 
     #[test]
@@ -1966,21 +2062,28 @@ mod tests {
 
     #[test]
     fn test_merge_profiles_network_profile_override() {
-        let base = base_profile(); // has network_profile = Some("base-net")
-        let child = child_profile(); // has network_profile = None
+        let base = base_profile(); // has network_profile = Set("base-net")
+        let child = child_profile(); // has network_profile = Inherit
 
-        // Child None -> inherit base
+        // Child Inherit -> inherit base
         let merged = merge_profiles(base.clone(), child);
-        assert_eq!(merged.network.network_profile, Some("base-net".to_string()));
+        assert_eq!(merged.network.resolved_network_profile(), Some("base-net"));
 
         // Child has explicit value -> override
         let mut overriding_child = child_profile();
-        overriding_child.network.network_profile = Some("child-net".to_string());
+        overriding_child.network.network_profile = InheritableValue::Set("child-net".to_string());
         let merged = merge_profiles(base, overriding_child);
-        assert_eq!(
-            merged.network.network_profile,
-            Some("child-net".to_string())
-        );
+        assert_eq!(merged.network.resolved_network_profile(), Some("child-net"));
+    }
+
+    #[test]
+    fn test_merge_profiles_network_profile_null_clears_base() {
+        let base = base_profile();
+        let mut child = child_profile();
+        child.network.network_profile = InheritableValue::Clear;
+
+        let merged = merge_profiles(base, child);
+        assert_eq!(merged.network.resolved_network_profile(), None);
     }
 
     #[test]
@@ -2342,7 +2445,10 @@ mod tests {
         // Should inherit base workdir
         assert_eq!(merged.workdir.access, base.workdir.access);
         // Should inherit base network settings
-        assert_eq!(merged.network.network_profile, base.network.network_profile);
+        assert_eq!(
+            merged.network.resolved_network_profile(),
+            base.network.resolved_network_profile()
+        );
         assert_eq!(merged.network.proxy_allow, base.network.proxy_allow);
         // Should inherit rollback config
         assert_eq!(
@@ -2442,5 +2548,60 @@ mod tests {
         let json_str = r#"{ "meta": { "name": "no-ext" } }"#;
         let profile: Profile = serde_json::from_str(json_str).expect("parse");
         assert!(profile.extends.is_none());
+    }
+
+    #[test]
+    fn test_network_profile_deserialization_distinguishes_absent_null_and_value() {
+        let absent: Profile = serde_json::from_str(r#"{ "meta": { "name": "absent" } }"#)
+            .expect("parse absent profile");
+        assert_eq!(absent.network.network_profile, InheritableValue::Inherit);
+
+        let cleared: Profile = serde_json::from_str(
+            r#"{
+                "meta": { "name": "cleared" },
+                "network": { "network_profile": null }
+            }"#,
+        )
+        .expect("parse cleared profile");
+        assert_eq!(cleared.network.network_profile, InheritableValue::Clear);
+
+        let set: Profile = serde_json::from_str(
+            r#"{
+                "meta": { "name": "set" },
+                "network": { "network_profile": "developer" }
+            }"#,
+        )
+        .expect("parse profile with network profile");
+        assert_eq!(
+            set.network.network_profile,
+            InheritableValue::Set("developer".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extends_can_clear_inherited_network_profile_with_null() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("claude-code-netopen.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "claude-code-netopen" },
+                "extends": "claude-code",
+                "network": { "network_profile": null }
+            }"#,
+        )
+        .expect("write profile");
+
+        let profile = load_profile_from_path(&profile_path).expect("load profile");
+        assert_eq!(profile.network.resolved_network_profile(), None);
+        assert!(!profile.network.has_proxy_flags());
+        assert!(
+            profile
+                .filesystem
+                .allow
+                .iter()
+                .any(|path| path == "$HOME/.claude"),
+            "expected filesystem grants from claude-code to still be inherited",
+        );
     }
 }

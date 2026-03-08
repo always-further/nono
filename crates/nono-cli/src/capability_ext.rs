@@ -126,8 +126,10 @@ fn apply_network_mode(
             port: 0,
             bind_ports: args.allow_bind.clone(),
         });
-    } else if block_network {
+    } else if args.net_block || (block_network && !args.net_allow) {
         caps.set_network_blocked(true);
+    } else if args.net_allow {
+        caps.set_network_mode_mut(nono::NetworkMode::AllowAll);
     } else if has_proxy_flags {
         // Proxy mode: port 0 is a placeholder, updated when proxy starts.
         // bind_ports are passed through allow_bind CLI flag.
@@ -340,10 +342,26 @@ impl CapabilitySetExt for CapabilitySet {
             profile.network.has_proxy_flags(),
         );
 
+        // Direct localhost IPC uses kernel-level per-port allowances.
+        // Relay mode keeps localhost traffic mediated by the parent proxy.
+        if !localhost_relay_requested(args) {
+            for port in &profile.network.port_allow {
+                caps.add_localhost_port(*port);
+            }
+        }
+
         // Apply allowed commands from profile
         for cmd in &profile.security.allowed_commands {
             caps.add_allowed_command(cmd.as_str());
         }
+
+        // Apply signal mode from profile (None defaults to Isolated)
+        let mode = profile
+            .security
+            .signal_mode
+            .map(nono::SignalMode::from)
+            .unwrap_or_default();
+        caps = caps.set_signal_mode(mode);
 
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
@@ -469,18 +487,16 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_from_args_basic() {
-        let dir = tempdir().expect("Failed to create temp dir");
-
-        let args = SandboxArgs {
-            allow: vec![dir.path().to_path_buf()],
+    fn sandbox_args() -> SandboxArgs {
+        SandboxArgs {
+            allow: vec![],
             read: vec![],
             write: vec![],
             allow_file: vec![],
             read_file: vec![],
             write_file: vec![],
             net_block: false,
+            net_allow: false,
             network_profile: None,
             proxy_allow: vec![],
             proxy_credential: vec![],
@@ -499,6 +515,16 @@ mod tests {
             allow_port: vec![],
             experimental_localhost_relay: false,
             proxy_port: None,
+        }
+    }
+
+    #[test]
+    fn test_from_args_basic() {
+        let dir = tempdir().expect("Failed to create temp dir");
+
+        let args = SandboxArgs {
+            allow: vec![dir.path().to_path_buf()],
+            ..sandbox_args()
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
@@ -509,31 +535,8 @@ mod tests {
     #[test]
     fn test_from_args_network_blocked() {
         let args = SandboxArgs {
-            allow: vec![],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
             net_block: true,
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            experimental_localhost_relay: false,
-            proxy_port: None,
+            ..sandbox_args()
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
@@ -543,31 +546,9 @@ mod tests {
     #[test]
     fn test_from_args_allow_port_grants_direct_localhost_access() {
         let args = SandboxArgs {
-            allow: vec![],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
             net_block: true,
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
             allow_port: vec![11434],
-            experimental_localhost_relay: false,
-            proxy_port: None,
+            ..sandbox_args()
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
@@ -577,31 +558,10 @@ mod tests {
     #[test]
     fn test_from_args_localhost_relay_sets_proxy_mode() {
         let args = SandboxArgs {
-            allow: vec![],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
             net_block: true,
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
             allow_port: vec![11434],
             experimental_localhost_relay: true,
-            proxy_port: None,
+            ..sandbox_args()
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
@@ -615,31 +575,10 @@ mod tests {
     #[test]
     fn test_from_args_with_commands() {
         let args = SandboxArgs {
-            allow: vec![],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-            net_block: false,
             override_deny: vec![],
             allow_command: vec!["rm".to_string()],
             block_command: vec!["custom".to_string()],
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            experimental_localhost_relay: false,
-            proxy_port: None,
+            ..sandbox_args()
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
@@ -654,30 +593,7 @@ mod tests {
 
         let args = SandboxArgs {
             allow: vec![protected_subtree],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-            net_block: false,
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            experimental_localhost_relay: false,
-            proxy_port: None,
+            ..sandbox_args()
         };
 
         let err = CapabilitySet::from_args(&args).expect_err("must reject protected state path");
@@ -704,33 +620,7 @@ mod tests {
         let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
 
         let workdir = tempdir().expect("workdir");
-        let args = SandboxArgs {
-            allow: vec![],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-            net_block: false,
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            experimental_localhost_relay: false,
-            proxy_port: None,
-        };
+        let args = sandbox_args();
 
         let (caps, _) =
             CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
@@ -750,33 +640,7 @@ mod tests {
             .expect("Failed to load claude-code profile");
 
         let workdir = tempdir().expect("Failed to create temp dir");
-        let args = SandboxArgs {
-            allow: vec![],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-            net_block: false,
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            experimental_localhost_relay: false,
-            proxy_port: None,
-        };
+        let args = sandbox_args();
 
         let (mut caps, needs_unlink_overrides) =
             CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("Failed to build");
@@ -843,30 +707,7 @@ mod tests {
         let workdir = tempdir().expect("workdir");
         let args = SandboxArgs {
             allow: vec![target.clone()],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-            net_block: false,
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            experimental_localhost_relay: false,
-            proxy_port: None,
+            ..sandbox_args()
         };
 
         let (caps, _) =
@@ -911,31 +752,8 @@ mod tests {
 
         let workdir = tempdir().expect("workdir");
         let args = SandboxArgs {
-            allow: vec![],
-            read: vec![],
             write: vec![target.clone()],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-            net_block: false,
-            network_profile: None,
-            proxy_allow: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            profile: None,
-            allow_cwd: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            experimental_localhost_relay: false,
-            proxy_port: None,
+            ..sandbox_args()
         };
 
         let (caps, _) =
@@ -954,5 +772,48 @@ mod tests {
             "CLI --write + profile read should merge to ReadWrite, got {:?}",
             cap.access,
         );
+    }
+
+    #[test]
+    fn test_from_profile_net_allow_overrides_proxy_mode() {
+        let profile = crate::profile::load_profile("claude-code")
+            .expect("Failed to load claude-code profile");
+        let workdir = tempdir().expect("workdir");
+        let args = SandboxArgs {
+            net_allow: true,
+            ..sandbox_args()
+        };
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        assert_eq!(*caps.network_mode(), nono::NetworkMode::AllowAll);
+    }
+
+    #[test]
+    fn test_from_profile_net_allow_overrides_blocked_network() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("blocked.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "blocked" },
+                "filesystem": { "allow": ["/tmp"] },
+                "network": { "block": true }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = SandboxArgs {
+            net_allow: true,
+            ..sandbox_args()
+        };
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        assert_eq!(*caps.network_mode(), nono::NetworkMode::AllowAll);
     }
 }

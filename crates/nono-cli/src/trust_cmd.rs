@@ -964,10 +964,12 @@ fn load_trust_policy(explicit_path: Option<&Path>) -> Result<trust::TrustPolicy>
             "Project policies are not authoritative without a user-level policy to anchor trust."
                 .yellow()
         );
+        let policy_path = user_trust_policy_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.config/nono/trust-policy.json".to_string());
         eprintln!(
             "  {}",
-            "Create a signed policy at ~/.config/nono/trust-policy.json to enforce verification."
-                .yellow()
+            format!("Create a signed policy at {policy_path} to enforce verification.").yellow()
         );
         return Ok(project_policy);
     }

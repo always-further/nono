@@ -43,6 +43,9 @@ nono run --allow-cwd --net-block -- command
 # Use a built-in profile
 nono run --profile claude-code -- claude
 
+# Keep a profile but temporarily allow unrestricted network
+nono run --profile claude-code --net-allow -- claude
+
 # Start an interactive shell inside the sandbox
 nono shell --allow-cwd
 
@@ -87,7 +90,8 @@ nono run --profile my-claude -- claude
 - **Lists** (filesystem paths, security groups, rollback patterns): appended and deduplicated
 - **HashMaps** (credentials, hooks): merged, child wins on same key
 - **Booleans** (`network.block`, `interactive`): OR — either activates
-- **Scalars** (`meta`, `network_profile`): child overrides
+- **Scalars** (`meta`): child overrides
+- **Nullable scalars** (`network_profile`): absent inherits, `null` clears, string overrides
 
 ### Chaining
 

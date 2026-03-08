@@ -338,6 +338,31 @@ fn tokenize_sexp(input: &str) -> Result<Vec<String>> {
 ///
 /// Determines how network traffic is filtered at the OS level.
 /// `ProxyOnly` restricts outbound connections to a single localhost port,
+/// Signal isolation mode for the sandbox.
+///
+/// Controls whether the sandboxed process can send signals to processes
+/// outside its own sandbox.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignalMode {
+    /// Signals restricted to the current process only.
+    ///
+    /// On macOS: `(allow signal (target self))` in Seatbelt — restricts
+    /// `kill()` to the calling process's own PID. Forked children within
+    /// the same sandbox are **not** included; the parent cannot signal
+    /// them via `kill()`. Terminal-generated signals (e.g., Ctrl+C
+    /// delivering SIGINT to the foreground process group) are delivered
+    /// by the kernel and bypass the sandbox filter.
+    ///
+    /// On Linux: **not yet enforced.** Landlock V6 scoping
+    /// (`LANDLOCK_SCOPE_SIGNAL`) will provide equivalent isolation once
+    /// implemented (see issue #255). Until then, sandboxed processes on
+    /// Linux can still call `kill(2)`/`tkill(2)`/`tgkill(2)` freely.
+    #[default]
+    Isolated,
+    /// Signals allowed to any process (no filtering).
+    AllowAll,
+}
+
 /// forcing all traffic through the nono proxy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkMode {
@@ -427,6 +452,8 @@ pub struct CapabilitySet {
     /// Raw platform-specific rules injected verbatim into the sandbox profile.
     /// On macOS these are Seatbelt S-expression strings; ignored on Linux.
     platform_rules: Vec<String>,
+    /// Signal isolation mode (default: Isolated).
+    signal_mode: SignalMode,
     /// Enable sandbox extension support for runtime capability expansion.
     /// On macOS, adds extension filter rules to the Seatbelt profile so that
     /// `sandbox_extension_consume()` tokens can expand the sandbox dynamically.
@@ -553,6 +580,26 @@ impl CapabilitySet {
         self.allow_tcp_connect(443).allow_tcp_connect(8443)
     }
 
+    /// Set signal isolation mode (builder pattern)
+    ///
+    /// By default, signals are isolated to the sandbox's own process subtree.
+    /// Use `SignalMode::AllowAll` to permit signaling any process.
+    #[must_use]
+    pub fn set_signal_mode(mut self, mode: SignalMode) -> Self {
+        self.signal_mode = mode;
+        self
+    }
+
+    /// Allow signals to any process (builder pattern)
+    ///
+    /// Disables signal isolation. By default, sandboxed processes can only
+    /// signal their own process subtree.
+    #[must_use]
+    pub fn allow_signals(mut self) -> Self {
+        self.signal_mode = SignalMode::AllowAll;
+        self
+    }
+
     /// Enable sandbox extensions for runtime capability expansion (builder pattern)
     ///
     /// On macOS, this adds extension filter rules to the Seatbelt profile so that
@@ -622,6 +669,11 @@ impl CapabilitySet {
         self.network_mode = mode;
     }
 
+    /// Set signal isolation mode (mutable)
+    pub fn set_signal_mode_mut(&mut self, mode: SignalMode) {
+        self.signal_mode = mode;
+    }
+
     /// Add a TCP connect port to the allowlist (mutable)
     pub fn add_tcp_connect_port(&mut self, port: u16) {
         self.tcp_connect_ports.push(port);
@@ -680,6 +732,12 @@ impl CapabilitySet {
             self.network_mode,
             NetworkMode::Blocked | NetworkMode::ProxyOnly { .. }
         )
+    }
+
+    /// Get the signal isolation mode
+    #[must_use]
+    pub fn signal_mode(&self) -> SignalMode {
+        self.signal_mode
     }
 
     /// Get the network mode

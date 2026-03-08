@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.12.0] - 2026-03-07
+
+### Bug Fixes
+
+- Resolve dirfd-relative paths in seccomp-notify handler (#262) (#277) ([#277](https://github.com/always-further/nono/pull/277))
+
+- Show platform-correct path in user-level policy warning (#263) ([#263](https://github.com/always-further/nono/pull/263))
+
+- Enforce macOS signal isolation via Seatbelt (#264) ([#264](https://github.com/always-further/nono/pull/264))
+
+- *(profile)* Allow clearing inherited network profiles (#252) ([#252](https://github.com/always-further/nono/pull/252))
+
+
+### Documentation
+
+- *(readme)* Update latest release note (#253) ([#253](https://github.com/always-further/nono/pull/253))
+
+
+### Features
+
+- Add port_allow to profile JSON NetworkConfig (#254) (#276) ([#276](https://github.com/always-further/nono/pull/276))
+
+- Context-aware diagnostic banner for sandbox failures (#275) ([#275](https://github.com/always-further/nono/pull/275))
+
+- *(cli)* Add --net-allow override (#251) ([#251](https://github.com/always-further/nono/pull/251))
+
+- Add macOS learn mode using fs_usage and profile save prompt (#244) ([#244](https://github.com/always-further/nono/pull/244))
+
+
+### Miscellaneous
+
+- Implement Cargo audit and update AWS-LC (#273) ([#273](https://github.com/always-further/nono/pull/273))
+
+- Remove Monitor strategy, make Supervised the default (#267) ([#267](https://github.com/always-further/nono/pull/267))
+
 ## [0.11.0] - 2026-03-05
 
 ### Features

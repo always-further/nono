@@ -50,6 +50,46 @@ pub enum DiagnosticMode {
     Supervised,
 }
 
+/// Context about the command that was executed.
+///
+/// Used to generate more specific diagnostic messages when a
+/// sandboxed command fails.
+#[derive(Debug, Clone)]
+pub struct CommandContext {
+    /// The program name as the user typed it (e.g. "ps", "./script.sh")
+    pub program: String,
+    /// The resolved absolute path to the binary
+    pub resolved_path: PathBuf,
+}
+
+/// Strip control characters and ANSI escape sequences from a string.
+///
+/// Prevents terminal injection from attacker-controlled program names
+/// or paths appearing in diagnostic output.
+fn sanitize_for_diagnostic(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC and the entire escape sequence
+            if let Some(next) = chars.next() {
+                if next == '[' {
+                    for seq_char in chars.by_ref() {
+                        if seq_char.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if c.is_control() {
+            // Strip all control characters
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 /// Formats diagnostic information about sandbox policy.
 ///
 /// This is library code that can be used by any parent process
@@ -62,6 +102,8 @@ pub struct DiagnosticFormatter<'a> {
     protected_paths: &'a [PathBuf],
     /// Name of a protected file that was detected in the error output
     blocked_protected_file: Option<String>,
+    /// Command that was executed (for context-aware diagnostics)
+    command: Option<CommandContext>,
 }
 
 impl<'a> DiagnosticFormatter<'a> {
@@ -74,6 +116,7 @@ impl<'a> DiagnosticFormatter<'a> {
             denials: &[],
             protected_paths: &[],
             blocked_protected_file: None,
+            command: None,
         }
     }
 
@@ -111,6 +154,13 @@ impl<'a> DiagnosticFormatter<'a> {
         self
     }
 
+    /// Set command context for more specific diagnostics.
+    #[must_use]
+    pub fn with_command(mut self, command: CommandContext) -> Self {
+        self.command = Some(command);
+        self
+    }
+
     /// Check if an error line mentions any protected file and return the filename.
     ///
     /// This is used by the output processor to detect when a permission error
@@ -139,6 +189,231 @@ impl<'a> DiagnosticFormatter<'a> {
         }
     }
 
+    /// Check whether the resolved binary path falls under any allowed read path.
+    fn is_binary_path_readable(&self) -> bool {
+        let cmd = match &self.command {
+            Some(c) => c,
+            None => return true, // no context, assume readable
+        };
+        let binary_path = &cmd.resolved_path;
+        for cap in self.caps.fs_capabilities() {
+            if cap.access == AccessMode::Read || cap.access == AccessMode::ReadWrite {
+                if cap.is_file {
+                    if *binary_path == cap.resolved {
+                        return true;
+                    }
+                } else if binary_path.starts_with(&cap.resolved) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check whether the binary's parent directory is readable in the sandbox.
+    fn is_binary_dir_readable(&self) -> bool {
+        let cmd = match &self.command {
+            Some(c) => c,
+            None => return true,
+        };
+        let binary_dir = match cmd.resolved_path.parent() {
+            Some(d) => d,
+            None => return false,
+        };
+        for cap in self.caps.fs_capabilities() {
+            if !cap.is_file
+                && (cap.access == AccessMode::Read || cap.access == AccessMode::ReadWrite)
+                && binary_dir.starts_with(&cap.resolved)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Format context-aware explanation for the exit code.
+    ///
+    /// Returns a vec of `[nono]`-prefixed lines explaining what likely
+    /// happened and what the user can do about it.
+    fn format_exit_explanation(&self, exit_code: i32) -> Vec<String> {
+        let mut lines = Vec::new();
+
+        match exit_code {
+            127 => {
+                // 127 = command not found (shell convention) or execve failed
+                lines.push("[nono] Command not found (exit code 127).".to_string());
+                lines.push("[nono]".to_string());
+
+                if let Some(ref cmd) = self.command {
+                    let program = sanitize_for_diagnostic(&cmd.program);
+                    let path = sanitize_for_diagnostic(&cmd.resolved_path.display().to_string());
+                    if !self.is_binary_path_readable() {
+                        // The binary exists (we resolved it) but the sandbox
+                        // can't read it.
+                        lines.push(format!("[nono] The binary '{}' was found at:", program,));
+                        lines.push(format!("[nono]   {}", path));
+                        lines.push(
+                            "[nono] but its directory is not readable inside the sandbox."
+                                .to_string(),
+                        );
+                        lines.push("[nono]".to_string());
+
+                        if let Some(parent) = cmd.resolved_path.parent() {
+                            let parent_path =
+                                sanitize_for_diagnostic(&parent.display().to_string());
+                            lines.push(
+                                "[nono] Fix: grant read access to the binary's directory:"
+                                    .to_string(),
+                            );
+                            lines.push(format!("[nono]   nono run --read {} ...", parent_path,));
+                        }
+                    } else if !self.is_binary_dir_readable() {
+                        // Binary itself is allowed but its directory isn't
+                        // (unlikely but possible with file-level grants)
+                        lines.push(format!(
+                            "[nono] '{}' resolved to {} but the directory",
+                            program, path,
+                        ));
+                        lines.push(
+                            "[nono] may not be accessible. The sandbox needs read access to"
+                                .to_string(),
+                        );
+                        lines.push("[nono] the directory containing the binary.".to_string());
+                    } else {
+                        // Binary path is readable — the command may depend on
+                        // a dynamic linker, shared libraries, or shell that
+                        // isn't accessible.
+                        lines.push(format!(
+                            "[nono] '{}' resolved to {} which is readable,",
+                            program, path,
+                        ));
+                        lines.push(
+                            "[nono] but the command still failed to execute. Common causes:"
+                                .to_string(),
+                        );
+                        lines.push(
+                            "[nono]   - A shared library or dynamic linker path is not accessible"
+                                .to_string(),
+                        );
+                        lines.push(
+                            "[nono]   - The binary is a script whose interpreter is not accessible"
+                                .to_string(),
+                        );
+                        lines.push(
+                            "[nono]   - The binary depends on a path not in the sandbox"
+                                .to_string(),
+                        );
+                        lines.push("[nono]".to_string());
+                        lines.push(
+                            "[nono] Run with -v to see all allowed paths and check if".to_string(),
+                        );
+                        lines.push("[nono] required system directories are included.".to_string());
+                    }
+                } else {
+                    lines.push(
+                        "[nono] The command binary could not be found or executed inside"
+                            .to_string(),
+                    );
+                    lines.push(
+                        "[nono] the sandbox. Ensure the binary's directory is readable."
+                            .to_string(),
+                    );
+                }
+            }
+            126 => {
+                // 126 = command found but not executable
+                lines.push("[nono] Permission denied (exit code 126).".to_string());
+                lines.push("[nono]".to_string());
+
+                if let Some(ref cmd) = self.command {
+                    let program = sanitize_for_diagnostic(&cmd.program);
+                    let path = sanitize_for_diagnostic(&cmd.resolved_path.display().to_string());
+                    lines.push(format!(
+                        "[nono] '{}' was found at {} but could not be executed.",
+                        program, path,
+                    ));
+                    lines.push(
+                        "[nono] The file may not have execute permission, or the sandbox"
+                            .to_string(),
+                    );
+                    lines.push(
+                        "[nono] may be blocking execution of binaries in that directory."
+                            .to_string(),
+                    );
+                } else {
+                    lines.push(
+                        "[nono] The command was found but could not be executed.".to_string(),
+                    );
+                    lines.push(
+                        "[nono] Check file permissions and sandbox access to the binary's directory."
+                            .to_string(),
+                    );
+                }
+            }
+            code if (129..=192).contains(&code) => {
+                // Signal-based exit: 128 + signal number
+                let sig = code - 128;
+                // SIGSYS is platform-dependent: 31 on Linux, 12 on macOS
+                let sigsys: i32 = libc::SIGSYS;
+                let sig_name = match sig {
+                    1 => "SIGHUP",
+                    2 => "SIGINT",
+                    4 => "SIGILL",
+                    6 => "SIGABRT",
+                    9 => "SIGKILL",
+                    11 => "SIGSEGV",
+                    13 => "SIGPIPE",
+                    15 => "SIGTERM",
+                    s if s == sigsys => "SIGSYS",
+                    _ => "",
+                };
+
+                if sig == sigsys {
+                    // SIGSYS = seccomp/sandbox killed it
+                    lines.push(format!(
+                        "[nono] Command killed by {} (exit code {}).",
+                        sig_name, code,
+                    ));
+                    lines.push("[nono]".to_string());
+                    lines.push(
+                        "[nono] SIGSYS typically means a blocked system call. The command tried"
+                            .to_string(),
+                    );
+                    lines.push("[nono] an operation that the sandbox does not permit.".to_string());
+                } else if sig == 9 {
+                    lines.push(format!(
+                        "[nono] Command killed by {} (exit code {}).",
+                        sig_name, code,
+                    ));
+                    lines.push("[nono]".to_string());
+                    lines.push(
+                        "[nono] The process was forcefully terminated. This is usually not"
+                            .to_string(),
+                    );
+                    lines.push("[nono] caused by sandbox restrictions.".to_string());
+                } else if !sig_name.is_empty() {
+                    lines.push(format!(
+                        "[nono] Command killed by signal {} / {} (exit code {}).",
+                        sig, sig_name, code,
+                    ));
+                } else {
+                    lines.push(format!(
+                        "[nono] Command killed by signal {} (exit code {}).",
+                        sig, code,
+                    ));
+                }
+            }
+            code => {
+                lines.push(format!(
+                    "[nono] Command exited with code {}. This may be due to sandbox restrictions.",
+                    code,
+                ));
+            }
+        }
+
+        lines
+    }
+
     /// Standard mode footer: concise policy summary with --allow suggestions.
     fn format_standard_footer(&self, exit_code: i32) -> String {
         let mut lines = Vec::new();
@@ -156,10 +431,7 @@ impl<'a> DiagnosticFormatter<'a> {
             lines.push("[nono]".to_string());
             lines.push(format!("[nono] Command exited with code {}.", exit_code));
         } else {
-            lines.push(format!(
-                "[nono] Command exited with code {}. This may be due to sandbox restrictions.",
-                exit_code
-            ));
+            lines.extend(self.format_exit_explanation(exit_code));
         }
         lines.push("[nono]".to_string());
 
@@ -179,7 +451,7 @@ impl<'a> DiagnosticFormatter<'a> {
 
             if self.caps.is_network_blocked() {
                 lines.push(
-                    "[nono]   --allow-net        network access (remove --net-block)".to_string(),
+                    "[nono]   --net-allow        unrestricted network for this session".to_string(),
                 );
             }
         }
@@ -191,10 +463,7 @@ impl<'a> DiagnosticFormatter<'a> {
     fn format_supervised_footer(&self, exit_code: i32) -> String {
         let mut lines = Vec::new();
 
-        lines.push(format!(
-            "[nono] Command exited with code {}. This may be due to sandbox restrictions.",
-            exit_code
-        ));
+        lines.extend(self.format_exit_explanation(exit_code));
         lines.push("[nono]".to_string());
 
         if self.denials.is_empty() && !self.caps.extensions_enabled() {
@@ -212,7 +481,7 @@ impl<'a> DiagnosticFormatter<'a> {
             lines.push("[nono]   --write <path>     write-only access to directory".to_string());
             if self.caps.is_network_blocked() {
                 lines.push(
-                    "[nono]   --allow-net        network access (remove --net-block)".to_string(),
+                    "[nono]   --net-allow        unrestricted network for this session".to_string(),
                 );
             }
             return lines.join("\n");
@@ -598,7 +867,7 @@ mod tests {
         let formatter = DiagnosticFormatter::new(&caps);
         let output = formatter.format_footer(1);
 
-        assert!(output.contains("--allow-net"));
+        assert!(output.contains("--net-allow"));
     }
 
     #[test]
@@ -614,7 +883,7 @@ mod tests {
         let formatter = DiagnosticFormatter::new(&caps);
         let output = formatter.format_footer(1);
 
-        assert!(!output.contains("--allow-net"));
+        assert!(!output.contains("--net-allow"));
     }
 
     #[test]
@@ -853,5 +1122,167 @@ mod tests {
 
         assert!(output.contains("Write-protected"));
         assert!(output.contains("config.json"));
+    }
+
+    // --- Exit code explanation tests ---
+
+    fn make_command_context(program: &str, path: &str) -> CommandContext {
+        CommandContext {
+            program: program.to_string(),
+            resolved_path: PathBuf::from(path),
+        }
+    }
+
+    #[test]
+    fn test_exit_127_binary_not_readable() {
+        // Binary resolved to /opt/bin/foo but sandbox has no read access there
+        let caps = make_test_caps(); // only /test/project
+        let cmd = make_command_context("foo", "/opt/bin/foo");
+        let formatter = DiagnosticFormatter::new(&caps).with_command(cmd);
+        let output = formatter.format_footer(127);
+
+        assert!(output.contains("Command not found (exit code 127)"));
+        assert!(output.contains("'foo' was found at:"));
+        assert!(output.contains("/opt/bin/foo"));
+        assert!(output.contains("not readable inside the sandbox"));
+        assert!(output.contains("nono run --read /opt/bin"));
+    }
+
+    #[test]
+    fn test_exit_127_binary_readable_but_exec_fails() {
+        // Binary at /usr/bin/ps, sandbox has /usr/bin readable
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/usr/bin"),
+            resolved: PathBuf::from("/usr/bin"),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::Group("system_read".to_string()),
+        });
+        let cmd = make_command_context("ps", "/usr/bin/ps");
+        let formatter = DiagnosticFormatter::new(&caps).with_command(cmd);
+        let output = formatter.format_footer(127);
+
+        assert!(output.contains("'ps' resolved to /usr/bin/ps which is readable"));
+        assert!(output.contains("Common causes:"));
+        assert!(output.contains("shared library"));
+        assert!(output.contains("Run with -v"));
+    }
+
+    #[test]
+    fn test_exit_127_file_level_grant_dir_not_readable() {
+        // Binary granted as a file-level read, but parent dir not readable
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/opt/custom/mybin"),
+            resolved: PathBuf::from("/opt/custom/mybin"),
+            access: AccessMode::Read,
+            is_file: true,
+            source: CapabilitySource::User,
+        });
+        let cmd = make_command_context("mybin", "/opt/custom/mybin");
+        let formatter = DiagnosticFormatter::new(&caps).with_command(cmd);
+        let output = formatter.format_footer(127);
+
+        // is_binary_path_readable returns true (file-level match)
+        // is_binary_dir_readable returns false (/opt/custom not granted)
+        assert!(output.contains("'mybin' resolved to /opt/custom/mybin but the directory"));
+        assert!(output.contains("read access to"));
+    }
+
+    #[test]
+    fn test_exit_127_no_command_context() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(127);
+
+        assert!(output.contains("Command not found (exit code 127)"));
+        assert!(output.contains("could not be found or executed"));
+    }
+
+    #[test]
+    fn test_exit_126_permission_denied() {
+        let caps = make_test_caps();
+        let cmd = make_command_context("script.sh", "/test/project/script.sh");
+        let formatter = DiagnosticFormatter::new(&caps).with_command(cmd);
+        let output = formatter.format_footer(126);
+
+        assert!(output.contains("Permission denied (exit code 126)"));
+        assert!(output.contains("'script.sh' was found at /test/project/script.sh"));
+        assert!(output.contains("execute permission"));
+    }
+
+    #[test]
+    fn test_exit_126_no_command_context() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(126);
+
+        assert!(output.contains("Permission denied (exit code 126)"));
+        assert!(output.contains("found but could not be executed"));
+    }
+
+    #[test]
+    fn test_exit_1_generic() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(1);
+
+        assert!(output.contains("exited with code 1"));
+        assert!(output.contains("may be due to sandbox restrictions"));
+    }
+
+    #[test]
+    fn test_exit_sigkill() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(128 + 9);
+
+        assert!(output.contains("SIGKILL"));
+        assert!(output.contains("forcefully terminated"));
+        assert!(output.contains("usually not"));
+    }
+
+    #[test]
+    fn test_exit_sigsys_platform_correct() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(128 + libc::SIGSYS);
+
+        assert!(output.contains("SIGSYS"));
+        assert!(output.contains("blocked system call"));
+    }
+
+    #[test]
+    fn test_exit_sigterm() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(128 + 15);
+
+        assert!(output.contains("SIGTERM"));
+        // SIGTERM gets the generic signal line, not a special explanation
+        assert!(!output.contains("blocked system call"));
+        assert!(!output.contains("forcefully terminated"));
+    }
+
+    #[test]
+    fn test_exit_unknown_signal() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(128 + 33);
+
+        assert!(output.contains("killed by signal 33"));
+        assert!(!output.contains("SIGKILL"));
+        assert!(!output.contains("SIGSYS"));
+    }
+
+    #[test]
+    fn test_exit_other_code() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(42);
+
+        assert!(output.contains("exited with code 42"));
+        assert!(output.contains("may be due to sandbox restrictions"));
     }
 }

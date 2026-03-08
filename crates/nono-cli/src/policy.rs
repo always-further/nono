@@ -147,6 +147,7 @@ impl ProfileDef {
                 groups,
                 trust_groups: self.trust_groups.clone(),
                 allowed_commands: self.security.allowed_commands.clone(),
+                signal_mode: self.security.signal_mode,
             },
             filesystem: self.filesystem.clone(),
             network: self.network.clone(),
@@ -453,6 +454,20 @@ fn add_deny_access_rules(
     let path = expand_path(path_str)?;
     deny_paths.push(path.clone());
 
+    // If the deny path is a symlink, also deny the resolved target.
+    // Without this, `--read-file ~/.zshrc` where ~/.zshrc is a symlink
+    // canonicalizes to the target, which wouldn't match the deny path.
+    let resolved = if path.is_symlink() {
+        path.canonicalize().ok()
+    } else {
+        None
+    };
+    if let Some(ref resolved) = resolved {
+        if *resolved != path {
+            deny_paths.push(resolved.clone());
+        }
+    }
+
     // Seatbelt deny rules only apply on macOS
     if cfg!(target_os = "macos") {
         let escaped = escape_seatbelt_path(path_to_utf8(&path)?)?;
@@ -468,6 +483,39 @@ fn add_deny_access_rules(
         caps.add_platform_rule(format!("(allow file-read-metadata ({}))", filter))?;
         caps.add_platform_rule(format!("(deny file-read-data ({}))", filter))?;
         caps.add_platform_rule(format!("(deny file-write* ({}))", filter))?;
+
+        // Emit deny rules for the symlink target too
+        if let Some(ref resolved) = resolved {
+            if *resolved != path {
+                if let Ok(resolved_utf8) = path_to_utf8(resolved) {
+                    if let Ok(resolved_escaped) = escape_seatbelt_path(resolved_utf8) {
+                        let resolved_filter = if resolved.is_file() {
+                            format!("literal \"{}\"", resolved_escaped)
+                        } else {
+                            format!("subpath \"{}\"", resolved_escaped)
+                        };
+
+                        if let Err(e) = caps.add_platform_rule(format!(
+                            "(allow file-read-metadata ({}))",
+                            resolved_filter
+                        )) {
+                            warn!("Skipping symlink target deny metadata rule: {}", e);
+                        }
+                        if let Err(e) = caps.add_platform_rule(format!(
+                            "(deny file-read-data ({}))",
+                            resolved_filter
+                        )) {
+                            warn!("Skipping symlink target deny read rule: {}", e);
+                        }
+                        if let Err(e) = caps
+                            .add_platform_rule(format!("(deny file-write* ({}))", resolved_filter))
+                        {
+                            warn!("Skipping symlink target deny write rule: {}", e);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -848,6 +896,20 @@ pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<(String, String)>> {
                     expanded.to_string_lossy().into_owned(),
                     group.description.clone(),
                 ));
+
+                // If the deny path is a symlink, also mark the resolved target
+                // as sensitive. Without this, querying a symlinked path like
+                // ~/.zshrc -> ~/dev/dotfiles/.zshrc would miss the deny.
+                if expanded.is_symlink() {
+                    if let Ok(resolved) = expanded.canonicalize() {
+                        if resolved != expanded {
+                            result.push((
+                                resolved.to_string_lossy().into_owned(),
+                                group.description.clone(),
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -879,8 +941,8 @@ pub fn get_dangerous_commands(policy: &Policy) -> HashSet<String> {
 ///
 /// Collects `allow.read` entries from all platform-matching groups. Paths are
 /// returned unexpanded (with `~` and `$TMPDIR` intact) for caller to expand.
-/// Used by learn mode (Linux only).
-#[cfg(target_os = "linux")]
+/// Used by learn mode.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
     let mut result = Vec::new();
 
@@ -1198,6 +1260,97 @@ mod tests {
             // On Linux, no platform rules generated (Landlock has no deny semantics)
             assert!(caps.platform_rules().is_empty());
         }
+    }
+
+    #[test]
+    fn test_deny_access_includes_symlink_target() {
+        // Create a temp dir with a file and a symlink to it
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let target = dir.path().join("real_file");
+        std::fs::write(&target, "secret").expect("write target");
+        let link = dir.path().join("link_file");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let mut caps = CapabilitySet::new();
+        let mut deny_paths = Vec::new();
+        let link_str = link.to_str().expect("valid utf8");
+        add_deny_access_rules(link_str, &mut caps, &mut deny_paths)
+            .expect("add deny rules for symlink");
+
+        // Both the symlink path and resolved target should be in deny_paths
+        let link_canonical = link.canonicalize().expect("canonicalize link");
+        assert!(
+            deny_paths.contains(&link),
+            "deny_paths must contain the symlink path"
+        );
+        assert!(
+            deny_paths.contains(&link_canonical),
+            "deny_paths must contain the resolved target path"
+        );
+
+        if cfg!(target_os = "macos") {
+            // Should have 6 rules: 3 for symlink path + 3 for resolved target
+            let rules = caps.platform_rules();
+            assert_eq!(rules.len(), 6, "expected 6 Seatbelt rules for symlink deny");
+        }
+    }
+
+    #[test]
+    fn test_deny_access_non_symlink_no_duplicate() {
+        // A regular (non-symlink) file should only produce one deny_paths entry
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let file = dir.path().join("regular_file");
+        std::fs::write(&file, "content").expect("write file");
+
+        let mut caps = CapabilitySet::new();
+        let mut deny_paths = Vec::new();
+        let file_str = file.to_str().expect("valid utf8");
+        add_deny_access_rules(file_str, &mut caps, &mut deny_paths)
+            .expect("add deny rules for regular file");
+
+        assert_eq!(
+            deny_paths.len(),
+            1,
+            "regular file should have one deny_paths entry"
+        );
+    }
+
+    #[test]
+    fn test_sensitive_paths_includes_symlink_targets() {
+        // Create a temp dir with a symlink
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let target = dir.path().join("real_config");
+        std::fs::write(&target, "secret").expect("write target");
+        let link = dir.path().join("link_config");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        // Build a minimal policy with a deny group pointing at the symlink
+        let link_str = link.to_str().expect("valid utf8");
+        let json = format!(
+            r#"{{
+              "meta": {{ "version": 1, "schema_version": "1.0" }},
+              "groups": {{
+                "test_deny_symlink": {{
+                  "description": "Test deny with symlink",
+                  "deny": {{ "access": ["{}"] }}
+                }}
+              }}
+            }}"#,
+            link_str
+        );
+        let policy = load_policy(&json).expect("parse test policy");
+        let sensitive = get_sensitive_paths(&policy).expect("get sensitive paths");
+
+        let link_canonical = link.canonicalize().expect("canonicalize");
+        let paths: Vec<&str> = sensitive.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&link_str),
+            "sensitive paths must contain symlink path"
+        );
+        assert!(
+            paths.contains(&link_canonical.to_str().expect("utf8")),
+            "sensitive paths must contain resolved target"
+        );
     }
 
     #[test]

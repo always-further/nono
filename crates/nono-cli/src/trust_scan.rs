@@ -68,9 +68,13 @@ pub fn load_scan_policy(root: &Path, trust_override: bool) -> Result<TrustPolicy
                 "Project policies are not authoritative without a user-level policy to anchor trust."
                     .yellow()
             );
+            let policy_path = user_path
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "~/.config/nono/trust-policy.json".to_string());
             eprintln!(
                 "  {}",
-                "Create a signed policy at ~/.config/nono/trust-policy.json to enforce verification."
+                format!("Create a signed policy at {policy_path} to enforce verification.")
                     .yellow()
             );
             Ok(p)

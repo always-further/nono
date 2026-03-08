@@ -74,6 +74,12 @@ echo "--- Network Allowed (Default) ---"
 if command_exists curl; then
     expect_success "curl works by default" \
         "$NONO_BIN" run --allow "$TMPDIR" -- curl -s --max-time 10 https://example.com >/dev/null
+
+    expect_failure "claude-code profile blocks hosts outside developer allowlist" \
+        "$NONO_BIN" run --profile claude-code --allow-cwd -- curl -s --max-time 10 https://example.com >/dev/null
+
+    expect_success "claude-code profile allows unrestricted network with --net-allow" \
+        "$NONO_BIN" run --profile claude-code --allow-cwd --net-allow -- curl -s --max-time 10 https://example.com >/dev/null
 else
     skip_test "curl works by default" "curl not installed"
 fi

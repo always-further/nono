@@ -24,7 +24,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Trace a command to discover required filesystem paths (Linux only)
+    /// Trace a command to discover required filesystem paths
     #[command(trailing_var_arg = true)]
     #[command(after_help = "EXAMPLES:
     # Discover paths needed by a command
@@ -38,6 +38,10 @@ pub enum Commands {
 
     # Limit trace duration
     nono learn --timeout 30 -- my-app
+
+PLATFORM NOTES:
+    Linux:  Uses strace (install with: apt install strace)
+    macOS:  Uses fs_usage (requires sudo)
 ")]
     Learn(Box<LearnArgs>),
 
@@ -49,6 +53,9 @@ pub enum Commands {
 
     # Use a named profile (built-in)
     nono run --profile claude-code claude
+
+    # Use a named profile but temporarily allow unrestricted network
+    nono run --profile claude-code --net-allow claude
 
     # Profile with explicit working directory
     nono run --profile claude-code --workdir ./my-project claude
@@ -88,6 +95,18 @@ pub enum Commands {
     nono shell --allow . --shell /bin/zsh
 ")]
     Shell(Box<ShellArgs>),
+
+    /// Apply sandbox and exec into command (nono disappears).
+    /// For scripts, piping, and embedding where no parent process is wanted.
+    #[command(trailing_var_arg = true)]
+    #[command(after_help = "EXAMPLES:
+    # Apply sandbox and exec into cargo build
+    nono wrap --allow . -- cargo build
+
+    # Use a named profile
+    nono wrap --profile developer -- cargo test
+")]
+    Wrap(Box<WrapArgs>),
 
     /// Check why a path or network operation would be allowed or denied
     #[command(after_help = "EXAMPLES:
@@ -197,7 +216,13 @@ pub struct SandboxArgs {
     // === Directory permissions (recursive) ===
     /// Directories to allow read+write access (recursive).
     /// Combines full read and write permissions (see --read and --write for details).
-    #[arg(long, short = 'a', value_name = "DIR")]
+    #[arg(
+        long,
+        short = 'a',
+        value_name = "DIR",
+        env = "NONO_ALLOW",
+        value_delimiter = ','
+    )]
     pub allow: Vec<PathBuf>,
 
     /// Directories to allow read-only access (recursive)
@@ -226,13 +251,38 @@ pub struct SandboxArgs {
     pub write_file: Vec<PathBuf>,
 
     /// Block network access (network allowed by default; use this flag to block)
-    #[arg(long)]
+    #[arg(
+        long,
+        conflicts_with = "net_allow",
+        env = "NONO_NET_BLOCK",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::SetTrue
+    )]
     pub net_block: bool,
+
+    /// Allow unrestricted network access, even when a selected profile enables
+    /// proxy filtering. This disables proxy filtering and credential injection
+    /// for the current session only.
+    #[arg(
+        long,
+        env = "NONO_NET_ALLOW",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::SetTrue,
+        conflicts_with_all = [
+            "net_block",
+            "network_profile",
+            "proxy_allow",
+            "proxy_credential",
+            "external_proxy",
+            "proxy_port"
+        ]
+    )]
+    pub net_allow: bool,
 
     // === Network proxy filtering ===
     /// Enable network proxy filtering with a named profile (e.g., claude-code, minimal, enterprise).
     /// When set, outbound network is restricted to hosts in the profile's allowlist.
-    #[arg(long, value_name = "PROFILE")]
+    #[arg(long, value_name = "PROFILE", env = "NONO_NETWORK_PROFILE")]
     pub network_profile: Option<String>,
 
     /// Allow additional hosts through the proxy (on top of network profile).
@@ -307,14 +357,14 @@ pub struct SandboxArgs {
     /// For network API keys, prefer --proxy-credential for credential isolation.
     /// Comma-separated entries: keyring names (auto-uppercased to env var) or
     /// 1Password URIs with explicit var (op://vault/item/field=MY_VAR).
-    #[arg(long, value_name = "CREDENTIALS")]
+    #[arg(long, value_name = "CREDENTIALS", env = "NONO_ENV_CREDENTIAL")]
     pub env_credential: Option<String>,
 
     // === Profile options ===
     /// Use a profile by name or file path.
     /// Names resolve from ~/.config/nono/profiles/ then built-ins.
     /// Paths (containing '/' or ending in .json) load directly.
-    #[arg(long, short = 'p', value_name = "NAME_OR_PATH")]
+    #[arg(long, short = 'p', value_name = "NAME_OR_PATH", env = "NONO_PROFILE")]
     pub profile: Option<String>,
 
     /// Allow access to current working directory without prompting.
@@ -360,22 +410,11 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_diagnostics: bool,
 
-    /// Preserve TTY for interactive apps (e.g., Claude Code, vim, htop).
-    /// Without this flag, nono monitors output which can break interactive UIs.
-    #[arg(long = "exec")]
-    pub direct_exec: bool,
-
     /// Enable atomic rollback snapshots for the session.
     /// Takes content-addressable snapshots of writable directories so you
     /// can restore to the pre-session state after the command exits.
     #[arg(long, conflicts_with = "no_rollback")]
     pub rollback: bool,
-
-    /// Use supervised execution mode for capability expansion approval.
-    /// Fork first, sandbox only the child. The parent stays unsandboxed
-    /// to handle approval prompts for additional path access requests.
-    #[arg(long)]
-    pub supervised: bool,
 
     /// Skip the post-exit rollback review prompt.
     /// Snapshots are still taken for audit purposes, but the interactive
@@ -407,6 +446,13 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "rollback_include")]
     pub rollback_all: bool,
 
+    /// Disable the audit trail for this session.
+    /// By default, every supervised execution records session metadata
+    /// (command, timestamps, exit code, network events) to ~/.nono/rollbacks/.
+    /// Use this flag to suppress audit recording entirely.
+    #[arg(long, conflicts_with = "rollback")]
+    pub no_audit: bool,
+
     /// Disable trust verification for instruction files.
     /// For development and testing only. Logs a warning and skips the
     /// pre-exec trust scan. Not recommended for production use.
@@ -426,6 +472,20 @@ pub struct ShellArgs {
     /// Shell to execute (defaults to $SHELL or /bin/sh)
     #[arg(long, value_name = "SHELL")]
     pub shell: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct WrapArgs {
+    #[command(flatten)]
+    pub sandbox: SandboxArgs,
+
+    /// Suppress diagnostic footer on command failure.
+    #[arg(long)]
+    pub no_diagnostics: bool,
+
+    /// Command to run inside the sandbox
+    #[arg(required = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -871,34 +931,15 @@ mod tests {
     }
 
     #[test]
-    fn test_run_with_supervised_flag() {
-        let cli = Cli::parse_from([
-            "nono",
-            "run",
-            "--allow",
-            ".",
-            "--supervised",
-            "--",
-            "echo",
-            "hello",
-        ]);
+    fn test_wrap_basic() {
+        let cli = Cli::parse_from(["nono", "wrap", "--allow", ".", "--", "cargo", "build"]);
         match cli.command {
-            Commands::Run(args) => {
-                assert!(args.supervised);
-                assert_eq!(args.command, vec!["echo", "hello"]);
+            Commands::Wrap(args) => {
+                assert_eq!(args.command, vec!["cargo", "build"]);
+                assert_eq!(args.sandbox.allow.len(), 1);
+                assert!(!args.no_diagnostics);
             }
-            _ => panic!("Expected Run command"),
-        }
-    }
-
-    #[test]
-    fn test_run_without_supervised_flag() {
-        let cli = Cli::parse_from(["nono", "run", "--allow", ".", "echo", "hello"]);
-        match cli.command {
-            Commands::Run(args) => {
-                assert!(!args.supervised);
-            }
-            _ => panic!("Expected Run command"),
+            _ => panic!("Expected Wrap command"),
         }
     }
 
@@ -1286,6 +1327,61 @@ mod tests {
         assert!(
             result.is_err(),
             "--rollback-all and --rollback-include should conflict"
+        );
+    }
+
+    #[test]
+    fn test_net_allow_parsing() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--net-allow",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert!(args.sandbox.net_allow);
+                assert!(!args.sandbox.net_block);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_net_allow_conflicts_with_net_block() {
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--net-allow",
+            "--net-block",
+            "echo",
+        ]);
+        assert!(
+            result.is_err(),
+            "--net-allow and --net-block should conflict"
+        );
+    }
+
+    #[test]
+    fn test_net_allow_conflicts_with_network_profile() {
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--net-allow",
+            "--network-profile",
+            "developer",
+            "echo",
+        ]);
+        assert!(
+            result.is_err(),
+            "--net-allow and --network-profile should conflict"
         );
     }
 

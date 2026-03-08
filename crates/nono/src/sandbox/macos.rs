@@ -344,7 +344,21 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     profile.push_str("(allow ipc-posix-shm-write-data)\n");
     profile.push_str("(allow ipc-posix-shm-write-create)\n");
 
-    profile.push_str("(allow signal)\n");
+    // Signal isolation: (target self) restricts kill() to the calling process's
+    // own PID only. This blocks signals to external processes but also blocks
+    // the parent from signaling forked children via kill(). Terminal-generated
+    // signals (Ctrl+C → SIGINT to foreground process group) are delivered by
+    // the kernel and bypass this restriction, so interactive use is unaffected.
+    // In monitor mode, the parent's signal forwarding handler will get EPERM
+    // when trying to forward to the child — this is tolerated silently.
+    match caps.signal_mode() {
+        crate::capability::SignalMode::Isolated => {
+            profile.push_str("(allow signal (target self))\n");
+        }
+        crate::capability::SignalMode::AllowAll => {
+            profile.push_str("(allow signal)\n");
+        }
+    }
     profile.push_str("(allow system-socket)\n");
     profile.push_str("(allow system-fsctl)\n");
     profile.push_str("(allow system-info)\n");

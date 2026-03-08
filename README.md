@@ -30,7 +30,7 @@
 > This is an early alpha release that has not undergone comprehensive security audits. While we have taken care to implement robust security measures, there may still be undiscovered issues. We do not recommend using this in production until we release a stable version of 1.0.
 
 > [!NOTE]
-> :tada: v0.6.1 has shipped! :tada: we have completed work to separate the CLI from the core library!
+> See our [latest release](https://github.com/always-further/nono/releases/latest) or [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
 AI agents get filesystem access, run shell commands, and are inherently open to prompt injection. The standard response is guardrails and policies. The problem is that policies can be bypassed and guardrails linguistically overcome.
 
@@ -38,9 +38,45 @@ Kernel-enforced sandboxing (Landlock/Seatbelt) blocks unauthorized access at the
 
 ## CLI
 
+The CLI is the quickest way to get going! zero startup latency, no need to install hypervisors, runtimes, mount volumes...sandboxed and protected in a single command
+
 ```bash
+# Any CLI agent — just put your command after --
 nono run --profile claude-code -- claude
-nono run --read ./src --write ./output -- cargo build
+nono run --profile opencode -- opencode
+nono run --profile openclaw -- openclaw
+
+nono run --allow-cwd -- python3 my_agent.py
+nono run --allow-cwd -- npx @anthropic/agent-framework
+
+# MCP servers, agents, anything!
+nono run --read /data -- npx @modelcontextprotocol/server-filesystem /data
+nono run --profile pydantic-ai-agent --allow logs/ -- uv run my_agent.py
+nono run --profile custom-profile -- node agent.js
+
+# Rollback snapshots — undo everything the agent did
+nono run --rollback --profile claude-code --allow-cwd -- claude
+
+# Combine rollback, network filtering, and port binding
+nono run --rollback --proxy-allow api.anthropic.ai --allow-port 8000 -- uv run uvicorn myagent.main:app --port 8000
+
+# Network proxy — allowlist hosts, inject credentials without exposing keys
+nono run --proxy-allow api.openai.com --proxy-credential openai -- python3 agent.py
+
+# Audit trail on every session — opt out with --no-audit
+nono run --no-audit --allow-cwd -- npm test
+
+# Direct exec for scripts and piping (no parent process)
+nono wrap --read ./src --write ./output -- cargo build
+
+# Need a profile automatically applied for a specific client?
+nono learn -- new-cool-coding-agent
+
+# Why did you block that command? 
+nono why --path ~/.ssh/id_rsa
+DENIED
+  Reason: sensitive_path
+  Details: Path matches sensitive pattern 'Block access to cryptographic keys, tokens, and cloud credentials'. Access blocked by security policy.
 ```
 
 Built-in profiles for [Claude Code](https://docs.nono.sh/clients/claude-code), [OpenCode](https://docs.nono.sh/clients/opencode), and [OpenClaw](https://docs.nono.sh/clients/openclaw) — or define your own with custom permissions.
@@ -133,7 +169,10 @@ Sign instruction files directly within GitHub Actions workflows. Users can then 
 Allowlist-based host filtering via a local proxy. The sandbox blocks all direct outbound connections — the agent can only reach explicitly allowed hosts. Cloud metadata endpoints are hardcoded as denied.
 
 ```bash
-nono run --supervised --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+nono run --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+
+# Keep the claude-code profile, but allow unrestricted network for this session
+nono run --profile claude-code --net-allow -- claude
 ```
 
 ### Supervisor and Capability Expansion
@@ -141,7 +180,7 @@ nono run --supervised --proxy-allow api.openai.com --proxy-allow api.anthropic.c
 On Linux, seccomp user notification intercepts syscalls when the agent needs access outside its sandbox. The supervisor prompts the user, then injects the file descriptor directly — the agent never executes its own `open()`. Sensitive paths are never-grantable regardless of approval.
 
 ```bash
-nono run --rollback --supervised --allow-cwd -- claude
+nono run --rollback --allow-cwd -- claude
 ```
 
 ### Undo and Snapshots
@@ -201,9 +240,10 @@ nono run --profile my-profile -- rm /tmp/old-file.txt
 
 ### Audit Trail
 
-Every session records command, timing, exit code, tracked paths, and cryptographic snapshot commitments as structured JSON.
+Every supervised session automatically records command, timing, exit code, network events, and cryptographic snapshot commitments as structured JSON. Opt out with `--no-audit`.
 
 ```bash
+nono audit list
 nono audit show 20260216-193311-20751 --json
 ```
 

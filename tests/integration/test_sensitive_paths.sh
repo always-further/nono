@@ -244,7 +244,9 @@ if is_linux; then
 else
     if [[ -f ~/.zshrc ]]; then
         expect_failure "explicit --read-file ~/.zshrc stays denied" \
-            "$NONO_BIN" run --read-file ~/.zshrc --allow /tmp -- head -1 ~/.zshrc
+            "$NONO_BIN" run --read-file ~/.zshrc --allow /tmp -- cat ~/.zshrc
+    else
+        skip_test "explicit --read-file ~/.zshrc stays denied" "~/.zshrc not found"
     fi
 
     if [[ -d ~/.ssh ]]; then

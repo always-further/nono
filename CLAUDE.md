@@ -124,6 +124,7 @@ make fmt             # Auto-format
 - **Arithmetic**: Use `checked_`, `saturating_`, or `overflowing_` methods for security-critical math.
 - **Memory**: Use the `zeroize` crate for sensitive data (keys/passwords) in memory.
 - **Testing**: Write unit tests for all new capability types and sandbox logic.
+- **Environment variables in tests**: Tests that modify `HOME`, `TMPDIR`, `XDG_CONFIG_HOME`, or other env vars must save and restore the original value. Rust runs unit tests in parallel within the same process, so an unrestored env var causes flaky failures in unrelated tests (e.g. `config::check_sensitive_path` fails when another test temporarily sets `HOME` to a fake path). Always use save/restore pattern and keep the modified window as short as possible.
 - **Attributes**: Apply `#[must_use]` to functions returning critical Results.
 - **Lazy use of dead code**: Avoid `#[allow(dead_code)]`. If code is unused, either remove it or write tests that use it.
 

@@ -1,7 +1,8 @@
 //! Learn mode: trace file accesses to discover required paths
 //!
-//! Uses strace to monitor a command's file system accesses and produces
-//! a list of paths that would need to be allowed in a nono profile.
+//! Uses strace (Linux) or fs_usage (macOS) to monitor a command's file system
+//! accesses and produces a list of paths that would need to be allowed in a
+//! nono profile.
 
 use crate::cli::LearnArgs;
 use nono::{NonoError, Result};
@@ -9,18 +10,22 @@ use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::profile::{self, Profile};
 #[cfg(target_os = "linux")]
-use std::collections::{HashMap, HashSet};
-#[cfg(target_os = "linux")]
+use std::collections::HashMap;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::collections::HashSet;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::io::{BufRead, BufReader};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
 #[cfg(target_os = "linux")]
 use tracing::{debug, info, warn};
+#[cfg(target_os = "macos")]
+use tracing::{debug, warn};
 
 /// Result of learning file access patterns
 #[derive(Debug)]
@@ -42,7 +47,7 @@ pub struct LearnResult {
 }
 
 impl LearnResult {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn new() -> Self {
         Self {
             read_paths: BTreeSet::new(),
@@ -68,7 +73,7 @@ impl LearnResult {
     }
 
     /// Format as JSON fragment for profile
-    pub fn to_json(&self) -> String {
+    pub fn to_json(&self) -> Result<String> {
         let allow: Vec<String> = self
             .readwrite_paths
             .iter()
@@ -129,72 +134,166 @@ impl LearnResult {
             }
         });
 
-        serde_json::to_string_pretty(&fragment).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string_pretty(&fragment)
+            .map_err(|e| nono::NonoError::LearnError(format!("Failed to serialize JSON: {}", e)))
     }
 
-    /// Format as human-readable summary
+    /// Generate a complete profile JSON from discovered paths
+    ///
+    /// Creates a minimal profile with the discovered filesystem permissions,
+    /// working directory access, and network settings. The profile can be
+    /// saved directly to `~/.config/nono/profiles/<name>.json`.
+    pub fn to_profile(&self, name: &str, command: &str) -> Result<String> {
+        let home = crate::config::validated_home()?;
+        let home_path = std::path::Path::new(&home);
+
+        // Replace $HOME prefix with ~ for portability.
+        // Uses Path::starts_with() to avoid string prefix matching pitfalls.
+        let shorten = |p: &std::path::Path| -> String {
+            if p.starts_with(home_path) {
+                match p.strip_prefix(home_path) {
+                    Ok(relative) => format!("~/{}", relative.display()),
+                    Err(_) => p.display().to_string(),
+                }
+            } else {
+                p.display().to_string()
+            }
+        };
+
+        let allow: Vec<String> = self.readwrite_paths.iter().map(|p| shorten(p)).collect();
+        let read: Vec<String> = self.read_paths.iter().map(|p| shorten(p)).collect();
+        let write: Vec<String> = self.write_paths.iter().map(|p| shorten(p)).collect();
+
+        let has_network = self.has_network_activity();
+
+        let profile = serde_json::json!({
+            "meta": {
+                "name": name,
+                "version": "1.0.0",
+                "description": format!("Auto-generated profile for {}", command),
+            },
+            "filesystem": {
+                "allow": allow,
+                "read": read,
+                "write": write,
+            },
+            "network": {
+                "block": !has_network,
+            },
+            "workdir": {
+                "access": "readwrite",
+            },
+        });
+
+        serde_json::to_string_pretty(&profile)
+            .map_err(|e| nono::NonoError::LearnError(format!("Failed to serialize profile: {}", e)))
+    }
+
+    /// Format as human-readable summary with clear visual separation
     pub fn to_summary(&self) -> String {
+        use colored::Colorize;
+
         let mut lines = Vec::new();
+        let separator = "=".repeat(60);
+
+        lines.push(String::new());
+        lines.push(format!("{}", separator.dimmed()));
+        lines.push(format!("{}", " nono learn - Discovered Paths".bold()));
+        lines.push(format!("{}", separator.dimmed()));
+
+        if !self.has_paths() && !self.has_network_activity() {
+            lines.push(String::new());
+            lines.push("  No additional paths needed.".to_string());
+            lines.push(String::new());
+            return lines.join("\n");
+        }
 
         if !self.read_paths.is_empty() {
-            lines.push("Read access needed:".to_string());
+            lines.push(String::new());
+            lines.push(format!(
+                " {} ({} paths)",
+                "READ".cyan().bold(),
+                self.read_paths.len()
+            ));
+            lines.push(format!(" {}", "-".repeat(40).dimmed()));
             for path in &self.read_paths {
                 lines.push(format!("  {}", path.display()));
             }
         }
 
         if !self.write_paths.is_empty() {
-            lines.push("Write access needed:".to_string());
+            lines.push(String::new());
+            lines.push(format!(
+                " {} ({} paths)",
+                "WRITE".yellow().bold(),
+                self.write_paths.len()
+            ));
+            lines.push(format!(" {}", "-".repeat(40).dimmed()));
             for path in &self.write_paths {
                 lines.push(format!("  {}", path.display()));
             }
         }
 
         if !self.readwrite_paths.is_empty() {
-            lines.push("Read+Write access needed:".to_string());
+            lines.push(String::new());
+            lines.push(format!(
+                " {} ({} paths)",
+                "READ+WRITE".green().bold(),
+                self.readwrite_paths.len()
+            ));
+            lines.push(format!(" {}", "-".repeat(40).dimmed()));
             for path in &self.readwrite_paths {
                 lines.push(format!("  {}", path.display()));
             }
         }
 
-        if !self.system_covered.is_empty() {
-            lines.push(format!(
-                "\n({} paths already covered by system defaults)",
-                self.system_covered.len()
-            ));
-        }
-
-        if !self.profile_covered.is_empty() {
-            lines.push(format!(
-                "({} paths already covered by profile)",
-                self.profile_covered.len()
-            ));
+        if !self.system_covered.is_empty() || !self.profile_covered.is_empty() {
+            lines.push(String::new());
+            if !self.system_covered.is_empty() {
+                lines.push(format!(
+                    " {} {} paths already covered by system defaults",
+                    "i".dimmed(),
+                    self.system_covered.len()
+                ));
+            }
+            if !self.profile_covered.is_empty() {
+                lines.push(format!(
+                    " {} {} paths already covered by profile",
+                    "i".dimmed(),
+                    self.profile_covered.len()
+                ));
+            }
         }
 
         // Network sections
         if !self.outbound_connections.is_empty() {
-            if !lines.is_empty() {
-                lines.push(String::new());
-            }
-            lines.push("Outbound connections:".to_string());
+            lines.push(String::new());
+            lines.push(format!(
+                " {} ({} endpoints)",
+                "OUTBOUND NETWORK".magenta().bold(),
+                self.outbound_connections.len()
+            ));
+            lines.push(format!(" {}", "-".repeat(40).dimmed()));
             for conn in &self.outbound_connections {
                 lines.push(format_network_summary(conn));
             }
         }
 
         if !self.listening_ports.is_empty() {
-            if !lines.is_empty() {
-                lines.push(String::new());
-            }
-            lines.push("Listening ports:".to_string());
+            lines.push(String::new());
+            lines.push(format!(
+                " {} ({} ports)",
+                "LISTENING PORTS".magenta().bold(),
+                self.listening_ports.len()
+            ));
+            lines.push(format!(" {}", "-".repeat(40).dimmed()));
             for conn in &self.listening_ports {
                 lines.push(format_network_summary(conn));
             }
         }
 
-        if lines.is_empty() {
-            lines.push("No additional paths needed.".to_string());
-        }
+        lines.push(String::new());
+        lines.push(format!("{}", separator.dimmed()));
 
         lines.join("\n")
     }
@@ -232,12 +331,441 @@ fn check_strace() -> Result<()> {
     }
 }
 
-/// Run learn mode (non-Linux stub)
-#[cfg(not(target_os = "linux"))]
+/// Run learn mode (unsupported platform stub)
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn run_learn(_args: &LearnArgs) -> Result<LearnResult> {
     Err(NonoError::LearnError(
-        "nono learn is only available on Linux (requires strace)".to_string(),
+        "nono learn is only available on Linux (strace) and macOS (fs_usage)".to_string(),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// macOS implementation (fs_usage)
+// ---------------------------------------------------------------------------
+
+/// Check if fs_usage is available
+#[cfg(target_os = "macos")]
+fn check_fs_usage() -> Result<()> {
+    if std::path::Path::new("/usr/bin/fs_usage").exists() {
+        Ok(())
+    } else {
+        Err(NonoError::LearnError(
+            "fs_usage not found at /usr/bin/fs_usage".to_string(),
+        ))
+    }
+}
+
+/// Acquire sudo credentials before spawning the child command.
+///
+/// `sudo -v` validates and caches credentials while the terminal is still
+/// available for password input. Without this, TUI applications paint over
+/// the sudo password prompt making it impossible to authenticate.
+#[cfg(target_os = "macos")]
+fn acquire_sudo() -> Result<()> {
+    let status = Command::new("sudo")
+        .arg("-v")
+        .status()
+        .map_err(|e| NonoError::LearnError(format!("Failed to run sudo: {}", e)))?;
+
+    if !status.success() {
+        return Err(NonoError::LearnError(
+            "Failed to acquire sudo credentials. fs_usage requires root access.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Run learn mode (macOS implementation)
+#[cfg(target_os = "macos")]
+pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
+    check_fs_usage()?;
+    acquire_sudo()?;
+
+    // Load profile if specified
+    let profile = if let Some(ref profile_name) = args.profile {
+        Some(profile::load_profile(profile_name)?)
+    } else {
+        None
+    };
+
+    // Run fs_usage and collect file accesses
+    let file_accesses = run_fs_usage(&args.command, args.timeout)?;
+
+    // Process and categorize file paths
+    let result = process_accesses(file_accesses, profile.as_ref(), args.all)?;
+
+    Ok(result)
+}
+
+/// Run fs_usage on the command and collect file accesses
+///
+/// Starts `sudo fs_usage` first (while the terminal is clean), then spawns
+/// the target command. This ordering ensures the sudo password prompt is
+/// visible and not overwritten by TUI applications.
+///
+/// fs_usage is started with the target command name as filter. The parsed
+/// output is further filtered by the child's PID to avoid capturing
+/// unrelated processes with the same name.
+#[cfg(target_os = "macos")]
+fn run_fs_usage(command: &[String], timeout: Option<u64>) -> Result<Vec<FileAccess>> {
+    use std::time::Duration;
+
+    if command.is_empty() {
+        return Err(NonoError::NoCommand);
+    }
+
+    // Extract the command basename for fs_usage's process name filter.
+    // fs_usage matches against the process name (not full path).
+    let cmd_path = std::path::Path::new(&command[0]);
+    let cmd_name = cmd_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| NonoError::LearnError("Invalid command name".to_string()))?;
+
+    // Validate cmd_name: must be a simple process name (alphanumeric, hyphens,
+    // underscores, dots). Reject wildcards or shell metacharacters to prevent
+    // fs_usage from matching unintended processes.
+    if !cmd_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(NonoError::LearnError(format!(
+            "Command name '{}' contains invalid characters for fs_usage filter",
+            cmd_name
+        )));
+    }
+
+    // Start fs_usage FIRST — before the child command.
+    // This ensures the sudo prompt (if needed) appears on a clean terminal,
+    // not hidden behind a TUI. Capture stderr for error diagnosis.
+    let mut fs_usage = Command::new("sudo")
+        .args([
+            "fs_usage", "-w", // Wide output (full paths)
+            "-f", "filesys", // Filesystem events
+            "-f", "pathname", // Pathname events (stat, readlink, etc.)
+            cmd_name,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            NonoError::LearnError(format!("Failed to spawn fs_usage (sudo required): {}", e))
+        })?;
+
+    let stdout = fs_usage
+        .stdout
+        .take()
+        .ok_or_else(|| NonoError::LearnError("Failed to capture fs_usage stdout".to_string()))?;
+
+    let fs_usage_stderr = fs_usage.stderr.take();
+
+    // Wait for fs_usage to produce its first line of output (or a brief
+    // timeout) before spawning the child. This ensures the kernel trace
+    // facility is attached before events start. We use a blocking read
+    // on a thread with a timeout to avoid a fixed sleep.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Option<u8>>();
+    let mut reader = BufReader::new(stdout);
+    let peek_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 1];
+        let byte = match reader.read(&mut buf) {
+            Ok(1) => Some(buf[0]),
+            _ => None,
+        };
+        let _ = ready_tx.send(byte);
+        (reader, byte)
+    });
+
+    // Wait up to 2 seconds for fs_usage to produce output
+    let _ready = ready_rx.recv_timeout(Duration::from_secs(2)).ok();
+
+    // Now spawn the target command
+    let mut child = Command::new(&command[0])
+        .args(&command[1..])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| NonoError::LearnError(format!("Failed to spawn command: {}", e)))?;
+
+    let child_pid = child.id();
+    debug!("Spawned child process with PID {}", child_pid);
+
+    // Read fs_usage output in a background thread.
+    // The main thread waits for the child to exit, then kills fs_usage
+    // which closes the pipe and unblocks the reader thread.
+    //
+    // Filtering relies on fs_usage's command name argument. fs_usage appends
+    // "ProcessName.threadID" (not PID) to each line, and the traced process
+    // may fork into children with different PIDs/names, so PID-based filtering
+    // would silently drop most results. The command name filter is sufficient.
+    let reader_handle = std::thread::spawn(move || {
+        let (reader, peeked_byte) = match peek_handle.join() {
+            Ok(result) => result,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut accesses = Vec::new();
+
+        // If we peeked a byte during the readiness check, prepend it
+        // to the first line
+        let mut first_line_prefix = peeked_byte.map(|b| String::from(b as char));
+
+        let raw_stdout = reader.into_inner();
+        let line_reader = BufReader::new(raw_stdout);
+        for line in line_reader.lines() {
+            match line {
+                Ok(l) => {
+                    let full_line = if let Some(prefix) = first_line_prefix.take() {
+                        format!("{}{}", prefix, l)
+                    } else {
+                        l
+                    };
+                    if let Some(access) = parse_fs_usage_line(&full_line) {
+                        accesses.push(access);
+                    }
+                }
+                Err(e) => {
+                    debug!("Error reading fs_usage line: {}", e);
+                }
+            }
+        }
+        accesses
+    });
+
+    // Wait for child to exit. Use a dedicated thread for timeout so
+    // the main thread can block on child.wait() instead of polling.
+    let timeout_duration = timeout.map(Duration::from_secs);
+    if let Some(timeout) = timeout_duration {
+        let child_id = child.id();
+        std::thread::spawn(move || {
+            std::thread::sleep(timeout);
+            warn!("Timeout reached, sending SIGTERM to child PID {}", child_id);
+            // SAFETY: sending a signal to a known child PID. If the process
+            // has already exited, kill() returns ESRCH which we ignore.
+            unsafe {
+                nix::libc::kill(child_id as i32, nix::libc::SIGTERM);
+            }
+            // Grace period: if the child ignores SIGTERM, escalate to SIGKILL
+            std::thread::sleep(Duration::from_secs(3));
+            unsafe {
+                nix::libc::kill(child_id as i32, nix::libc::SIGKILL);
+            }
+        });
+    }
+    let _ = child.wait();
+    debug!("Child process exited");
+
+    // Kill fs_usage — this closes the pipe and unblocks the reader thread.
+    // Use `sudo pkill -P <pid>` to kill the fs_usage child of the sudo
+    // wrapper, then kill sudo itself.
+    kill_fs_usage(&fs_usage);
+    let _ = fs_usage.wait();
+
+    // Check fs_usage stderr for errors
+    if let Some(mut stderr) = fs_usage_stderr {
+        let mut err_output = String::new();
+        use std::io::Read;
+        if stderr.read_to_string(&mut err_output).is_ok() && !err_output.is_empty() {
+            debug!("fs_usage stderr: {}", err_output.trim());
+        }
+    }
+
+    // Collect results from reader thread
+    let file_accesses = match reader_handle.join() {
+        Ok(accesses) => accesses,
+        Err(_) => {
+            warn!("fs_usage reader thread panicked, returning partial results");
+            Vec::new()
+        }
+    };
+
+    Ok(file_accesses)
+}
+
+/// Kill an fs_usage process tree running under sudo.
+///
+/// `fs_usage.id()` returns the PID of the `sudo` wrapper, not fs_usage itself.
+/// We use `sudo pkill -P <sudo_pid>` to kill child processes (the actual
+/// fs_usage), then kill the sudo wrapper. Failures are ignored since the
+/// processes may have already exited.
+#[cfg(target_os = "macos")]
+fn kill_fs_usage(fs_usage: &std::process::Child) {
+    let sudo_pid = fs_usage.id().to_string();
+    // Kill children of the sudo process (the actual fs_usage)
+    let _ = Command::new("sudo")
+        .args(["pkill", "-P", &sudo_pid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // Then kill the sudo wrapper itself
+    let _ = Command::new("sudo")
+        .args(["kill", &sudo_pid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Parse a single fs_usage output line to extract file access information
+///
+/// fs_usage -w output format (wide mode):
+/// ```text
+/// 14:23:45.123456  open              /path/to/file    0.000012  ProcessName.123
+/// 14:23:45.123456  stat64            /path/to/file    0.000003  ProcessName.123
+/// 14:23:45.123456  getattrlist       /path/to/file    0.000005  ProcessName.123
+/// ```
+///
+/// The path is between the operation name and the elapsed time.
+/// Some lines include file descriptors like `F=5` or byte counts like `B=4096`.
+#[cfg(target_os = "macos")]
+fn parse_fs_usage_line(line: &str) -> Option<FileAccess> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Split into whitespace-delimited tokens
+    // Format: TIMESTAMP  OPERATION  [F=n]  [(FLAGS)]  PATH  ELAPSED  PROCESS.tid
+    // The path starts with '/' and is the key field we need to extract
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+
+    // Need at least: timestamp, operation, path, elapsed, process
+    if tokens.len() < 4 {
+        return None;
+    }
+
+    // Token 0 = timestamp (HH:MM:SS.microseconds)
+    // Token 1 = operation name
+    let operation = tokens[1];
+
+    // Skip operations we don't care about
+    let tracked_ops = [
+        "open",
+        "open_nocancel",
+        "stat64",
+        "stat64_extended",
+        "lstat64",
+        "lstat64_extended",
+        "getattrlist",
+        "getxattr",
+        "listxattr",
+        "readlink",
+        "access",
+        "access_extended",
+        "execve",
+        "posix_spawn",
+        "mkdir",
+        "mkdir_extended",
+        "rename",
+        "unlink",
+        "rmdir",
+        "link",
+        "symlink",
+        "write",
+        "write_nocancel",
+        "pwrite",
+        "ftruncate",
+        "truncate",
+    ];
+
+    if !tracked_ops.contains(&operation) {
+        return None;
+    }
+
+    // Find the path — look for a token starting with '/'
+    // Path can contain spaces, so we need to be careful.
+    // Strategy: find the first token starting with '/' and collect until
+    // we hit what looks like the elapsed time (a decimal number at end of line)
+    let path = extract_fs_usage_path(trimmed)?;
+
+    // Skip pseudo-paths and kernel internals
+    if path.starts_with("/dev/") || path == "/dev" {
+        return None;
+    }
+
+    // Determine if this is a write operation
+    let is_write = is_fs_usage_write(operation, trimmed);
+
+    Some(FileAccess {
+        path: PathBuf::from(path),
+        is_write,
+    })
+}
+
+/// Extract the file path from an fs_usage line
+///
+/// Paths start with '/' and may contain spaces. The path is followed by
+/// the elapsed time (a decimal number) and the process name.
+#[cfg(target_os = "macos")]
+fn extract_fs_usage_path(line: &str) -> Option<String> {
+    // Find the first '/' that starts a path
+    // Skip any '/' that appears inside timestamps or other fields
+    let path_start = line.find("  /")?;
+    let path_region = &line[path_start..].trim_start();
+
+    // The path ends before the elapsed time, which is a decimal number
+    // Pattern: /some/path    0.000123   ProcessName.tid
+    // We look for the last sequence of: whitespace + decimal number + whitespace
+    // Working backwards from the end to find the elapsed time
+
+    // Find the path by looking for the pattern: spaces + digits.digits + spaces
+    // The elapsed time is always in the format N.NNNNNN
+    let mut end = path_region.len();
+
+    // Scan backwards to find the elapsed time field
+    // The line ends with: ELAPSED_TIME  PROCESS_NAME
+    // or: ELAPSED_TIME W PROCESS_NAME (W = was scheduled out)
+    // We need to find where the path ends (before trailing whitespace + elapsed time)
+
+    // Find the last occurrence of a path-like region
+    // Strategy: find sequences that match elapsed time pattern (digits.digits)
+    // and take everything before the whitespace preceding it as the path
+    for (i, window) in path_region.as_bytes().windows(3).enumerate().rev() {
+        // Look for pattern: space + digit + '.'  (start of elapsed time like " 0.000123")
+        if window[0] == b' ' && window[1].is_ascii_digit() && window[2] == b'.' {
+            // Verify this is actually an elapsed time by checking more context
+            let candidate = &path_region[i + 1..];
+            if candidate.split_whitespace().next().is_some_and(|s| {
+                s.contains('.') && s.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            }) {
+                end = i;
+                break;
+            }
+        }
+    }
+
+    let path = path_region[..end].trim_end();
+    if path.is_empty() || !path.starts_with('/') {
+        return None;
+    }
+
+    // Handle paths with [errno] annotations like "/path/to/file  [2]"
+    // Strip trailing bracketed errno
+    let path = if let Some(bracket_pos) = path.rfind("  [") {
+        path[..bracket_pos].trim_end()
+    } else {
+        path
+    };
+
+    Some(path.to_string())
+}
+
+/// Determine if an fs_usage operation represents a write access
+#[cfg(target_os = "macos")]
+fn is_fs_usage_write(operation: &str, line: &str) -> bool {
+    match operation {
+        "mkdir" | "mkdir_extended" | "rename" | "unlink" | "rmdir" | "link" | "symlink"
+        | "write" | "write_nocancel" | "pwrite" | "ftruncate" | "truncate" => true,
+        "open" | "open_nocancel" => {
+            // Check for write flags in the line
+            // fs_usage shows flags like (RW____) or (W_____) or O_WRONLY etc.
+            line.contains("(W")
+                || line.contains("O_WRONLY")
+                || line.contains("O_RDWR")
+                || line.contains("O_CREAT")
+                || line.contains("O_TRUNC")
+        }
+        _ => false,
+    }
 }
 
 /// Run learn mode (Linux implementation)
@@ -268,8 +796,8 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
     Ok(result)
 }
 
-/// Represents a file access from strace
-#[cfg(target_os = "linux")]
+/// Represents a file access observed by tracing
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Clone)]
 struct FileAccess {
     path: PathBuf,
@@ -650,7 +1178,7 @@ fn is_write_access(line: &str, syscall: &str) -> bool {
 }
 
 /// Process raw accesses into categorized result
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn process_accesses(
     accesses: Vec<FileAccess>,
     profile: Option<&Profile>,
@@ -730,7 +1258,7 @@ fn process_accesses(
 }
 
 /// Check if a path is covered by a set of allowed paths
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_covered_by_set(path: &Path, allowed: &HashSet<&str>) -> Result<bool> {
     for allowed_path in allowed {
         let allowed_expanded = expand_home(allowed_path)?;
@@ -749,7 +1277,7 @@ fn is_covered_by_set(path: &Path, allowed: &HashSet<&str>) -> Result<bool> {
 }
 
 /// Check if a path is covered by profile paths
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_covered_by_profile(path: &Path, profile_paths: &HashSet<String>) -> Result<bool> {
     for profile_path in profile_paths {
         let expanded = expand_home(profile_path)?;
@@ -767,7 +1295,7 @@ fn is_covered_by_profile(path: &Path, profile_paths: &HashSet<String>) -> Result
 }
 
 /// Expand ~ to home directory
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn expand_home(path: &str) -> Result<String> {
     use crate::config;
 
@@ -783,7 +1311,7 @@ fn expand_home(path: &str) -> Result<String> {
 }
 
 /// Collapse a file path to its parent directory for cleaner output
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn collapse_to_parent(path: &Path) -> PathBuf {
     // Don't collapse if it's already a directory
     if path.is_dir() {
@@ -1263,15 +1791,16 @@ mod tests {
     }
 
     #[test]
-    fn test_learn_result_to_json() {
+    fn test_learn_result_to_json() -> Result<()> {
         let mut result = LearnResult::new();
         result.read_paths.insert(PathBuf::from("/some/read/path"));
         result.write_paths.insert(PathBuf::from("/some/write/path"));
 
-        let json = result.to_json();
+        let json = result.to_json()?;
         assert!(json.contains("filesystem"));
         assert!(json.contains("/some/read/path"));
         assert!(json.contains("/some/write/path"));
+        Ok(())
     }
 
     #[test]
@@ -1458,7 +1987,7 @@ mod tests {
     }
 
     #[test]
-    fn test_learn_result_network_json() {
+    fn test_learn_result_network_json() -> Result<()> {
         let mut result = LearnResult::new();
         result.outbound_connections.push(NetworkConnectionSummary {
             endpoint: NetworkEndpoint {
@@ -1477,7 +2006,7 @@ mod tests {
             count: 1,
         });
 
-        let json = result.to_json();
+        let json = result.to_json()?;
         assert!(json.contains("\"network\""));
         assert!(json.contains("\"outbound\""));
         assert!(json.contains("\"listening\""));
@@ -1486,6 +2015,7 @@ mod tests {
         assert!(json.contains("example.com"));
         assert!(json.contains("0.0.0.0"));
         assert!(json.contains("3000"));
+        Ok(())
     }
 
     #[test]
@@ -1509,9 +2039,9 @@ mod tests {
         });
 
         let summary = result.to_summary();
-        assert!(summary.contains("Outbound connections:"));
+        assert!(summary.contains("OUTBOUND NETWORK"));
         assert!(summary.contains("example.com (93.184.216.34):443 (12x)"));
-        assert!(summary.contains("Listening ports:"));
+        assert!(summary.contains("LISTENING PORTS"));
         assert!(summary.contains("0.0.0.0:3000"));
         // Count of 1 should NOT show "(1x)"
         assert!(!summary.contains("(1x)"));
@@ -1763,5 +2293,159 @@ mod tests {
         let line = r#"sendmsg(5, {msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("8.8.8.8")}, msg_namelen=16, msg_iov=[{iov_base="\xab\x12\1\0\0\1\0\0\0\0\0\0\7example\3com\0\0\1\0\1", iov_len=29}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 29"#;
         let hostname = parse_dns_sendto(line).expect("should parse DNS query from sendmsg");
         assert_eq!(hostname, "example.com");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[allow(clippy::unwrap_used)]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_fs_usage_open_read() {
+        let line = "14:23:45.123456  open              /etc/passwd    0.000012   ls.12345";
+        let access = parse_fs_usage_line(line).expect("should parse open");
+        assert_eq!(access.path, PathBuf::from("/etc/passwd"));
+        assert!(!access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_stat64() {
+        let line =
+            "14:23:45.123456  stat64            /usr/lib/libSystem.B.dylib    0.000003   ls.12345";
+        let access = parse_fs_usage_line(line).expect("should parse stat64");
+        assert_eq!(access.path, PathBuf::from("/usr/lib/libSystem.B.dylib"));
+        assert!(!access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_mkdir_is_write() {
+        let line = "14:23:45.123456  mkdir             /tmp/test_dir    0.000008   my_app.12345";
+        let access = parse_fs_usage_line(line).expect("should parse mkdir");
+        assert_eq!(access.path, PathBuf::from("/tmp/test_dir"));
+        assert!(access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_unlink_is_write() {
+        let line = "14:23:45.123456  unlink            /tmp/test_file    0.000005   my_app.12345";
+        let access = parse_fs_usage_line(line).expect("should parse unlink");
+        assert_eq!(access.path, PathBuf::from("/tmp/test_file"));
+        assert!(access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_rename_is_write() {
+        let line = "14:23:45.123456  rename            /tmp/old_name    0.000005   my_app.12345";
+        let access = parse_fs_usage_line(line).expect("should parse rename");
+        assert!(access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_skips_dev_paths() {
+        let line = "14:23:45.123456  open              /dev/null    0.000002   my_app.12345";
+        assert!(parse_fs_usage_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_fs_usage_skips_unknown_ops() {
+        let line = "14:23:45.123456  mmap              /some/file    0.000002   my_app.12345";
+        assert!(parse_fs_usage_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_fs_usage_empty_line() {
+        assert!(parse_fs_usage_line("").is_none());
+        assert!(parse_fs_usage_line("   ").is_none());
+    }
+
+    #[test]
+    fn test_parse_fs_usage_getattrlist() {
+        let line =
+            "14:23:45.123456  getattrlist       /Applications/Safari.app    0.000004   Finder.12345";
+        let access = parse_fs_usage_line(line).expect("should parse getattrlist");
+        assert_eq!(access.path, PathBuf::from("/Applications/Safari.app"));
+        assert!(!access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_readlink() {
+        let line = "14:23:45.123456  readlink          /var    0.000002   ls.12345";
+        let access = parse_fs_usage_line(line).expect("should parse readlink");
+        assert_eq!(access.path, PathBuf::from("/var"));
+        assert!(!access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_write_op() {
+        let line = "14:23:45.123456  write             /tmp/output.log    0.000010   my_app.12345";
+        let access = parse_fs_usage_line(line).expect("should parse write");
+        assert_eq!(access.path, PathBuf::from("/tmp/output.log"));
+        assert!(access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_execve() {
+        let line = "14:23:45.123456  execve            /usr/bin/env    0.000015   bash.12345";
+        let access = parse_fs_usage_line(line).expect("should parse execve");
+        assert_eq!(access.path, PathBuf::from("/usr/bin/env"));
+        assert!(!access.is_write);
+    }
+
+    #[test]
+    fn test_parse_fs_usage_path_with_spaces() {
+        let line = "14:23:45.123456  stat64            /Users/test/Library/Application Support    0.000003   my_app.12345";
+        let access = parse_fs_usage_line(line).expect("should parse path with spaces");
+        assert_eq!(
+            access.path,
+            PathBuf::from("/Users/test/Library/Application Support")
+        );
+    }
+
+    #[test]
+    fn test_parse_fs_usage_with_errno() {
+        let line =
+            "14:23:45.123456  stat64            /nonexistent/path  [2]    0.000003   my_app.12345";
+        let access = parse_fs_usage_line(line).expect("should parse line with errno");
+        assert_eq!(access.path, PathBuf::from("/nonexistent/path"));
+    }
+
+    #[test]
+    fn test_extract_fs_usage_path_basic() {
+        let line = "14:23:45.123456  open              /etc/hosts    0.000012   ls.12345";
+        let path = extract_fs_usage_path(line).expect("should extract path");
+        assert_eq!(path, "/etc/hosts");
+    }
+
+    #[test]
+    fn test_is_fs_usage_write_open_flags() {
+        assert!(is_fs_usage_write(
+            "open",
+            "open  (W_____)  /tmp/file  0.000001  app.1"
+        ));
+        assert!(is_fs_usage_write(
+            "open",
+            "open  O_WRONLY  /tmp/file  0.000001  app.1"
+        ));
+        assert!(is_fs_usage_write(
+            "open",
+            "open  O_RDWR  /tmp/file  0.000001  app.1"
+        ));
+        assert!(!is_fs_usage_write(
+            "open",
+            "open  (R_____)  /tmp/file  0.000001  app.1"
+        ));
+    }
+
+    #[test]
+    fn test_is_fs_usage_write_operations() {
+        assert!(is_fs_usage_write("mkdir", ""));
+        assert!(is_fs_usage_write("unlink", ""));
+        assert!(is_fs_usage_write("rename", ""));
+        assert!(is_fs_usage_write("write", ""));
+        assert!(is_fs_usage_write("truncate", ""));
+        assert!(!is_fs_usage_write("stat64", ""));
+        assert!(!is_fs_usage_write("readlink", ""));
+        assert!(!is_fs_usage_write("access", ""));
     }
 }

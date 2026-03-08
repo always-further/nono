@@ -7,24 +7,23 @@ Supervisor mode keeps a parent process alive outside the sandbox to provide runt
 
 ## Enabling Supervisor Mode
 
+Supervised execution is the default for `nono run` and `nono shell`. No extra flags are needed:
+
 ```bash
-# Enable approval sidecar (capability expansion on Linux)
-nono run --supervised --profile claude-code -- claude
+# Supervised by default
+nono run --profile claude-code -- claude
 
 # Enable rollback snapshots
 nono run --rollback --profile claude-code -- claude
-
-# Both: rollback snapshots + approval sidecar
-nono run --rollback --supervised --profile claude-code -- claude
 ```
 
-Either `--supervised` or `--rollback` (or both) activates supervised execution. The flags change the execution model:
+The execution model:
 
 1. nono forks before applying the sandbox
 2. The **child** is sandboxed and runs the command
 3. The **parent** remains unsandboxed to provide supervisor services
 
-See [Execution Modes](/cli/features/execution-modes) for how this compares to Direct and Monitor modes.
+See [Execution Modes](/cli/features/execution-modes) for how this compares to Direct mode (`nono wrap`).
 
 ## Capability Expansion (Linux)
 
@@ -103,10 +102,8 @@ Future backends will support:
 
 ## Diagnostic Footer
 
-In both Monitor and Supervised modes, when the child exits with a non-zero exit code, nono prints a diagnostic footer to stderr explaining what happened and suggesting fixes.
+When the child exits with a non-zero exit code, nono prints a diagnostic footer to stderr explaining what happened and suggesting fixes.
 
 ## Limitations
 
-- `--supervised` and `--rollback` are incompatible with `--env-credential` (keyring threads cause a deadlock across fork)
-- The unsandboxed parent represents a larger attack surface than Monitor mode. The parent applies ptrace hardening to mitigate this.
 - Capability expansion is Linux-only. macOS supervised mode provides rollback snapshots and diagnostics only.

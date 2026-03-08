@@ -40,6 +40,15 @@ nono run --allow-cwd --proxy-allow api.openai.com --proxy-allow api.anthropic.co
 nono run --allow-cwd --network-profile claude-code -- claude
 ```
 
+### Disable Proxy Filtering For One Session
+
+```bash
+# Keep the profile's filesystem policy, but skip proxy filtering this run
+nono run --profile claude-code --net-allow -- claude
+```
+
+`--net-allow` is a per-session override. It keeps the selected profile's filesystem and command policy, but disables proxy filtering and proxy-based credential injection for that run.
+
 ## How It Works
 
 When proxy mode is active, nono:
@@ -211,7 +220,7 @@ nono run -vv --network-profile claude-code --allow-cwd -- my-agent
 
 - **HTTP/1.1 only** - The CONNECT tunnel passes raw bytes (HTTP/2 works end-to-end), but the reverse proxy mode speaks HTTP/1.1 to upstream
 - **No per-port filtering on macOS** - Seatbelt cannot filter outbound by destination port (only ProxyOnly mode is supported, not arbitrary per-port rules)
-- **Proxy mode requires supervised execution** - The proxy runs in the unsandboxed parent process, so `--exec` mode is incompatible
+- **Proxy mode requires supervised execution** - The proxy runs in the unsandboxed parent process, so `nono wrap` (Direct mode) is incompatible. Use `nono run` instead.
 
 ## Next Steps
 
