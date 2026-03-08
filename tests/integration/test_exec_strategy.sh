@@ -44,6 +44,12 @@ run_test "default mode preserves exit code 1" 1 \
 run_test "default mode preserves exit code 42" 42 \
     "$NONO_BIN" run --allow "$TMPDIR" -- sh -c "exit 42"
 
+expect_output_contains "default mode preserves ENOENT for missing absolute paths" "No such file or directory" \
+    "$NONO_BIN" run --allow "$TMPDIR" -- cat /definitely-missing-nono-regression-path
+
+expect_output_not_contains "missing absolute path is not reported as supervisor denial" "Denied paths during this session" \
+    "$NONO_BIN" run --allow "$TMPDIR" -- cat /definitely-missing-nono-regression-path
+
 # =============================================================================
 # Direct Mode (nono wrap)
 # =============================================================================

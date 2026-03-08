@@ -341,6 +341,7 @@ const SECCOMP_IOCTL_NOTIF_ADDFD: libc::c_ulong = 0x40182103;
 
 // Seccomp addfd flags
 const SECCOMP_ADDFD_FLAG_SEND: u32 = 1 << 1;
+const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
 
 // BPF constants
 const BPF_LD: u16 = 0x00;
@@ -832,19 +833,19 @@ pub fn inject_fd(
     Ok(())
 }
 
-/// Deny a seccomp notification with EPERM.
+/// Respond to a seccomp notification with a specific errno.
 ///
 /// Sends a response to the kernel that causes the child's syscall to
-/// return -1 with errno=EPERM.
+/// return -1 with the supplied errno.
 ///
 /// # Errors
 ///
 /// Returns an error if the ioctl fails.
-pub fn deny_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
+pub fn respond_notif_errno(notify_fd: std::os::fd::RawFd, notif_id: u64, errno: i32) -> Result<()> {
     let resp = SeccompNotifResp {
         id: notif_id,
         val: 0,
-        error: -libc::EPERM,
+        error: -errno,
         flags: 0,
     };
 
@@ -866,6 +867,48 @@ pub fn deny_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Continue a seccomp notification, letting the child's original syscall run.
+///
+/// This preserves the original syscall semantics exactly. It is safe only when
+/// the syscall is already authorized by the sandbox's allow-list.
+pub fn continue_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
+    let resp = SeccompNotifResp {
+        id: notif_id,
+        val: 0,
+        error: 0,
+        flags: SECCOMP_USER_NOTIF_FLAG_CONTINUE,
+    };
+
+    let ret = unsafe {
+        libc::ioctl(
+            notify_fd,
+            SECCOMP_IOCTL_NOTIF_SEND,
+            &resp as *const SeccompNotifResp,
+        )
+    };
+
+    if ret < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "SECCOMP_IOCTL_NOTIF_SEND (continue) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Deny a seccomp notification with EPERM.
+///
+/// Sends a response to the kernel that causes the child's syscall to
+/// return -1 with errno=EPERM.
+///
+/// # Errors
+///
+/// Returns an error if the ioctl fails.
+pub fn deny_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
+    respond_notif_errno(notify_fd, notif_id, libc::EPERM)
 }
 
 #[cfg(test)]

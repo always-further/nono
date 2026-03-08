@@ -99,9 +99,9 @@ pub(super) fn handle_seccomp_notification(
     mut trust_interceptor: Option<&mut TrustInterceptor>,
 ) -> Result<()> {
     use nono::sandbox::{
-        classify_access_from_flags, deny_notif, inject_fd, notif_id_valid, read_notif_path,
-        read_open_how, recv_notif, resolve_notif_path, validate_openat2_size, SYS_OPENAT,
-        SYS_OPENAT2,
+        classify_access_from_flags, continue_notif, deny_notif, inject_fd, notif_id_valid,
+        read_notif_path, read_open_how, recv_notif, resolve_notif_path, respond_notif_errno,
+        validate_openat2_size, SYS_OPENAT, SYS_OPENAT2,
     };
 
     // 1. Receive the notification
@@ -176,12 +176,22 @@ pub(super) fn handle_seccomp_notification(
         }
     };
 
-    let canonicalized = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let procfs_context = ProcfsAccessContext::new(child.as_raw() as u32, Some(notif.pid));
+    let resolved_path = match resolve_procfs_path_for_child(&path, Some(procfs_context)) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            debug!("Failed to resolve procfs path '{}': {}", path.display(), e);
+            let _ = deny_notif(notify_fd, notif.id);
+            return Ok(());
+        }
+    };
+    let canonicalized =
+        std::fs::canonicalize(&resolved_path).unwrap_or_else(|_| resolved_path.clone());
 
     // 4. Check never_grant BEFORE initial-set fast-path.
     let never_grant_check = config.never_grant.check(&canonicalized);
     if !never_grant_check.is_blocked() {
-        let never_grant_original = config.never_grant.check(&path);
+        let never_grant_original = config.never_grant.check(&resolved_path);
         if never_grant_original.is_blocked() {
             debug!(
                 "Seccomp: path {} (via {}) blocked by never_grant",
@@ -229,33 +239,84 @@ pub(super) fn handle_seccomp_notification(
     });
 
     if in_initial_set {
-        match open_path_for_access(&canonicalized, &access, config.never_grant, None) {
-            Ok(file) => {
-                if notif_id_valid(notify_fd, notif.id)? {
-                    if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
-                        debug!(
-                            "inject_fd failed for initial-set path {}: {}",
-                            path.display(),
-                            e
+        if canonicalized.starts_with("/proc") {
+            match open_path_for_access(
+                &path,
+                &access,
+                config.never_grant,
+                None,
+                Some(procfs_context),
+            ) {
+                Ok(file) => {
+                    if notif_id_valid(notify_fd, notif.id)? {
+                        if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
+                            debug!(
+                                "inject_fd failed for initial-set proc path {}: {}",
+                                path.display(),
+                                e
+                            );
+                            let _ = deny_notif(notify_fd, notif.id);
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        "Failed to open initial-set proc path {}: {}",
+                        path.display(),
+                        e
+                    );
+                    if e.is_policy_blocked() {
+                        record_denial(
+                            denials,
+                            DenialRecord {
+                                path: canonicalized.clone(),
+                                access,
+                                reason: DenialReason::PolicyBlocked,
+                            },
                         );
                         let _ = deny_notif(notify_fd, notif.id);
+                    } else {
+                        let _ = respond_notif_errno(notify_fd, notif.id, e.errno());
                     }
                 }
             }
-            Err(e) => {
-                debug!("Failed to open initial-set path {}: {}", path.display(), e);
-                record_denial(
-                    denials,
-                    DenialRecord {
-                        path: canonicalized.clone(),
-                        access,
-                        reason: DenialReason::PolicyBlocked,
-                    },
+        } else if notif_id_valid(notify_fd, notif.id)? {
+            if let Err(e) = continue_notif(notify_fd, notif.id) {
+                debug!(
+                    "continue_notif failed for initial-set path {}: {}",
+                    path.display(),
+                    e
                 );
                 let _ = deny_notif(notify_fd, notif.id);
             }
         }
         return Ok(());
+    }
+
+    // Preserve native ENOENT/ENOTDIR behavior for nonexistent paths. Runtimes
+    // frequently probe optional locations (e.g. Bun's /$bunfs assets) and
+    // expect a normal "not found" result rather than a policy denial. This is
+    // safe because Landlock will still block any path that appears after the
+    // check but remains outside the initial allow-list.
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(libc::ENOTDIR) =>
+        {
+            if notif_id_valid(notify_fd, notif.id)? {
+                if let Err(send_err) = continue_notif(notify_fd, notif.id) {
+                    debug!(
+                        "continue_notif failed for missing path {}: {}",
+                        path.display(),
+                        send_err
+                    );
+                    let _ = deny_notif(notify_fd, notif.id);
+                }
+            }
+            return Ok(());
+        }
+        Err(_) => {}
     }
 
     // 6. Rate limit check
@@ -361,10 +422,11 @@ pub(super) fn handle_seccomp_notification(
     // Pass verified_digest to enable TOCTOU re-verification for instruction files
     if decision.is_granted() {
         match open_path_for_access(
-            &canonicalized,
+            &path,
             &access,
             config.never_grant,
             verified_digest.as_deref(),
+            Some(procfs_context),
         ) {
             Ok(file) => {
                 if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
@@ -382,7 +444,11 @@ pub(super) fn handle_seccomp_notification(
                     canonicalized.display(),
                     e
                 );
-                let _ = deny_notif(notify_fd, notif.id);
+                if e.is_policy_blocked() {
+                    let _ = deny_notif(notify_fd, notif.id);
+                } else {
+                    let _ = respond_notif_errno(notify_fd, notif.id, e.errno());
+                }
             }
         }
     } else {
