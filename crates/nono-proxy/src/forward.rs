@@ -22,16 +22,21 @@ use zeroize::Zeroizing;
 /// Timeout for upstream TCP connect.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Shared context for handling a forward proxy request.
+pub struct ForwardProxyCtx<'a> {
+    pub filter: &'a ProxyFilter,
+    pub session_token: &'a Zeroizing<String>,
+    pub localhost_connect_ports: &'a [u16],
+    pub audit_log: Option<&'a audit::SharedAuditLog>,
+}
+
 /// Handle a non-CONNECT HTTP proxy request.
 pub async fn handle_forward_proxy(
     first_line: &str,
     stream: &mut TcpStream,
-    filter: &ProxyFilter,
-    session_token: &Zeroizing<String>,
     remaining_header: &[u8],
     buffered: &[u8],
-    localhost_connect_ports: &[u16],
-    audit_log: Option<&audit::SharedAuditLog>,
+    ctx: &ForwardProxyCtx<'_>,
 ) -> Result<()> {
     let (method, target, version) = match parse_request_line(first_line) {
         Ok(parts) => parts,
@@ -78,27 +83,39 @@ pub async fn handle_forward_proxy(
         }
     };
 
-    if !localhost_connect_ports.is_empty()
+    if !ctx.localhost_connect_ports.is_empty()
         && is_loopback_host(&host)
-        && !localhost_connect_ports.contains(&port)
+        && !ctx.localhost_connect_ports.contains(&port)
     {
         let reason = format!("localhost port {} is not allowed", port);
-        audit::log_denied(audit_log, audit::ProxyMode::Forward, &host, port, &reason);
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Forward,
+            &host,
+            port,
+            &reason,
+        );
         send_response(stream, 403, &format!("Forbidden: {}", reason)).await?;
         return Err(ProxyError::HostDenied { host, reason });
     }
 
     // Forward mode requires proxy auth.
-    if let Err(e) = token::validate_proxy_auth(remaining_header, session_token) {
+    if let Err(e) = token::validate_proxy_auth(remaining_header, ctx.session_token) {
         debug!("FORWARD auth failed: {}", e);
         send_response(stream, 407, "Proxy Authentication Required").await?;
         return Err(ProxyError::InvalidToken);
     }
 
-    let check = filter.check_host(&host, port).await?;
+    let check = ctx.filter.check_host(&host, port).await?;
     if !check.result.is_allowed() {
         let reason = check.result.reason();
-        audit::log_denied(audit_log, audit::ProxyMode::Forward, &host, port, &reason);
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Forward,
+            &host,
+            port,
+            &reason,
+        );
         send_response(stream, 403, &format!("Forbidden: {}", reason)).await?;
         return Err(ProxyError::HostDenied { host, reason });
     }
@@ -106,7 +123,13 @@ pub async fn handle_forward_proxy(
     let resolved = &check.resolved_addrs;
     if resolved.is_empty() {
         let reason = "DNS resolution returned no addresses".to_string();
-        audit::log_denied(audit_log, audit::ProxyMode::Forward, &host, port, &reason);
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Forward,
+            &host,
+            port,
+            &reason,
+        );
         send_response(stream, 502, "DNS resolution failed").await?;
         return Err(ProxyError::UpstreamConnect { host, reason });
     }
@@ -119,7 +142,13 @@ pub async fn handle_forward_proxy(
         upstream.write_all(buffered).await?;
     }
 
-    audit::log_allowed(audit_log, audit::ProxyMode::Forward, &host, port, &method);
+    audit::log_allowed(
+        ctx.audit_log,
+        audit::ProxyMode::Forward,
+        &host,
+        port,
+        &method,
+    );
     let _ = tokio::io::copy_bidirectional(stream, &mut upstream).await;
     Ok(())
 }

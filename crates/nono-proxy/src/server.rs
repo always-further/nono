@@ -360,17 +360,13 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
         // Forward proxying for plain HTTP is enabled only in localhost relay mode.
         // Without relay configuration, preserve legacy behavior and reject
         // non-CONNECT requests when no credential routes are configured.
-        forward::handle_forward_proxy(
-            first_line,
-            &mut stream,
-            &state.filter,
-            &state.session_token,
-            &header_bytes,
-            &buffered,
-            &state.config.localhost_connect_ports,
-            Some(&state.audit_log),
-        )
-        .await
+        let ctx = forward::ForwardProxyCtx {
+            filter: &state.filter,
+            session_token: &state.session_token,
+            localhost_connect_ports: &state.config.localhost_connect_ports,
+            audit_log: Some(&state.audit_log),
+        };
+        forward::handle_forward_proxy(first_line, &mut stream, &header_bytes, &buffered, &ctx).await
     } else {
         let response = "HTTP/1.1 400 Bad Request\r\n\r\n";
         stream.write_all(response.as_bytes()).await?;
