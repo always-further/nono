@@ -249,7 +249,7 @@ nono run --allow-cwd -- nono why --self --path ~/.ssh --op read
 # Output: DENIED - sensitive_path (SSH keys and config)
 
 # Check if a path would be writable
-nono run --allow-cwd -- nono why --self --path ./src --op write
+nono run --allow . -- nono why --self --path ./src --op write
 # Output: ALLOWED - Granted by: --allow .
 
 # JSON output for programmatic use (useful for AI agents)
@@ -317,8 +317,8 @@ nono learn -- my-app
 # Compare against an existing profile to see what's missing
 nono learn --profile my-profile -- my-app
 
-# Output as TOML for easy profile creation
-nono learn --toml -- my-app
+# Output as JSON for easy profile creation
+nono learn --json -- my-app
 ```
 
 <Note>

@@ -104,12 +104,12 @@ Compare against an existing profile to show only missing paths.
 nono learn --profile opencode -- opencode
 ```
 
-### `--toml`
+### `--json`
 
-Output discovered paths as a TOML fragment suitable for a profile.
+Output discovered paths as a JSON fragment suitable for a profile.
 
 ```bash
-nono learn --toml -- my-app > paths.toml
+nono learn --json -- my-app > paths.json
 ```
 
 ### `--timeout`
@@ -212,7 +212,7 @@ Block all network access. Network is **allowed by default**.
 
 ```bash
 # Block network for a build process that should be offline
-nono run --allow-cwd --net-block -- cargo build
+nono run --allow . --net-block -- cargo build
 ```
 
 #### `--net-allow`
@@ -240,7 +240,7 @@ nono run --allow-cwd --network-profile claude-code -- claude
 nono run --allow-cwd --network-profile minimal -- my-agent
 ```
 
-Available profiles: `claude-code`, `minimal`, `enterprise`. See [Network Proxy](/cli/features/network-proxy) for details.
+Available profiles: `claude-code`, `developer`, `minimal`, `opencode`, `enterprise`. See [Network Proxy](/cli/features/network-proxy) for details.
 
 <Note>
   `--network-profile` and `--proxy-allow` activate proxy mode, which forces supervised execution. The proxy runs in the unsandboxed parent process.
@@ -480,8 +480,8 @@ nono run --allow-cwd --env-credential openai_api_key,anthropic_api_key -- my-age
 # Load from 1Password (op:// URI with =VAR_NAME suffix)
 nono run --allow-cwd --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' -- my-agent
 
-# Use with profile (loads credentials defined in profile's [env_credentials] section)
-nono run --profile claude-code --env-credential -- claude
+# Use with a profile that defines env_credentials
+nono run --profile my-agent -- my-agent
 ```
 
 Credentials are:
@@ -549,7 +549,7 @@ nono run --rollback --no-rollback-prompt --allow-cwd -- my-agent
 Disable rollback entirely for this session. No snapshots are taken and no restore is offered. Useful when rollback overhead is not needed.
 
 ```bash
-nono run --no-rollback --allow-cwd -- npm test
+nono run --no-rollback --allow . -- npm test
 ```
 
 #### `--no-audit`

@@ -29,7 +29,7 @@ cargo build --release
 
 ```bash
 # Allow read+write to current directory
-nono run --allow-cwd -- command
+nono run --allow . -- command
 
 # Separate read and write permissions
 nono run --read ./src --write ./output -- cargo build
@@ -47,7 +47,7 @@ nono run --profile claude-code -- claude
 nono run --profile claude-code --net-allow -- claude
 
 # Start an interactive shell inside the sandbox
-nono shell --allow-cwd
+nono shell --allow .
 
 # Check why a path would be blocked
 nono why --path ~/.ssh/id_rsa --op read
@@ -132,7 +132,7 @@ nono run --profile my-profile -- rm /tmp/old-file.txt
 ## Documentation
 
 - [Full Documentation](https://docs.nono.sh)
-- [Client Guides](https://docs.nono.sh/clients)
+- [Client Guides](https://docs.nono.sh/cli/clients/quickstart)
 
 ## License
 
