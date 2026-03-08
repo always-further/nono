@@ -186,22 +186,42 @@ pub(crate) fn forward_winsize(real_tty_fd: RawFd, master_fd: RawFd) {
 /// This is a non-blocking single-pass relay (call within a poll loop).
 pub(crate) fn relay_bytes(src_fd: RawFd, dst_fd: RawFd) -> usize {
     let mut buf = [0u8; 4096];
-    // SAFETY: read/write on valid fds with valid buffer
-    let n = unsafe { libc::read(src_fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if n <= 0 {
+    // SAFETY: read on valid fd with valid buffer
+    let n = loop {
+        let res = unsafe { libc::read(src_fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if res < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return 0;
+        }
+        break res as usize;
+    };
+
+    if n == 0 {
         return 0;
     }
-    let n = n as usize;
+
     let mut written = 0;
     while written < n {
         // SAFETY: write on valid fd with valid buffer slice
         let w = unsafe { libc::write(dst_fd, buf[written..n].as_ptr().cast(), n - written) };
-        if w <= 0 {
+        if w < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            // EAGAIN/EWOULDBLOCK or fatal write error — return what we wrote.
+            // The caller's poll loop will retry when the fd is writable.
+            break;
+        }
+        if w == 0 {
             break;
         }
         written += w as usize;
     }
-    n
+    written
 }
 
 /// Set a file descriptor to non-blocking mode.

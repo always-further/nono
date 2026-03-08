@@ -1568,25 +1568,28 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         let home = config::validated_home()?;
         let home_path = std::path::Path::new(&home);
 
+        let precreate = |path: &std::path::Path, is_dir: bool| {
+            if !path.exists() {
+                let result = if is_dir {
+                    std::fs::create_dir_all(path)
+                } else {
+                    std::fs::File::create(path).map(|_| ())
+                };
+                if let Err(e) = result {
+                    warn!("Failed to pre-create {}: {}", path.display(), e);
+                }
+            }
+        };
+
         // ~/.claude.json.lock — Claude Code's saveConfigWithLock creates this
         // next to ~/.claude.json. Landlock cannot grant permission to create
         // new files in ~/ without opening the entire directory.
-        let lock_path = home_path.join(".claude.json.lock");
-        if !lock_path.exists() {
-            if let Err(e) = std::fs::File::create(&lock_path) {
-                warn!("Failed to pre-create {}: {}", lock_path.display(), e);
-            }
-        }
+        precreate(&home_path.join(".claude.json.lock"), false);
 
         // ~/.cache/claude-cli-nodejs — MCP server logs and CLI cache.
         // The claude_cache_linux group grants this directory, but it may
         // not exist on a fresh system.
-        let cache_dir = home_path.join(".cache/claude-cli-nodejs");
-        if !cache_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(&cache_dir) {
-                warn!("Failed to pre-create {}: {}", cache_dir.display(), e);
-            }
-        }
+        precreate(&home_path.join(".cache/claude-cli-nodejs"), true);
     }
 
     // Build capabilities from profile or arguments.
