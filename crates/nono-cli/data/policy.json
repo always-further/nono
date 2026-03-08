@@ -395,15 +395,6 @@
         ]
       }
     },
-    "claude_code_linux": {
-      "description": "Claude Code Linux-specific state paths",
-      "platform": "linux",
-      "allow": {
-        "read": [
-          "$HOME/.local/share/claude"
-        ]
-      }
-    },
     "vscode_macos": {
       "description": "Visual Studio Code configuration and extension directories for macOS",
       "platform": "macos",
@@ -514,7 +505,6 @@
       "security": {
         "groups": [
           "claude_code_macos",
-          "claude_code_linux",
           "user_caches_macos",
           "node_runtime",
           "rust_runtime",
@@ -528,6 +518,7 @@
       "trust_groups": [],
       "filesystem": {
         "allow": ["$HOME/.claude"],
+        "read": ["$HOME/.local/share/claude"],
         "allow_file": ["$HOME/.claude.json", "$HOME/.claude.json.lock"],
         "read_file": ["$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
       },

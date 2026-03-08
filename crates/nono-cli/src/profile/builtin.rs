@@ -43,16 +43,12 @@ mod tests {
         assert!(profile
             .security
             .groups
-            .contains(&"claude_code_linux".to_string()));
-        assert!(profile
-            .security
-            .groups
             .contains(&"vscode_macos".to_string()));
         assert!(profile
             .security
             .groups
             .contains(&"vscode_linux".to_string()));
-        assert!(!profile
+        assert!(profile
             .filesystem
             .read
             .contains(&"$HOME/.local/share/claude".to_string()));

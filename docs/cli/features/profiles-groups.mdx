@@ -395,9 +395,9 @@ These are a hard safety net below all other policy.
 nono run --profile claude-code -- claude
 ```
 
-**Groups:** `claude_code_macos`, `claude_code_linux`, `user_caches_macos`, `node_runtime`, `rust_runtime`, `python_runtime`, `vscode_macos`, `vscode_linux`, `unlink_protection` (plus all base_groups)
+**Groups:** `claude_code_macos`, `user_caches_macos`, `node_runtime`, `rust_runtime`, `python_runtime`, `vscode_macos`, `vscode_linux`, `unlink_protection` (plus all base_groups)
 
-**Filesystem:** `~/.claude` (read+write), `~/.claude.json` (read+write), plus platform-specific Claude Code and VS Code paths from the matching `_macos` or `_linux` groups
+**Filesystem:** `~/.claude` (read+write), `~/.claude.json` (read+write), `~/.local/share/claude` (read), plus the macOS keychain path and OS-specific VS Code paths from the matching platform groups
 
 **Network:** Allowed
 

@@ -1106,16 +1106,12 @@ mod tests {
         assert!(profile
             .security
             .groups
-            .contains(&"claude_code_linux".to_string()));
-        assert!(profile
-            .security
-            .groups
             .contains(&"vscode_macos".to_string()));
         assert!(profile
             .security
             .groups
             .contains(&"vscode_linux".to_string()));
-        assert!(!profile
+        assert!(profile
             .filesystem
             .read
             .contains(&"$HOME/.local/share/claude".to_string()));
@@ -1140,18 +1136,6 @@ mod tests {
             .expect("claude_code_macos allow missing")
             .read
             .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
-
-        let claude_code_linux = policy
-            .groups
-            .get("claude_code_linux")
-            .expect("claude_code_linux group missing");
-        assert_eq!(claude_code_linux.platform.as_deref(), Some("linux"));
-        assert!(claude_code_linux
-            .allow
-            .as_ref()
-            .expect("claude_code_linux allow missing")
-            .read
-            .contains(&"$HOME/.local/share/claude".to_string()));
 
         let vscode_macos = policy
             .groups
@@ -1188,7 +1172,6 @@ mod tests {
             &policy,
             &[
                 "claude_code_macos".to_string(),
-                "claude_code_linux".to_string(),
                 "vscode_macos".to_string(),
                 "vscode_linux".to_string(),
             ],
@@ -1196,13 +1179,12 @@ mod tests {
         )
         .expect("resolve failed");
 
-        assert_eq!(resolved.names.len(), 2);
-
         if cfg!(target_os = "macos") {
+            assert_eq!(resolved.names.len(), 2);
             assert!(resolved.names.contains(&"claude_code_macos".to_string()));
             assert!(resolved.names.contains(&"vscode_macos".to_string()));
         } else {
-            assert!(resolved.names.contains(&"claude_code_linux".to_string()));
+            assert_eq!(resolved.names.len(), 1);
             assert!(resolved.names.contains(&"vscode_linux".to_string()));
         }
     }
