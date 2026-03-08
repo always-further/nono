@@ -2000,6 +2000,7 @@ mod tests {
             .is_some());
     }
 
+    #[test]
     fn test_check_sensitive_path() {
         assert!(config::check_sensitive_path("~/.ssh")
             .expect("policy must load")
@@ -2019,7 +2020,6 @@ mod tests {
             .is_none());
     }
 
-    #[test]
     #[test]
     fn test_resolve_effective_proxy_settings_net_allow_clears_profile_proxy_state() {
         let args = SandboxArgs {
