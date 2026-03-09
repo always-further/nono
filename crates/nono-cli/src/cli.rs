@@ -267,12 +267,9 @@ pub struct SandboxArgs {
 
     // === Network proxy filtering ===
     /// Enable network proxy filtering with a named profile (e.g., claude-code, minimal, enterprise).
-<<<<<<< HEAD
     /// When set, outbound network is restricted to hosts in the profile's allowlist.
     #[arg(long, value_name = "PROFILE", env = "NONO_NETWORK_PROFILE")]
-=======
     #[arg(long, value_name = "PROFILE")]
->>>>>>> 966988a (fix: shorten help menu verbosity for nono run (#120))
     pub network_profile: Option<String>,
 
     /// Allow additional hosts through the proxy (on top of network profile). | Can be specified multiple times.
@@ -321,15 +318,12 @@ pub struct SandboxArgs {
 
     // === Credential options ===
     /// Load credentials and inject as environment variables.
-<<<<<<< HEAD
     /// The sandboxed process can read these credentials directly.
     /// For network API keys, prefer --proxy-credential for credential isolation.
     /// Comma-separated entries: keyring names (auto-uppercased to env var) or
     /// 1Password URIs with explicit var (op://vault/item/field=MY_VAR).
     #[arg(long, value_name = "CREDENTIALS", env = "NONO_ENV_CREDENTIAL")]
-=======
     #[arg(long, value_name = "CREDENTIALS")]
->>>>>>> 966988a (fix: shorten help menu verbosity for nono run (#120))
     pub env_credential: Option<String>,
 
     // === Profile options ===
@@ -378,24 +372,18 @@ pub struct RunArgs {
     #[arg(long)]
     pub no_diagnostics: bool,
 
-<<<<<<< HEAD
-=======
     /// Preserve TTY for interactive apps (e.g., Claude Code, vim, htop).
     #[arg(long = "exec")]
     pub direct_exec: bool,
 
->>>>>>> 966988a (fix: shorten help menu verbosity for nono run (#120))
     /// Enable atomic rollback snapshots for the session.
     #[arg(long, conflicts_with = "no_rollback")]
     pub rollback: bool,
 
-<<<<<<< HEAD
-=======
     /// Supervised mode: sandbox only the child, parent handles approval prompts
     #[arg(long)]
     pub supervised: bool,
 
->>>>>>> 966988a (fix: shorten help menu verbosity for nono run (#120))
     /// Skip the post-exit rollback review prompt.
     #[arg(long)]
     pub no_rollback_prompt: bool,
