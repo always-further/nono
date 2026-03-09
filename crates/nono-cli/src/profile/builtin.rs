@@ -50,6 +50,10 @@ mod tests {
         assert_eq!(profile.meta.name, "opencode");
         assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
         assert!(profile.interactive);
+        assert!(profile
+            .filesystem
+            .allow
+            .contains(&"$HOME/.local/share/opentui".to_string()));
     }
 
     #[test]

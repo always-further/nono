@@ -552,7 +552,8 @@
         "allow": [
           "$HOME/.config/opencode",
           "$HOME/.cache/opencode",
-          "$HOME/.local/share/opencode"
+          "$HOME/.local/share/opencode",
+          "$HOME/.local/share/opentui"
         ]
       },
       "network": { "block": false, "network_profile": "developer" },

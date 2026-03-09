@@ -43,6 +43,9 @@ expect_failure "nonexistent profile exits non-zero" \
 expect_output_contains "claude-code profile lists .claude in dry-run" ".claude" \
     "$NONO_BIN" run --profile claude-code --dry-run -- echo "test"
 
+expect_output_contains "opencode profile lists OpenTUI data dir in dry-run" ".local/share/opentui" \
+    "$NONO_BIN" run --profile opencode --dry-run -- echo "test"
+
 expect_output_contains "dry-run output shows Capabilities section" "Capabilities:" \
     "$NONO_BIN" run --profile claude-code --dry-run -- echo "test"
 

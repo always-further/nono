@@ -26,6 +26,7 @@ The built-in profile provides:
 - **Read+write access** to `~/.config/opencode` (configuration)
 - **Read+write access** to `~/.cache/opencode` (cache)
 - **Read+write access** to `~/.local/share/opencode` (data)
+- **Read+write access** to `~/.local/share/opentui` (OpenTUI parser/runtime data)
 - **Read+write access** to `/tmp` (temp files)
 - **Network access** enabled (required for AI provider API calls)
 
@@ -50,7 +51,8 @@ Create `~/.config/nono/profiles/opencode.json` for different permissions:
   "filesystem": {
     "read": [
       "$XDG_CONFIG_HOME/opencode",
-      "$XDG_DATA_HOME/opencode"
+      "$XDG_DATA_HOME/opencode",
+      "$XDG_DATA_HOME/opentui"
     ]
   },
   "network": {
