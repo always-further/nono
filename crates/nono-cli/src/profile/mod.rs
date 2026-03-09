@@ -581,6 +581,32 @@ impl From<ProfileSignalMode> for nono::SignalMode {
     }
 }
 
+/// Process inspection mode as specified in a profile.
+///
+/// Maps to `nono::ProcessInfoMode` when building the `CapabilitySet`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileProcessInfoMode {
+    /// Inspection restricted to self only (default)
+    Isolated,
+    /// Inspection allowed for same-sandbox children
+    #[serde(alias = "allow_same_sandbox")]
+    AllowSameSandbox,
+    /// Inspection allowed for any process
+    #[serde(alias = "allow_all")]
+    AllowAll,
+}
+
+impl From<ProfileProcessInfoMode> for nono::ProcessInfoMode {
+    fn from(val: ProfileProcessInfoMode) -> Self {
+        match val {
+            ProfileProcessInfoMode::Isolated => nono::ProcessInfoMode::Isolated,
+            ProfileProcessInfoMode::AllowSameSandbox => nono::ProcessInfoMode::AllowSameSandbox,
+            ProfileProcessInfoMode::AllowAll => nono::ProcessInfoMode::AllowAll,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkdirAccess {
@@ -624,6 +650,11 @@ pub struct SecurityConfig {
     /// (defaults to `Isolated` if no base sets it).
     #[serde(default)]
     pub signal_mode: Option<ProfileSignalMode>,
+    /// Process inspection mode. Controls whether the sandboxed process can read
+    /// process info (ps, proc_pidinfo) for other processes. When `None`, defaults
+    /// to `Isolated`.
+    #[serde(default)]
+    pub process_info_mode: Option<ProfileProcessInfoMode>,
     /// Enable runtime capability elevation via seccomp-notify (Linux).
     /// When true, the supervisor intercepts file opens and can grant access
     /// to paths not in the initial capability set. When false (default),
@@ -863,6 +894,7 @@ fn load_base_profile_raw(name: &str) -> Result<Profile> {
                 trust_groups: def.trust_groups.clone(),
                 allowed_commands: def.security.allowed_commands.clone(),
                 signal_mode: def.security.signal_mode,
+                process_info_mode: def.security.process_info_mode,
                 capability_elevation: def.security.capability_elevation,
             },
             filesystem: def.filesystem.clone(),
@@ -897,6 +929,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &child.security.allowed_commands,
             ),
             signal_mode: child.security.signal_mode.or(base.security.signal_mode),
+            process_info_mode: child
+                .security
+                .process_info_mode
+                .or(base.security.process_info_mode),
             capability_elevation: child
                 .security
                 .capability_elevation
@@ -2626,6 +2662,67 @@ mod tests {
                 .iter()
                 .any(|path| path == "$HOME/.claude"),
             "expected filesystem grants from claude-code to still be inherited",
+        );
+    }
+
+    #[test]
+    fn test_signal_mode_allow_same_sandbox_deserializes() {
+        let json = r#"{
+            "meta": { "name": "sig-test" },
+            "filesystem": { "allow": ["/tmp"] },
+            "security": { "signal_mode": "allow_same_sandbox" }
+        }"#;
+        let dir = tempdir().expect("tmpdir");
+        let path = dir.path().join("sig-test.json");
+        std::fs::write(&path, json).expect("write profile");
+        let profile = load_profile_from_path(&path).expect("parse profile");
+        assert_eq!(
+            profile.security.signal_mode,
+            Some(ProfileSignalMode::AllowSameSandbox)
+        );
+    }
+
+    #[test]
+    fn test_security_config_process_info_mode_deserializes() {
+        let json = r#"{
+            "meta": { "name": "ps-test" },
+            "filesystem": { "allow": ["/tmp"] },
+            "security": { "process_info_mode": "allow_same_sandbox" }
+        }"#;
+        let dir = tempdir().expect("tmpdir");
+        let path = dir.path().join("ps-test.json");
+        std::fs::write(&path, json).expect("write profile");
+        let profile = load_profile_from_path(&path).expect("parse profile");
+        assert_eq!(
+            profile.security.process_info_mode,
+            Some(ProfileProcessInfoMode::AllowSameSandbox)
+        );
+    }
+
+    #[test]
+    fn test_security_config_process_info_mode_defaults_none() {
+        let json = r#"{ "meta": { "name": "no-pim" }, "filesystem": { "allow": ["/tmp"] } }"#;
+        let dir = tempdir().expect("tmpdir");
+        let path = dir.path().join("no-pim.json");
+        std::fs::write(&path, json).expect("write profile");
+        let profile = load_profile_from_path(&path).expect("parse profile");
+        assert!(profile.security.process_info_mode.is_none());
+    }
+
+    #[test]
+    fn test_security_config_process_info_mode_allow_all_alias() {
+        let json = r#"{
+            "meta": { "name": "pim-alias" },
+            "filesystem": { "allow": ["/tmp"] },
+            "security": { "process_info_mode": "allow_all" }
+        }"#;
+        let dir = tempdir().expect("tmpdir");
+        let path = dir.path().join("pim-alias.json");
+        std::fs::write(&path, json).expect("write profile");
+        let profile = load_profile_from_path(&path).expect("parse profile");
+        assert_eq!(
+            profile.security.process_info_mode,
+            Some(ProfileProcessInfoMode::AllowAll)
         );
     }
 }
