@@ -600,7 +600,13 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["unlink_protection"],
+        "groups": [
+          "node_runtime",
+          "rust_runtime",
+          "python_runtime",
+          "nix_runtime",
+          "unlink_protection"
+        ],
         "signal_mode": "isolated",
         "capability_elevation": false
       },

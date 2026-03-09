@@ -13,6 +13,7 @@ if ! require_working_sandbox "profiles suite"; then
     print_summary
     exit 0
 fi
+NONO_BIN_ABS="$(cd "$(dirname "$NONO_BIN")" && pwd)/$(basename "$NONO_BIN")"
 
 # Create test fixtures
 TMPDIR=$(setup_test_dir)
@@ -80,6 +81,14 @@ fi
 # claude-code profile allows cat on granted path
 expect_success "claude-code profile allows cat on granted path" \
     "$NONO_BIN" run --profile claude-code --allow "$TMPDIR" -- cat "$TMPDIR/workdir/file.txt"
+
+# codex profile allows cargo from user-local runtime paths
+if command_exists cargo; then
+    expect_success "codex profile allows cargo from runtime path" \
+        bash -lc "cd \"$TMPDIR/workdir\" && \"$NONO_BIN_ABS\" run --profile codex --allow-cwd -- cargo --version"
+else
+    skip_test "codex profile allows cargo from runtime path" "cargo not installed"
+fi
 
 # =============================================================================
 # Profile with Workdir

@@ -86,6 +86,19 @@ mod tests {
         assert!(profile
             .security
             .groups
+            .contains(&"node_runtime".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"rust_runtime".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"python_runtime".to_string()));
+        assert!(profile.security.groups.contains(&"nix_runtime".to_string()));
+        assert!(profile
+            .security
+            .groups
             .contains(&"unlink_protection".to_string()));
     }
 

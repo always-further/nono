@@ -25,6 +25,7 @@ The built-in profile provides:
 
 - **Read+write access** to the current working directory
 - **Read+write access** to `~/.codex` (config, auth state, sessions, caches, and local metadata)
+- **Read access** to common user-local runtime paths for Rust, Node.js, Python, and Nix toolchains
 - **Network access** enabled
 - **Interactive mode** enabled for the terminal UI
 
@@ -85,6 +86,19 @@ If you want Codex limited to the built-in host allowlist for coding workflows:
 
 ```bash
 nono run --profile codex --network-profile codex -- codex
+```
+
+### Additional Home-Directory Tools
+
+The built-in profile covers common Rust, Node.js, Python, and Nix runtime locations under `~/`, but some developer tools still install into other home-directory paths such as `~/go/bin` or `~/.bun/bin`.
+
+If a tool exists on your `PATH` but Codex cannot launch it inside the sandbox, grant read access to the specific path entry:
+
+```bash
+nono run --profile codex \
+  --read ~/.bun/bin \
+  --read ~/go/bin \
+  -- codex
 ```
 
 See [Network Filtering](/cli/features/network-proxy) and [Security Profiles](/cli/features/profiles-groups) for details on host allowlists, profile format, and precedence rules.
