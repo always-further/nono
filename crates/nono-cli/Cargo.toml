@@ -12,6 +12,20 @@ readme = "README.md"
 keywords = ["sandbox", "security", "cli", "landlock", "seatbelt"]
 categories = ["command-line-utilities", "development-tools"]
 
+[package.metadata.deb]
+maintainer = "Luke Hinds <luke@nono.sh>"
+copyright = "2025-2026, Luke Hinds"
+depends = "$auto, libc6 (>= 2.34)"
+recommends = "1password-cli | gnome-keyring"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/nono", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/nono/README", "644"],
+    ["../../LICENSE", "usr/share/doc/nono/LICENSE", "644"],
+]
+conf-files = ["/etc/nono/profiles/"]
+
 [[bin]]
 name = "nono"
 path = "src/main.rs"
