@@ -372,6 +372,32 @@ pub enum SignalMode {
     AllowAll,
 }
 
+/// Process inspection mode for the sandbox.
+///
+/// Controls whether the sandboxed process can read process information
+/// (e.g., via `ps`, `proc_pidinfo`, `proc_listpids`) about processes
+/// outside its own sandbox.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessInfoMode {
+    /// Process inspection restricted to the current process only.
+    ///
+    /// On macOS: emits `(deny process-info* (target others))` in Seatbelt.
+    #[default]
+    Isolated,
+    /// Process inspection allowed for child processes in the same sandbox only.
+    ///
+    /// On macOS: emits `(allow process-info* (target same-sandbox))` in Seatbelt.
+    /// Permits `ps` and `proc_pidinfo` on processes that inherited the sandbox,
+    /// while blocking inspection of external processes.
+    ///
+    /// On Linux: no-op (Landlock does not restrict process inspection).
+    AllowSameSandbox,
+    /// Process inspection allowed for any process.
+    ///
+    /// On macOS: omits the `(deny process-info* (target others))` rule entirely.
+    AllowAll,
+}
+
 /// forcing all traffic through the nono proxy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkMode {
@@ -463,6 +489,8 @@ pub struct CapabilitySet {
     platform_rules: Vec<String>,
     /// Signal isolation mode (default: Isolated).
     signal_mode: SignalMode,
+    /// Process inspection mode (default: Isolated).
+    process_info_mode: ProcessInfoMode,
     /// Enable sandbox extension support for runtime capability expansion.
     /// On macOS, adds extension filter rules to the Seatbelt profile so that
     /// `sandbox_extension_consume()` tokens can expand the sandbox dynamically.
@@ -599,6 +627,16 @@ impl CapabilitySet {
         self
     }
 
+    /// Set process inspection mode (builder pattern)
+    ///
+    /// Controls whether the sandboxed process can read process info (e.g., via
+    /// `ps`, `proc_pidinfo`) for processes outside the sandbox.
+    #[must_use]
+    pub fn set_process_info_mode(mut self, mode: ProcessInfoMode) -> Self {
+        self.process_info_mode = mode;
+        self
+    }
+
     /// Allow signals to any process (builder pattern)
     ///
     /// Disables signal isolation. By default, sandboxed processes can only
@@ -683,6 +721,11 @@ impl CapabilitySet {
         self.signal_mode = mode;
     }
 
+    /// Set process inspection mode (mutable)
+    pub fn set_process_info_mode_mut(&mut self, mode: ProcessInfoMode) {
+        self.process_info_mode = mode;
+    }
+
     /// Add a TCP connect port to the allowlist (mutable)
     pub fn add_tcp_connect_port(&mut self, port: u16) {
         self.tcp_connect_ports.push(port);
@@ -747,6 +790,12 @@ impl CapabilitySet {
     #[must_use]
     pub fn signal_mode(&self) -> SignalMode {
         self.signal_mode
+    }
+
+    /// Get the process inspection mode
+    #[must_use]
+    pub fn process_info_mode(&self) -> ProcessInfoMode {
+        self.process_info_mode
     }
 
     /// Get the network mode
@@ -1592,5 +1641,23 @@ mod tests {
     fn test_signal_mode_allow_same_sandbox_roundtrip() {
         let caps = CapabilitySet::new().set_signal_mode(SignalMode::AllowSameSandbox);
         assert_eq!(caps.signal_mode(), SignalMode::AllowSameSandbox);
+    }
+
+    #[test]
+    fn test_process_info_mode_default_is_isolated() {
+        let caps = CapabilitySet::new();
+        assert_eq!(caps.process_info_mode(), ProcessInfoMode::Isolated);
+    }
+
+    #[test]
+    fn test_process_info_mode_allow_same_sandbox() {
+        let caps = CapabilitySet::new().set_process_info_mode(ProcessInfoMode::AllowSameSandbox);
+        assert_eq!(caps.process_info_mode(), ProcessInfoMode::AllowSameSandbox);
+    }
+
+    #[test]
+    fn test_process_info_mode_allow_all() {
+        let caps = CapabilitySet::new().set_process_info_mode(ProcessInfoMode::AllowAll);
+        assert_eq!(caps.process_info_mode(), ProcessInfoMode::AllowAll);
     }
 }
