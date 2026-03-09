@@ -48,10 +48,10 @@ PLATFORM NOTES:
     /// Run a command inside the sandbox
     #[command(trailing_var_arg = true)]
     #[command(after_help = "EXAMPLES:
-    # Allow read/write to current directory, run claude
+    # Allow read/write to current directory
     nono run --allow . claude
 
-    # Use a named profile (built-in)
+    # Use a built-in profile
     nono run --profile claude-code claude
 
     # Use a named profile but temporarily allow unrestricted network
@@ -60,26 +60,17 @@ PLATFORM NOTES:
     # Profile with explicit working directory
     nono run --profile claude-code --workdir ./my-project claude
 
-    # Profile + additional permissions
-    nono run --profile openclaw --read /tmp/extra openclaw gateway
-
-    # Read-only access to src, write to output
+    # Granular permissions: read src, write output
     nono run --read ./src --write ./output cargo build
 
-    # Multiple allowed paths
-    nono run --allow ./project-a --allow ./project-b claude
-
-    # Block network access (network allowed by default)
+    # Block network access
     nono run --allow . --net-block cargo build
 
-    # Allow specific files (not directories)
+    # Allow a specific file (not whole directory)
     nono run --allow . --write-file ~/.claude.json claude
 
-    # Load secrets from system keystore (comma-separated keyring names)
+    # Load secrets from keystore
     nono run --allow . --env-credential openai_api_key,anthropic_api_key -- claude
-
-    # Load secret from 1Password (op:// URI with explicit env var name)
-    nono run --allow . --env-credential 'op://vault/item/field=OPENAI_API_KEY' -- claude
 ")]
     Run(Box<RunArgs>),
 
@@ -215,7 +206,6 @@ PLATFORM NOTES:
 pub struct SandboxArgs {
     // === Directory permissions (recursive) ===
     /// Directories to allow read+write access (recursive).
-    /// Combines full read and write permissions (see --read and --write for details).
     #[arg(
         long,
         short = 'a',
@@ -230,9 +220,6 @@ pub struct SandboxArgs {
     pub read: Vec<PathBuf>,
 
     /// Directories to allow write-only access (recursive).
-    /// Write access includes: creating files/dirs, modifying content, deleting files,
-    /// renaming/moving files (atomic writes), and truncating files.
-    /// Note: Directory deletion is NOT included for safety.
     #[arg(long, short = 'w', value_name = "DIR")]
     pub write: Vec<PathBuf>,
 
@@ -246,7 +233,6 @@ pub struct SandboxArgs {
     pub read_file: Vec<PathBuf>,
 
     /// Single files to allow write-only access.
-    /// Write access includes: modifying content, deleting, renaming, and truncating.
     #[arg(long, value_name = "FILE")]
     pub write_file: Vec<PathBuf>,
 
@@ -283,25 +269,18 @@ pub struct SandboxArgs {
     /// Enable network proxy filtering with a named profile (e.g., claude-code, minimal, enterprise).
     /// When set, outbound network is restricted to hosts in the profile's allowlist.
     #[arg(long, value_name = "PROFILE", env = "NONO_NETWORK_PROFILE")]
+    #[arg(long, value_name = "PROFILE")]
     pub network_profile: Option<String>,
 
-    /// Allow additional hosts through the proxy (on top of network profile).
-    /// Can be specified multiple times.
+    /// Allow additional hosts through the proxy (on top of network profile). | Can be specified multiple times.
     #[arg(long, value_name = "HOST")]
     pub proxy_allow: Vec<String>,
 
-    /// Enable credential injection via reverse proxy for a service.
-    /// Service names map to entries in network-policy.json credentials section.
-    /// Can be specified multiple times.
+    /// Enable credential injection via reverse proxy for a service.  | Can be specified multiple times.
     #[arg(long, value_name = "SERVICE")]
     pub proxy_credential: Vec<String>,
 
     /// Allow the sandboxed process to bind (listen) on a specific TCP port.
-    /// Use this for server apps that need to accept connections while still
-    /// routing outbound HTTP through the credential proxy.
-    /// Can be specified multiple times for multiple ports.
-    /// Note: On macOS, Seatbelt cannot filter by port, so this enables blanket
-    /// bind/inbound access. On Linux, per-port filtering is enforced.
     #[arg(long, value_name = "PORT")]
     pub allow_bind: Vec<u16>,
 
@@ -319,16 +298,11 @@ pub struct SandboxArgs {
     pub external_proxy: Option<String>,
 
     /// Fixed port for the credential injection proxy (default: OS-assigned).
-    /// Use this when the sandboxed application requires a known proxy port
-    /// (e.g., for base URL configuration that can't read environment variables).
     #[arg(long, value_name = "PORT")]
     pub proxy_port: Option<u16>,
 
     // === Deny overrides ===
     /// Override a deny group rule for a specific path.
-    /// The path must also be explicitly granted via --allow, --read, or --write.
-    /// Cannot override never_grant paths (e.g., SSH private keys).
-    /// Can be specified multiple times.
     #[arg(long, value_name = "PATH")]
     pub override_deny: Vec<PathBuf>,
 
@@ -349,6 +323,7 @@ pub struct SandboxArgs {
     /// Comma-separated entries: keyring names (auto-uppercased to env var) or
     /// 1Password URIs with explicit var (op://vault/item/field=MY_VAR).
     #[arg(long, value_name = "CREDENTIALS", env = "NONO_ENV_CREDENTIAL")]
+    #[arg(long, value_name = "CREDENTIALS")]
     pub env_credential: Option<String>,
 
     // === Profile options ===
@@ -359,7 +334,6 @@ pub struct SandboxArgs {
     pub profile: Option<String>,
 
     /// Allow access to current working directory without prompting.
-    /// Access level determined by profile or defaults to read-only.
     #[arg(long)]
     pub allow_cwd: bool,
 
@@ -395,44 +369,38 @@ pub struct RunArgs {
     pub sandbox: SandboxArgs,
 
     /// Suppress diagnostic footer on command failure.
-    /// By default, nono prints a helpful summary when commands exit non-zero.
-    /// Use this flag for scripts that parse stderr.
     #[arg(long)]
     pub no_diagnostics: bool,
 
+    /// Preserve TTY for interactive apps (e.g., Claude Code, vim, htop).
+    #[arg(long = "exec")]
+    pub direct_exec: bool,
+
     /// Enable atomic rollback snapshots for the session.
-    /// Takes content-addressable snapshots of writable directories so you
-    /// can restore to the pre-session state after the command exits.
     #[arg(long, conflicts_with = "no_rollback")]
     pub rollback: bool,
 
+    /// Supervised mode: sandbox only the child, parent handles approval prompts
+    #[arg(long)]
+    pub supervised: bool,
+
     /// Skip the post-exit rollback review prompt.
-    /// Snapshots are still taken for audit purposes, but the interactive
-    /// restore UI is suppressed.
     #[arg(long)]
     pub no_rollback_prompt: bool,
 
     /// Disable rollback entirely for this session.
-    /// No snapshots are taken and no restore is offered.
     #[arg(long, conflicts_with = "rollback")]
     pub no_rollback: bool,
 
     /// Exclude from rollback snapshots (repeatable).
-    /// Values containing glob characters (*, ?, [) are matched against
-    /// filenames. Plain names match exact path components; names with '/'
-    /// match as path substrings. Does NOT affect sandbox permissions.
     #[arg(long, value_name = "PATTERN")]
     pub rollback_exclude: Vec<String>,
 
     /// Force-include a directory in rollback snapshots that would otherwise be
-    /// auto-excluded (repeatable). Accepts directory names (e.g., "target",
-    /// "node_modules"), not full paths. Does NOT affect sandbox permissions.
     #[arg(long, value_name = "DIR_NAME")]
     pub rollback_include: Vec<String>,
 
     /// Include ALL directories in rollback snapshots, overriding auto-exclusions.
-    /// VCS internals (.git, .hg, .svn) are always excluded to prevent repository
-    /// corruption. Warning: may be very slow on large projects with build artifacts.
     #[arg(long, conflicts_with = "rollback_include")]
     pub rollback_all: bool,
 
@@ -444,8 +412,6 @@ pub struct RunArgs {
     pub no_audit: bool,
 
     /// Disable trust verification for instruction files.
-    /// For development and testing only. Logs a warning and skips the
-    /// pre-exec trust scan. Not recommended for production use.
     #[arg(long)]
     pub trust_override: bool,
 
