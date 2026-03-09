@@ -43,6 +43,7 @@ The CLI is the quickest way to get going! zero startup latency, no need to insta
 ```bash
 # Any CLI agent — just put your command after --
 nono run --profile claude-code -- claude
+nono run --profile codex -- codex
 nono run --profile opencode -- opencode
 nono run --profile openclaw -- openclaw
 
@@ -79,7 +80,7 @@ DENIED
   Details: Path matches sensitive pattern 'Block access to cryptographic keys, tokens, and cloud credentials'. Access blocked by security policy.
 ```
 
-Built-in profiles for [Claude Code](https://docs.nono.sh/clients/claude-code), [OpenCode](https://docs.nono.sh/clients/opencode), and [OpenClaw](https://docs.nono.sh/clients/openclaw) — or define your own with custom permissions.
+Built-in profiles for [Claude Code](https://docs.nono.sh/clients/claude-code), [Codex](https://docs.nono.sh/clients/codex), [OpenCode](https://docs.nono.sh/clients/opencode), and [OpenClaw](https://docs.nono.sh/clients/openclaw) — or define your own with custom permissions.
 
 ## Library
 
@@ -274,6 +275,7 @@ nono ships with built-in profiles for popular AI coding agents. Each profile def
 | Client | Profile | Docs |
 |--------|---------|------|
 | **Claude Code** | `claude-code` | [Guide](https://docs.nono.sh/clients/claude-code) |
+| **Codex** | `codex` | [Guide](https://docs.nono.sh/clients/codex) |
 | **OpenCode** | `opencode` | [Guide](https://docs.nono.sh/clients/opencode) |
 | **OpenClaw** | `openclaw` | [Guide](https://docs.nono.sh/clients/openclaw) |
 

@@ -592,6 +592,26 @@
       },
       "interactive": true
     },
+    "codex": {
+      "meta": {
+        "name": "codex",
+        "version": "1.0.0",
+        "description": "OpenAI Codex CLI agent",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["unlink_protection"],
+        "signal_mode": "isolated",
+        "capability_elevation": false
+      },
+      "trust_groups": [],
+      "filesystem": {
+        "allow": ["$HOME/.codex"]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "interactive": true
+    },
     "openclaw": {
       "meta": {
         "name": "openclaw",

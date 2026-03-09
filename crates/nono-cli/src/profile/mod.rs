@@ -1246,6 +1246,7 @@ mod tests {
     fn test_list_profiles() {
         let profiles = list_profiles();
         assert!(profiles.contains(&"claude-code".to_string()));
+        assert!(profiles.contains(&"codex".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
         assert!(profiles.contains(&"opencode".to_string()));
     }

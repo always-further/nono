@@ -34,6 +34,9 @@ echo "--- Profile Dry Run ---"
 expect_success "claude-code profile dry-run exits 0" \
     "$NONO_BIN" run --profile claude-code --dry-run -- echo "test"
 
+expect_success "codex profile dry-run exits 0" \
+    "$NONO_BIN" run --profile codex --dry-run -- echo "test"
+
 expect_success "opencode profile dry-run exits 0" \
     "$NONO_BIN" run --profile opencode --dry-run -- echo "test"
 
@@ -42,6 +45,9 @@ expect_failure "nonexistent profile exits non-zero" \
 
 expect_output_contains "claude-code profile lists .claude in dry-run" ".claude" \
     "$NONO_BIN" run --profile claude-code --dry-run -- echo "test"
+
+expect_output_contains "codex profile lists .codex in dry-run" ".codex" \
+    "$NONO_BIN" run --profile codex --dry-run -- echo "test"
 
 expect_output_contains "opencode profile lists OpenTUI data dir in dry-run" ".local/share/opentui" \
     "$NONO_BIN" run --profile opencode --dry-run -- echo "test"

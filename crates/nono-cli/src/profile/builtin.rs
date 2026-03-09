@@ -74,6 +74,22 @@ mod tests {
     }
 
     #[test]
+    fn test_get_builtin_codex() {
+        let profile = get_builtin("codex").expect("Profile not found");
+        assert_eq!(profile.meta.name, "codex");
+        assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
+        assert!(profile.interactive);
+        assert!(profile
+            .filesystem
+            .allow
+            .contains(&"$HOME/.codex".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"unlink_protection".to_string()));
+    }
+
+    #[test]
     fn test_get_builtin_opencode() {
         let profile = get_builtin("opencode").expect("Profile not found");
         assert_eq!(profile.meta.name, "opencode");
@@ -94,6 +110,7 @@ mod tests {
     fn test_list_builtin() {
         let profiles = list_builtin();
         assert!(profiles.contains(&"claude-code".to_string()));
+        assert!(profiles.contains(&"codex".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
         assert!(profiles.contains(&"opencode".to_string()));
     }

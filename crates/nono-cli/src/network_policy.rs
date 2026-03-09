@@ -765,6 +765,24 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_profile_includes_openai_and_github_credentials() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy should load");
+
+        let resolved = resolve_network_profile(&policy, "codex").expect("should resolve");
+        assert!(
+            resolved.profile_credentials.contains(&"openai".to_string()),
+            "codex profile should include openai credential, got: {:?}",
+            resolved.profile_credentials
+        );
+        assert!(
+            resolved.profile_credentials.contains(&"github".to_string()),
+            "codex profile should include github credential, got: {:?}",
+            resolved.profile_credentials
+        );
+    }
+
+    #[test]
     fn test_resolve_credentials_rejects_dangerous_env_var() {
         use crate::profile::CustomCredentialDef;
 
