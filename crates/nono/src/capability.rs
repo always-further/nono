@@ -442,7 +442,7 @@ pub struct CapabilitySet {
     ///
     /// On macOS (Seatbelt), outbound is scoped to localhost per-port.
     /// On Linux (Landlock), ConnectTcp/BindTcp filter by port only, not
-    /// by destination IP. Use with `--net-block` or proxy mode to ensure
+    /// by destination IP. Use with `--block-net` or proxy mode to ensure
     /// only localhost is reachable.
     localhost_ports: Vec<u16>,
     /// Commands explicitly allowed (overrides blocklists - for CLI use)

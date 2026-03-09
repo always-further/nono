@@ -271,7 +271,7 @@ impl SetupRunner {
         let sample: Vec<_> = all_commands.into_iter().take(8).collect();
         println!("      {}, ...", sample.join(", "));
 
-        println!("  * Network access: allowed by default (use --net-block to disable)");
+        println!("  * Network access: allowed by default (use --block-net to disable)");
         println!();
 
         Ok(())
@@ -366,7 +366,7 @@ impl SetupRunner {
         println!("  You can add these aliases to {}:", shell_rc);
         println!();
         println!("    alias nono-claude='nono run --profile claude-code -- claude'");
-        println!("    alias nono-safe='nono run --allow-cwd --net-block --'");
+        println!("    alias nono-safe='nono run --allow-cwd --block-net --'");
         println!();
     }
 

@@ -34,7 +34,7 @@ Listening ports:
   0.0.0.0:3000
 
 (15 paths already covered by system defaults)
-Network activity detected. Use --net-block to restrict network access.
+Network activity detected. Use --block-net to restrict network access.
 ```
 
 Paths already covered by base groups (system libraries, temp directories, etc.) are filtered out by default.
@@ -124,7 +124,7 @@ Use `--no-rdns` to skip all DNS resolution, which avoids network calls during an
 nono learn --no-rdns -- my-command
 ```
 
-When network activity is detected, learn prints a hint suggesting `--net-block` to restrict network access at sandbox time.
+When network activity is detected, learn prints a hint suggesting `--block-net` to restrict network access at sandbox time.
 
 ## Workflow
 

@@ -88,7 +88,7 @@ nono why --host api.openai.com --port 443
 # Output: ALLOWED - network allowed by default
 
 # Check with network blocked
-nono why --host api.openai.com --net-block
+nono why --host api.openai.com --block-net
 # Output: DENIED - network_blocked
 ```
 
@@ -111,7 +111,7 @@ nono run --read ./src --read ./Cargo.toml --read ./Cargo.lock --allow ./target -
 nono run --allow-cwd -- npm install
 
 # Run build (offline)
-nono run --allow-cwd --net-block -- npm run build
+nono run --allow-cwd --block-net -- npm run build
 
 # Run tests
 nono run --allow-cwd -- npm test
@@ -198,8 +198,8 @@ nono run --allow-cwd -- sh -c "echo test > /tmp/blocked.txt"
 # Should succeed - network allowed by default
 nono run --allow-cwd -- curl https://example.com
 
-# Should fail - network blocked with --net-block
-nono run --allow-cwd --net-block -- curl https://example.com
+# Should fail - network blocked with --block-net
+nono run --allow-cwd --block-net -- curl https://example.com
 ```
 
 ## Shell Scripts
@@ -260,7 +260,7 @@ nono run --profile claude-code --workdir ./my-project -- claude
 ### Temporarily Bypass Profile Network Filtering
 
 ```bash
-nono run --profile claude-code --net-allow -- claude
+nono run --profile claude-code --allow-net -- claude
 ```
 
 ## Real-World Scenarios
@@ -325,7 +325,7 @@ nono run \
 ```bash
 nono run \
   --allow-cwd \
-  --net-block \
+  --block-net \
   -- make release
 ```
 
@@ -335,10 +335,10 @@ Run an MCP server and a client in separate sandboxes, communicating over localho
 
 ```bash
 # Terminal 1: MCP server on port 3000 (network blocked except IPC port)
-nono run --net-block --allow-port 3000 --allow ./mcp-server -- node server.js
+nono run --block-net --allow-port 3000 --allow ./mcp-server -- node server.js
 
 # Terminal 2: Agent connects to the MCP server on port 3000
-nono run --net-block --allow-port 3000 --allow ./agent -- my-agent
+nono run --block-net --allow-port 3000 --allow ./agent -- my-agent
 
 # With proxy filtering + localhost IPC
 nono run --network-profile claude-code --allow-port 3000 --allow-cwd -- claude

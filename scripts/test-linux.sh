@@ -224,31 +224,31 @@ fi
 print_header "Network Sandbox Tests"
 
 if $NETWORK_SUPPORTED; then
-    # Test: Network should be blocked with --net-block
+    # Test: Network should be blocked with --block-net
     if command -v curl &>/dev/null; then
-        NET_BLOCK_OUTPUT=$(timeout 10 $NONO run --allow "$TEST_DIR" --net-block --allow-cwd -- curl -s --connect-timeout 3 https://example.com 2>&1 || true)
+        NET_BLOCK_OUTPUT=$(timeout 10 $NONO run --allow "$TEST_DIR" --block-net --allow-cwd -- curl -s --connect-timeout 3 https://example.com 2>&1 || true)
         if echo "$NET_BLOCK_OUTPUT" | grep -qiE "denied|refused|failed|couldn't connect|connection.*failed|error"; then
-            pass "Network blocked with --net-block"
+            pass "Network blocked with --block-net"
         else
             if [[ -z "$NET_BLOCK_OUTPUT" ]] || [[ "$NET_BLOCK_OUTPUT" == *"exit"* ]]; then
-                pass "Network blocked with --net-block (no response)"
+                pass "Network blocked with --block-net (no response)"
             else
                 info "Output: $(echo "$NET_BLOCK_OUTPUT" | head -2)"
-                fail "Network NOT blocked with --net-block"
+                fail "Network NOT blocked with --block-net"
             fi
         fi
     else
         skip "curl not available for network test"
     fi
 
-    # Test: Network should work without --net-block
+    # Test: Network should work without --block-net
     if command -v curl &>/dev/null; then
         NET_ALLOW_OUTPUT=$(timeout 15 $NONO run --allow "$TEST_DIR" --allow-cwd -- curl -s --connect-timeout 5 -o /dev/null -w "%{http_code}" https://example.com 2>&1 || true)
         if [[ "$NET_ALLOW_OUTPUT" == *"200"* ]]; then
-            pass "Network allowed without --net-block"
+            pass "Network allowed without --block-net"
         else
             info "Output: $NET_ALLOW_OUTPUT"
-            fail "Network blocked even without --net-block"
+            fail "Network blocked even without --block-net"
         fi
     else
         skip "curl not available for network test"

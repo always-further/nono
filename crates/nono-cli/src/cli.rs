@@ -55,7 +55,7 @@ PLATFORM NOTES:
     nono run --profile claude-code claude
 
     # Use a named profile but temporarily allow unrestricted network
-    nono run --profile claude-code --net-allow claude
+    nono run --profile claude-code --allow-net claude
 
     # Profile with explicit working directory
     nono run --profile claude-code --workdir ./my-project claude
@@ -70,7 +70,7 @@ PLATFORM NOTES:
     nono run --allow ./project-a --allow ./project-b claude
 
     # Block network access (network allowed by default)
-    nono run --allow . --net-block cargo build
+    nono run --allow . --block-net cargo build
 
     # Allow specific files (not directories)
     nono run --allow . --write-file ~/.claude.json claude
@@ -252,24 +252,26 @@ pub struct SandboxArgs {
 
     /// Block network access (network allowed by default; use this flag to block)
     #[arg(
-        long,
-        conflicts_with = "net_allow",
-        env = "NONO_NET_BLOCK",
+        long = "block-net",
+        alias = "net-block",
+        conflicts_with = "allow_net",
+        env = "NONO_BLOCK_NET",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::SetTrue
     )]
-    pub net_block: bool,
+    pub block_net: bool,
 
     /// Allow unrestricted network access, even when a selected profile enables
     /// proxy filtering. This disables proxy filtering and credential injection
     /// for the current session only.
     #[arg(
-        long,
-        env = "NONO_NET_ALLOW",
+        long = "allow-net",
+        alias = "net-allow",
+        env = "NONO_ALLOW_NET",
         value_parser = clap::builder::BoolishValueParser::new(),
         action = clap::ArgAction::SetTrue,
         conflicts_with_all = [
-            "net_block",
+            "block_net",
             "network_profile",
             "proxy_allow",
             "proxy_credential",
@@ -277,7 +279,7 @@ pub struct SandboxArgs {
             "proxy_port"
         ]
     )]
-    pub net_allow: bool,
+    pub allow_net: bool,
 
     // === Network proxy filtering ===
     /// Enable network proxy filtering with a named profile (e.g., claude-code, minimal, enterprise).
@@ -287,7 +289,7 @@ pub struct SandboxArgs {
 
     /// Allow additional hosts through the proxy (on top of network profile).
     /// Can be specified multiple times.
-    #[arg(long, value_name = "HOST")]
+    #[arg(long = "allow-proxy", alias = "proxy-allow", value_name = "HOST")]
     pub proxy_allow: Vec<String>,
 
     /// Enable credential injection via reverse proxy for a service.
@@ -307,7 +309,7 @@ pub struct SandboxArgs {
 
     /// Allow bidirectional TCP on a specific port (connect + bind).
     /// On macOS, scoped to localhost. On Linux, port-only (use with
-    /// --net-block or proxy mode to restrict to localhost).
+    /// --block-net or proxy mode to restrict to localhost).
     /// Use for IPC between sandboxed processes (e.g., MCP servers).
     /// Can be specified multiple times for multiple ports.
     #[arg(long, value_name = "PORT")]
@@ -556,8 +558,8 @@ pub struct WhyArgs {
     pub write_file: Vec<PathBuf>,
 
     /// Block network access (for query context)
-    #[arg(long)]
-    pub net_block: bool,
+    #[arg(long = "block-net", alias = "net-block")]
+    pub block_net: bool,
 
     /// Use a named profile for query context
     #[arg(long, short = 'p', value_name = "NAME")]
@@ -1303,7 +1305,80 @@ mod tests {
     }
 
     #[test]
-    fn test_net_allow_parsing() {
+    fn test_allow_net_parsing() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--allow-net",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert!(args.sandbox.allow_net);
+                assert!(!args.sandbox.block_net);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_allow_net_conflicts_with_block_net() {
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--allow-net",
+            "--block-net",
+            "echo",
+        ]);
+        assert!(
+            result.is_err(),
+            "--allow-net and --block-net should conflict"
+        );
+    }
+
+    #[test]
+    fn test_allow_net_conflicts_with_network_profile() {
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--allow-net",
+            "--network-profile",
+            "developer",
+            "echo",
+        ]);
+        assert!(
+            result.is_err(),
+            "--allow-net and --network-profile should conflict"
+        );
+    }
+
+    #[test]
+    fn test_allow_net_conflicts_with_allow_proxy() {
+        let result = Cli::try_parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--allow-net",
+            "--allow-proxy",
+            "api.openai.com",
+            "echo",
+        ]);
+        assert!(
+            result.is_err(),
+            "--allow-net and --allow-proxy should conflict"
+        );
+    }
+
+    #[test]
+    fn test_legacy_flag_aliases_still_parse() {
         let cli = Cli::parse_from([
             "nono",
             "run",
@@ -1315,46 +1390,34 @@ mod tests {
         ]);
         match cli.command {
             Commands::Run(args) => {
-                assert!(args.sandbox.net_allow);
-                assert!(!args.sandbox.net_block);
+                assert!(args.sandbox.allow_net);
             }
             _ => panic!("Expected Run command"),
         }
-    }
 
-    #[test]
-    fn test_net_allow_conflicts_with_net_block() {
-        let result = Cli::try_parse_from([
+        let cli = Cli::parse_from([
             "nono",
             "run",
             "--allow",
             ".",
-            "--net-allow",
-            "--net-block",
+            "--proxy-allow",
+            "api.openai.com",
             "echo",
         ]);
-        assert!(
-            result.is_err(),
-            "--net-allow and --net-block should conflict"
-        );
-    }
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.sandbox.proxy_allow, vec!["api.openai.com"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
 
-    #[test]
-    fn test_net_allow_conflicts_with_network_profile() {
-        let result = Cli::try_parse_from([
-            "nono",
-            "run",
-            "--allow",
-            ".",
-            "--net-allow",
-            "--network-profile",
-            "developer",
-            "echo",
-        ]);
-        assert!(
-            result.is_err(),
-            "--net-allow and --network-profile should conflict"
-        );
+        let cli = Cli::parse_from(["nono", "why", "--host", "example.com", "--net-block"]);
+        match cli.command {
+            Commands::Why(args) => {
+                assert!(args.block_net);
+            }
+            _ => panic!("Expected Why command"),
+        }
     }
 
     #[test]

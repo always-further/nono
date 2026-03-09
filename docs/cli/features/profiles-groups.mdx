@@ -250,10 +250,10 @@ CLI flags always take precedence over profile settings:
 
 ```bash
 # Use claude-code profile but block network
-nono run --profile claude-code --net-block -- claude
+nono run --profile claude-code --block-net -- claude
 
 # Use claude-code profile but temporarily allow unrestricted network
-nono run --profile claude-code --net-allow -- claude
+nono run --profile claude-code --allow-net -- claude
 
 # Add extra directory access
 nono run --profile claude-code --allow ~/other-project -- claude

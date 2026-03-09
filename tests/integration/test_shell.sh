@@ -66,15 +66,15 @@ EOF"
 run_test "shell --dry-run did not execute command" 1 \
     test -f "$ALLOWED_DIR/dry_run_should_not_exist.txt"
 
-# Shell with --net-block should not allow outbound network
+# Shell with --block-net should not allow outbound network
 if command_exists curl; then
-    expect_failure "shell --net-block blocks curl" \
-        bash -c "cat <<'EOF' | \"$NONO_BIN\" shell --net-block --allow \"$ALLOWED_DIR\" --shell /bin/sh
+    expect_failure "shell --block-net blocks curl" \
+        bash -c "cat <<'EOF' | \"$NONO_BIN\" shell --block-net --allow \"$ALLOWED_DIR\" --shell /bin/sh
 curl -s --max-time 5 https://example.com
 exit
 EOF"
 else
-    skip_test "shell --net-block blocks curl" "curl not installed"
+    skip_test "shell --block-net blocks curl" "curl not installed"
 fi
 
 # Invalid shell path should fail before entering shell

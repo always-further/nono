@@ -38,13 +38,13 @@ nono run --read ./src --write ./output -- cargo build
 nono run --allow ./project-a --allow ./project-b -- command
 
 # Block network access
-nono run --allow-cwd --net-block -- command
+nono run --allow-cwd --block-net -- command
 
 # Use a built-in profile
 nono run --profile claude-code -- claude
 
 # Keep a profile but temporarily allow unrestricted network
-nono run --profile claude-code --net-allow -- claude
+nono run --profile claude-code --allow-net -- claude
 
 # Start an interactive shell inside the sandbox
 nono shell --allow-cwd

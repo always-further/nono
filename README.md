@@ -58,10 +58,10 @@ nono run --profile custom-profile -- node agent.js
 nono run --rollback --profile claude-code --allow-cwd -- claude
 
 # Combine rollback, network filtering, and port binding
-nono run --rollback --proxy-allow api.anthropic.ai --allow-port 8000 -- uv run uvicorn myagent.main:app --port 8000
+nono run --rollback --allow-proxy api.anthropic.ai --allow-port 8000 -- uv run uvicorn myagent.main:app --port 8000
 
 # Network proxy — allowlist hosts, inject credentials without exposing keys
-nono run --proxy-allow api.openai.com --proxy-credential openai -- python3 agent.py
+nono run --allow-proxy api.openai.com --proxy-credential openai -- python3 agent.py
 
 # Audit trail on every session — opt out with --no-audit
 nono run --no-audit --allow-cwd -- npm test
@@ -169,10 +169,10 @@ Sign instruction files directly within GitHub Actions workflows. Users can then 
 Allowlist-based host filtering via a local proxy. The sandbox blocks all direct outbound connections — the agent can only reach explicitly allowed hosts. Cloud metadata endpoints are hardcoded as denied.
 
 ```bash
-nono run --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+nono run --allow-proxy api.openai.com --allow-proxy api.anthropic.com -- my-agent
 
 # Keep the claude-code profile, but allow unrestricted network for this session
-nono run --profile claude-code --net-allow -- claude
+nono run --profile claude-code --allow-net -- claude
 ```
 
 ### Supervisor and Capability Expansion

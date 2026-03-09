@@ -217,7 +217,7 @@ The supervisor is not a privilege escalation target because it does not hold pri
 
 ## Network Proxy Security Model
 
-When `--network-profile` or `--proxy-allow` is used, nono starts an HTTP proxy in the supervisor process and restricts the child to `ProxyOnly` mode — only `localhost:<port>` is reachable from inside the sandbox.
+When `--network-profile` or `--allow-proxy` is used, nono starts an HTTP proxy in the supervisor process and restricts the child to `ProxyOnly` mode — only `localhost:<port>` is reachable from inside the sandbox.
 
 ### Enforcement Layers
 

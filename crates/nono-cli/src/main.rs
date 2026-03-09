@@ -41,6 +41,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    normalize_legacy_flag_env_vars();
     let cli = Cli::parse();
     init_tracing(&cli);
 
@@ -48,6 +49,21 @@ fn main() {
         error!("{}", e);
         eprintln!("nono: {}", e);
         std::process::exit(1);
+    }
+}
+
+fn normalize_legacy_flag_env_vars() {
+    copy_legacy_env_var("NONO_NET_BLOCK", "NONO_BLOCK_NET");
+    copy_legacy_env_var("NONO_NET_ALLOW", "NONO_ALLOW_NET");
+}
+
+fn copy_legacy_env_var(old: &str, new: &str) {
+    if std::env::var_os(new).is_some() {
+        return;
+    }
+
+    if let Some(value) = std::env::var_os(old) {
+        std::env::set_var(new, value);
     }
 }
 
@@ -205,7 +221,7 @@ fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
             );
         }
         if result.has_network_activity() {
-            eprintln!("Network activity detected. Use --net-block to restrict network access.");
+            eprintln!("Network activity detected. Use --block-net to restrict network access.");
         }
     }
 
@@ -340,8 +356,8 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_file: args.allow_file.clone(),
             read_file: args.read_file.clone(),
             write_file: args.write_file.clone(),
-            net_block: args.net_block,
-            net_allow: false,
+            block_net: args.block_net,
+            allow_net: false,
             network_profile: None,
             proxy_allow: vec![],
             proxy_credential: vec![],
@@ -375,8 +391,8 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_file: args.allow_file.clone(),
             read_file: args.read_file.clone(),
             write_file: args.write_file.clone(),
-            net_block: args.net_block,
-            net_allow: false,
+            block_net: args.block_net,
+            allow_net: false,
             network_profile: None,
             proxy_allow: vec![],
             proxy_credential: vec![],
@@ -565,7 +581,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let proxy_credentials = effective_proxy.proxy_credentials;
 
     // The proxy is needed when the network mode is ProxyOnly OR when there are
-    // credential routes to inject. However, --net-block takes precedence: if
+    // credential routes to inject. However, --block-net takes precedence: if
     // network is explicitly blocked, the proxy must NOT activate since that
     // would re-enable network access through the proxy's localhost listener.
     let proxy_active = if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
@@ -574,12 +590,12 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             || !proxy_allow_hosts.is_empty()
         {
             warn!(
-                "--net-block is active; ignoring proxy configuration \
+                "--block-net is active; ignoring proxy configuration \
                  that would re-enable network access"
             );
             if !silent {
                 eprintln!(
-                    "  [nono] Warning: --net-block overrides proxy/credential settings. \
+                    "  [nono] Warning: --block-net overrides proxy/credential settings. \
                      Network remains fully blocked."
                 );
             }
@@ -715,7 +731,7 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
         || args.external_proxy.is_some()
     {
         return Err(NonoError::ConfigParse(
-            "nono wrap does not support proxy flags (--network-profile, --proxy-allow, \
+            "nono wrap does not support proxy flags (--network-profile, --allow-proxy, \
              --proxy-credential, --external-proxy). Use `nono run` instead."
                 .to_string(),
         ));
@@ -789,7 +805,7 @@ struct ExecutionFlags {
     proxy_active: bool,
     /// Network profile name for proxy filtering (from --network-profile or profile config)
     network_profile: Option<String>,
-    /// Additional hosts to allow through the proxy (from --proxy-allow or profile config)
+    /// Additional hosts to allow through the proxy (from --allow-proxy or profile config)
     proxy_allow_hosts: Vec<String>,
     /// Credential services for reverse proxy (from --proxy-credential or profile config)
     proxy_credentials: Vec<String>,
@@ -853,7 +869,7 @@ fn resolve_effective_proxy_settings(
     args: &SandboxArgs,
     prepared: &PreparedSandbox,
 ) -> EffectiveProxySettings {
-    if args.net_allow {
+    if args.allow_net {
         return EffectiveProxySettings {
             network_profile: None,
             proxy_allow_hosts: Vec::new(),
@@ -930,7 +946,7 @@ fn build_proxy_config_from_flags(
     )?;
     resolved.routes = routes;
 
-    // Expand --proxy-allow entries: group names become their hosts,
+    // Expand --allow-proxy entries: group names become their hosts,
     // literal hostnames pass through as-is.
     let expanded_proxy_allow =
         network_policy::expand_proxy_allow(&net_policy, &flags.proxy_allow_hosts);
@@ -1913,8 +1929,8 @@ mod tests {
             allow_file: vec![],
             read_file: vec![],
             write_file: vec![],
-            net_block: false,
-            net_allow: false,
+            block_net: false,
+            allow_net: false,
             network_profile: None,
             proxy_allow: vec![],
             proxy_credential: vec![],
@@ -2013,9 +2029,9 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_effective_proxy_settings_net_allow_clears_profile_proxy_state() {
+    fn test_resolve_effective_proxy_settings_allow_net_clears_profile_proxy_state() {
         let args = SandboxArgs {
-            net_allow: true,
+            allow_net: true,
             ..sandbox_args()
         };
         let prepared = PreparedSandbox {

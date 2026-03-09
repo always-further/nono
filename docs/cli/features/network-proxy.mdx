@@ -14,7 +14,7 @@ Originally nono used OS-level sandboxing (Landlock on Linux, Seatbelt on macOS) 
 nono run --allow-cwd -- my-agent
 
 # Everything blocked
-nono run --allow-cwd --net-block -- my-agent
+nono run --allow-cwd --block-net -- my-agent
 ```
 
 However, AI agents need something in between. They need to reach specific APIs (OpenAI, Anthropic, GitHub) while being blocked from:
@@ -30,7 +30,7 @@ The proxy provides this granular control.
 ### Allow Specific Hosts
 
 ```bash
-nono run --allow-cwd --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+nono run --allow-cwd --allow-proxy api.openai.com --allow-proxy api.anthropic.com -- my-agent
 ```
 
 ### Using a Network Profile
@@ -44,10 +44,10 @@ nono run --allow-cwd --network-profile claude-code -- claude
 
 ```bash
 # Keep the profile's filesystem policy, but skip proxy filtering this run
-nono run --profile claude-code --net-allow -- claude
+nono run --profile claude-code --allow-net -- claude
 ```
 
-`--net-allow` is a per-session override. It keeps the selected profile's filesystem and command policy, but disables proxy filtering and proxy-based credential injection for that run.
+`--allow-net` is a per-session override. It keeps the selected profile's filesystem and command policy, but disables proxy filtering and proxy-based credential injection for that run.
 
 ## How It Works
 
@@ -79,7 +79,7 @@ Standard HTTP CONNECT proxying. The proxy validates the target host and establis
 This is what `HTTP_PROXY`/`HTTPS_PROXY` uses. Most HTTP libraries, curl, and language runtimes support it natively.
 
 ```bash
-nono run --allow-cwd --proxy-allow api.openai.com -- curl https://api.openai.com/v1/models
+nono run --allow-cwd --allow-proxy api.openai.com -- curl https://api.openai.com/v1/models
 ```
 
 ### Mode 2: External Proxy Passthrough (Enterprise)
@@ -142,10 +142,10 @@ When running multiple sandboxed processes that need to communicate (e.g., an MCP
 
 ```bash
 # Terminal 1: MCP server listening on port 3000
-nono run --net-block --allow-port 3000 --allow ./mcp-server -- node server.js
+nono run --block-net --allow-port 3000 --allow ./mcp-server -- node server.js
 
 # Terminal 2: Agent connecting to the MCP server
-nono run --net-block --allow-port 3000 --allow ./client -- claude
+nono run --block-net --allow-port 3000 --allow ./client -- claude
 ```
 
 `--allow-port` works alongside the proxy. Outbound to allowed hosts goes through the proxy; IPC stays on localhost:

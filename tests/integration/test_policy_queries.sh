@@ -51,7 +51,7 @@ echo "--- Network Policy Queries ---"
 expect_output_contains "network allowed by default" "\"reason\": \"network_allowed\"" \
     "$NONO_BIN" --silent why --json --host example.com --port 443
 
-expect_output_contains "network denied with --net-block" "\"reason\": \"network_blocked\"" \
-    "$NONO_BIN" --silent why --json --host example.com --port 443 --net-block
+expect_output_contains "network denied with --block-net" "\"reason\": \"network_blocked\"" \
+    "$NONO_BIN" --silent why --json --host example.com --port 443 --block-net
 
 print_summary

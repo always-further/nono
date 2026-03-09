@@ -65,13 +65,13 @@ Commands like `curl`, `wget`, or API calls fail with connection errors.
 
 ### Possible Causes
 
-1. **Network explicitly blocked** - You used `--net-block` flag
+1. **Network explicitly blocked** - You used `--block-net` flag
 2. **Actual network issue** - DNS, firewall, or connectivity problem
 3. **Application-specific issue** - App needs specific configuration
 
 ### Solutions
 
-1. **If you used `--net-block`, remove it**:
+1. **If you used `--block-net`, remove it**:
    ```bash
    # Network is allowed by default
    nono run --allow-cwd -- curl https://example.com
@@ -261,7 +261,7 @@ nono run --allow-cwd -- nono why --self --host api.openai.com
 # Output: ALLOWED - network allowed by default
 
 # Check network when blocked
-nono run --allow-cwd --net-block -- nono why --self --host api.openai.com
+nono run --allow-cwd --block-net -- nono why --self --host api.openai.com
 # Output: DENIED - network_blocked
 ```
 

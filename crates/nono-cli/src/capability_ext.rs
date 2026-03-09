@@ -325,9 +325,9 @@ fn finalize_caps(
 }
 
 fn apply_cli_network_mode(caps: &mut CapabilitySet, args: &SandboxArgs) {
-    if args.net_block {
+    if args.block_net {
         caps.set_network_blocked(true);
-    } else if args.net_allow {
+    } else if args.allow_net {
         caps.set_network_mode_mut(nono::NetworkMode::AllowAll);
     } else if args.has_proxy_flags() {
         // Proxy mode: port 0 is a placeholder, updated when proxy starts.
@@ -426,8 +426,8 @@ mod tests {
             allow_file: vec![],
             read_file: vec![],
             write_file: vec![],
-            net_block: false,
-            net_allow: false,
+            block_net: false,
+            allow_net: false,
             network_profile: None,
             proxy_allow: vec![],
             proxy_credential: vec![],
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn test_from_args_network_blocked() {
         let args = SandboxArgs {
-            net_block: true,
+            block_net: true,
             ..sandbox_args()
         };
 
@@ -676,12 +676,12 @@ mod tests {
     }
 
     #[test]
-    fn test_from_profile_net_allow_overrides_proxy_mode() {
+    fn test_from_profile_allow_net_overrides_proxy_mode() {
         let profile = crate::profile::load_profile("claude-code")
             .expect("Failed to load claude-code profile");
         let workdir = tempdir().expect("workdir");
         let args = SandboxArgs {
-            net_allow: true,
+            allow_net: true,
             ..sandbox_args()
         };
 
@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_profile_net_allow_overrides_blocked_network() {
+    fn test_from_profile_allow_net_overrides_blocked_network() {
         let dir = tempdir().expect("tmpdir");
         let profile_path = dir.path().join("blocked.json");
         std::fs::write(
@@ -708,7 +708,7 @@ mod tests {
 
         let workdir = tempdir().expect("workdir");
         let args = SandboxArgs {
-            net_allow: true,
+            allow_net: true,
             ..sandbox_args()
         };
 

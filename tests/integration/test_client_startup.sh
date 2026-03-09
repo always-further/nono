@@ -148,9 +148,9 @@ version_match_test "plain claude reports pinned version" "$CLAUDE_VERSION" \
     client_env claude --version
 
 version_match_test "nono run starts Claude Code successfully" "$CLAUDE_VERSION" \
-    client_env "$NONO_BIN" run --profile claude-code --allow-cwd --net-allow -- claude --version
+    client_env "$NONO_BIN" run --profile claude-code --allow-cwd --allow-net -- claude --version
 
 version_match_test "nono wrap starts Claude Code successfully" "$CLAUDE_VERSION" \
-    client_env "$NONO_BIN" wrap --profile claude-code --allow-cwd --net-allow -- claude --version
+    client_env "$NONO_BIN" wrap --profile claude-code --allow-cwd --allow-net -- claude --version
 
 print_summary

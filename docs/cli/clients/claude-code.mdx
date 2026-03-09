@@ -133,7 +133,7 @@ nono run --read . --read ~/.claude --allow-file ~/.claude.json -- claude
 If you want to prevent any outbound connections (e.g., for reviewing local code without API calls):
 
 ```bash
-nono run --profile claude-code --net-block -- claude
+nono run --profile claude-code --block-net -- claude
 ```
 
 ### Temporarily Allow Unrestricted Network
@@ -141,7 +141,7 @@ nono run --profile claude-code --net-block -- claude
 If you want to keep the Claude Code profile's filesystem and command restrictions, but bypass its proxy filtering for a single session:
 
 ```bash
-nono run --profile claude-code --net-allow -- claude
+nono run --profile claude-code --allow-net -- claude
 ```
 
 This also disables any proxy-based credential injection configured by the profile for that run.
@@ -224,10 +224,10 @@ CLI flags always take precedence over profile settings:
 nono run --profile claude-code --allow ~/other-project -- claude
 
 # Use profile but block network
-nono run --profile claude-code --net-block -- claude
+nono run --profile claude-code --block-net -- claude
 
 # Use profile but temporarily allow unrestricted network
-nono run --profile claude-code --net-allow -- claude
+nono run --profile claude-code --allow-net -- claude
 ```
 
 See [Security Profiles](/cli/features/profiles-groups) for details on profile format and precedence rules.

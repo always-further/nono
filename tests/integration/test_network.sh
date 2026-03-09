@@ -23,21 +23,21 @@ echo "Test directory: $TMPDIR"
 echo ""
 
 # =============================================================================
-# Network Blocked (--net-block)
+# Network Blocked (--block-net)
 # =============================================================================
 
 echo "--- Network Blocked ---"
 
 if command_exists curl; then
-    expect_failure "curl blocked with --net-block" \
-        "$NONO_BIN" run --net-block --allow "$TMPDIR" -- curl -s --max-time 5 https://example.com
+    expect_failure "curl blocked with --block-net" \
+        "$NONO_BIN" run --block-net --allow "$TMPDIR" -- curl -s --max-time 5 https://example.com
 else
     skip_test "curl blocked" "curl not installed"
 fi
 
 if command_exists wget; then
-    expect_failure "wget blocked with --net-block" \
-        "$NONO_BIN" run --net-block --allow "$TMPDIR" -- wget -q --timeout=5 -O - https://example.com
+    expect_failure "wget blocked with --block-net" \
+        "$NONO_BIN" run --block-net --allow "$TMPDIR" -- wget -q --timeout=5 -O - https://example.com
 else
     skip_test "wget blocked" "wget not installed"
 fi
@@ -45,23 +45,23 @@ fi
 # Note: ping requires special privileges, may not work in all environments
 if command_exists ping; then
     # Use timeout to avoid hanging
-    expect_failure "ping blocked with --net-block" \
-        timeout 5 "$NONO_BIN" run --net-block --allow "$TMPDIR" -- ping -c 1 -W 2 8.8.8.8 2>/dev/null || true
+    expect_failure "ping blocked with --block-net" \
+        timeout 5 "$NONO_BIN" run --block-net --allow "$TMPDIR" -- ping -c 1 -W 2 8.8.8.8 2>/dev/null || true
 else
     skip_test "ping blocked" "ping not installed"
 fi
 
 if command_exists nc; then
-    expect_failure "nc (netcat) blocked with --net-block" \
-        "$NONO_BIN" run --net-block --allow "$TMPDIR" -- nc -z -w 2 example.com 80
+    expect_failure "nc (netcat) blocked with --block-net" \
+        "$NONO_BIN" run --block-net --allow "$TMPDIR" -- nc -z -w 2 example.com 80
 else
     skip_test "nc blocked" "nc not installed"
 fi
 
 # Test that even local network is blocked
 if command_exists nc; then
-    expect_failure "localhost connection blocked with --net-block" \
-        "$NONO_BIN" run --net-block --allow "$TMPDIR" -- nc -z -w 1 127.0.0.1 22 2>/dev/null || true
+    expect_failure "localhost connection blocked with --block-net" \
+        "$NONO_BIN" run --block-net --allow "$TMPDIR" -- nc -z -w 1 127.0.0.1 22 2>/dev/null || true
 fi
 
 # =============================================================================
@@ -80,12 +80,12 @@ if command_exists curl; then
     # built-in profile no longer sets network.network_profile in policy.json, so
     # expecting it to block example.com is stale. python-dev still embeds the
     # developer network profile, which makes it the right built-in fixture for
-    # validating "profile enables proxy filtering" plus the --net-allow override.
+    # validating "profile enables proxy filtering" plus the --allow-net override.
     expect_failure "python-dev profile blocks hosts outside developer allowlist" \
         "$NONO_BIN" run --profile python-dev --allow-cwd -- curl -s --max-time 10 https://example.com >/dev/null
 
-    expect_success "python-dev profile allows unrestricted network with --net-allow" \
-        "$NONO_BIN" run --profile python-dev --allow-cwd --net-allow -- curl -s --max-time 10 https://example.com >/dev/null
+    expect_success "python-dev profile allows unrestricted network with --allow-net" \
+        "$NONO_BIN" run --profile python-dev --allow-cwd --allow-net -- curl -s --max-time 10 https://example.com >/dev/null
 else
     skip_test "curl works by default" "curl not installed"
 fi

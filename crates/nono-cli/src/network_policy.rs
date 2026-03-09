@@ -285,7 +285,7 @@ pub fn build_proxy_config(resolved: &ResolvedNetworkPolicy, extra_hosts: &[Strin
     }
 }
 
-/// Expand `--proxy-allow` entries: if an entry matches a group name in the
+/// Expand `--allow-proxy` entries: if an entry matches a group name in the
 /// network policy, expand it to the group's hosts and suffixes. Otherwise
 /// treat it as a literal hostname.
 pub fn expand_proxy_allow(policy: &NetworkPolicy, entries: &[String]) -> Vec<String> {

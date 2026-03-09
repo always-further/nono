@@ -32,9 +32,9 @@ fn env_nono_allow_comma_separated() {
 }
 
 #[test]
-fn env_nono_net_block() {
+fn env_nono_block_net() {
     let output = nono_bin()
-        .env("NONO_NET_BLOCK", "1")
+        .env("NONO_BLOCK_NET", "1")
         .args(["run", "--allow", "/tmp", "--dry-run", "echo"])
         .output()
         .expect("failed to run nono");
@@ -47,17 +47,32 @@ fn env_nono_net_block() {
 }
 
 #[test]
-fn env_nono_net_block_accepts_true() {
+fn env_nono_block_net_accepts_true() {
     let output = nono_bin()
-        .env("NONO_NET_BLOCK", "true")
+        .env("NONO_BLOCK_NET", "true")
         .args(["run", "--allow", "/tmp", "--dry-run", "echo"])
         .output()
         .expect("failed to run nono");
 
     assert!(
         output.status.success(),
-        "NONO_NET_BLOCK=true should be accepted, stderr: {}",
+        "NONO_BLOCK_NET=true should be accepted, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn legacy_env_nono_net_block_still_works() {
+    let output = nono_bin()
+        .env("NONO_NET_BLOCK", "1")
+        .args(["run", "--allow", "/tmp", "--dry-run", "echo"])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        text.contains("blocked"),
+        "expected legacy NONO_NET_BLOCK to still block network, got:\n{text}"
     );
 }
 
@@ -116,16 +131,16 @@ fn cli_flag_overrides_env_var() {
 }
 
 #[test]
-fn env_conflict_net_allow_and_net_block() {
+fn env_conflict_allow_net_and_block_net() {
     let output = nono_bin()
-        .env("NONO_NET_ALLOW", "true")
-        .env("NONO_NET_BLOCK", "true")
+        .env("NONO_ALLOW_NET", "true")
+        .env("NONO_BLOCK_NET", "true")
         .args(["run", "--allow", "/tmp", "--dry-run", "echo"])
         .output()
         .expect("failed to run nono");
 
     assert!(
         !output.status.success(),
-        "NONO_NET_ALLOW + NONO_NET_BLOCK should conflict"
+        "NONO_ALLOW_NET + NONO_BLOCK_NET should conflict"
     );
 }
