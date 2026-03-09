@@ -16,7 +16,17 @@ brew install nono
 
 ## Linux Package Managers
 
-We are in the process of packaging nono for popular Linux distributions. In the meantime, you can use the prebuilt binaries or build from source.
+### Debian/Ubuntu
+
+Download the `.deb` package from [GitHub Releases](https://github.com/always-further/nono/releases):
+
+```bash
+VERSION=0.14.0
+wget https://github.com/always-further/nono/releases/download/v${VERSION}/nono-cli_${VERSION}-1_amd64.deb
+sudo dpkg -i nono-cli_${VERSION}-1_amd64.deb
+```
+
+Other distributions are in the process of being packaged. In the meantime, you can use the prebuilt binaries or build from source.
 
 ## Building from Source
 
