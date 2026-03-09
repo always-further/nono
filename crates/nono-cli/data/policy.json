@@ -319,6 +319,27 @@
         ]
       }
     },
+    "user_caches_linux": {
+      "description": "User cache and log directories for Linux programs (XDG)",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "~/.cache"
+        ],
+        "read": [
+          "~/.local/state"
+        ]
+      }
+    },
+    "claude_cache_linux": {
+      "description": "Claude Code CLI cache and MCP log directories on Linux",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "~/.cache/claude-cli-nodejs"
+        ]
+      }
+    },
     "user_tools": {
       "description": "User-local executables, .desktop files, man pages, and shell completions",
       "allow": {
@@ -344,6 +365,15 @@
           "~/.node",
           "~/.local/share/fnm",
           "/usr/local/lib/node_modules"
+        ]
+      }
+    },
+    "opencode_linux": {
+      "description": "OpenCode binary directory (Landlock requires directory read to execute binaries)",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "~/.opencode/bin"
         ]
       }
     },
@@ -386,13 +416,54 @@
         ]
       }
     },
-    "vscode": {
-      "description": "Visual Studio Code configuration and extension directories",
+    "claude_code_macos": {
+      "description": "Claude Code macOS-specific state and credential paths",
       "platform": "macos",
       "allow": {
-        "write": [
+        "read": [
+          "$HOME/Library/Keychains/login.keychain-db"
+        ]
+      }
+    },
+    "claude_code_linux": {
+      "description": "Claude Code Linux-specific state paths",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "$HOME/.local/share/claude"
+        ]
+      }
+    },
+    "vscode_macos": {
+      "description": "Visual Studio Code configuration and extension directories for macOS",
+      "platform": "macos",
+      "allow": {
+        "readwrite": [
           "$HOME/.vscode",
           "$HOME/Library/Application Support/Code"
+        ]
+      }
+    },
+    "vscode_linux": {
+      "description": "Visual Studio Code configuration and extension directories for Linux",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "$HOME/.vscode",
+          "$HOME/.config/Code"
+        ]
+      }
+    },
+    "nix_runtime": {
+      "description": "Nix package manager runtime paths",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "~/.nix-profile",
+          "~/.nix-defexpr",
+          "/run/current-system/sw",
+          "/etc/profiles/per-user",
+          "/nix/var/nix/profiles"
         ]
       }
     },
@@ -484,17 +555,29 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "python_runtime", "vscode", "unlink_protection"],
-        "signal_mode": "isolated"
+        "groups": [
+          "claude_code_macos",
+          "claude_code_linux",
+          "user_caches_macos",
+          "claude_cache_linux",
+          "node_runtime",
+          "rust_runtime",
+          "python_runtime",
+          "vscode_macos",
+          "vscode_linux",
+          "nix_runtime",
+          "unlink_protection"
+        ],
+        "signal_mode": "isolated",
+        "capability_elevation": false
       },
       "trust_groups": [],
       "filesystem": {
         "allow": ["$HOME/.claude"],
-        "read": ["$HOME/.local/share/claude"],
         "allow_file": ["$HOME/.claude.json", "$HOME/.claude.json.lock"],
-        "read_file": ["$HOME/Library/Keychains/login.keychain-db", "$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
+        "read_file": ["$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
       },
-      "network": { "block": false, "network_profile": "developer" },
+      "network": { "block": false },
       "workdir": { "access": "readwrite" },
       "hooks": {
         "claude-code": {
@@ -507,6 +590,32 @@
         "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
         "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
       },
+      "interactive": true
+    },
+    "codex": {
+      "meta": {
+        "name": "codex",
+        "version": "1.0.0",
+        "description": "OpenAI Codex CLI agent",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "node_runtime",
+          "rust_runtime",
+          "python_runtime",
+          "nix_runtime",
+          "unlink_protection"
+        ],
+        "signal_mode": "isolated",
+        "capability_elevation": false
+      },
+      "trust_groups": [],
+      "filesystem": {
+        "allow": ["$HOME/.codex"]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
       "interactive": true
     },
     "openclaw": {
@@ -529,7 +638,7 @@
           "$TMPDIR/openclaw-$UID"
         ]
       },
-      "network": { "block": false, "network_profile": "developer" },
+      "network": { "block": false },
       "workdir": { "access": "read" },
       "undo": {
         "exclude_patterns": ["node_modules", ".next"]
@@ -544,7 +653,7 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "node_runtime", "unlink_protection"],
+        "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "opencode_linux", "unlink_protection"],
         "signal_mode": "isolated"
       },
       "trust_groups": [],
@@ -552,10 +661,11 @@
         "allow": [
           "$HOME/.config/opencode",
           "$HOME/.cache/opencode",
-          "$HOME/.local/share/opencode"
+          "$HOME/.local/share/opencode",
+          "$HOME/.local/share/opentui"
         ]
       },
-      "network": { "block": false, "network_profile": "developer" },
+      "network": { "block": false },
       "workdir": { "access": "readwrite" },
       "undo": {
         "exclude_patterns": ["node_modules", ".next"]

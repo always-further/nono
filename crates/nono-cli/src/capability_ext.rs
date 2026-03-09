@@ -283,6 +283,14 @@ impl CapabilitySetExt for CapabilitySet {
             .unwrap_or_default();
         caps = caps.set_signal_mode(mode);
 
+        // Apply process inspection mode from profile (None defaults to Isolated)
+        let process_info_mode = profile
+            .security
+            .process_info_mode
+            .map(nono::ProcessInfoMode::from)
+            .unwrap_or_default();
+        caps.set_process_info_mode_mut(process_info_mode);
+
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
 
@@ -436,6 +444,7 @@ mod tests {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: None,
@@ -716,5 +725,30 @@ mod tests {
             CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
 
         assert_eq!(*caps.network_mode(), nono::NetworkMode::AllowAll);
+    }
+
+    #[test]
+    fn test_from_profile_process_info_mode_same_sandbox() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("pim-test.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "pim-test" },
+                "filesystem": { "allow": ["/tmp"] },
+                "security": { "process_info_mode": "allow_same_sandbox" }
+            }"#,
+        )
+        .expect("write profile");
+        let workdir = tempdir().expect("tmpdir");
+        let args = sandbox_args();
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+        assert_eq!(
+            caps.process_info_mode(),
+            nono::ProcessInfoMode::AllowSameSandbox,
+            "profile process_info_mode should propagate to CapabilitySet"
+        );
     }
 }

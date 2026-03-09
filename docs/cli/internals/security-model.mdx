@@ -68,6 +68,13 @@ If the supervisor has a bug and fails to inject an fd, the child's syscall falls
 
 fd injection via `SECCOMP_IOCTL_NOTIF_ADDFD` eliminates this entirely. The supervisor opens the file itself — whatever path it read from the child's memory is what gets opened. The child's memory contents after that point are irrelevant.
 
+nono therefore avoids `CONTINUE` for any path that requires a supervisor authorization decision. The only Linux supervised-mode exceptions are tightly scoped compatibility cases where Landlock is already the enforcement floor:
+
+- **Initial allow-list hits outside procfs**: if the requested path is already inside the initial capability set, the supervisor can let the child's original syscall proceed because Landlock will independently enforce the same boundary.
+- **Missing-path probes (`ENOENT`/`ENOTDIR`)**: runtimes often probe optional files (`/$bunfs/...`, loader fallback paths, locale assets). Letting the original syscall continue preserves the kernel's native "not found" behavior instead of converting those probes into policy denials.
+
+For procfs paths, nono still resolves `/proc/self/...` in the child context and uses supervisor-opened fds so that procfs symlinks such as `/proc/<pid>/fd/*` cannot bypass target-path validation.
+
 ### Why not mount namespaces?
 
 A mount namespace with a minimal filesystem view would eliminate the information leak surface (the child could not `stat` paths outside the namespace). However:
@@ -110,7 +117,7 @@ The `SECCOMP_ADDFD_FLAG_SEND` flag is critical: it atomically injects the fd and
 
 - **Does not pass `O_CREAT`** — the supervisor cannot be tricked into creating files that do not exist
 - **Does not pass `O_TRUNC`** — the child cannot use the supervisor as a proxy to truncate files; it receives a plain writable fd and can seek/write within the file, but truncation is an explicit operation on an fd the user approved
-- **Does not use `SECCOMP_USER_NOTIF_FLAG_CONTINUE`** — the child never executes its own `openat`
+- **Does not use `SECCOMP_USER_NOTIF_FLAG_CONTINUE` for supervisor-approved paths** — authorization decisions still resolve to supervisor-opened fds, not the child's own `openat`
 
 ### Scope of an approved fd
 

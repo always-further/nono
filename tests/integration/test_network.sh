@@ -75,11 +75,17 @@ if command_exists curl; then
     expect_success "curl works by default" \
         "$NONO_BIN" run --allow "$TMPDIR" -- curl -s --max-time 10 https://example.com >/dev/null
 
-    expect_failure "claude-code profile blocks hosts outside developer allowlist" \
-        "$NONO_BIN" run --profile claude-code --allow-cwd -- curl -s --max-time 10 https://example.com >/dev/null
+    # Keep this assertion on a profile that still bundles a network_profile.
+    # claude-code used to carry a profile-level proxy allowlist, but the current
+    # built-in profile no longer sets network.network_profile in policy.json, so
+    # expecting it to block example.com is stale. python-dev still embeds the
+    # developer network profile, which makes it the right built-in fixture for
+    # validating "profile enables proxy filtering" plus the --net-allow override.
+    expect_failure "python-dev profile blocks hosts outside developer allowlist" \
+        "$NONO_BIN" run --profile python-dev --allow-cwd -- curl -s --max-time 10 https://example.com >/dev/null
 
-    expect_success "claude-code profile allows unrestricted network with --net-allow" \
-        "$NONO_BIN" run --profile claude-code --allow-cwd --net-allow -- curl -s --max-time 10 https://example.com >/dev/null
+    expect_success "python-dev profile allows unrestricted network with --net-allow" \
+        "$NONO_BIN" run --profile python-dev --allow-cwd --net-allow -- curl -s --max-time 10 https://example.com >/dev/null
 else
     skip_test "curl works by default" "curl not installed"
 fi

@@ -115,6 +115,12 @@ if is_linux; then
     if [[ -d /proc ]]; then
         expect_success "can read /proc/self/status" \
             "$NONO_BIN" run --allow "$TMPDIR" -- cat /proc/self/status >/dev/null
+
+        expect_success "can read /proc/self/maps" \
+            "$NONO_BIN" run --allow "$TMPDIR" -- cat /proc/self/maps >/dev/null
+
+        expect_failure "cannot read foreign /proc/1/maps" \
+            "$NONO_BIN" run --allow "$TMPDIR" -- cat /proc/1/maps >/dev/null
     fi
 
     if [[ -d /sys ]]; then

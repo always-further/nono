@@ -59,14 +59,16 @@ pub mod undo;
 
 // Re-exports for convenience
 pub use capability::{
-    AccessMode, CapabilitySet, CapabilitySource, FsCapability, NetworkMode, SignalMode,
+    AccessMode, CapabilitySet, CapabilitySource, FsCapability, NetworkMode, ProcessInfoMode,
+    SignalMode,
 };
 pub use diagnostic::{
     CommandContext, DenialReason, DenialRecord, DiagnosticFormatter, DiagnosticMode,
 };
 pub use error::{NonoError, Result};
 pub use keystore::{
-    is_env_uri, is_op_uri, load_secret_by_ref, load_secrets, redact_op_uri,
+    is_apple_password_uri, is_env_uri, is_op_uri, load_secret_by_ref, load_secrets,
+    redact_apple_password_uri, redact_op_uri, validate_apple_password_uri,
     validate_destination_env_var, validate_env_uri, validate_op_uri, LoadedSecret,
 };
 pub use net_filter::{FilterResult, HostFilter};

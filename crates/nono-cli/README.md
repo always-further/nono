@@ -43,6 +43,9 @@ nono run --allow-cwd --net-block -- command
 # Use a built-in profile
 nono run --profile claude-code -- claude
 
+# Use the Codex profile
+nono run --profile codex -- codex
+
 # Keep a profile but temporarily allow unrestricted network
 nono run --profile claude-code --net-allow -- claude
 
@@ -61,6 +64,7 @@ nono run --allow-cwd --dry-run -- command
 | Profile | Command |
 |---------|---------|
 | Claude Code | `nono run --profile claude-code -- claude` |
+| Codex | `nono run --profile codex -- codex` |
 | OpenCode | `nono run --profile opencode -- opencode` |
 | OpenClaw | `nono run --profile openclaw -- openclaw gateway` |
 

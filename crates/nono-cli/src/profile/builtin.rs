@@ -34,6 +34,35 @@ mod tests {
     }
 
     #[test]
+    fn test_get_builtin_claude_code_uses_platform_groups_for_os_paths() {
+        let profile = get_builtin("claude-code").expect("Profile not found");
+        assert!(profile
+            .security
+            .groups
+            .contains(&"claude_code_macos".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"claude_code_linux".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"vscode_macos".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"vscode_linux".to_string()));
+        assert!(!profile
+            .filesystem
+            .read
+            .contains(&"$HOME/.local/share/claude".to_string()));
+        assert!(!profile
+            .filesystem
+            .read_file
+            .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
+    }
+
+    #[test]
     fn test_get_builtin_openclaw() {
         let profile = get_builtin("openclaw").expect("Profile not found");
         assert_eq!(profile.meta.name, "openclaw");
@@ -45,11 +74,44 @@ mod tests {
     }
 
     #[test]
+    fn test_get_builtin_codex() {
+        let profile = get_builtin("codex").expect("Profile not found");
+        assert_eq!(profile.meta.name, "codex");
+        assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
+        assert!(profile.interactive);
+        assert!(profile
+            .filesystem
+            .allow
+            .contains(&"$HOME/.codex".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"node_runtime".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"rust_runtime".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"python_runtime".to_string()));
+        assert!(profile.security.groups.contains(&"nix_runtime".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"unlink_protection".to_string()));
+    }
+
+    #[test]
     fn test_get_builtin_opencode() {
         let profile = get_builtin("opencode").expect("Profile not found");
         assert_eq!(profile.meta.name, "opencode");
         assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
         assert!(profile.interactive);
+        assert!(profile
+            .filesystem
+            .allow
+            .contains(&"$HOME/.local/share/opentui".to_string()));
     }
 
     #[test]
@@ -61,6 +123,7 @@ mod tests {
     fn test_list_builtin() {
         let profiles = list_builtin();
         assert!(profiles.contains(&"claude-code".to_string()));
+        assert!(profiles.contains(&"codex".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
         assert!(profiles.contains(&"opencode".to_string()));
     }

@@ -65,11 +65,25 @@ jobs:
           tar czvf ../../../nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
           cd ../../..
 
+      - name: Install cargo-deb
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo install cargo-deb
+
+      - name: Build .deb
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          VERSION="${{ env.RELEASE_TAG }}"
+          VERSION="${VERSION#v}"
+          cd crates/nono-cli
+          cargo deb --deb-version "$VERSION"
+
       - name: Upload artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nono-${{ matrix.target }}
-          path: nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz
+          path: |
+            nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz
+            target/debian/*.deb
 
   release:
     name: Create Release
@@ -89,6 +103,7 @@ jobs:
         run: |
           cd artifacts
           find . -name "*.tar.gz" -exec mv {} . \;
+          find . -name "*.deb" -exec mv {} . \;
           sha256sum *.tar.gz > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -100,6 +115,7 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.tar.gz
+            artifacts/*.deb
             artifacts/SHA256SUMS.txt
 
   publish-crates:

@@ -43,6 +43,7 @@ The CLI is the quickest way to get going! zero startup latency, no need to insta
 ```bash
 # Any CLI agent — just put your command after --
 nono run --profile claude-code -- claude
+nono run --profile codex -- codex
 nono run --profile opencode -- opencode
 nono run --profile openclaw -- openclaw
 
@@ -79,7 +80,7 @@ DENIED
   Details: Path matches sensitive pattern 'Block access to cryptographic keys, tokens, and cloud credentials'. Access blocked by security policy.
 ```
 
-Built-in profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [OpenCode](https://docs.nono.sh/cli/clients/opencode), and [OpenClaw](https://docs.nono.sh/cli/clients/openclaw) — or define your own with custom permissions.
+Built-in profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [Codex](https://docs.nono.sh/cli/clients/codex), [OpenCode](https://docs.nono.sh/cli/clients/opencode), and [OpenClaw](https://docs.nono.sh/cli/clients/openclaw) — or define your own with custom permissions.
 
 ## Library
 
@@ -139,7 +140,7 @@ nono run --read ./src --write ./output -- cargo build
 
 ### Credential Injection
 
-Two modes: **proxy injection** keeps credentials entirely outside the sandbox — the agent connects to `localhost` and the proxy injects real API keys into upstream requests. **Env injection** loads secrets from the OS keystore or 1Password and injects them as environment variables before the sandbox locks.
+Two modes: **proxy injection** keeps credentials entirely outside the sandbox — the agent connects to `localhost` and the proxy injects real API keys into upstream requests. **Env injection** loads secrets from the OS keystore, 1Password, or Apple Passwords and injects them as environment variables before the sandbox locks.
 
 ```bash
 # Proxy mode — agent never sees the API key, even in its own memory
@@ -148,8 +149,11 @@ nono run --network-profile claude-code --proxy-credential openai -- my-agent
 # Env mode — simpler, but secret is in the process environment
 nono run --env-credential openai_api_key --allow-cwd -- my-agent
 
-# 1Password — use op:// URIs with an explicit env var name
-nono run --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' --allow-cwd -- my-agent
+# 1Password — map URI reference to destination env var
+nono run --env-credential-map 'op://Development/OpenAI/credential' OPENAI_API_KEY --allow-cwd -- my-agent
+
+# Apple Passwords (macOS) — map URI reference to destination env var
+nono run --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD --allow-cwd -- my-agent
 ```
 
 ### Agent SKILL Provenance and Supply Chain Security
@@ -274,6 +278,7 @@ nono ships with built-in profiles for popular AI coding agents. Each profile def
 | Client | Profile | Docs |
 |--------|---------|------|
 | **Claude Code** | `claude-code` | [Guide](https://docs.nono.sh/cli/clients/claude-code) |
+| **Codex** | `codex` | [Guide](https://docs.nono.sh/cli/clients/codex) |
 | **OpenCode** | `opencode` | [Guide](https://docs.nono.sh/cli/clients/opencode) |
 | **OpenClaw** | `openclaw` | [Guide](https://docs.nono.sh/cli/clients/openclaw) |
 

@@ -41,24 +41,56 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
-        .with_target(false)
-        .init();
+    let cli = Cli::parse();
+    init_tracing(&cli);
 
-    if let Err(e) = run() {
+    if let Err(e) = run(cli) {
         error!("{}", e);
         eprintln!("nono: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
+fn init_tracing(cli: &Cli) {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_filter(cli))
+        .with_target(false)
+        .init();
+}
 
+fn tracing_filter(cli: &Cli) -> EnvFilter {
+    cli_log_override(cli)
+        .map(EnvFilter::new)
+        .unwrap_or_else(|| {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+        })
+}
+
+fn cli_log_override(cli: &Cli) -> Option<&'static str> {
+    if cli.silent {
+        return Some("off");
+    }
+
+    match cli_verbosity(cli) {
+        0 => None,
+        1 => Some("info"),
+        2 => Some("debug"),
+        _ => Some("trace"),
+    }
+}
+
+fn cli_verbosity(cli: &Cli) -> u8 {
+    match &cli.command {
+        Commands::Learn(args) => args.verbose,
+        Commands::Run(args) => args.sandbox.verbose,
+        Commands::Shell(args) => args.sandbox.verbose,
+        Commands::Wrap(args) => args.sandbox.verbose,
+        Commands::Setup(args) => args.verbose,
+        Commands::Why(_) | Commands::Rollback(_) | Commands::Trust(_) | Commands::Audit(_) => 0,
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     // Start background update check (non-blocking, 3s timeout)
     let mut update_handle = if !cli.silent {
         update_check::start_background_check()
@@ -318,6 +350,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
@@ -353,6 +386,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
@@ -434,6 +468,11 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 
     let mut prepared = prepare_sandbox(&args, silent)?;
 
+    // CLI --capability-elevation overrides profile setting
+    if run_args.capability_elevation {
+        prepared.capability_elevation = true;
+    }
+
     // Compute scan root for trust policy discovery and instruction file scanning.
     let scan_root = args
         .workdir
@@ -444,7 +483,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     // Pre-exec trust scan: verify instruction files before the agent reads them.
     // Must run BEFORE sandbox application so we can still read bundles and policy.
     // The trust_policy and scan_result are preserved for macOS deny rule injection.
-    let scan_result = if trust_override {
+    let (trust_policy, scan_result) = if trust_override {
         if !silent {
             eprintln!(
                 "  {}",
@@ -452,7 +491,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
                     .yellow()
             );
         }
-        None
+        (None, None)
     } else {
         let trust_policy = trust_scan::load_scan_policy(&scan_root, false)?;
         let result = trust_scan::run_pre_exec_scan(&scan_root, &trust_policy, silent)?;
@@ -502,17 +541,19 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             }
         }
 
-        Some(result)
+        (Some(trust_policy), Some(result))
     };
     let _ = &scan_result; // suppress unused warning on non-macOS
 
-    // Enable sandbox extensions for transparent capability expansion in supervised mode.
-    // On Linux, seccomp-notify intercepts syscalls at the kernel level -- this flag is
-    // informational only (seccomp is installed separately in the child process).
+    // Enable sandbox extensions for transparent capability expansion in supervised mode,
+    // but only when the profile opts into capability elevation. Without elevation,
+    // supervised mode runs with static capabilities (no seccomp, no PTY, no prompts).
     #[cfg(target_os = "linux")]
-    prepared.caps.set_extensions_enabled(true);
+    if prepared.capability_elevation {
+        prepared.caps.set_extensions_enabled(true);
+    }
 
-    let trust_scan_verified = scan_result.as_ref().is_some_and(|r| r.verified > 0);
+    let trust_interception_active = trust_interception_active(trust_policy.as_ref());
 
     // Extract write-protected paths (signed instruction files) for diagnostic output
     let verified_protected_paths = scan_result
@@ -567,27 +608,41 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let mut merged_globs = prepared.rollback_exclude_globs;
     merged_globs.extend(cli_exclude_globs);
 
+    // Select execution strategy. Supervised mode is needed when any feature
+    // requires a parent process: rollback snapshots, network proxy, capability
+    // elevation (seccomp + PTY), or trust interception. Direct mode (exec,
+    // nono disappears) gives the child native terminal access — required for
+    // TUI programs like Claude Code that call setRawMode.
+    let needs_supervised =
+        rollback || proxy_active || prepared.capability_elevation || trust_interception_active;
+    let strategy = if needs_supervised {
+        exec_strategy::ExecStrategy::Supervised
+    } else {
+        exec_strategy::ExecStrategy::Direct
+    };
+
     execute_sandboxed(
         program,
         cmd_args,
         prepared.caps,
         prepared.secrets,
         ExecutionFlags {
-            strategy: exec_strategy::ExecStrategy::Supervised,
+            strategy,
             no_diagnostics,
             rollback,
             no_rollback: run_args.no_rollback,
             no_rollback_prompt,
-            trust_override,
             no_audit,
             silent,
             rollback_all: run_args.rollback_all,
             rollback_include: run_args.rollback_include,
             scan_root,
-            trust_scan_verified,
+            trust_policy,
+            trust_interception_active,
             protected_paths: verified_protected_paths,
             rollback_exclude_patterns: merged_patterns,
             rollback_exclude_globs: merged_globs,
+            capability_elevation: prepared.capability_elevation,
             proxy_active,
             network_profile,
             proxy_allow_hosts,
@@ -642,6 +697,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         prepared.secrets,
         ExecutionFlags {
             no_diagnostics: true,
+            capability_elevation: prepared.capability_elevation,
             ..ExecutionFlags::defaults(silent)?
         },
     )
@@ -711,7 +767,6 @@ struct ExecutionFlags {
     no_rollback_prompt: bool,
     /// Disable audit trail recording for this session
     no_audit: bool,
-    trust_override: bool,
     silent: bool,
     /// Override all auto-exclusions (full snapshot)
     rollback_all: bool,
@@ -719,14 +774,19 @@ struct ExecutionFlags {
     rollback_include: Vec<String>,
     /// Root directory for trust policy discovery and scanning
     scan_root: std::path::PathBuf,
-    /// Whether trust scan ran and verified at least one file (crypto threads may linger)
-    trust_scan_verified: bool,
+    /// Loaded trust policy from the pre-exec scan path.
+    trust_policy: Option<nono::trust::TrustPolicy>,
+    /// Whether runtime trust interception is relevant for this session.
+    trust_interception_active: bool,
     /// Write-protected paths (signed instruction files) for diagnostic output
     protected_paths: Vec<std::path::PathBuf>,
     /// Profile-specific rollback exclusion patterns (additive on base)
     rollback_exclude_patterns: Vec<String>,
     /// Profile-specific rollback exclusion globs (filename matching)
     rollback_exclude_globs: Vec<String>,
+    /// Whether runtime capability elevation is enabled (seccomp-notify + PTY mux).
+    /// When false, supervised mode runs with static capabilities only.
+    capability_elevation: bool,
     /// Whether proxy-based network filtering is active (forces Supervised mode)
     proxy_active: bool,
     /// Network profile name for proxy filtering (from --network-profile or profile config)
@@ -757,16 +817,17 @@ impl ExecutionFlags {
             no_rollback: false,
             no_rollback_prompt: false,
             no_audit: false,
-            trust_override: false,
             silent,
             rollback_all: false,
             rollback_include: Vec::new(),
             scan_root: std::env::current_dir()
                 .map_err(|e| NonoError::SandboxInit(format!("Failed to get cwd: {e}")))?,
-            trust_scan_verified: false,
+            trust_policy: None,
+            trust_interception_active: false,
             protected_paths: Vec::new(),
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
+            capability_elevation: false,
             proxy_active: false,
             network_profile: None,
             proxy_allow_hosts: Vec::new(),
@@ -777,6 +838,10 @@ impl ExecutionFlags {
             proxy_port: None,
         })
     }
+}
+
+fn trust_interception_active(policy: Option<&nono::trust::TrustPolicy>) -> bool {
+    policy.is_some_and(|policy| !policy.instruction_patterns.is_empty())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1036,9 +1101,11 @@ fn execute_sandboxed(
     // sandbox then immediately calls execve which replaces the address space.
     let threading = if !loaded_secrets.is_empty() && !flags.proxy_active {
         exec_strategy::ThreadingContext::KeyringExpected
-    } else if flags.trust_scan_verified || flags.proxy_active || !loaded_secrets.is_empty() {
+    } else if flags.trust_interception_active || flags.proxy_active || !loaded_secrets.is_empty() {
         // Proxy uses tokio threads (parked on epoll/kqueue, safe for fork+exec).
         // Keyring threads are idle XPC dispatch workers when proxy is also active.
+        // Trust policy signature verification and runtime attestation may also
+        // leave crypto worker threads parked before we fork.
         exec_strategy::ThreadingContext::CryptoExpected
     } else {
         exec_strategy::ThreadingContext::Strict
@@ -1059,6 +1126,7 @@ fn execute_sandboxed(
         no_diagnostics: flags.no_diagnostics || flags.silent,
         threading,
         protected_paths: &flags.protected_paths,
+        capability_elevation: flags.capability_elevation,
     };
 
     // Execute based on strategy
@@ -1269,10 +1337,13 @@ fn execute_sandboxed(
                 session_id: &supervisor_session_id,
             };
 
-            let trust_interceptor = if !flags.trust_override {
-                match trust_scan::load_scan_policy(&flags.scan_root, false) {
-                    Ok(p) => {
-                        match trust_intercept::TrustInterceptor::new(p, flags.scan_root.clone()) {
+            let trust_interceptor = if flags.trust_interception_active {
+                match flags.trust_policy.clone() {
+                    Some(policy) => {
+                        match trust_intercept::TrustInterceptor::new(
+                            policy,
+                            flags.scan_root.clone(),
+                        ) {
                             Ok(interceptor) => Some(interceptor),
                             Err(e) => {
                                 tracing::warn!("Trust interceptor pattern compilation failed: {e}");
@@ -1288,18 +1359,7 @@ fn execute_sandboxed(
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Trust policy load failed for interceptor: {e}");
-                        eprintln!(
-                            "  {}",
-                            format!(
-                                "WARNING: Runtime instruction file verification disabled \
-                                 (policy error: {e})"
-                            )
-                            .yellow()
-                        );
-                        None
-                    }
+                    None => None,
                 }
             } else {
                 None
@@ -1436,26 +1496,43 @@ struct PreparedSandbox {
     proxy_credentials: Vec<String>,
     /// Custom credential definitions from profile config
     custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
+    /// Whether the profile enables runtime capability elevation (seccomp-notify + PTY)
+    capability_elevation: bool,
+}
+
+fn parse_env_credential_map_args(values: &[String]) -> Result<Vec<(String, String)>> {
+    // Clap enforces 2 values per occurrence for --env-credential-map, but keep
+    // this check fail-secure in case argument wiring changes.
+    if values.len() % 2 != 0 {
+        return Err(NonoError::ConfigParse(
+            "--env-credential-map expects pairs: <CREDENTIAL_REF> <ENV_VAR>".to_string(),
+        ));
+    }
+
+    let mut pairs = Vec::with_capacity(values.len() / 2);
+    for chunk in values.chunks_exact(2) {
+        let credential_ref = chunk[0].trim();
+        let env_var = chunk[1].trim();
+
+        if credential_ref.is_empty() {
+            return Err(NonoError::ConfigParse(
+                "--env-credential-map has an empty credential reference".to_string(),
+            ));
+        }
+
+        if env_var.is_empty() {
+            return Err(NonoError::ConfigParse(
+                "--env-credential-map has an empty destination env var".to_string(),
+            ));
+        }
+
+        pairs.push((credential_ref.to_string(), env_var.to_string()));
+    }
+
+    Ok(pairs)
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
-    // Reinitialize tracing with verbose level if requested.
-    // Uses tracing_subscriber directly instead of mutating process env vars
-    // (std::env::set_var is unsound in multi-threaded context).
-    if args.verbose > 0 {
-        let filter = match args.verbose {
-            1 => "info",
-            2 => "debug",
-            _ => "trace",
-        };
-        let _ = tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::new(filter))
-                .with_target(false)
-                .finish(),
-        );
-    }
-
     // Clean up stale state files from previous nono runs
     sandbox_state::cleanup_stale_state_files();
 
@@ -1512,6 +1589,10 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     // Extract config before profile is consumed for secrets
+    let capability_elevation = loaded_profile
+        .as_ref()
+        .and_then(|p| p.security.capability_elevation)
+        .unwrap_or(false);
     let profile_workdir_access = loaded_profile.as_ref().map(|p| p.workdir.access.clone());
     let profile_rollback_patterns = loaded_profile
         .as_ref()
@@ -1539,20 +1620,37 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .map(|p| p.network.custom_credentials.clone())
         .unwrap_or_default();
 
-    // On Linux, pre-create the Claude Code config lock file before building
-    // capabilities. Claude Code's saveConfigWithLock creates ~/.claude.json.lock
-    // next to ~/.claude.json. Landlock cannot grant permission to create new
-    // files in ~/ without opening the entire directory, so we pre-create the
-    // lock file and grant access to it via the profile's allow_file list.
+    // On Linux, pre-create paths that the claude-code profile grants but
+    // may not exist yet. Non-existent paths are skipped during capability
+    // construction (capability_ext.rs:14), so they must exist before we
+    // build the CapabilitySet.
     #[cfg(target_os = "linux")]
     if args.profile.as_deref() == Some("claude-code") {
         let home = config::validated_home()?;
-        let lock_path = std::path::Path::new(&home).join(".claude.json.lock");
-        if !lock_path.exists() {
-            if let Err(e) = std::fs::File::create(&lock_path) {
-                warn!("Failed to pre-create {}: {}", lock_path.display(), e);
+        let home_path = std::path::Path::new(&home);
+
+        let precreate = |path: &std::path::Path, is_dir: bool| {
+            if !path.exists() {
+                let result = if is_dir {
+                    std::fs::create_dir_all(path)
+                } else {
+                    std::fs::File::create(path).map(|_| ())
+                };
+                if let Err(e) = result {
+                    warn!("Failed to pre-create {}: {}", path.display(), e);
+                }
             }
-        }
+        };
+
+        // ~/.claude.json.lock — Claude Code's saveConfigWithLock creates this
+        // next to ~/.claude.json. Landlock cannot grant permission to create
+        // new files in ~/ without opening the entire directory.
+        precreate(&home_path.join(".claude.json.lock"), false);
+
+        // ~/.cache/claude-cli-nodejs — MCP server logs and CLI cache.
+        // The claude_cache_linux group grants this directory, but it may
+        // not exist on a fresh system.
+        precreate(&home_path.join(".cache/claude-cli-nodejs"), true);
     }
 
     // Build capabilities from profile or arguments.
@@ -1643,52 +1741,62 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     let profile_secrets = loaded_profile
         .map(|p| p.env_credentials.mappings)
         .unwrap_or_default();
+    let cli_secret_mappings = parse_env_credential_map_args(&args.env_credential_map)?;
 
-    let secret_mappings =
-        nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets)?;
+    let secret_mappings = nono::keystore::build_secret_mappings(
+        args.env_credential.as_deref(),
+        &cli_secret_mappings,
+        &profile_secrets,
+    )?;
 
-    // Load credentials from keystore/1Password BEFORE sandbox is applied
+    // Load credentials from keystore/URI managers BEFORE sandbox is applied
     let loaded_secrets = if !secret_mappings.is_empty() {
         let op_count = secret_mappings
             .keys()
             .filter(|k| nono::keystore::is_op_uri(k))
             .count();
-        let keyring_count = secret_mappings.len() - op_count;
+        let apple_password_count = secret_mappings
+            .keys()
+            .filter(|k| nono::keystore::is_apple_password_uri(k))
+            .count();
+        let keyring_count = secret_mappings.len() - op_count - apple_password_count;
 
         info!(
-            "Loading {} credential(s) (keyring: {}, 1Password: {})",
+            "Loading {} credential(s) (keyring: {}, 1Password: {}, Apple Passwords: {})",
             secret_mappings.len(),
             keyring_count,
-            op_count
+            op_count,
+            apple_password_count
         );
         if !silent {
-            if keyring_count > 0 && op_count > 0 {
-                eprintln!(
-                    "  Loading {} credential(s) ({} from keystore, {} from 1Password)...",
-                    secret_mappings.len(),
-                    keyring_count,
-                    op_count
-                );
-            } else if op_count > 0 {
-                eprintln!(
-                    "  Loading {} credential(s) from 1Password...",
-                    secret_mappings.len()
-                );
-            } else {
-                eprintln!(
-                    "  Loading {} credential(s) from keystore...",
-                    secret_mappings.len()
-                );
+            let mut source_parts: Vec<String> = Vec::new();
+            if keyring_count > 0 {
+                source_parts.push(format!("{} from keystore", keyring_count));
             }
+            if op_count > 0 {
+                source_parts.push(format!("{} from 1Password", op_count));
+            }
+            if apple_password_count > 0 {
+                source_parts.push(format!("{} from Apple Passwords", apple_password_count));
+            }
+
+            eprintln!(
+                "  Loading {} credential(s) ({})...",
+                secret_mappings.len(),
+                source_parts.join(", ")
+            );
+
             // Warn that env credentials are visible to the sandboxed process
             for account in secret_mappings.keys() {
                 let display_account = if nono::keystore::is_op_uri(account) {
                     nono::keystore::redact_op_uri(account)
+                } else if nono::keystore::is_apple_password_uri(account) {
+                    nono::keystore::redact_apple_password_uri(account)
                 } else {
                     account.to_string()
                 };
                 eprintln!(
-                    "  {}: --env-credential '{}' exposes the secret directly to the sandboxed process.\n\
+                    "  {}: env credential '{}' exposes the secret directly to the sandboxed process.\n\
                      {}  For network API keys, use a profile with proxy_credentials for credential isolation.",
                     "warning".yellow(),
                     display_account,
@@ -1720,6 +1828,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         proxy_allow_hosts: profile_proxy_allow,
         proxy_credentials: profile_proxy_credentials,
         custom_credentials: profile_custom_credentials,
+        capability_elevation,
     })
 }
 
@@ -1858,6 +1967,7 @@ mod tests {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: None,
@@ -1948,26 +2058,6 @@ mod tests {
     }
 
     #[test]
-    fn test_check_sensitive_path() {
-        assert!(config::check_sensitive_path("~/.ssh")
-            .expect("policy must load")
-            .is_some());
-        assert!(config::check_sensitive_path("~/.aws")
-            .expect("policy must load")
-            .is_some());
-        assert!(config::check_sensitive_path("~/.bashrc")
-            .expect("policy must load")
-            .is_some());
-
-        assert!(config::check_sensitive_path("/tmp")
-            .expect("policy must load")
-            .is_none());
-        assert!(config::check_sensitive_path("~/Documents")
-            .expect("policy must load")
-            .is_none());
-    }
-
-    #[test]
     fn test_resolve_effective_proxy_settings_net_allow_clears_profile_proxy_state() {
         let args = SandboxArgs {
             net_allow: true,
@@ -1982,6 +2072,7 @@ mod tests {
             proxy_allow_hosts: vec!["docs.python.org".to_string()],
             proxy_credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
+            capability_elevation: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -2013,6 +2104,7 @@ mod tests {
             proxy_allow_hosts: vec!["docs.python.org".to_string()],
             proxy_credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
+            capability_elevation: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -2025,5 +2117,22 @@ mod tests {
                 proxy_credentials: vec!["github".to_string(), "openai".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn test_trust_interception_inactive_for_default_policy() {
+        let policy = nono::trust::TrustPolicy::default();
+
+        assert!(!trust_interception_active(Some(&policy)));
+    }
+
+    #[test]
+    fn test_trust_interception_active_when_instruction_patterns_exist() {
+        let policy = nono::trust::TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
+            ..nono::trust::TrustPolicy::default()
+        };
+
+        assert!(trust_interception_active(Some(&policy)));
     }
 }
