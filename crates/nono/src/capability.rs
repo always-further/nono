@@ -359,6 +359,15 @@ pub enum SignalMode {
     /// Linux can still call `kill(2)`/`tkill(2)`/`tgkill(2)` freely.
     #[default]
     Isolated,
+    /// Signals allowed to child processes in the same sandbox only.
+    ///
+    /// On macOS: `(allow signal (target same-sandbox))` in Seatbelt.
+    /// Permits signaling any process that inherited the sandbox (i.e., forked
+    /// or exec'd children), but blocks signals to external processes.
+    ///
+    /// On Linux: not yet enforced; behaves identically to `Isolated` until
+    /// Landlock V6 signal scoping is implemented (see issue #255).
+    AllowSameSandbox,
     /// Signals allowed to any process (no filtering).
     AllowAll,
 }
@@ -1577,5 +1586,11 @@ mod tests {
         let summary = caps.summary();
         assert!(summary.contains("tcp connect ports: 443"));
         assert!(summary.contains("tcp bind ports: 8080"));
+    }
+
+    #[test]
+    fn test_signal_mode_allow_same_sandbox_roundtrip() {
+        let caps = CapabilitySet::new().set_signal_mode(SignalMode::AllowSameSandbox);
+        assert_eq!(caps.signal_mode(), SignalMode::AllowSameSandbox);
     }
 }

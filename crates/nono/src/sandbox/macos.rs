@@ -355,6 +355,11 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         crate::capability::SignalMode::Isolated => {
             profile.push_str("(allow signal (target self))\n");
         }
+        crate::capability::SignalMode::AllowSameSandbox => {
+            // Handled in Task 3: will emit (allow signal (target same-sandbox))
+            // For now, fall back to self-only to keep the sandbox restrictive.
+            profile.push_str("(allow signal (target self))\n");
+        }
         crate::capability::SignalMode::AllowAll => {
             profile.push_str("(allow signal)\n");
         }

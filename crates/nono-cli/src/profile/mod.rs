@@ -563,6 +563,9 @@ pub struct HooksConfig {
 pub enum ProfileSignalMode {
     /// Signals restricted to the current process only
     Isolated,
+    /// Signals allowed to child processes in the same sandbox only
+    #[serde(alias = "allow_same_sandbox")]
+    AllowSameSandbox,
     /// Signals allowed to any process
     #[serde(alias = "allow_all")]
     AllowAll,
@@ -572,6 +575,7 @@ impl From<ProfileSignalMode> for nono::SignalMode {
     fn from(val: ProfileSignalMode) -> Self {
         match val {
             ProfileSignalMode::Isolated => nono::SignalMode::Isolated,
+            ProfileSignalMode::AllowSameSandbox => nono::SignalMode::AllowSameSandbox,
             ProfileSignalMode::AllowAll => nono::SignalMode::AllowAll,
         }
     }
