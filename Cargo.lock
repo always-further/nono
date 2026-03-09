@@ -2196,9 +2196,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-bundle"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97747f0c23b3de7bec8bff2f4d330801739030c1d87f2f607f387874c6697f30"
+checksum = "5e1c326f5796df635de915cc1b2d29485423df10a4997be6103091772f503451"
 dependencies = [
  "base64",
  "hex",
@@ -2214,9 +2214,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-crypto"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed9df1366416681f427f05ee6f14d368c1dc526a037460dff9369bae08d7a8e3"
+checksum = "6271208173601a0f058f5fb5354561905a7ead9b4185d85a6c2ed97fbdd31338"
 dependencies = [
  "aws-lc-rs",
  "base64",
@@ -2224,7 +2224,7 @@ dependencies = [
  "der",
  "digest",
  "pem",
- "rand_core 0.9.5",
+ "rand_core 0.10.0",
  "sha2",
  "signature",
  "sigstore-types",
@@ -2253,9 +2253,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-merkle"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e04d0f9daba2b9e00ea1ce244d01d57e971f7ff07162acfb0e71db5fa76d2e2"
+checksum = "692e1c1037124c0305e6e342c6a5fa180a31d6ce0eafc0e6c8f001d200083f8d"
 dependencies = [
  "base64",
  "hex",
@@ -2286,9 +2286,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-rekor"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bf7b349a6e2417700a2b095183f5d425d11f119bff1b94d74b16e0ec7bf4c98"
+checksum = "21abbf2ab10930dd2eb77cbc4c24b1efa6da89f6f0dce9b28b7c1362e7b80da8"
 dependencies = [
  "base64",
  "hex",
@@ -2324,9 +2324,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-trust-root"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee8762a4813252faffdf6f7e2040213078eb2482fbc351381134f3fc60c1be9c"
+checksum = "45f9d2f2dc33e04c80cfd5f11c93b64f0a2555b1d7f92b5aa16307266f05ad8c"
 dependencies = [
  "base64",
  "chrono",
@@ -2342,9 +2342,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-tsa"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0354fd9de1ee2862c7b74a68d9e9c2287bfe557c2792fd27f9e007012d4cecea"
+checksum = "c43c677d430038c216b4f6368efc8cea42f35eca4d20fe5fcf51133d71b3b51b"
 dependencies = [
  "aws-lc-rs",
  "base64",
@@ -2354,7 +2354,7 @@ dependencies = [
  "const-oid",
  "der",
  "hex",
- "rand 0.9.2",
+ "rand 0.10.0",
  "reqwest 0.13.2",
  "rustls-pki-types",
  "rustls-webpki",
@@ -2368,9 +2368,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-types"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff61a0d2889dae48848203be54ab0de06fd46b4bf6a992bf780c9bfd5576b661"
+checksum = "47aa6bca8f329e06c7ccb5b9f9be82b165b2be063396be0ee57b13402b994744"
 dependencies = [
  "base64",
  "chrono",
@@ -2383,9 +2383,9 @@ dependencies = [
 
 [[package]]
 name = "sigstore-verify"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d751d608afd334fb9d8c037ad9efef69f1954494eff99cd79a0a6fc8af34ccb"
+checksum = "d44caf1ea504259cf70c7c16527d8a3fa07bd9374ba4e59ec247e7d13a7f2cb8"
 dependencies = [
  "base64",
  "chrono",
