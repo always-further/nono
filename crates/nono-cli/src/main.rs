@@ -1967,6 +1967,7 @@ mod tests {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: None,
