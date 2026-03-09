@@ -115,6 +115,7 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.tar.gz
+            artifacts/*.deb
             artifacts/SHA256SUMS.txt
 
   publish-crates:
