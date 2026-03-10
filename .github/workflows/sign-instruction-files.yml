@@ -1,8 +1,8 @@
-# Sign instruction files with Sigstore keyless attestation.
+# Sign instruction files with the official nono-attest GitHub Action.
 #
-# Produces .bundle sidecar files containing DSSE envelopes with in-toto
+# Produces Sigstore bundles containing DSSE envelopes with in-toto
 # statements that nono's trust pipeline can verify. Uses GitHub Actions
-# OIDC for identity — Fulcio issues a short-lived certificate carrying
+# OIDC for identity; Fulcio issues a short-lived certificate carrying
 # the repository, workflow, and ref claims.
 #
 # Consumer-side verification: nono's pre-exec trust scan validates bundles
@@ -22,7 +22,7 @@ on:
 
 permissions:
   id-token: write   # Sigstore keyless OIDC token
-  contents: write   # Commit .bundle sidecars
+  contents: write   # Commit generated bundle files
 
 jobs:
   sign:
@@ -30,29 +30,4 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Install nono
-        run: |
-          LATEST_TAG=$(gh release view --repo always-further/nono --json tagName -q .tagName)
-          curl -fsSL "https://github.com/always-further/nono/releases/download/${LATEST_TAG}/nono-${LATEST_TAG}-x86_64-unknown-linux-gnu.tar.gz" | tar xz
-          sudo mv nono /usr/local/bin/
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Sign instruction files
-        run: nono trust sign --keyless --all
-
-      - name: Commit bundles
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add -A '*.bundle'
-
-          if git diff --cached --quiet; then
-            echo "No bundle changes to commit."
-            exit 0
-          fi
-
-          git commit -m "chore: update instruction file attestation bundles [skip ci]"
-          git push
+      - uses: always-further/nono-attest@v0.0.3
