@@ -25,7 +25,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install Nix
-        uses: cachix/install-nix-action@4cbb444a961f7f17a9ce421956b09f42343cf780 # v9
+        uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31
         with:
           nix_path: nixpkgs=channel:nixos-24.11
 
