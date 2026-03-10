@@ -382,7 +382,6 @@
         "read": [
           "~/.pyenv",
           "~/.local/lib",
-          "~/.local/bin",
           "~/.local/share/uv",
           "~/.conda"
         ]
