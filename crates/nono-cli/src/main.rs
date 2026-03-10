@@ -613,13 +613,12 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     // elevation (seccomp + PTY), or trust interception. Direct mode (exec,
     // nono disappears) gives the child native terminal access — required for
     // TUI programs like Claude Code that call setRawMode.
-    let needs_supervised =
-        rollback || proxy_active || prepared.capability_elevation || trust_interception_active;
-    let strategy = if needs_supervised {
-        exec_strategy::ExecStrategy::Supervised
-    } else {
-        exec_strategy::ExecStrategy::Direct
-    };
+    let strategy = select_exec_strategy(
+        rollback,
+        proxy_active,
+        prepared.capability_elevation,
+        trust_interception_active,
+    );
 
     execute_sandboxed(
         program,
@@ -653,6 +652,19 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             proxy_port: args.proxy_port,
         },
     )
+}
+
+fn select_exec_strategy(
+    rollback: bool,
+    proxy_active: bool,
+    capability_elevation: bool,
+    trust_interception_active: bool,
+) -> exec_strategy::ExecStrategy {
+    if rollback || proxy_active || capability_elevation || trust_interception_active {
+        exec_strategy::ExecStrategy::Supervised
+    } else {
+        exec_strategy::ExecStrategy::Direct
+    }
 }
 
 /// Run an interactive shell inside the sandbox
@@ -2134,5 +2146,45 @@ mod tests {
         };
 
         assert!(trust_interception_active(Some(&policy)));
+    }
+
+    #[test]
+    fn test_select_exec_strategy_prefers_direct_for_plain_run() {
+        assert_eq!(
+            select_exec_strategy(false, false, false, false),
+            exec_strategy::ExecStrategy::Direct
+        );
+    }
+
+    #[test]
+    fn test_select_exec_strategy_uses_supervised_for_rollback() {
+        assert_eq!(
+            select_exec_strategy(true, false, false, false),
+            exec_strategy::ExecStrategy::Supervised
+        );
+    }
+
+    #[test]
+    fn test_select_exec_strategy_uses_supervised_for_proxy() {
+        assert_eq!(
+            select_exec_strategy(false, true, false, false),
+            exec_strategy::ExecStrategy::Supervised
+        );
+    }
+
+    #[test]
+    fn test_select_exec_strategy_uses_supervised_for_capability_elevation() {
+        assert_eq!(
+            select_exec_strategy(false, false, true, false),
+            exec_strategy::ExecStrategy::Supervised
+        );
+    }
+
+    #[test]
+    fn test_select_exec_strategy_uses_supervised_for_trust_interception() {
+        assert_eq!(
+            select_exec_strategy(false, false, false, true),
+            exec_strategy::ExecStrategy::Supervised
+        );
     }
 }

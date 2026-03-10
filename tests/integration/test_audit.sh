@@ -1,7 +1,9 @@
 #!/bin/bash
 # Audit Trail Tests
 # Verifies that audit sessions are recorded correctly in all execution scenarios.
-# Audit is on by default for supervised execution and can be opted out with --no-audit.
+# Audit is only recorded for supervised executions. Plain `nono run` may exec
+# directly, so only runs that require a parent process (for example `--rollback`)
+# are expected to leave session metadata behind.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/test_helpers.sh"
@@ -47,73 +49,47 @@ echo "Rollback root: $ROLLBACK_ROOT"
 echo ""
 
 # =============================================================================
-# Audit always-on (default supervised mode)
+# Direct execution should not create audit sessions
 # =============================================================================
 
-echo "--- Audit Always-On (Supervised Default) ---"
+echo "--- Direct Execution (No Audit Session) ---"
 
-# Test 1: Plain run (no --rollback) should create a session
+# Test 1: Plain run (no --rollback) should NOT create a session
 TESTS_RUN=$((TESTS_RUN + 1))
 run_nono run --silent --allow-cwd --allow "$TMPDIR" -- echo "audit test"
 session_file=$(find_session_for_pid "$LAST_NONO_PID")
-if [[ -n "$session_file" && -f "$session_file" ]]; then
-    echo -e "  ${GREEN}PASS${NC}: plain run creates audit session"
+if [[ -z "$session_file" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: plain run does not create audit session"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    echo -e "  ${RED}FAIL${NC}: plain run creates audit session"
-    echo "       PID: $LAST_NONO_PID, session_file: ${session_file:-not found}"
+    echo -e "  ${RED}FAIL${NC}: plain run does not create audit session"
+    echo "       Unexpected session: $session_file"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
-# Test 2: Session.json contains expected fields
-TESTS_RUN=$((TESTS_RUN + 1))
-if [[ -n "$session_file" && -f "$session_file" ]]; then
-    has_fields=true
-    for field in session_id started ended command exit_code; do
-        if ! grep -q "\"$field\"" "$session_file"; then
-            has_fields=false
-            break
-        fi
-    done
-    if $has_fields; then
-        echo -e "  ${GREEN}PASS${NC}: session.json contains required fields"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    else
-        echo -e "  ${RED}FAIL${NC}: session.json contains required fields"
-        echo "       Content: $(head -20 "$session_file")"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-    fi
-else
-    echo -e "  ${RED}FAIL${NC}: session.json contains required fields"
-    echo "       No session.json found"
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-fi
-
-# Test 3: Read-only session should still create audit
+# Test 2: Read-only direct run should NOT create a session
 TESTS_RUN=$((TESTS_RUN + 1))
 run_nono run --silent --allow-cwd --read "$TMPDIR" -- echo "readonly audit"
 session_file=$(find_session_for_pid "$LAST_NONO_PID")
-if [[ -n "$session_file" && -f "$session_file" ]]; then
-    echo -e "  ${GREEN}PASS${NC}: read-only session creates audit"
+if [[ -z "$session_file" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: read-only direct run does not create audit session"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    echo -e "  ${RED}FAIL${NC}: read-only session creates audit"
-    echo "       PID: $LAST_NONO_PID, session_file: ${session_file:-not found}"
+    echo -e "  ${RED}FAIL${NC}: read-only direct run does not create audit session"
+    echo "       Unexpected session: $session_file"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
-# Test 4: Session records correct exit code
+# Test 3: Direct run with non-zero exit should NOT create a session
 TESTS_RUN=$((TESTS_RUN + 1))
 run_nono run --silent --allow-cwd --allow "$TMPDIR" -- sh -c "exit 42"
 session_file=$(find_session_for_pid "$LAST_NONO_PID")
-if [[ -n "$session_file" ]] && grep -q '"exit_code": 42' "$session_file"; then
-    echo -e "  ${GREEN}PASS${NC}: session records non-zero exit code"
+if [[ -z "$session_file" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: direct run with non-zero exit does not create audit session"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    echo -e "  ${RED}FAIL${NC}: session records non-zero exit code"
-    if [[ -n "$session_file" ]]; then
-        echo "       exit_code in file: $(grep exit_code "$session_file")"
-    fi
+    echo -e "  ${RED}FAIL${NC}: direct run with non-zero exit does not create audit session"
+    echo "       Unexpected session: $session_file"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
 
@@ -124,15 +100,15 @@ fi
 echo ""
 echo "--- Audit Opt-Out (--no-audit) ---"
 
-# Test 5: --no-audit suppresses session creation
+# Test 4: --no-audit without a supervisor-required feature remains sessionless
 TESTS_RUN=$((TESTS_RUN + 1))
 run_nono run --silent --no-audit --allow-cwd --allow "$TMPDIR" -- echo "no audit"
 session_file=$(find_session_for_pid "$LAST_NONO_PID")
 if [[ -z "$session_file" ]]; then
-    echo -e "  ${GREEN}PASS${NC}: --no-audit suppresses audit session"
+    echo -e "  ${GREEN}PASS${NC}: --no-audit run does not create audit session"
     TESTS_PASSED=$((TESTS_PASSED + 1))
 else
-    echo -e "  ${RED}FAIL${NC}: --no-audit suppresses audit session"
+    echo -e "  ${RED}FAIL${NC}: --no-audit run does not create audit session"
     echo "       Unexpected session: $session_file"
     TESTS_FAILED=$((TESTS_FAILED + 1))
 fi
@@ -142,13 +118,65 @@ expect_failure "--no-audit conflicts with --rollback" \
     "$NONO_BIN" run --silent --no-audit --rollback --allow-cwd --allow "$TMPDIR" -- echo "conflict"
 
 # =============================================================================
-# Audit with rollback
+# Audit with rollback (forces supervised execution)
 # =============================================================================
 
 echo ""
 echo "--- Audit with Rollback ---"
 
-# Test 6: --rollback with writable path creates session with snapshot data
+# Test 5: --rollback with read-only paths still creates an audit session
+TESTS_RUN=$((TESTS_RUN + 1))
+run_nono run --silent --rollback --no-rollback-prompt --allow-cwd --read "$TMPDIR" -- echo "readonly rollback audit"
+session_file=$(find_session_for_pid "$LAST_NONO_PID")
+if [[ -n "$session_file" && -f "$session_file" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: rollback read-only session creates audit"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "  ${RED}FAIL${NC}: rollback read-only session creates audit"
+    echo "       PID: $LAST_NONO_PID, session_file: ${session_file:-not found}"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Test 6: rollback session.json contains expected fields
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -n "$session_file" && -f "$session_file" ]]; then
+    has_fields=true
+    for field in session_id started ended command exit_code; do
+        if ! grep -q "\"$field\"" "$session_file"; then
+            has_fields=false
+            break
+        fi
+    done
+    if $has_fields; then
+        echo -e "  ${GREEN}PASS${NC}: rollback session.json contains required fields"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "  ${RED}FAIL${NC}: rollback session.json contains required fields"
+        echo "       Content: $(head -20 "$session_file")"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+else
+    echo -e "  ${RED}FAIL${NC}: rollback session.json contains required fields"
+    echo "       No session.json found"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Test 7: rollback session records correct exit code
+TESTS_RUN=$((TESTS_RUN + 1))
+run_nono run --silent --rollback --no-rollback-prompt --allow-cwd --allow "$TMPDIR" -- sh -c "exit 42"
+session_file=$(find_session_for_pid "$LAST_NONO_PID")
+if [[ -n "$session_file" ]] && grep -q '"exit_code": 42' "$session_file"; then
+    echo -e "  ${GREEN}PASS${NC}: rollback session records non-zero exit code"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+else
+    echo -e "  ${RED}FAIL${NC}: rollback session records non-zero exit code"
+    if [[ -n "$session_file" ]]; then
+        echo "       exit_code in file: $(grep exit_code "$session_file")"
+    fi
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+fi
+
+# Test 8: --rollback with writable path creates session with snapshot data
 TESTS_RUN=$((TESTS_RUN + 1))
 WRITE_DIR=$(mktemp -d "$TMPDIR/write-XXXXXX")
 run_nono run --silent --rollback --no-rollback-prompt --allow-cwd --allow "$WRITE_DIR" -- touch "$WRITE_DIR/testfile"
@@ -180,7 +208,7 @@ fi
 echo ""
 echo "--- Direct Mode (nono wrap) ---"
 
-# Test 8: nono wrap does not create audit sessions (no parent process)
+# Test 9: nono wrap does not create audit sessions (no parent process)
 TESTS_RUN=$((TESTS_RUN + 1))
 run_nono wrap --allow "$TMPDIR" -- echo "wrap no audit"
 session_file=$(find_session_for_pid "$LAST_NONO_PID")
@@ -200,7 +228,7 @@ fi
 echo ""
 echo "--- Audit List Command ---"
 
-# Test 9: nono audit list shows sessions
+# Test 10: nono audit list shows sessions
 TESTS_RUN=$((TESTS_RUN + 1))
 set +e
 list_output=$("$NONO_BIN" audit list 2>&1)
