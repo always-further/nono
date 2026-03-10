@@ -4,11 +4,13 @@ CLI for capability-based sandboxing using Landlock (Linux) and Seatbelt (macOS).
 
 ## Installation
 
-### Homebrew (macOS)
+### Homebrew (macOS and Linux)
 
 ```bash
 brew install nono
 ```
+
+See the [Homebrew formula page](https://formulae.brew.sh/formula/nono) for package metadata and bottle availability, and [Homebrew/homebrew-core#271443](https://github.com/Homebrew/homebrew-core/pull/271443) for the upstream formula PR.
 
 ### Cargo
 
