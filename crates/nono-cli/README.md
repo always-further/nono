@@ -29,7 +29,7 @@ cargo build --release
 
 ```bash
 # Allow read+write to current directory
-nono run --allow-cwd -- command
+nono run --allow . -- command
 
 # Separate read and write permissions
 nono run --read ./src --write ./output -- cargo build
@@ -43,11 +43,14 @@ nono run --allow-cwd --block-net -- command
 # Use a built-in profile
 nono run --profile claude-code -- claude
 
+# Use the Codex profile
+nono run --profile codex -- codex
+
 # Keep a profile but temporarily allow unrestricted network
 nono run --profile claude-code --allow-net -- claude
 
 # Start an interactive shell inside the sandbox
-nono shell --allow-cwd
+nono shell --allow .
 
 # Check why a path would be blocked
 nono why --path ~/.ssh/id_rsa --op read
@@ -61,8 +64,10 @@ nono run --allow-cwd --dry-run -- command
 | Profile | Command |
 |---------|---------|
 | Claude Code | `nono run --profile claude-code -- claude` |
+| Codex | `nono run --profile codex -- codex` |
 | OpenCode | `nono run --profile opencode -- opencode` |
 | OpenClaw | `nono run --profile openclaw -- openclaw gateway` |
+| Swival | `nono run --profile swival -- swival` |
 
 ## Profile Inheritance
 
@@ -132,7 +137,7 @@ nono run --profile my-profile -- rm /tmp/old-file.txt
 ## Documentation
 
 - [Full Documentation](https://docs.nono.sh)
-- [Client Guides](https://docs.nono.sh/clients)
+- [Client Guides](https://docs.nono.sh/cli/clients/quickstart)
 
 ## License
 

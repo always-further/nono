@@ -152,7 +152,8 @@ pub enum ExecStrategy {
     /// - Diagnostic footer on non-zero exit
     /// - Undo support (parent can write snapshots)
     /// - IPC for capability expansion
-    /// - Default for `nono run` and `nono shell`
+    /// - Default for `nono shell`
+    /// - Used by `nono run` when a parent process is required
     #[default]
     Supervised,
 }

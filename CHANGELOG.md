@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.15.0] - 2026-03-09
+
+### Bug Fixes
+
+- Allow opentui data dir in opencode profile (#296) ([#296](https://github.com/always-further/nono/pull/296))
+
+- `nono run` default to direct exec when supervision is not needed (#295) ([#295](https://github.com/always-further/nono/pull/295))
+
+- Add tilde expansion to profile paths and opencode binary access (#294) ([#294](https://github.com/always-further/nono/pull/294))
+
+- Honor silent tracing output (#290) ([#290](https://github.com/always-further/nono/pull/290))
+
+- Preserve supervised Linux open semantics (#289) ([#289](https://github.com/always-further/nono/pull/289))
+
+
+### Dependencies
+
+- *(deps)* Bump sigstore-verify from 0.6.3 to 0.6.4 (#305) ([#305](https://github.com/always-further/nono/pull/305))
+
+- *(deps)* Bump libc from 0.2.182 to 0.2.183 (#304) ([#304](https://github.com/always-further/nono/pull/304))
+
+- *(deps)* Bump tempfile from 3.25.0 to 3.26.0 (#303) ([#303](https://github.com/always-further/nono/pull/303))
+
+
+### Documentation
+
+- Document that gemini baseurl is ignored in opencode (#307) ([#307](https://github.com/always-further/nono/pull/307))
+
+
+### Features
+
+- Add Apple Passwords URI credential support (#229) ([#229](https://github.com/always-further/nono/pull/229))
+
+- Add built-in Codex profile (#300) ([#300](https://github.com/always-further/nono/pull/300))
+
+- Add Debian package support (#298) ([#298](https://github.com/always-further/nono/pull/298))
+
+- Add capability_elevation profile field and OS-aware groups (#293) ([#293](https://github.com/always-further/nono/pull/293))
+
+- Make claude-code profile platform-aware (#291) ([#291](https://github.com/always-further/nono/pull/291))
+
 ## [0.14.0] - 2026-03-08
 
 ### Bug Fixes

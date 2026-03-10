@@ -122,6 +122,16 @@
       ],
       "credentials": ["github"]
     },
+    "codex": {
+      "groups": [
+        "llm_apis",
+        "package_registries",
+        "github",
+        "sigstore",
+        "documentation"
+      ],
+      "credentials": ["openai", "github"]
+    },
     "claude-code": {
       "groups": [
         "llm_apis",

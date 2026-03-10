@@ -317,9 +317,19 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     profile.push_str("(allow process-exec*)\n");
     profile.push_str("(allow process-fork)\n");
 
-    // Process info: allow self-inspection, deny inspecting others
+    // Process info: allow self-inspection, then apply mode-based rule for others
     profile.push_str("(allow process-info* (target self))\n");
-    profile.push_str("(deny process-info* (target others))\n");
+    match caps.process_info_mode() {
+        crate::capability::ProcessInfoMode::Isolated => {
+            profile.push_str("(deny process-info* (target others))\n");
+        }
+        crate::capability::ProcessInfoMode::AllowSameSandbox => {
+            profile.push_str("(allow process-info* (target same-sandbox))\n");
+        }
+        crate::capability::ProcessInfoMode::AllowAll => {
+            profile.push_str("(allow process-info*)\n");
+        }
+    }
 
     // Allow specific system operations
     profile.push_str("(allow sysctl-read)\n");
@@ -351,9 +361,17 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // the kernel and bypass this restriction, so interactive use is unaffected.
     // In monitor mode, the parent's signal forwarding handler will get EPERM
     // when trying to forward to the child — this is tolerated silently.
+    //
+    // Note: for AllowSameSandbox we emit both (target self) and (target same-sandbox)
+    // because Seatbelt's same-sandbox filter may not subsume self — being explicit
+    // ensures the process can always signal itself regardless of implementation details.
     match caps.signal_mode() {
         crate::capability::SignalMode::Isolated => {
             profile.push_str("(allow signal (target self))\n");
+        }
+        crate::capability::SignalMode::AllowSameSandbox => {
+            profile.push_str("(allow signal (target self))\n");
+            profile.push_str("(allow signal (target same-sandbox))\n");
         }
         crate::capability::SignalMode::AllowAll => {
             profile.push_str("(allow signal)\n");
@@ -986,6 +1004,44 @@ mod tests {
         let caps = CapabilitySet::new().allow_tcp_bind(8080);
         let result = generate_profile(&caps);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_generate_profile_signal_allow_same_sandbox() {
+        use crate::capability::SignalMode;
+        let caps = CapabilitySet::new().set_signal_mode(SignalMode::AllowSameSandbox);
+        let profile = generate_profile(&caps).unwrap();
+        assert!(profile.contains("(allow signal (target self))"));
+        assert!(profile.contains("(allow signal (target same-sandbox))"));
+        assert!(!profile.contains("(allow signal)\n"));
+    }
+
+    #[test]
+    fn test_generate_profile_process_info_isolated() {
+        let caps = CapabilitySet::new(); // default = Isolated
+        let profile = generate_profile(&caps).unwrap();
+        assert!(profile.contains("(allow process-info* (target self))"));
+        assert!(profile.contains("(deny process-info* (target others))"));
+    }
+
+    #[test]
+    fn test_generate_profile_process_info_allow_same_sandbox() {
+        use crate::capability::ProcessInfoMode;
+        let caps = CapabilitySet::new().set_process_info_mode(ProcessInfoMode::AllowSameSandbox);
+        let profile = generate_profile(&caps).unwrap();
+        assert!(profile.contains("(allow process-info* (target self))"));
+        assert!(profile.contains("(allow process-info* (target same-sandbox))"));
+        assert!(!profile.contains("(deny process-info* (target others))"));
+    }
+
+    #[test]
+    fn test_generate_profile_process_info_allow_all() {
+        use crate::capability::ProcessInfoMode;
+        let caps = CapabilitySet::new().set_process_info_mode(ProcessInfoMode::AllowAll);
+        let profile = generate_profile(&caps).unwrap();
+        assert!(profile.contains("(allow process-info* (target self))"));
+        assert!(profile.contains("(allow process-info*)\n"));
+        assert!(!profile.contains("(deny process-info* (target others))"));
     }
 
     #[test]

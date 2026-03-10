@@ -104,12 +104,12 @@ Compare against an existing profile to show only missing paths.
 nono learn --profile opencode -- opencode
 ```
 
-### `--toml`
+### `--json`
 
-Output discovered paths as a TOML fragment suitable for a profile.
+Output discovered paths as a JSON fragment suitable for a profile.
 
 ```bash
-nono learn --toml -- my-app > paths.toml
+nono learn --json -- my-app > paths.json
 ```
 
 ### `--timeout`
@@ -212,7 +212,7 @@ Block all network access. Network is **allowed by default**.
 
 ```bash
 # Block network for a build process that should be offline
-nono run --allow-cwd --block-net -- cargo build
+nono run --allow . --block-net -- cargo build
 ```
 
 #### `--allow-net`
@@ -240,7 +240,7 @@ nono run --allow-cwd --network-profile claude-code -- claude
 nono run --allow-cwd --network-profile minimal -- my-agent
 ```
 
-Available profiles: `claude-code`, `minimal`, `enterprise`. See [Network Proxy](/cli/features/network-proxy) for details.
+Available profiles: `claude-code`, `developer`, `minimal`, `opencode`, `enterprise`. See [Network Proxy](/cli/features/network-proxy) for details.
 
 <Note>
   `--network-profile` and `--allow-proxy` activate proxy mode, which forces supervised execution. The proxy runs in the unsandboxed parent process.
@@ -260,7 +260,7 @@ nono run --allow-cwd --network-profile minimal --allow-proxy custom-api.example.
 
 #### `--proxy-credential`
 
-Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name, or from 1Password when the profile's `credential_key` is an `op://` URI.
+Enable credential injection for a named service via the reverse proxy. The service must be either a built-in service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name, from 1Password when `credential_key` is an `op://` URI, or from Apple Passwords on macOS when `credential_key` is an `apple-password://` URI.
 
 ```bash
 # Inject OpenAI credentials (loads from keyring account "openai_api_key")
@@ -471,23 +471,44 @@ Can be specified multiple times.
 
 #### `--env-credential`
 
-Load credentials from the system keystore (macOS Keychain / Linux Secret Service) or 1Password and inject them as environment variables. The sandboxed process can read these credentials directly.
+Load credentials from the system keystore (macOS Keychain / Linux Secret Service) by account name and inject them as environment variables. The sandboxed process can read these credentials directly.
 
 ```bash
 # Load specific credentials by account name
 nono run --allow-cwd --env-credential openai_api_key,anthropic_api_key -- my-agent
 
-# Load from 1Password (op:// URI with =VAR_NAME suffix)
-nono run --allow-cwd --env-credential 'op://Development/OpenAI/credential=OPENAI_API_KEY' -- my-agent
+# Use with a profile that defines env_credentials
+nono run --profile my-agent -- my-agent
+```
 
-# Use with profile (loads credentials defined in profile's [env_credentials] section)
-nono run --profile claude-code --env-credential -- claude
+#### `--env-credential-map`
+
+Map an explicit credential reference to a destination environment variable.
+Repeatable as `--env-credential-map <CREDENTIAL_REF> <ENV_VAR>`.
+
+```bash
+# Load from 1Password
+nono run --allow-cwd --env-credential-map 'op://Development/OpenAI/credential' OPENAI_API_KEY -- my-agent
+
+# Load from Apple Passwords on macOS
+nono run --allow-cwd --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD -- my-agent
+
+# Load and rename from parent env
+nono run --allow-cwd --env-credential-map 'env://GITHUB_TOKEN' GH_TOKEN -- my-agent
+
+# Multiple mappings
+nono run --allow-cwd \
+  --env-credential-map 'op://Development/OpenAI/credential' OPENAI_API_KEY \
+  --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD \
+  -- my-agent
 ```
 
 Credentials are:
 
 - Loaded **before** the sandbox is applied (keystore access blocked after)
-- Auto-named by uppercasing: `openai_api_key` becomes `$OPENAI_API_KEY`
+- Auto-named by uppercasing for keyring names: `openai_api_key` becomes `$OPENAI_API_KEY`
+- `--env-credential-map` validates URI references (`op://`, `apple-password://`, `env://`) and target env var names
+- `--env-credential` URI suffix form remains supported for 1Password compatibility (`op://...=VAR`)
 - Zeroized from memory after `exec()`
 
 For network API keys, prefer `--proxy-credential` instead for credential isolation — the agent never sees the real API key.
@@ -549,7 +570,7 @@ nono run --rollback --no-rollback-prompt --allow-cwd -- my-agent
 Disable rollback entirely for this session. No snapshots are taken and no restore is offered. Useful when rollback overhead is not needed.
 
 ```bash
-nono run --no-rollback --allow-cwd -- npm test
+nono run --no-rollback --allow . -- npm test
 ```
 
 #### `--no-audit`

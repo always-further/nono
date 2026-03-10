@@ -71,9 +71,10 @@ pub struct CredentialDef {
     pub credential_format: String,
     /// Explicit environment variable name for the phantom token.
     ///
-    /// Required when `credential_key` is an `env://` or `op://` URI, since
-    /// uppercasing those produces nonsensical env var names. When `None`,
-    /// the proxy derives the env var from `credential_key.to_uppercase()`.
+    /// Required when `credential_key` is a URI manager reference (`env://`,
+    /// `op://`, `apple-password://`), since uppercasing those produces
+    /// nonsensical env var names. When `None`, the proxy derives the env var
+    /// from `credential_key.to_uppercase()`.
     #[serde(default)]
     pub env_var: Option<String>,
 }
@@ -760,6 +761,24 @@ mod tests {
         assert!(
             resolved.profile_credentials.contains(&"github".to_string()),
             "claude-code profile should include github credential, got: {:?}",
+            resolved.profile_credentials
+        );
+    }
+
+    #[test]
+    fn test_codex_profile_includes_openai_and_github_credentials() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy should load");
+
+        let resolved = resolve_network_profile(&policy, "codex").expect("should resolve");
+        assert!(
+            resolved.profile_credentials.contains(&"openai".to_string()),
+            "codex profile should include openai credential, got: {:?}",
+            resolved.profile_credentials
+        );
+        assert!(
+            resolved.profile_credentials.contains(&"github".to_string()),
+            "codex profile should include github credential, got: {:?}",
             resolved.profile_credentials
         );
     }

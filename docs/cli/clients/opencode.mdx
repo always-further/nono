@@ -66,7 +66,7 @@ Create `~/.config/nono/profiles/opencode.json` for different permissions:
 
 **Usage:**
 ```bash
-nono run --profile opencode --env-credential -- opencode
+nono run --profile opencode -- opencode
 ```
 
 ## Security Tips
@@ -119,3 +119,15 @@ nono run --profile opencode --block-net -- opencode
 ```
 
 See [Security Profiles](/cli/features/profiles-groups) for details on profile format and precedence rules.
+
+## Known Issues
+
+### Google Gemini Proxy Credential Injection
+
+OpenCode routes Google Gemini requests directly to the Google API rather than through a configurable base URL. This means proxy-based credential injection does not work with Gemini models. Only environment variable injection is supported.
+
+Use `--env-credential` instead of proxy injection when working with Gemini:
+
+```bash
+nono run --profile opencode --env-credential gemini_api_key -- opencode
+```

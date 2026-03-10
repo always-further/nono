@@ -366,6 +366,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
@@ -401,6 +402,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: args.workdir.clone(),
@@ -627,13 +629,12 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     // elevation (seccomp + PTY), or trust interception. Direct mode (exec,
     // nono disappears) gives the child native terminal access — required for
     // TUI programs like Claude Code that call setRawMode.
-    let needs_supervised =
-        rollback || proxy_active || prepared.capability_elevation || trust_interception_active;
-    let strategy = if needs_supervised {
-        exec_strategy::ExecStrategy::Supervised
-    } else {
-        exec_strategy::ExecStrategy::Direct
-    };
+    let strategy = select_exec_strategy(
+        rollback,
+        proxy_active,
+        prepared.capability_elevation,
+        trust_interception_active,
+    );
 
     execute_sandboxed(
         program,
@@ -667,6 +668,19 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             proxy_port: args.proxy_port,
         },
     )
+}
+
+fn select_exec_strategy(
+    rollback: bool,
+    proxy_active: bool,
+    capability_elevation: bool,
+    trust_interception_active: bool,
+) -> exec_strategy::ExecStrategy {
+    if rollback || proxy_active || capability_elevation || trust_interception_active {
+        exec_strategy::ExecStrategy::Supervised
+    } else {
+        exec_strategy::ExecStrategy::Direct
+    }
 }
 
 /// Run an interactive shell inside the sandbox
@@ -901,7 +915,20 @@ fn apply_pre_fork_sandbox(
 ) -> Result<()> {
     if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
         output::print_applying_sandbox(silent);
-        Sandbox::apply(caps)?;
+
+        // On Linux, use the ABI-aware path to avoid BestEffort flag masking.
+        #[cfg(target_os = "linux")]
+        {
+            let detected = Sandbox::detect_abi()?;
+            info!("Direct mode: detected {}", detected);
+            Sandbox::apply_with_abi(caps, &detected)?;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Sandbox::apply(caps)?;
+        }
+
         output::print_sandbox_active(silent);
     }
     Ok(())
@@ -1514,6 +1541,38 @@ struct PreparedSandbox {
     capability_elevation: bool,
 }
 
+fn parse_env_credential_map_args(values: &[String]) -> Result<Vec<(String, String)>> {
+    // Clap enforces 2 values per occurrence for --env-credential-map, but keep
+    // this check fail-secure in case argument wiring changes.
+    if values.len() % 2 != 0 {
+        return Err(NonoError::ConfigParse(
+            "--env-credential-map expects pairs: <CREDENTIAL_REF> <ENV_VAR>".to_string(),
+        ));
+    }
+
+    let mut pairs = Vec::with_capacity(values.len() / 2);
+    for chunk in values.chunks_exact(2) {
+        let credential_ref = chunk[0].trim();
+        let env_var = chunk[1].trim();
+
+        if credential_ref.is_empty() {
+            return Err(NonoError::ConfigParse(
+                "--env-credential-map has an empty credential reference".to_string(),
+            ));
+        }
+
+        if env_var.is_empty() {
+            return Err(NonoError::ConfigParse(
+                "--env-credential-map has an empty destination env var".to_string(),
+            ));
+        }
+
+        pairs.push((credential_ref.to_string(), env_var.to_string()));
+    }
+
+    Ok(pairs)
+}
+
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
     // Clean up stale state files from previous nono runs
     sandbox_state::cleanup_stale_state_files();
@@ -1723,52 +1782,62 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     let profile_secrets = loaded_profile
         .map(|p| p.env_credentials.mappings)
         .unwrap_or_default();
+    let cli_secret_mappings = parse_env_credential_map_args(&args.env_credential_map)?;
 
-    let secret_mappings =
-        nono::keystore::build_secret_mappings(args.env_credential.as_deref(), &profile_secrets)?;
+    let secret_mappings = nono::keystore::build_secret_mappings(
+        args.env_credential.as_deref(),
+        &cli_secret_mappings,
+        &profile_secrets,
+    )?;
 
-    // Load credentials from keystore/1Password BEFORE sandbox is applied
+    // Load credentials from keystore/URI managers BEFORE sandbox is applied
     let loaded_secrets = if !secret_mappings.is_empty() {
         let op_count = secret_mappings
             .keys()
             .filter(|k| nono::keystore::is_op_uri(k))
             .count();
-        let keyring_count = secret_mappings.len() - op_count;
+        let apple_password_count = secret_mappings
+            .keys()
+            .filter(|k| nono::keystore::is_apple_password_uri(k))
+            .count();
+        let keyring_count = secret_mappings.len() - op_count - apple_password_count;
 
         info!(
-            "Loading {} credential(s) (keyring: {}, 1Password: {})",
+            "Loading {} credential(s) (keyring: {}, 1Password: {}, Apple Passwords: {})",
             secret_mappings.len(),
             keyring_count,
-            op_count
+            op_count,
+            apple_password_count
         );
         if !silent {
-            if keyring_count > 0 && op_count > 0 {
-                eprintln!(
-                    "  Loading {} credential(s) ({} from keystore, {} from 1Password)...",
-                    secret_mappings.len(),
-                    keyring_count,
-                    op_count
-                );
-            } else if op_count > 0 {
-                eprintln!(
-                    "  Loading {} credential(s) from 1Password...",
-                    secret_mappings.len()
-                );
-            } else {
-                eprintln!(
-                    "  Loading {} credential(s) from keystore...",
-                    secret_mappings.len()
-                );
+            let mut source_parts: Vec<String> = Vec::new();
+            if keyring_count > 0 {
+                source_parts.push(format!("{} from keystore", keyring_count));
             }
+            if op_count > 0 {
+                source_parts.push(format!("{} from 1Password", op_count));
+            }
+            if apple_password_count > 0 {
+                source_parts.push(format!("{} from Apple Passwords", apple_password_count));
+            }
+
+            eprintln!(
+                "  Loading {} credential(s) ({})...",
+                secret_mappings.len(),
+                source_parts.join(", ")
+            );
+
             // Warn that env credentials are visible to the sandboxed process
             for account in secret_mappings.keys() {
                 let display_account = if nono::keystore::is_op_uri(account) {
                     nono::keystore::redact_op_uri(account)
+                } else if nono::keystore::is_apple_password_uri(account) {
+                    nono::keystore::redact_apple_password_uri(account)
                 } else {
                     account.to_string()
                 };
                 eprintln!(
-                    "  {}: --env-credential '{}' exposes the secret directly to the sandboxed process.\n\
+                    "  {}: env credential '{}' exposes the secret directly to the sandboxed process.\n\
                      {}  For network API keys, use a profile with proxy_credentials for credential isolation.",
                     "warning".yellow(),
                     display_account,
@@ -1783,6 +1852,10 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
 
     // Print capability summary
     output::print_capabilities(&caps, args.verbose, silent);
+
+    // Print Landlock ABI info on Linux
+    #[cfg(target_os = "linux")]
+    output::print_abi_info(silent);
 
     // Check platform support
     if !Sandbox::is_supported() {
@@ -1939,6 +2012,7 @@ mod tests {
             allow_command: vec![],
             block_command: vec![],
             env_credential: None,
+            env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
             workdir: None,
@@ -2105,5 +2179,45 @@ mod tests {
         };
 
         assert!(trust_interception_active(Some(&policy)));
+    }
+
+    #[test]
+    fn test_select_exec_strategy_prefers_direct_for_plain_run() {
+        assert_eq!(
+            select_exec_strategy(false, false, false, false),
+            exec_strategy::ExecStrategy::Direct
+        );
+    }
+
+    #[test]
+    fn test_select_exec_strategy_uses_supervised_for_rollback() {
+        assert_eq!(
+            select_exec_strategy(true, false, false, false),
+            exec_strategy::ExecStrategy::Supervised
+        );
+    }
+
+    #[test]
+    fn test_select_exec_strategy_uses_supervised_for_proxy() {
+        assert_eq!(
+            select_exec_strategy(false, true, false, false),
+            exec_strategy::ExecStrategy::Supervised
+        );
+    }
+
+    #[test]
+    fn test_select_exec_strategy_uses_supervised_for_capability_elevation() {
+        assert_eq!(
+            select_exec_strategy(false, false, true, false),
+            exec_strategy::ExecStrategy::Supervised
+        );
+    }
+
+    #[test]
+    fn test_select_exec_strategy_uses_supervised_for_trust_interception() {
+        assert_eq!(
+            select_exec_strategy(false, false, false, true),
+            exec_strategy::ExecStrategy::Supervised
+        );
     }
 }

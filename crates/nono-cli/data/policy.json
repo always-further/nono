@@ -301,7 +301,6 @@
           "/dev/zero",
           "/dev/full",
           "/dev/tty",
-          "/dev/pts",
           "$TMPDIR"
         ]
       }
@@ -592,6 +591,32 @@
       },
       "interactive": true
     },
+    "codex": {
+      "meta": {
+        "name": "codex",
+        "version": "1.0.0",
+        "description": "OpenAI Codex CLI agent",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "node_runtime",
+          "rust_runtime",
+          "python_runtime",
+          "nix_runtime",
+          "unlink_protection"
+        ],
+        "signal_mode": "isolated",
+        "capability_elevation": false
+      },
+      "trust_groups": [],
+      "filesystem": {
+        "allow": ["$HOME/.codex"]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "interactive": true
+    },
     "openclaw": {
       "meta": {
         "name": "openclaw",
@@ -713,6 +738,40 @@
       "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
       "interactive": false
+    },
+    "swival": {
+      "meta": {
+        "name": "swival",
+        "version": "1.0.0",
+        "description": "Swival CLI coding agent",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "python_runtime",
+          "node_runtime",
+          "user_caches_macos",
+          "user_caches_linux",
+          "unlink_protection"
+        ],
+        "signal_mode": "isolated",
+        "capability_elevation": false
+      },
+      "trust_groups": [],
+      "filesystem": {
+        "allow": [
+          "$HOME/.config/swival",
+          "$HOME/.local/share/swival"
+        ],
+        "read_file": ["$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "undo": {
+        "exclude_patterns": ["node_modules", "__pycache__", ".swival"],
+        "exclude_globs": ["*.pyc"]
+      },
+      "interactive": true
     }
   }
 }

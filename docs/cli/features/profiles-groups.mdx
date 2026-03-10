@@ -94,7 +94,7 @@ The `secrets` section maps keystore account names to environment variable names.
 ```
 
 ```bash
-nono run --profile my-agent --env-credential -- my-command
+nono run --profile my-agent -- my-command
 ```
 
 See [Credential Injection](/cli/features/credential-injection) for details on storing secrets in the keystore.
@@ -402,6 +402,20 @@ nono run --profile claude-code -- claude
 **Network:** Allowed
 
 **Special:** Auto-installs Claude Code hooks
+
+### codex
+
+```bash
+nono run --profile codex -- codex
+```
+
+**Filesystem:** `~/.codex` (read+write)
+
+**Groups:** `node_runtime`, `rust_runtime`, `python_runtime`, `nix_runtime`, `unlink_protection` (plus all `base_groups`)
+
+**Network:** Allowed
+
+**Interactive:** Enabled
 
 ### opencode
 
