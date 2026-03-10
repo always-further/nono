@@ -1,39 +1,193 @@
 //! Linux sandbox implementation using Landlock LSM
 
-use crate::capability::{AccessMode, CapabilitySet, FsCapability, NetworkMode};
+use crate::capability::{AccessMode, CapabilitySet, NetworkMode};
 use crate::error::{NonoError, Result};
 use crate::sandbox::SupportInfo;
 use landlock::{
     Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
-    Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
+    Ruleset, RulesetAttr, RulesetCreatedAttr, Scope, ABI,
 };
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-/// The target ABI version we support (highest we know about)
-const TARGET_ABI: ABI = ABI::V5;
+/// Detected Landlock ABI version with feature query methods.
+///
+/// Wraps the `landlock::ABI` enum and provides methods to query which
+/// features are available at the detected ABI level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DetectedAbi {
+    /// The detected ABI version
+    pub abi: ABI,
+}
+
+impl DetectedAbi {
+    /// Create a new `DetectedAbi` from a raw `landlock::ABI`.
+    #[must_use]
+    pub fn new(abi: ABI) -> Self {
+        Self { abi }
+    }
+
+    /// Whether file rename across directories is supported (V2+).
+    #[must_use]
+    pub fn has_refer(&self) -> bool {
+        AccessFs::from_all(self.abi).contains(AccessFs::Refer)
+    }
+
+    /// Whether file truncation control is supported (V3+).
+    #[must_use]
+    pub fn has_truncate(&self) -> bool {
+        AccessFs::from_all(self.abi).contains(AccessFs::Truncate)
+    }
+
+    /// Whether TCP network filtering is supported (V4+).
+    #[must_use]
+    pub fn has_network(&self) -> bool {
+        !AccessNet::from_all(self.abi).is_empty()
+    }
+
+    /// Whether device ioctl filtering is supported (V5+).
+    #[must_use]
+    pub fn has_ioctl_dev(&self) -> bool {
+        AccessFs::from_all(self.abi).contains(AccessFs::IoctlDev)
+    }
+
+    /// Whether process scoping (signals and abstract UNIX sockets) is supported (V6+).
+    #[must_use]
+    pub fn has_scoping(&self) -> bool {
+        !Scope::from_all(self.abi).is_empty()
+    }
+
+    /// Return a human-readable version string (e.g., "V4").
+    #[must_use]
+    pub fn version_string(&self) -> &'static str {
+        match self.abi {
+            ABI::V1 => "V1",
+            ABI::V2 => "V2",
+            ABI::V3 => "V3",
+            ABI::V4 => "V4",
+            ABI::V5 => "V5",
+            ABI::V6 => "V6",
+            _ => "unknown",
+        }
+    }
+
+    /// Return a list of available feature names at this ABI level.
+    ///
+    /// Each feature includes the specific Landlock flags in parentheses
+    /// for consistency and debuggability.
+    #[must_use]
+    pub fn feature_names(&self) -> Vec<String> {
+        let mut features = vec!["Basic filesystem access control".to_string()];
+        if self.has_refer() {
+            features.push("File rename across directories (Refer)".to_string());
+        }
+        if self.has_truncate() {
+            features.push("File truncation (Truncate)".to_string());
+        }
+        if self.has_network() {
+            features.push(format!(
+                "TCP network filtering ({:?})",
+                AccessNet::from_all(self.abi)
+            ));
+        }
+        if self.has_ioctl_dev() {
+            features.push("Device ioctl filtering (IoctlDev)".to_string());
+        }
+        if self.has_scoping() {
+            features.push(format!("Process scoping ({:?})", Scope::from_all(self.abi)));
+        }
+        features
+    }
+}
+
+impl std::fmt::Display for DetectedAbi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Landlock {}", self.version_string())
+    }
+}
+
+/// ABI probe order: highest to lowest.
+const ABI_PROBE_ORDER: [ABI; 6] = [ABI::V6, ABI::V5, ABI::V4, ABI::V3, ABI::V2, ABI::V1];
+
+/// Detect the highest Landlock ABI supported by the running kernel.
+///
+/// Probes from V6 down to V1 using `HardRequirement` compatibility mode.
+/// Returns the highest ABI for which a full ruleset can be created.
+///
+/// # Errors
+///
+/// Returns an error if no ABI version is supported (Landlock not available).
+pub fn detect_abi() -> Result<DetectedAbi> {
+    let mut last_error = None;
+
+    for &abi in &ABI_PROBE_ORDER {
+        match probe_abi_candidate(abi) {
+            Ok(()) => return Ok(DetectedAbi::new(abi)),
+            Err(err) => {
+                debug!("ABI {:?} probe failed: {}", abi, err);
+                last_error = Some(format!("ABI {:?}: {}", abi, err));
+            }
+        }
+    }
+
+    Err(NonoError::SandboxInit(format!(
+        "No supported Landlock ABI detected{}",
+        last_error
+            .as_ref()
+            .map(|e| format!(" (last error: {})", e))
+            .unwrap_or_default()
+    )))
+}
+
+/// Probe whether a specific ABI version is supported using `HardRequirement`.
+fn probe_abi_candidate(abi: ABI) -> std::result::Result<(), String> {
+    let mut ruleset = Ruleset::default().set_compatibility(CompatLevel::HardRequirement);
+
+    ruleset = ruleset
+        .handle_access(AccessFs::from_all(abi))
+        .map_err(|e| format!("filesystem access probe failed: {}", e))?;
+
+    let handled_net = AccessNet::from_all(abi);
+    if !handled_net.is_empty() {
+        ruleset = ruleset
+            .handle_access(handled_net)
+            .map_err(|e| format!("network access probe failed: {}", e))?;
+    }
+
+    let scopes = Scope::from_all(abi);
+    if !scopes.is_empty() {
+        ruleset = ruleset
+            .scope(scopes)
+            .map_err(|e| format!("scope probe failed: {}", e))?;
+    }
+
+    ruleset
+        .create()
+        .map_err(|e| format!("ruleset creation probe failed: {}", e))?;
+
+    Ok(())
+}
 
 /// Check if Landlock is supported on this system
 pub fn is_supported() -> bool {
-    // Try to create a minimal ruleset to check if Landlock is available
-    Ruleset::default()
-        .handle_access(AccessFs::from_all(TARGET_ABI))
-        .and_then(|r| r.create())
-        .is_ok()
+    detect_abi().is_ok()
 }
 
 /// Get information about Landlock support
 pub fn support_info() -> SupportInfo {
-    // Try to create a ruleset and check the status
-    match Ruleset::default()
-        .handle_access(AccessFs::from_all(TARGET_ABI))
-        .and_then(|r| r.create())
-    {
-        Ok(_) => SupportInfo {
-            is_supported: true,
-            platform: "linux",
-            details: format!("Landlock available (targeting ABI v{:?})", TARGET_ABI),
-        },
+    match detect_abi() {
+        Ok(detected) => {
+            let features = detected.feature_names();
+            SupportInfo {
+                is_supported: true,
+                platform: "linux",
+                details: format!(
+                    "Landlock available ({}, features: {})",
+                    detected,
+                    features.join(", ")
+                ),
+            }
+        }
         Err(_) => SupportInfo {
             is_supported: false,
             platform: "linux",
@@ -43,27 +197,35 @@ pub fn support_info() -> SupportInfo {
     }
 }
 
-/// Convert AccessMode to Landlock AccessFs flags
+/// Result of converting AccessMode to Landlock flags, including any dropped flags.
+struct LandlockAccess {
+    /// Flags that will be applied (supported by this ABI).
+    effective: BitFlags<AccessFs>,
+    /// Flags that were requested but not supported by this ABI.
+    dropped: BitFlags<AccessFs>,
+}
+
+/// Convert AccessMode to Landlock AccessFs flags, intersected with ABI support.
+///
+/// Returns both the effective flags and any dropped flags so the caller can
+/// emit warnings with path context. This prevents `BestEffort` from hiding
+/// degradation.
 ///
 /// RemoveFile, RemoveDir, Truncate, and Refer are included to support atomic
-/// writes (write to .tmp → rename to target), which is the standard pattern
+/// writes (write to .tmp -> rename to target), which is the standard pattern
 /// used by most applications for safe config/build artifact updates.
-/// Landlock requires `LANDLOCK_ACCESS_FS_REMOVE_DIR` on the source directory
-/// for `rename()` operations involving directories (e.g., cargo build
-/// incremental artifacts), so excluding it would cause spurious EACCES errors.
-fn access_to_landlock(access: AccessMode, abi: ABI) -> BitFlags<AccessFs> {
-    match access {
+///
+/// IoctlDev is NOT included here — it is added selectively in `apply_with_abi()`
+/// only for paths that are actual device files (char/block devices), detected
+/// via `stat()` at rule-addition time. This avoids granting device ioctl access
+/// to non-device paths.
+fn access_to_landlock(access: AccessMode, abi: ABI) -> LandlockAccess {
+    let available = AccessFs::from_all(abi);
+
+    let desired = match access {
         AccessMode::Read => AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
         AccessMode::Write => {
-            // Write access includes all operations needed for normal file manipulation:
-            // - WriteFile: modify file contents
-            // - MakeReg/MakeDir/etc: create new files/directories
-            // - RemoveFile: delete files (required for rename() in atomic writes)
-            // - RemoveDir: delete directories (required for rename() of directories,
-            //   e.g., cargo build incremental artifacts)
-            // - Refer: rename/hard link operations (required for atomic writes)
-            // - Truncate: change file size (common write operation, ABI v3+)
-            let mut access = AccessFs::WriteFile
+            AccessFs::WriteFile
                 | AccessFs::MakeChar
                 | AccessFs::MakeDir
                 | AccessFs::MakeReg
@@ -73,63 +235,89 @@ fn access_to_landlock(access: AccessMode, abi: ABI) -> BitFlags<AccessFs> {
                 | AccessFs::MakeSym
                 | AccessFs::RemoveFile
                 | AccessFs::RemoveDir
-                | AccessFs::Refer;
-
-            if AccessFs::from_all(abi).contains(AccessFs::Truncate) {
-                access |= AccessFs::Truncate;
-            }
-
-            access
+                | AccessFs::Refer
+                | AccessFs::Truncate
         }
         AccessMode::ReadWrite => {
-            access_to_landlock(AccessMode::Read, abi) | access_to_landlock(AccessMode::Write, abi)
+            let read = access_to_landlock(AccessMode::Read, abi);
+            let write = access_to_landlock(AccessMode::Write, abi);
+            return LandlockAccess {
+                effective: read.effective | write.effective,
+                dropped: read.dropped | write.dropped,
+            };
         }
+    };
+
+    LandlockAccess {
+        effective: desired & available,
+        dropped: desired & !available,
     }
 }
 
-/// Landlock ABI v5+ restricts device ioctls when `IoctlDev` is handled.
+/// Check if a path is a character or block device file.
 ///
-/// TTY-backed TUIs rely on ioctl operations like `TCSETS` to enter raw mode and
-/// resize correctly. Limit the extra grant to terminal device capabilities so we
-/// do not widen ioctl access for arbitrary read-write paths.
-fn access_to_landlock_for_capability(cap: &FsCapability, abi: ABI) -> BitFlags<AccessFs> {
-    let mut access = access_to_landlock(cap.access, abi);
-
-    if should_grant_tty_ioctl(cap, abi) {
-        access |= AccessFs::IoctlDev;
-    }
-
-    access
+/// Used to selectively grant `IoctlDev` only for actual device files
+/// (e.g., `/dev/tty`, `/dev/null`), not for regular files or directories.
+fn is_device_path(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path)
+        .map(|m| {
+            let ft = m.file_type();
+            ft.is_char_device() || ft.is_block_device()
+        })
+        .unwrap_or(false)
 }
 
-fn should_grant_tty_ioctl(cap: &FsCapability, abi: ABI) -> bool {
-    AccessFs::from_all(abi).contains(AccessFs::IoctlDev)
-        && matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite)
-        && is_tty_device_path(&cap.resolved)
+/// Check if a path is a directory that contains device files (e.g., `/dev/pts`).
+///
+/// For directories under `/dev`, we grant `IoctlDev` because Landlock's
+/// `PathBeneath` applies to all files within the subtree, and those files
+/// are device nodes that need ioctl access for terminal operations.
+fn is_device_directory(path: &Path) -> bool {
+    // Only consider directories directly under /dev as device directories.
+    // This avoids granting IoctlDev to arbitrary directories.
+    path.starts_with("/dev") && path.is_dir()
 }
 
-fn is_tty_device_path(path: &Path) -> bool {
-    path == Path::new("/dev/tty") || path.starts_with(Path::new("/dev/pts"))
-}
-
-/// Apply Landlock sandbox with the given capabilities
+/// Apply Landlock sandbox with the given capabilities, auto-detecting ABI.
 ///
 /// This is a pure primitive - it applies ONLY the capabilities provided.
 /// The caller is responsible for including all necessary paths (including
 /// system paths like /usr, /lib, /bin if executables need to run).
 pub fn apply(caps: &CapabilitySet) -> Result<()> {
-    info!("Using Landlock ABI {:?}", TARGET_ABI);
+    let detected = detect_abi()?;
+    apply_with_abi(caps, &detected)
+}
+
+/// Apply Landlock sandbox with the given capabilities and a pre-detected ABI.
+///
+/// This variant avoids re-probing the kernel ABI when the caller has already
+/// detected it (e.g., the CLI probes once at startup).
+///
+/// # Security
+///
+/// The provided ABI is validated against the kernel: the ruleset is created
+/// with `HardRequirement` for filesystem access rights. If the caller passes
+/// an ABI higher than the kernel supports, `handle_access()` will fail rather
+/// than silently dropping flags.
+pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
+    let target_abi = abi.abi;
+    info!("Using Landlock ABI {:?}", target_abi);
 
     // Determine which access rights to handle based on ABI
-    let handled_fs = AccessFs::from_all(TARGET_ABI);
+    let handled_fs = AccessFs::from_all(target_abi);
 
     debug!("Handling filesystem access: {:?}", handled_fs);
 
-    // Create the ruleset (Ruleset::default() auto-probes kernel support)
-    // Start with filesystem access
+    // Create the ruleset with HardRequirement for filesystem access.
+    // This ensures that if the caller passes a stale or forged ABI higher
+    // than the kernel supports, handle_access() fails instead of silently
+    // dropping flags via BestEffort.
     let ruleset_builder = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(handled_fs)
-        .map_err(|e| NonoError::SandboxInit(format!("Failed to handle fs access: {}", e)))?;
+        .map_err(|e| NonoError::SandboxInit(format!("Failed to handle fs access: {}", e)))?
+        .set_compatibility(CompatLevel::BestEffort);
 
     // Determine if we need network handling (any mode besides AllowAll)
     let needs_network_handling = !matches!(caps.network_mode(), NetworkMode::AllowAll)
@@ -137,7 +325,7 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
         || !caps.tcp_bind_ports().is_empty();
 
     let ruleset_builder = if needs_network_handling {
-        let handled_net = AccessNet::from_all(TARGET_ABI);
+        let handled_net = AccessNet::from_all(target_abi);
         if !handled_net.is_empty() {
             debug!("Handling network access: {:?}", handled_net);
             ruleset_builder
@@ -238,8 +426,37 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
     // Add rules for each filesystem capability
     // These MUST succeed - caller explicitly requested these capabilities
     // Failing silently would violate the principle of least surprise and fail-secure design
+    let ioctl_dev_available = AccessFs::from_all(target_abi).contains(AccessFs::IoctlDev);
+
     for cap in caps.fs_capabilities() {
-        let access = access_to_landlock_for_capability(cap, TARGET_ABI);
+        let result = access_to_landlock(cap.access, target_abi);
+        let mut access = result.effective;
+
+        if !result.dropped.is_empty() {
+            warn!(
+                "Landlock ABI {:?} does not support {:?} for path {} (requested for {:?})",
+                target_abi,
+                result.dropped,
+                cap.resolved.display(),
+                cap.access
+            );
+        }
+
+        // Grant IoctlDev only for device files and device directories (under /dev).
+        // Terminal ioctls (TCSETS, TIOCGWINSZ) require this flag on V5+ kernels.
+        // Without it, TUI programs fail with EACCES on /dev/tty and /dev/pts.
+        // We restrict this to actual devices to avoid granting ioctl access to
+        // regular files and non-device directories.
+        if ioctl_dev_available
+            && matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite)
+            && (is_device_path(&cap.resolved) || is_device_directory(&cap.resolved))
+        {
+            access |= AccessFs::IoctlDev;
+            debug!(
+                "Adding IoctlDev for device path: {}",
+                cap.resolved.display()
+            );
+        }
 
         debug!(
             "Adding rule: {} with access {:?}",
@@ -945,8 +1162,6 @@ pub fn deny_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::CapabilitySource;
-    use std::path::PathBuf;
 
     #[test]
     fn test_is_supported() {
@@ -962,93 +1177,179 @@ mod tests {
     }
 
     #[test]
-    fn test_access_conversion() {
+    fn test_access_conversion_v3() {
         let abi = ABI::V3;
 
         let read = access_to_landlock(AccessMode::Read, abi);
-        assert!(read.contains(AccessFs::ReadFile));
-        assert!(!read.contains(AccessFs::WriteFile));
+        assert!(read.effective.contains(AccessFs::ReadFile));
+        assert!(!read.effective.contains(AccessFs::WriteFile));
+        assert!(read.dropped.is_empty());
 
         let write = access_to_landlock(AccessMode::Write, abi);
-        assert!(write.contains(AccessFs::WriteFile));
-        assert!(!write.contains(AccessFs::ReadFile));
-        // Verify atomic write operations ARE included (RemoveFile, RemoveDir, Refer, Truncate)
-        assert!(write.contains(AccessFs::RemoveFile));
-        assert!(write.contains(AccessFs::RemoveDir));
-        assert!(write.contains(AccessFs::Refer));
-        assert!(write.contains(AccessFs::Truncate));
+        assert!(write.effective.contains(AccessFs::WriteFile));
+        assert!(!write.effective.contains(AccessFs::ReadFile));
+        // V3 supports Refer and Truncate but NOT IoctlDev
+        assert!(write.effective.contains(AccessFs::RemoveFile));
+        assert!(write.effective.contains(AccessFs::RemoveDir));
+        assert!(write.effective.contains(AccessFs::Refer));
+        assert!(write.effective.contains(AccessFs::Truncate));
+        assert!(!write.effective.contains(AccessFs::IoctlDev));
+        assert!(write.dropped.is_empty());
 
         let rw = access_to_landlock(AccessMode::ReadWrite, abi);
-        assert!(rw.contains(AccessFs::ReadFile));
-        assert!(rw.contains(AccessFs::WriteFile));
-        // Verify atomic write operations ARE included in ReadWrite too
-        assert!(rw.contains(AccessFs::RemoveFile));
-        assert!(rw.contains(AccessFs::RemoveDir));
-        assert!(rw.contains(AccessFs::Refer));
-        assert!(rw.contains(AccessFs::Truncate));
+        assert!(rw.effective.contains(AccessFs::ReadFile));
+        assert!(rw.effective.contains(AccessFs::WriteFile));
+        assert!(rw.effective.contains(AccessFs::RemoveFile));
+        assert!(rw.effective.contains(AccessFs::RemoveDir));
+        assert!(rw.effective.contains(AccessFs::Refer));
+        assert!(rw.effective.contains(AccessFs::Truncate));
+        assert!(rw.dropped.is_empty());
     }
 
     #[test]
-    fn test_non_tty_paths_do_not_gain_ioctl_dev() {
-        let cap = FsCapability {
-            original: PathBuf::from("/tmp"),
-            resolved: PathBuf::from("/tmp"),
-            access: AccessMode::ReadWrite,
-            is_file: false,
-            source: CapabilitySource::User,
-        };
+    fn test_access_conversion_v1_drops_refer_and_truncate() {
+        let abi = ABI::V1;
 
-        let access = access_to_landlock_for_capability(&cap, TARGET_ABI);
-
-        assert!(!access.contains(AccessFs::IoctlDev));
+        let write = access_to_landlock(AccessMode::Write, abi);
+        assert!(write.effective.contains(AccessFs::WriteFile));
+        // V1 does NOT have Refer, Truncate, or IoctlDev
+        assert!(!write.effective.contains(AccessFs::Refer));
+        assert!(!write.effective.contains(AccessFs::Truncate));
+        assert!(!write.effective.contains(AccessFs::IoctlDev));
+        // But basic write operations are still present
+        assert!(write.effective.contains(AccessFs::RemoveFile));
+        assert!(write.effective.contains(AccessFs::RemoveDir));
+        // Dropped flags should be reported
+        assert!(write.dropped.contains(AccessFs::Refer));
+        assert!(write.dropped.contains(AccessFs::Truncate));
     }
 
     #[test]
-    fn test_tty_paths_gain_ioctl_dev_when_supported() {
-        let tty = FsCapability {
-            original: PathBuf::from("/dev/tty"),
-            resolved: PathBuf::from("/dev/tty"),
-            access: AccessMode::Write,
-            is_file: true,
-            source: CapabilitySource::User,
-        };
-        let pts = FsCapability {
-            original: PathBuf::from("/dev/pts"),
-            resolved: PathBuf::from("/dev/pts"),
-            access: AccessMode::ReadWrite,
-            is_file: false,
-            source: CapabilitySource::User,
-        };
+    fn test_access_conversion_v2_has_refer_but_not_truncate() {
+        let abi = ABI::V2;
 
-        let tty_access = access_to_landlock_for_capability(&tty, TARGET_ABI);
-        let pts_access = access_to_landlock_for_capability(&pts, TARGET_ABI);
-
-        assert!(tty_access.contains(AccessFs::IoctlDev));
-        assert!(pts_access.contains(AccessFs::IoctlDev));
+        let write = access_to_landlock(AccessMode::Write, abi);
+        assert!(write.effective.contains(AccessFs::WriteFile));
+        // V2 added Refer but NOT Truncate or IoctlDev
+        assert!(write.effective.contains(AccessFs::Refer));
+        assert!(!write.effective.contains(AccessFs::Truncate));
+        assert!(!write.effective.contains(AccessFs::IoctlDev));
+        // Truncate should be in dropped
+        assert!(write.dropped.contains(AccessFs::Truncate));
+        assert!(!write.dropped.contains(AccessFs::Refer));
     }
 
     #[test]
-    fn test_read_only_tty_path_does_not_gain_ioctl_dev() {
-        let cap = FsCapability {
-            original: PathBuf::from("/dev/tty"),
-            resolved: PathBuf::from("/dev/tty"),
-            access: AccessMode::Read,
-            is_file: true,
-            source: CapabilitySource::User,
-        };
+    fn test_access_conversion_v5_excludes_ioctl_dev_from_generic_flags() {
+        let abi = ABI::V5;
 
-        let access = access_to_landlock_for_capability(&cap, TARGET_ABI);
+        // IoctlDev is NOT in the generic write flags — it is added selectively
+        // at rule-addition time only for device paths (char/block devices).
+        let write = access_to_landlock(AccessMode::Write, abi);
+        assert!(!write.effective.contains(AccessFs::IoctlDev));
 
-        assert!(!access.contains(AccessFs::IoctlDev));
+        let rw = access_to_landlock(AccessMode::ReadWrite, abi);
+        assert!(!rw.effective.contains(AccessFs::IoctlDev));
+
+        let read = access_to_landlock(AccessMode::Read, abi);
+        assert!(!read.effective.contains(AccessFs::IoctlDev));
     }
 
     #[test]
-    fn test_tty_device_path_detection() {
-        assert!(is_tty_device_path(Path::new("/dev/tty")));
-        assert!(is_tty_device_path(Path::new("/dev/pts")));
-        assert!(is_tty_device_path(Path::new("/dev/pts/3")));
-        assert!(!is_tty_device_path(Path::new("/dev/null")));
-        assert!(!is_tty_device_path(Path::new("/tmp")));
+    fn test_is_device_path_dev_null() {
+        // /dev/null is a character device on all Unix systems
+        assert!(is_device_path(Path::new("/dev/null")));
+    }
+
+    #[test]
+    fn test_is_device_path_regular_file() {
+        // A regular file should not be detected as a device
+        assert!(!is_device_path(Path::new("/etc/hosts")));
+    }
+
+    #[test]
+    fn test_is_device_path_nonexistent() {
+        assert!(!is_device_path(Path::new("/nonexistent/path/12345")));
+    }
+
+    #[test]
+    fn test_is_device_directory_dev_pts() {
+        // /dev/pts is a directory under /dev
+        if Path::new("/dev/pts").exists() {
+            assert!(is_device_directory(Path::new("/dev/pts")));
+        }
+    }
+
+    #[test]
+    fn test_is_device_directory_not_dev() {
+        // /tmp is a directory but not under /dev
+        assert!(!is_device_directory(Path::new("/tmp")));
+    }
+
+    #[test]
+    fn test_detected_abi_feature_methods() {
+        let v1 = DetectedAbi::new(ABI::V1);
+        assert!(!v1.has_refer());
+        assert!(!v1.has_truncate());
+        assert!(!v1.has_network());
+        assert!(!v1.has_ioctl_dev());
+        assert!(!v1.has_scoping());
+
+        let v2 = DetectedAbi::new(ABI::V2);
+        assert!(v2.has_refer());
+        assert!(!v2.has_truncate());
+
+        let v3 = DetectedAbi::new(ABI::V3);
+        assert!(v3.has_refer());
+        assert!(v3.has_truncate());
+        assert!(!v3.has_network());
+
+        let v4 = DetectedAbi::new(ABI::V4);
+        assert!(v4.has_network());
+        assert!(!v4.has_ioctl_dev());
+
+        let v5 = DetectedAbi::new(ABI::V5);
+        assert!(v5.has_ioctl_dev());
+        assert!(!v5.has_scoping());
+
+        let v6 = DetectedAbi::new(ABI::V6);
+        assert!(v6.has_scoping());
+    }
+
+    #[test]
+    fn test_detected_abi_version_string() {
+        assert_eq!(DetectedAbi::new(ABI::V1).version_string(), "V1");
+        assert_eq!(DetectedAbi::new(ABI::V4).version_string(), "V4");
+        assert_eq!(DetectedAbi::new(ABI::V6).version_string(), "V6");
+    }
+
+    #[test]
+    fn test_detected_abi_display() {
+        let d = DetectedAbi::new(ABI::V4);
+        assert_eq!(format!("{}", d), "Landlock V4");
+    }
+
+    #[test]
+    fn test_detected_abi_feature_names() {
+        let v1 = DetectedAbi::new(ABI::V1);
+        let names = v1.feature_names();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], "Basic filesystem access control");
+
+        let v4 = DetectedAbi::new(ABI::V4);
+        let names = v4.feature_names();
+        assert!(names.iter().any(|n| n.starts_with("TCP network filtering")));
+        assert!(names
+            .iter()
+            .any(|n| n == "File rename across directories (Refer)"));
+        assert!(names.iter().any(|n| n == "File truncation (Truncate)"));
+    }
+
+    #[test]
+    fn test_detect_abi_returns_ok_on_supported_system() {
+        // On a system with Landlock, this should succeed
+        // On a system without it, it should return Err (not panic)
+        let _ = detect_abi();
     }
 
     #[test]

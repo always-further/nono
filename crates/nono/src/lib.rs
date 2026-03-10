@@ -72,6 +72,8 @@ pub use keystore::{
     validate_destination_env_var, validate_env_uri, validate_op_uri, LoadedSecret,
 };
 pub use net_filter::{FilterResult, HostFilter};
+#[cfg(target_os = "linux")]
+pub use sandbox::{detect_abi, DetectedAbi};
 pub use sandbox::{Sandbox, SupportInfo};
 pub use state::SandboxState;
 pub use supervisor::{

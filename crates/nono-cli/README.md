@@ -67,6 +67,7 @@ nono run --allow-cwd --dry-run -- command
 | Codex | `nono run --profile codex -- codex` |
 | OpenCode | `nono run --profile opencode -- opencode` |
 | OpenClaw | `nono run --profile openclaw -- openclaw gateway` |
+| Swival | `nono run --profile swival -- swival` |
 
 ## Profile Inheritance
 

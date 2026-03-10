@@ -899,7 +899,20 @@ fn apply_pre_fork_sandbox(
 ) -> Result<()> {
     if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
         output::print_applying_sandbox(silent);
-        Sandbox::apply(caps)?;
+
+        // On Linux, use the ABI-aware path to avoid BestEffort flag masking.
+        #[cfg(target_os = "linux")]
+        {
+            let detected = Sandbox::detect_abi()?;
+            info!("Direct mode: detected {}", detected);
+            Sandbox::apply_with_abi(caps, &detected)?;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Sandbox::apply(caps)?;
+        }
+
         output::print_sandbox_active(silent);
     }
     Ok(())
@@ -1823,6 +1836,10 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
 
     // Print capability summary
     output::print_capabilities(&caps, args.verbose, silent);
+
+    // Print Landlock ABI info on Linux
+    #[cfg(target_os = "linux")]
+    output::print_abi_info(silent);
 
     // Check platform support
     if !Sandbox::is_supported() {
