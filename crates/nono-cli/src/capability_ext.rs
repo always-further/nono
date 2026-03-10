@@ -429,7 +429,7 @@ mod tests {
             block_net: false,
             allow_net: false,
             network_profile: None,
-            proxy_allow: vec![],
+            allow_proxy: vec![],
             proxy_credential: vec![],
             external_proxy: None,
             override_deny: vec![],

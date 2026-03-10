@@ -273,7 +273,7 @@ pub struct SandboxArgs {
         conflicts_with_all = [
             "block_net",
             "network_profile",
-            "proxy_allow",
+            "allow_proxy",
             "proxy_credential",
             "external_proxy",
             "proxy_port"
@@ -290,7 +290,7 @@ pub struct SandboxArgs {
     /// Allow additional hosts through the proxy (on top of network profile).
     /// Can be specified multiple times.
     #[arg(long = "allow-proxy", alias = "proxy-allow", value_name = "HOST")]
-    pub proxy_allow: Vec<String>,
+    pub allow_proxy: Vec<String>,
 
     /// Enable credential injection via reverse proxy for a service.
     /// Service names map to entries in network-policy.json credentials section.
@@ -386,7 +386,7 @@ impl SandboxArgs {
     /// Whether any CLI flag requires proxy mode activation.
     pub fn has_proxy_flags(&self) -> bool {
         self.network_profile.is_some()
-            || !self.proxy_allow.is_empty()
+            || !self.allow_proxy.is_empty()
             || !self.proxy_credential.is_empty()
     }
 }
@@ -1406,7 +1406,7 @@ mod tests {
         ]);
         match cli.command {
             Commands::Run(args) => {
-                assert_eq!(args.sandbox.proxy_allow, vec!["api.openai.com"]);
+                assert_eq!(args.sandbox.allow_proxy, vec!["api.openai.com"]);
             }
             _ => panic!("Expected Run command"),
         }

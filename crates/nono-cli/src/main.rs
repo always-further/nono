@@ -359,7 +359,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             block_net: args.block_net,
             allow_net: false,
             network_profile: None,
-            proxy_allow: vec![],
+            allow_proxy: vec![],
             proxy_credential: vec![],
             external_proxy: None,
             override_deny: vec![],
@@ -394,7 +394,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             block_net: args.block_net,
             allow_net: false,
             network_profile: None,
-            proxy_allow: vec![],
+            allow_proxy: vec![],
             proxy_credential: vec![],
             external_proxy: None,
             override_deny: vec![],
@@ -726,7 +726,7 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
 
     // Validate: proxy flags are incompatible with Direct mode (no parent to run proxy)
     if args.network_profile.is_some()
-        || !args.proxy_allow.is_empty()
+        || !args.allow_proxy.is_empty()
         || !args.proxy_credential.is_empty()
         || args.external_proxy.is_some()
     {
@@ -882,7 +882,7 @@ fn resolve_effective_proxy_settings(
         .clone()
         .or_else(|| prepared.network_profile.clone());
     let mut proxy_allow_hosts = prepared.proxy_allow_hosts.clone();
-    proxy_allow_hosts.extend(args.proxy_allow.clone());
+    proxy_allow_hosts.extend(args.allow_proxy.clone());
     let mut proxy_credentials = prepared.proxy_credentials.clone();
     proxy_credentials.extend(args.proxy_credential.clone());
 
@@ -1932,7 +1932,7 @@ mod tests {
             block_net: false,
             allow_net: false,
             network_profile: None,
-            proxy_allow: vec![],
+            allow_proxy: vec![],
             proxy_credential: vec![],
             external_proxy: None,
             override_deny: vec![],
@@ -2062,7 +2062,7 @@ mod tests {
     fn test_resolve_effective_proxy_settings_merges_cli_and_profile() {
         let args = SandboxArgs {
             network_profile: Some("minimal".to_string()),
-            proxy_allow: vec!["example.com".to_string()],
+            allow_proxy: vec!["example.com".to_string()],
             proxy_credential: vec!["openai".to_string()],
             ..sandbox_args()
         };
