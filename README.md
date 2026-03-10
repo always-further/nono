@@ -254,7 +254,7 @@ nono audit show 20260216-193311-20751 --json
 
 ## Quick Start
 
-### Homebrew (macOS and Linux)
+### Homebrew (macOS/Linux)
 
 ```bash
 brew install nono
