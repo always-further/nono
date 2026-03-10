@@ -46,6 +46,7 @@ nono run --profile claude-code -- claude
 nono run --profile codex -- codex
 nono run --profile opencode -- opencode
 nono run --profile openclaw -- openclaw
+nono run --profile swival -- swival
 
 nono run --allow-cwd -- python3 my_agent.py
 nono run --allow-cwd -- npx @anthropic/agent-framework
@@ -80,7 +81,7 @@ DENIED
   Details: Path matches sensitive pattern 'Block access to cryptographic keys, tokens, and cloud credentials'. Access blocked by security policy.
 ```
 
-Built-in profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [Codex](https://docs.nono.sh/cli/clients/codex), [OpenCode](https://docs.nono.sh/cli/clients/opencode), and [OpenClaw](https://docs.nono.sh/cli/clients/openclaw) — or define your own with custom permissions.
+Built-in profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [Codex](https://docs.nono.sh/cli/clients/codex), [OpenCode](https://docs.nono.sh/cli/clients/opencode), [OpenClaw](https://docs.nono.sh/cli/clients/openclaw), and [Swival](https://docs.nono.sh/cli/clients/swival) — or define your own with custom permissions.
 
 ## Library
 
@@ -281,6 +282,7 @@ nono ships with built-in profiles for popular AI coding agents. Each profile def
 | **Codex** | `codex` | [Guide](https://docs.nono.sh/cli/clients/codex) |
 | **OpenCode** | `opencode` | [Guide](https://docs.nono.sh/cli/clients/opencode) |
 | **OpenClaw** | `openclaw` | [Guide](https://docs.nono.sh/cli/clients/openclaw) |
+| **Swival** | `swival` | [Guide](https://docs.nono.sh/cli/clients/swival) |
 
 Custom profiles can [extend built-in ones](https://docs.nono.sh/cli/features/profiles-groups) with `"extends": "claude-code"` to inherit all settings and add overrides. nono is agent-agnostic and works with any CLI command. See the [full documentation](https://docs.nono.sh) for usage details, configuration, and integration guides.
 
