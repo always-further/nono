@@ -75,11 +75,31 @@ pub struct AuditEntry {
     pub duration_ms: u64,
 }
 
+/// A request from the sandboxed child to open a URL in the user's browser.
+///
+/// Sent over the supervisor Unix socket when the child needs to launch a
+/// browser (e.g., for OAuth2 login). The unsandboxed supervisor validates
+/// the URL against the profile's allowed origins and opens it outside the
+/// sandbox, where the browser can access its own config files freely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UrlOpenRequest {
+    /// Unique identifier for this request (for replay protection and audit)
+    pub request_id: String,
+    /// The URL to open in the user's browser
+    pub url: String,
+    /// PID of the requesting child process
+    pub child_pid: u32,
+    /// Session identifier for correlating requests within a single run
+    pub session_id: String,
+}
+
 /// IPC message envelope sent from child to supervisor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SupervisorMessage {
     /// A capability expansion request (explicit, from SDK clients)
     Request(CapabilityRequest),
+    /// A request to open a URL in the user's browser (e.g., OAuth2 login)
+    OpenUrl(UrlOpenRequest),
 }
 
 /// IPC message envelope sent from supervisor to child.
@@ -91,5 +111,14 @@ pub enum SupervisorResponse {
         request_id: String,
         /// The approval decision
         decision: ApprovalDecision,
+    },
+    /// Response to a URL open request
+    UrlOpened {
+        /// The request_id this responds to
+        request_id: String,
+        /// Whether the URL was opened successfully
+        success: bool,
+        /// Error message if the open failed
+        error: Option<String>,
     },
 }

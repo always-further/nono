@@ -86,11 +86,12 @@ mod tests {
         assert!(profile
             .security
             .groups
-            .contains(&"node_runtime".to_string()));
+            .contains(&"codex_macos".to_string()));
         assert!(profile
             .security
             .groups
-            .contains(&"rust_runtime".to_string()));
+            .contains(&"node_runtime".to_string()));
+        assert!(profile.security.groups.contains(&"rust_runtime".to_string()));
         assert!(profile
             .security
             .groups

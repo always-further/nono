@@ -710,6 +710,23 @@ pub struct RollbackConfig {
     pub exclude_globs: Vec<String>,
 }
 
+/// Configuration for supervisor-delegated URL opening.
+///
+/// Controls which URLs the sandboxed child can request the supervisor to
+/// open in the user's browser. Used for OAuth2 login flows and similar
+/// operations where the sandboxed process cannot launch a browser directly.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OpenUrlConfig {
+    /// Allowed URL origins (scheme + host, e.g., "https://console.anthropic.com").
+    /// The supervisor validates each URL open request against this list.
+    /// An empty list means no URLs are allowed.
+    #[serde(default)]
+    pub allow_origins: Vec<String>,
+    /// Allow opening http://localhost and http://127.0.0.1 URLs (for OAuth2 callbacks).
+    #[serde(default)]
+    pub allow_localhost: bool,
+}
+
 /// A complete profile definition
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Profile {
@@ -732,6 +749,17 @@ pub struct Profile {
     pub hooks: HooksConfig,
     #[serde(default, alias = "undo")]
     pub rollback: RollbackConfig,
+    /// Supervisor-delegated URL opening (e.g., for OAuth2 login flows).
+    /// When `None` (absent from JSON), inherits from the base profile.
+    /// When `Some`, replaces the base profile's config entirely, allowing
+    /// derived profiles to narrow permissions.
+    #[serde(default)]
+    pub open_urls: Option<OpenUrlConfig>,
+    /// Opt-in gate for temporary direct LaunchServices opens on macOS.
+    /// Must be paired with the CLI flag `--allow-launch-services`.
+    /// When `None`, inherits from the base profile.
+    #[serde(default)]
+    pub allow_launch_services: Option<bool>,
     /// Deprecated: Parsed for backward compatibility but ignored.
     /// Supervised mode preserves TTY by default, making this unnecessary.
     #[serde(default)]
@@ -932,6 +960,8 @@ fn load_base_profile_raw(name: &str) -> Result<Profile> {
             workdir: def.workdir.clone(),
             hooks: def.hooks.clone(),
             rollback: def.rollback.clone(),
+            open_urls: def.open_urls.clone(),
+            allow_launch_services: def.allow_launch_services,
             interactive: def.interactive,
         });
     }
@@ -1031,6 +1061,11 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &child.rollback.exclude_globs,
             ),
         },
+        open_urls: match child.open_urls {
+            Some(child_urls) => Some(child_urls),
+            None => base.open_urls,
+        },
+        allow_launch_services: child.allow_launch_services.or(base.allow_launch_services),
         interactive: base.interactive || child.interactive,
     }
 }
@@ -2051,6 +2086,11 @@ mod tests {
                 exclude_patterns: vec!["node_modules".to_string()],
                 exclude_globs: vec!["*.pyc".to_string()],
             },
+            open_urls: Some(OpenUrlConfig {
+                allow_origins: vec!["https://base.example.com".to_string()],
+                allow_localhost: false,
+            }),
+            allow_launch_services: Some(false),
             interactive: false,
         }
     }
@@ -2104,6 +2144,11 @@ mod tests {
                 exclude_patterns: vec![],
                 exclude_globs: vec![],
             },
+            open_urls: Some(OpenUrlConfig {
+                allow_origins: vec!["https://child.example.com".to_string()],
+                allow_localhost: true,
+            }),
+            allow_launch_services: Some(true),
             interactive: false,
         }
     }
@@ -2679,6 +2724,54 @@ mod tests {
             merged.extends.is_none(),
             "extends should be consumed after merge"
         );
+    }
+
+    #[test]
+    fn test_merge_profiles_open_urls_child_replaces_base() {
+        // When child has open_urls, it replaces base entirely
+        let merged = merge_profiles(base_profile(), child_profile());
+        let urls = merged.open_urls.expect("should have open_urls");
+        assert_eq!(urls.allow_origins, vec!["https://child.example.com"]);
+        assert!(!urls
+            .allow_origins
+            .contains(&"https://base.example.com".to_string()));
+        assert!(urls.allow_localhost);
+    }
+
+    #[test]
+    fn test_merge_profiles_open_urls_child_absent_inherits_base() {
+        // When child has no open_urls, base is inherited
+        let mut child = child_profile();
+        child.open_urls = None;
+        let merged = merge_profiles(base_profile(), child);
+        let urls = merged.open_urls.expect("should inherit base open_urls");
+        assert_eq!(urls.allow_origins, vec!["https://base.example.com"]);
+        assert!(!urls.allow_localhost);
+    }
+
+    #[test]
+    fn test_merge_profiles_open_urls_child_narrows() {
+        // A derived profile can restrict to fewer origins than base
+        let mut child = child_profile();
+        child.open_urls = Some(OpenUrlConfig {
+            allow_origins: vec![],
+            allow_localhost: false,
+        });
+        let merged = merge_profiles(base_profile(), child);
+        let urls = merged.open_urls.expect("should have open_urls");
+        assert!(urls.allow_origins.is_empty());
+        assert!(!urls.allow_localhost);
+    }
+
+    #[test]
+    fn test_merge_profiles_allow_launch_services_child_overrides_base() {
+        let merged = merge_profiles(base_profile(), child_profile());
+        assert_eq!(merged.allow_launch_services, Some(true));
+
+        let mut child = child_profile();
+        child.allow_launch_services = Some(false);
+        let merged = merge_profiles(base_profile(), child);
+        assert_eq!(merged.allow_launch_services, Some(false));
     }
 
     #[test]

@@ -495,6 +495,7 @@ mod tests {
                 assert_eq!(req.path, PathBuf::from("/tmp/test"));
                 assert_eq!(req.child_pid, 12345);
             }
+            other => panic!("Expected Request, got {:?}", other),
         }
 
         // Supervisor sends response
@@ -516,6 +517,64 @@ mod tests {
                 assert_eq!(request_id, "req-001");
                 assert!(decision.is_granted());
             }
+            other => panic!("Expected Decision, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_url_open_roundtrip() {
+        use crate::supervisor::types::UrlOpenRequest;
+
+        let (mut supervisor, mut child) =
+            SupervisorSocket::pair().expect("Failed to create socket pair");
+
+        let url_request = UrlOpenRequest {
+            request_id: "url-001".to_string(),
+            url: "https://console.anthropic.com/oauth/authorize".to_string(),
+            child_pid: 12345,
+            session_id: "sess-001".to_string(),
+        };
+
+        // Child sends URL open request
+        child
+            .send_message(&SupervisorMessage::OpenUrl(url_request))
+            .expect("Failed to send message");
+
+        // Supervisor receives it
+        let msg = supervisor
+            .recv_message()
+            .expect("Failed to receive message");
+        match msg {
+            SupervisorMessage::OpenUrl(req) => {
+                assert_eq!(req.request_id, "url-001");
+                assert_eq!(req.url, "https://console.anthropic.com/oauth/authorize");
+            }
+            other => panic!("Expected OpenUrl, got {:?}", other),
+        }
+
+        // Supervisor sends response
+        let response = SupervisorResponse::UrlOpened {
+            request_id: "url-001".to_string(),
+            success: true,
+            error: None,
+        };
+        supervisor
+            .send_response(&response)
+            .expect("Failed to send response");
+
+        // Child receives it
+        let resp = child.recv_response().expect("Failed to receive response");
+        match resp {
+            SupervisorResponse::UrlOpened {
+                request_id,
+                success,
+                error,
+            } => {
+                assert_eq!(request_id, "url-001");
+                assert!(success);
+                assert!(error.is_none());
+            }
+            other => panic!("Expected UrlOpened, got {:?}", other),
         }
     }
 

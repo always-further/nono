@@ -436,6 +436,15 @@
         ]
       }
     },
+    "codex_macos": {
+      "description": "Codex macOS-specific state and credential paths",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "$HOME/Library/Keychains/login.keychain-db"
+        ]
+      }
+    },
     "vscode_macos": {
       "description": "Visual Studio Code configuration and extension directories for macOS",
       "platform": "macos",
@@ -581,6 +590,13 @@
       },
       "network": { "block": false },
       "workdir": { "access": "readwrite" },
+      "open_urls": {
+        "allow_origins": [
+          "https://claude.ai"
+        ],
+        "allow_localhost": true
+      },
+      "allow_launch_services": true,
       "hooks": {
         "claude-code": {
           "event": "PostToolUseFailure",
@@ -603,6 +619,7 @@
       },
       "security": {
         "groups": [
+          "codex_macos",
           "node_runtime",
           "rust_runtime",
           "python_runtime",
@@ -616,6 +633,13 @@
       "filesystem": {
         "allow": ["$HOME/.codex"]
       },
+      "open_urls": {
+        "allow_origins": [
+          "https://auth.openai.com"
+        ],
+        "allow_localhost": true
+      },
+      "allow_launch_services": true,
       "network": { "block": false },
       "workdir": { "access": "readwrite" },
       "interactive": true

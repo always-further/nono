@@ -448,6 +448,7 @@ mod tests {
             env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
+            allow_launch_services: false,
             workdir: None,
             config: None,
             verbose: 0,

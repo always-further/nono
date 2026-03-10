@@ -38,6 +38,7 @@ pub use never_grant::{NeverGrantChecker, NeverGrantResult};
 pub use socket::SupervisorSocket;
 pub use types::{
     ApprovalDecision, AuditEntry, CapabilityRequest, SupervisorMessage, SupervisorResponse,
+    UrlOpenRequest,
 };
 
 use crate::error::Result;

@@ -31,12 +31,14 @@ mod update_check;
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
 use cli::{
-    Cli, Commands, LearnArgs, RunArgs, SandboxArgs, SetupArgs, ShellArgs, WhyArgs, WhyOp, WrapArgs,
+    Cli, Commands, LearnArgs, OpenUrlHelperArgs, RunArgs, SandboxArgs, SetupArgs, ShellArgs,
+    WhyArgs, WhyOp, WrapArgs,
 };
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
 use std::ffi::OsString;
+use std::os::unix::io::FromRawFd;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -102,7 +104,11 @@ fn cli_verbosity(cli: &Cli) -> u8 {
         Commands::Shell(args) => args.sandbox.verbose,
         Commands::Wrap(args) => args.sandbox.verbose,
         Commands::Setup(args) => args.verbose,
-        Commands::Why(_) | Commands::Rollback(_) | Commands::Trust(_) | Commands::Audit(_) => 0,
+        Commands::Why(_)
+        | Commands::Rollback(_)
+        | Commands::Trust(_)
+        | Commands::Audit(_)
+        | Commands::OpenUrlHelper(_) => 0,
     }
 }
 
@@ -151,6 +157,7 @@ fn run(cli: Cli) -> Result<()> {
             show_update_notification(&mut update_handle, cli.silent);
             audit_commands::run_audit(args)
         }
+        Commands::OpenUrlHelper(args) => run_open_url_helper(args),
     }
 }
 
@@ -160,6 +167,60 @@ fn show_update_notification(handle: &mut Option<update_check::UpdateCheckHandle>
         if let Some(info) = h.take_result() {
             output::print_update_notification(&info, silent);
         }
+    }
+}
+
+/// Internal helper invoked via BROWSER env var (Linux) or PATH shim (macOS).
+///
+/// Reads the supervisor socket fd from `NONO_SUPERVISOR_FD`, sends an
+/// `OpenUrl` IPC message, waits for the response, and exits with the
+/// appropriate exit code.
+fn run_open_url_helper(args: OpenUrlHelperArgs) -> Result<()> {
+    use nono::supervisor::types::{SupervisorMessage, SupervisorResponse};
+    use nono::supervisor::{SupervisorSocket, UrlOpenRequest};
+    use std::os::unix::net::UnixStream;
+
+    let fd_str = std::env::var("NONO_SUPERVISOR_FD").map_err(|_| {
+        NonoError::SandboxInit(
+            "NONO_SUPERVISOR_FD not set. open-url-helper must be invoked inside a nono sandbox."
+                .to_string(),
+        )
+    })?;
+
+    let fd: i32 = fd_str.parse().map_err(|_| {
+        NonoError::SandboxInit(format!("Invalid NONO_SUPERVISOR_FD value: {fd_str}"))
+    })?;
+
+    // SAFETY: The fd was inherited from the parent process via fork+exec.
+    // It is a valid Unix domain socket created by the supervisor.
+    let stream = unsafe { UnixStream::from(std::os::unix::io::OwnedFd::from_raw_fd(fd)) };
+    let mut sock = SupervisorSocket::from_stream(stream);
+
+    let request = UrlOpenRequest {
+        request_id: format!("url-{}", std::process::id()),
+        url: args.url.clone(),
+        child_pid: std::process::id(),
+        session_id: String::new(),
+    };
+
+    sock.send_message(&SupervisorMessage::OpenUrl(request))?;
+
+    let response = sock.recv_response()?;
+    match response {
+        SupervisorResponse::UrlOpened { success: true, .. } => Ok(()),
+        SupervisorResponse::UrlOpened {
+            success: false,
+            error,
+            ..
+        } => {
+            let msg = error.unwrap_or_else(|| "Unknown error".to_string());
+            Err(NonoError::SandboxInit(format!(
+                "Supervisor denied URL open: {msg}"
+            )))
+        }
+        other => Err(NonoError::SandboxInit(format!(
+            "Unexpected supervisor response: {other:?}"
+        ))),
     }
 }
 
@@ -370,6 +431,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
+            allow_launch_services: false,
             workdir: args.workdir.clone(),
             config: None,
             verbose: 0,
@@ -407,6 +469,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
+            allow_launch_services: false,
             workdir: args.workdir.clone(),
             config: None,
             verbose: 0,
@@ -486,6 +549,10 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     }
 
     let mut prepared = prepare_sandbox(&args, silent)?;
+
+    if prepared.allow_launch_services_active {
+        print_allow_launch_services_warning(silent);
+    }
 
     // CLI --capability-elevation overrides profile setting
     if run_args.capability_elevation {
@@ -698,6 +765,8 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             external_proxy_bypass: effective_bypass,
             allow_bind_ports: args.allow_bind,
             proxy_port: args.proxy_port,
+            open_url_origins: prepared.open_url_origins,
+            open_url_allow_localhost: prepared.open_url_allow_localhost,
         },
     )
 }
@@ -741,6 +810,10 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
     }
 
     let prepared = prepare_sandbox(&args.sandbox, silent)?;
+
+    if prepared.allow_launch_services_active {
+        print_allow_launch_services_warning(silent);
+    }
 
     if !silent {
         eprintln!(
@@ -823,6 +896,10 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
         ));
     }
 
+    if prepared.allow_launch_services_active {
+        print_allow_launch_services_warning(silent);
+    }
+
     execute_sandboxed(
         program,
         cmd_args,
@@ -883,6 +960,10 @@ struct ExecutionFlags {
     allow_bind_ports: Vec<u16>,
     /// Fixed port for the credential proxy (from --proxy-port)
     proxy_port: Option<u16>,
+    /// Allowed URL origins for supervisor-delegated browser opens
+    open_url_origins: Vec<String>,
+    /// Whether to allow http://localhost URL opens
+    open_url_allow_localhost: bool,
 }
 
 impl ExecutionFlags {
@@ -917,6 +998,8 @@ impl ExecutionFlags {
             external_proxy_bypass: Vec::new(),
             allow_bind_ports: Vec::new(),
             proxy_port: None,
+            open_url_origins: Vec::new(),
+            open_url_allow_localhost: false,
         })
     }
 }
@@ -1465,6 +1548,8 @@ fn execute_sandboxed(
                 never_grant: &never_grant_checker,
                 approval_backend: &approval_backend,
                 session_id: &supervisor_session_id,
+                open_url_origins: &flags.open_url_origins,
+                open_url_allow_localhost: flags.open_url_allow_localhost,
             };
 
             let trust_interceptor = if flags.trust_interception_active {
@@ -1635,6 +1720,12 @@ struct PreparedSandbox {
     external_proxy_bypass: Vec<String>,
     /// Whether the profile enables runtime capability elevation (seccomp-notify + PTY)
     capability_elevation: bool,
+    /// Whether direct LaunchServices opens are enabled for this session.
+    allow_launch_services_active: bool,
+    /// Allowed URL origins for supervisor-delegated browser opens
+    open_url_origins: Vec<String>,
+    /// Whether to allow http://localhost URL opens
+    open_url_allow_localhost: bool,
 }
 
 fn parse_env_credential_map_args(values: &[String]) -> Result<Vec<(String, String)>> {
@@ -1667,6 +1758,72 @@ fn parse_env_credential_map_args(values: &[String]) -> Result<Vec<(String, Strin
     }
 
     Ok(pairs)
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_enable_macos_launch_services(
+    caps: &mut CapabilitySet,
+    cli_requested: bool,
+    profile_allowed: bool,
+    open_url_origins: &[String],
+    open_url_allow_localhost: bool,
+) -> Result<bool> {
+    if !cli_requested {
+        return Ok(false);
+    }
+
+    if !profile_allowed {
+        return Err(NonoError::ConfigParse(
+            "--allow-launch-services requires a profile that opts into allow_launch_services"
+                .to_string(),
+        ));
+    }
+
+    if open_url_origins.is_empty() && !open_url_allow_localhost {
+        return Err(NonoError::ConfigParse(
+            "--allow-launch-services requires the selected profile to configure open_urls"
+                .to_string(),
+        ));
+    }
+
+    // Allow LaunchServices URL opening directly from inside the Seatbelt sandbox.
+    // This bypasses supervisor URL validation on macOS, so it must be gated by
+    // both profile opt-in and an explicit CLI flag.
+    caps.add_platform_rule("(allow lsopen)")?;
+    warn!("--allow-launch-services enabled: allowing direct LaunchServices opens on macOS");
+    Ok(true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn maybe_enable_macos_launch_services(
+    _caps: &mut CapabilitySet,
+    cli_requested: bool,
+    _profile_allowed: bool,
+    _open_url_origins: &[String],
+    _open_url_allow_localhost: bool,
+) -> Result<bool> {
+    if cli_requested {
+        return Err(NonoError::ConfigParse(
+            "--allow-launch-services is only supported on macOS".to_string(),
+        ));
+    }
+    Ok(false)
+}
+
+fn print_allow_launch_services_warning(silent: bool) {
+    if silent {
+        return;
+    }
+
+    eprintln!(
+        "  {}",
+        "WARNING: --allow-launch-services permits the sandboxed process to ask macOS \
+         LaunchServices to open URLs, files, or apps.".yellow()
+    );
+    eprintln!(
+        "  Use this only for temporary login/setup flows, then exit and rerun without it."
+    );
+    eprintln!("  Prefer using it from a trusted directory, not inside an untrusted project.");
 }
 
 fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> {
@@ -1768,6 +1925,20 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .as_ref()
         .map(|p| p.network.external_proxy_bypass.clone())
         .unwrap_or_default();
+    let open_url_origins = loaded_profile
+        .as_ref()
+        .and_then(|p| p.open_urls.as_ref())
+        .map(|u| u.allow_origins.clone())
+        .unwrap_or_default();
+    let open_url_allow_localhost = loaded_profile
+        .as_ref()
+        .and_then(|p| p.open_urls.as_ref())
+        .map(|u| u.allow_localhost)
+        .unwrap_or(false);
+    let profile_allow_launch_services = loaded_profile
+        .as_ref()
+        .and_then(|p| p.allow_launch_services)
+        .unwrap_or(false);
 
     // On Linux, pre-create paths that the claude-code profile grants but
     // may not exist yet. Non-existent paths are skipped during capability
@@ -1809,6 +1980,14 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     } else {
         CapabilitySet::from_args(args)?
     };
+
+    let allow_launch_services_active = maybe_enable_macos_launch_services(
+        &mut caps,
+        args.allow_launch_services,
+        profile_allow_launch_services,
+        &open_url_origins,
+        open_url_allow_localhost,
+    )?;
 
     // Auto-include CWD based on profile [workdir] config or default behavior
     let cwd_access = if let Some(ref access) = profile_workdir_access {
@@ -1984,6 +2163,9 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         external_proxy: profile_external_proxy,
         external_proxy_bypass: profile_external_proxy_bypass,
         capability_elevation,
+        allow_launch_services_active,
+        open_url_origins,
+        open_url_allow_localhost,
     })
 }
 
@@ -2203,6 +2385,7 @@ mod tests {
             env_credential_map: vec![],
             profile: None,
             allow_cwd: false,
+            allow_launch_services: false,
             workdir: None,
             config: None,
             verbose: 0,
@@ -2308,6 +2491,9 @@ mod tests {
             external_proxy: None,
             external_proxy_bypass: Vec::new(),
             capability_elevation: false,
+            allow_launch_services_active: false,
+            open_url_origins: Vec::new(),
+            open_url_allow_localhost: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -2342,6 +2528,9 @@ mod tests {
             external_proxy: None,
             external_proxy_bypass: Vec::new(),
             capability_elevation: false,
+            allow_launch_services_active: false,
+            open_url_origins: Vec::new(),
+            open_url_allow_localhost: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -2435,5 +2624,60 @@ mod tests {
         assert!(!is_claude_command(&OsString::from("bash")));
         assert!(!is_claude_command(&OsString::from("/usr/bin/python3")));
         assert!(!is_claude_command(&OsString::from("claude-code")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_maybe_enable_macos_launch_services_adds_rule_when_enabled() {
+        let mut caps = CapabilitySet::new();
+
+        let enabled = maybe_enable_macos_launch_services(
+            &mut caps,
+            true,
+            true,
+            &["https://claude.ai".to_string()],
+            false,
+        )
+        .expect("launch services gate should apply");
+
+        assert!(enabled, "launch services should be active");
+        assert!(
+            caps.platform_rules().iter().any(|r| r == "(allow lsopen)"),
+            "lsopen platform rule should be present"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_maybe_enable_macos_launch_services_rejects_without_profile_opt_in() {
+        let mut caps = CapabilitySet::new();
+
+        let err = maybe_enable_macos_launch_services(
+            &mut caps,
+            true,
+            false,
+            &["https://claude.ai".to_string()],
+            false,
+        )
+        .expect_err("missing profile opt-in should fail");
+
+        assert!(
+            err.to_string().contains("requires a profile"),
+            "error should mention profile opt-in"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_maybe_enable_macos_launch_services_rejects_without_open_urls() {
+        let mut caps = CapabilitySet::new();
+
+        let err = maybe_enable_macos_launch_services(&mut caps, true, true, &[], false)
+            .expect_err("missing open_urls should fail");
+
+        assert!(
+            err.to_string().contains("configure open_urls"),
+            "error should mention open_urls"
+        );
     }
 }

@@ -37,6 +37,7 @@ The built-in profile provides:
 - **Network access** enabled (required for Anthropic API)
 - **Interactive mode** enabled (preserves TTY for Claude's terminal UI)
 - **Automatic hook installation** for sandbox-aware error handling
+- **OAuth2 login support** via supervised URL opening (allows `claude /login` to work)
 
 ## Custom Profile
 
@@ -145,6 +146,57 @@ nono run --profile claude-code --allow-net -- claude
 ```
 
 This also disables any proxy-based credential injection configured by the profile for that run.
+
+## OAuth2 Login
+
+Running `claude /login` inside a sandbox requires the browser to open outside the sandboxed process. On Linux (Landlock), `nono` can delegate approved URLs to the unsandboxed parent process. On macOS (Seatbelt), Claude's login flow needs a temporary LaunchServices permission to open the browser.
+
+The built-in `claude-code` profile includes an origin allowlist that controls which URLs may be opened during supervised login flows:
+
+- `https://claude.ai` (OAuth2 authorize endpoint)
+- `localhost` callbacks (for the OAuth2 redirect)
+
+On Linux, no additional flags are needed:
+
+```bash
+nono run --profile claude-code -- claude
+```
+
+On macOS, enable LaunchServices temporarily for the login session:
+
+```bash
+nono run --profile claude-code --allow-launch-services -- claude
+```
+
+After login completes, exit and rerun without `--allow-launch-services`.
+
+<Warning>
+`--allow-launch-services` lets the sandboxed Claude process ask macOS LaunchServices to open URLs, files, or apps for that session. Use it only for temporary login or setup flows, and prefer running it from a trusted directory.
+</Warning>
+
+### Adding Custom OAuth2 Origins
+
+If your organization uses a custom identity provider for Claude Code authentication, add its origin to your profile:
+
+```json
+{
+  "meta": { "name": "claude-code-custom-auth" },
+  "extends": "claude-code",
+  "open_urls": {
+    "allow_origins": [
+      "https://claude.ai",
+      "https://sso.example.com"
+    ],
+    "allow_localhost": true
+  }
+}
+```
+
+When a derived profile specifies `open_urls`, it replaces the base profile's config entirely. Include all origins you need, including `https://claude.ai` if you still want the standard OAuth2 flow. Omit `open_urls` to inherit the base profile's settings unchanged.
+
+<Note>
+The origin allowlist is enforced by the supervisor when `nono` delegates browser opening itself. On macOS, `--allow-launch-services` bypasses that supervisor path for the duration of the session in exchange for login compatibility.
+</Note>
 
 ## Enabling LSPs, Linters, and Dev Tools
 

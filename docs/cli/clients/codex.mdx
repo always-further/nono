@@ -26,6 +26,7 @@ The built-in profile provides:
 - **Read+write access** to the current working directory
 - **Read+write access** to `~/.codex` (config, auth state, sessions, caches, and local metadata)
 - **Read access** to common user-local runtime paths for Rust, Node.js, Python, and Nix toolchains
+- **OAuth login support** via supervised URL opening on Linux and a temporary LaunchServices flag on macOS
 - **Network access** enabled
 - **Interactive mode** enabled for the terminal UI
 
@@ -55,6 +56,33 @@ Custom profiles with the same name override the built-in profile. Remove or rena
 </Note>
 
 ## Security Tips
+
+### OAuth Login
+
+Codex login opens `https://auth.openai.com` during the OAuth flow.
+
+The built-in profile includes the required browser-open allowlist:
+
+- `https://auth.openai.com`
+- `localhost` callbacks for the OAuth redirect
+
+On Linux, no additional flags are needed:
+
+```bash
+nono run --profile codex -- codex
+```
+
+On macOS, enable LaunchServices temporarily for the login session:
+
+```bash
+nono run --profile codex --allow-launch-services -- codex
+```
+
+After login completes, exit and rerun without `--allow-launch-services`.
+
+<Warning>
+`--allow-launch-services` lets the sandboxed Codex process ask macOS LaunchServices to open URLs, files, or apps for that session. Use it only for temporary login or setup flows, and prefer running it from a trusted directory.
+</Warning>
 
 ### Restrict to a Specific Project
 

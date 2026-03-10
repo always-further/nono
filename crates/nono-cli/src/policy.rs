@@ -121,6 +121,10 @@ pub struct ProfileDef {
     #[serde(default, alias = "undo")]
     pub rollback: profile::RollbackConfig,
     #[serde(default)]
+    pub open_urls: Option<profile::OpenUrlConfig>,
+    #[serde(default)]
+    pub allow_launch_services: Option<bool>,
+    #[serde(default)]
     pub interactive: bool,
 }
 
@@ -157,6 +161,8 @@ impl ProfileDef {
             workdir: self.workdir.clone(),
             hooks: self.hooks.clone(),
             rollback: self.rollback.clone(),
+            open_urls: self.open_urls.clone(),
+            allow_launch_services: self.allow_launch_services,
             interactive: self.interactive,
         })
     }

@@ -212,6 +212,22 @@ PLATFORM NOTES:
     nono audit show 20260214-143022-12345 --json
 ")]
     Audit(AuditArgs),
+
+    /// Internal: open a URL via supervisor IPC
+    #[command(hide = true)]
+    OpenUrlHelper(OpenUrlHelperArgs),
+}
+
+/// Arguments for the hidden open-url-helper subcommand.
+///
+/// Invoked as `BROWSER=nono open-url-helper` on Linux, or via the `open`
+/// PATH shim on macOS. Reads `NONO_SUPERVISOR_FD` from the environment,
+/// sends an `OpenUrl` IPC message to the unsandboxed supervisor, and
+/// waits for a response.
+#[derive(Parser, Debug, Clone)]
+pub struct OpenUrlHelperArgs {
+    /// The URL to open
+    pub url: String,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -393,6 +409,11 @@ pub struct SandboxArgs {
     /// Access level determined by profile or defaults to read-only.
     #[arg(long)]
     pub allow_cwd: bool,
+
+    /// Allow direct LaunchServices opens on macOS for this session.
+    /// Requires profile opt-in and should be used only for temporary login/setup flows.
+    #[arg(long)]
+    pub allow_launch_services: bool,
 
     /// Working directory for $WORKDIR expansion in profiles (defaults to current dir)
     #[arg(long, value_name = "DIR")]

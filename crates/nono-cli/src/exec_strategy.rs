@@ -199,6 +199,11 @@ pub struct SupervisorConfig<'a> {
     pub approval_backend: &'a dyn ApprovalBackend,
     /// Session identifier used for audit correlation.
     pub session_id: &'a str,
+    /// Allowed URL origins for supervisor-delegated browser opens (from profile).
+    /// Empty means no URLs are allowed.
+    pub open_url_origins: &'a [String],
+    /// Whether to allow http://localhost and http://127.0.0.1 URLs.
+    pub open_url_allow_localhost: bool,
 }
 
 /// Execute a command using the Direct strategy (exec, nono disappears).
@@ -346,6 +351,53 @@ pub fn execute_supervised(
         }
     }
 
+    // Delegate URL opens to the unsandboxed supervisor.
+    //
+    // On Linux, child processes inherit Landlock restrictions so the browser
+    // can't access its own config directories. xdg-open and the Node.js `open`
+    // package respect the BROWSER env var, so we set it to our helper.
+    //
+    // On macOS, the Node.js `open` package ignores BROWSER and always spawns
+    // `/usr/bin/open`. Seatbelt blocks that from launching URLs. Instead, we
+    // create a shim script named `open` in a temp directory and prepend it to
+    // PATH so the npm `open` package hits our shim first.
+    if supervisor.is_some() {
+        if let Ok(nono_exe) = std::env::current_exe() {
+            #[cfg(target_os = "linux")]
+            {
+                let exe_str = nono_exe.display().to_string();
+                let quoted_exe = shell_quote(&exe_str);
+                let browser_cmd = format!("BROWSER={quoted_exe} open-url-helper");
+                if let Ok(cstr) = CString::new(browser_cmd) {
+                    env_c.push(cstr);
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                // Create a shim `open` script that delegates to nono open-url-helper.
+                // The npm `open` package spawns `open <url>` on macOS; by placing our
+                // shim earlier in PATH, we intercept the call.
+                if let Some(shim) = create_open_shim(&nono_exe) {
+                    // Prepend shim dir to PATH and also set BROWSER for any tool
+                    // that does respect it.
+                    let current_path = std::env::var("PATH").unwrap_or_default();
+                    let new_path = format!("PATH={}:{current_path}", shim.dir.display());
+                    if let Ok(cstr) = CString::new(new_path) {
+                        // Remove existing PATH from env_c, then add our modified one
+                        env_c.retain(|c| !c.as_bytes().starts_with(b"PATH="));
+                        env_c.push(cstr);
+                    }
+                    let quoted_helper = shell_quote(&shim.helper_exe.display().to_string());
+                    let browser_cmd = format!("BROWSER={quoted_helper} open-url-helper");
+                    if let Ok(cstr) = CString::new(browser_cmd) {
+                        env_c.push(cstr);
+                    }
+                }
+            }
+        }
+    }
+
     // Create null-terminated pointer arrays for execve
     let argv_ptrs: Vec<*const libc::c_char> = argv_c
         .iter()
@@ -453,6 +505,28 @@ pub fn execute_supervised(
             // Sandbox::apply() allocates (Seatbelt profile generation, Landlock
             // PathFd opens) but this is safe because we validated single-threaded
             // execution before fork, giving us a clean heap.
+
+            // The supervisor socket must survive exec into the sandboxed command,
+            // and later into any helper (`open-url-helper`) that needs to speak
+            // IPC back to the unsandboxed parent. `UnixStream::pair()` creates
+            // fds with close-on-exec set, so clear it on the child end here.
+            if let Some(fd) = child_sock_fd {
+                if let Err(e) = clear_close_on_exec(fd) {
+                    let detail = format!(
+                        "nono: failed to clear close-on-exec on supervisor socket: {}\n",
+                        e
+                    );
+                    let msg = detail.as_bytes();
+                    unsafe {
+                        libc::write(
+                            libc::STDERR_FILENO,
+                            msg.as_ptr().cast::<libc::c_void>(),
+                            msg.len(),
+                        );
+                        libc::_exit(126);
+                    }
+                }
+            }
 
             // Set up PTY slave as the child's controlling terminal (elevation only).
             // This gives the child its own terminal so TUI apps can freely
@@ -1566,6 +1640,162 @@ fn handle_supervisor_message(
             };
             sock.send_response(&response)?;
         }
+        SupervisorMessage::OpenUrl(url_request) => {
+            let request_id = url_request.request_id.clone();
+
+            match validate_and_open_url(&url_request.url, config) {
+                Ok(()) => {
+                    info!("Supervisor: opened URL {} for child", url_request.url);
+                    let response = SupervisorResponse::UrlOpened {
+                        request_id,
+                        success: true,
+                        error: None,
+                    };
+                    sock.send_response(&response)?;
+                }
+                Err(reason) => {
+                    warn!(
+                        "Supervisor: URL open denied for {}: {}",
+                        url_request.url, reason
+                    );
+                    let response = SupervisorResponse::UrlOpened {
+                        request_id,
+                        success: false,
+                        error: Some(reason),
+                    };
+                    sock.send_response(&response)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Maximum URL length to prevent abuse via oversized URLs.
+const MAX_URL_LENGTH: usize = 8192;
+
+/// Validate a URL against the profile's allowed origins, then open it in the user's browser.
+///
+/// The supervisor (unsandboxed parent) performs this operation so the browser
+/// launches outside the sandbox with full access to its own config files.
+fn validate_and_open_url(
+    url: &str,
+    config: &SupervisorConfig<'_>,
+) -> std::result::Result<(), String> {
+    validate_url(url, config)?;
+    open_url_in_browser(url)
+}
+
+/// Validate a URL against the profile's allowed origins and scheme rules.
+///
+/// Returns `Ok(())` if the URL passes all checks. Does not open the browser.
+fn validate_url(url: &str, config: &SupervisorConfig<'_>) -> std::result::Result<(), String> {
+    // Length check
+    if url.len() > MAX_URL_LENGTH {
+        return Err(format!(
+            "URL exceeds maximum length ({} > {})",
+            url.len(),
+            MAX_URL_LENGTH
+        ));
+    }
+
+    // Parse URL to extract origin
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+
+    let scheme = parsed.scheme();
+    let host = parsed.host_str().unwrap_or("");
+
+    // Check localhost first
+    let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    if is_localhost {
+        if scheme != "http" && scheme != "https" {
+            return Err(format!(
+                "Localhost URL must use http or https scheme, got: {scheme}"
+            ));
+        }
+        if !config.open_url_allow_localhost {
+            return Err("Localhost URLs are not allowed by this profile".to_string());
+        }
+    } else {
+        // Non-localhost: must be https
+        if scheme != "https" {
+            return Err(format!(
+                "Only https:// URLs are allowed (got {scheme}://). \
+                 file://, javascript:, data:, and other schemes are blocked."
+            ));
+        }
+
+        // Check against allowed origins
+        let url_origin = parsed.origin().unicode_serialization();
+        let origin_allowed = config.open_url_origins.contains(&url_origin);
+
+        if !origin_allowed {
+            return Err(format!(
+                "Origin {url_origin} is not in the profile's open_urls.allow_origins list"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Open a URL in the user's default browser.
+///
+/// Uses `open` on macOS and `xdg-open` on Linux. Runs in the unsandboxed
+/// parent process so the browser has full system access.
+fn open_url_in_browser(url: &str) -> std::result::Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result: std::result::Result<std::process::ExitStatus, std::io::Error> =
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "URL opening not supported on this platform",
+        ));
+
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("Browser opener exited with status: {status}")),
+        Err(e) => Err(format!("Failed to launch browser: {e}")),
+    }
+}
+
+/// Clear `FD_CLOEXEC` on a file descriptor so it survives `execve()`.
+fn clear_close_on_exec(fd: i32) -> Result<()> {
+    // SAFETY: `fcntl` is called with a valid fd owned by this process.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "fcntl(F_GETFD) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let new_flags = flags & !libc::FD_CLOEXEC;
+    if new_flags != flags {
+        // SAFETY: `fcntl` is called with a valid fd and descriptor flags.
+        let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, new_flags) };
+        if rc < 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "fcntl(F_SETFD) failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
     }
 
     Ok(())
@@ -1577,11 +1807,101 @@ pub(super) fn record_denial(denials: &mut Vec<DenialRecord>, record: DenialRecor
     }
 }
 
-/// Generate a unique request ID from timestamp + random component.
+/// Create a temporary directory containing an `open` shim script on macOS.
 ///
-/// Uses nanosecond timestamp for ordering plus random bytes for
-/// uniqueness under concurrency. Not cryptographically significant --
-/// used for audit correlation and replay detection, not security.
+/// The shim intercepts calls to `open` (which the Node.js `open` package
+/// uses on macOS) and routes URL arguments through `nono open-url-helper`.
+/// Non-URL arguments are passed through to `/usr/bin/open` so that
+/// non-browser `open` invocations (e.g. opening files) still work.
+///
+/// Returns the path to the shim directory, or `None` on failure.
+#[cfg(target_os = "macos")]
+struct OpenShim {
+    dir: std::path::PathBuf,
+    helper_exe: std::path::PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+fn create_open_shim(nono_exe: &std::path::Path) -> Option<OpenShim> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let shim_dir = std::env::temp_dir().join(format!("nono-shim-{}", std::process::id()));
+    if std::fs::create_dir_all(&shim_dir).is_err() {
+        return None;
+    }
+
+    // Keep the helper inside the shim directory so it is always readable and
+    // executable under the sandbox's temp-dir allowlist, regardless of where
+    // the original `nono` binary was launched from.
+    let helper_path = shim_dir.join("nono-open-url-helper");
+    if std::fs::copy(nono_exe, &helper_path).is_err() {
+        return None;
+    }
+    if std::fs::set_permissions(&helper_path, std::fs::Permissions::from_mode(0o755)).is_err() {
+        return None;
+    }
+
+    let shim_path = shim_dir.join("open");
+    let quoted_helper = shell_quote(&helper_path.display().to_string());
+
+    // The shim script checks if the last argument looks like a URL (starts with
+    // http:// or https://). If so, delegate to nono open-url-helper. Otherwise
+    // fall through to /usr/bin/open for non-URL uses (opening files, apps, etc.).
+    let script = format!(
+        r#"#!/bin/sh
+# nono URL open shim — intercepts `open` calls for browser URL delegation
+# Get last argument (POSIX-compatible)
+for last_arg do :; done
+case "$last_arg" in
+    http://*|https://*)
+        exec {quoted_helper} open-url-helper "$last_arg"
+        ;;
+    *)
+        exec /usr/bin/open "$@"
+        ;;
+esac
+"#
+    );
+
+    if std::fs::write(&shim_path, script).is_err() {
+        return None;
+    }
+    if std::fs::set_permissions(&shim_path, std::fs::Permissions::from_mode(0o755)).is_err() {
+        return None;
+    }
+
+    Some(OpenShim {
+        dir: shim_dir,
+        helper_exe: helper_path,
+    })
+}
+
+/// Shell-quote a string for safe embedding in `sh -c` commands.
+/// If the string contains no special characters, returns it unchanged.
+/// Otherwise wraps it in single quotes, escaping embedded single quotes.
+fn shell_quote(s: &str) -> String {
+    // If the string is safe as-is, skip quoting
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+    {
+        return s.to_string();
+    }
+    // Single-quote the string, replacing ' with '\'' (end quote, escaped quote, start quote)
+    let mut quoted = String::with_capacity(s.len() + 2);
+    quoted.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Generate a unique request ID from timestamp + monotonic counter.
 #[cfg(target_os = "linux")]
 fn unique_request_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2148,6 +2468,8 @@ mod tests {
             never_grant: &never_grant,
             approval_backend: &backend,
             session_id: "test-session",
+            open_url_origins: &[],
+            open_url_allow_localhost: false,
         };
 
         // Fork a child that closes its socket end and exits immediately.
@@ -2194,5 +2516,194 @@ mod tests {
             }
             Err(e) => panic!("fork failed: {e}"),
         }
+    }
+
+    struct TestDenyBackend;
+    impl ApprovalBackend for TestDenyBackend {
+        fn request_capability(
+            &self,
+            _req: &nono::supervisor::CapabilityRequest,
+        ) -> nono::Result<ApprovalDecision> {
+            Ok(ApprovalDecision::Denied {
+                reason: "test".to_string(),
+            })
+        }
+        fn backend_name(&self) -> &str {
+            "test-deny"
+        }
+    }
+
+    #[test]
+    fn test_validate_url_allowed_origin() {
+        let never_grant =
+            NeverGrantChecker::new(&[]).expect("NeverGrantChecker::new failed in test");
+        let backend = TestDenyBackend;
+        let origins = vec!["https://claude.ai".to_string()];
+        let config = SupervisorConfig {
+            never_grant: &never_grant,
+            approval_backend: &backend,
+            session_id: "test",
+            open_url_origins: &origins,
+            open_url_allow_localhost: false,
+        };
+
+        // Allowed origin: validation passes
+        let result = validate_url("https://claude.ai/oauth/authorize?state=xyz", &config);
+        assert!(result.is_ok(), "Expected validation to pass: {result:?}");
+
+        // Disallowed origin: must fail validation
+        let result = validate_url("https://evil.example.com/phishing", &config);
+        assert!(result.is_err());
+        assert!(result
+            .as_ref()
+            .err()
+            .map(|e| e.contains("not in the profile"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn test_validate_url_blocks_non_https() {
+        let never_grant =
+            NeverGrantChecker::new(&[]).expect("NeverGrantChecker::new failed in test");
+        let backend = TestDenyBackend;
+        let config = SupervisorConfig {
+            never_grant: &never_grant,
+            approval_backend: &backend,
+            session_id: "test",
+            open_url_origins: &[],
+            open_url_allow_localhost: false,
+        };
+
+        let result = validate_url("file:///etc/passwd", &config);
+        assert!(result.is_err());
+        assert!(result
+            .as_ref()
+            .err()
+            .map(|e| e.contains("Only https://"))
+            .unwrap_or(false));
+
+        let result = validate_url("javascript:alert(1)", &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_url_localhost() {
+        let never_grant =
+            NeverGrantChecker::new(&[]).expect("NeverGrantChecker::new failed in test");
+        let backend = TestDenyBackend;
+        let config_allow = SupervisorConfig {
+            never_grant: &never_grant,
+            approval_backend: &backend,
+            session_id: "test",
+            open_url_origins: &[],
+            open_url_allow_localhost: true,
+        };
+        let config_deny = SupervisorConfig {
+            never_grant: &never_grant,
+            approval_backend: &backend,
+            session_id: "test",
+            open_url_origins: &[],
+            open_url_allow_localhost: false,
+        };
+
+        // Localhost denied when not allowed
+        let result = validate_url("http://localhost:8080/callback", &config_deny);
+        assert!(result.is_err());
+        assert!(result
+            .as_ref()
+            .err()
+            .map(|e| e.contains("not allowed"))
+            .unwrap_or(false));
+
+        // Localhost allowed when configured
+        let result = validate_url("http://localhost:8080/callback", &config_allow);
+        assert!(
+            result.is_ok(),
+            "Expected localhost validation to pass: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_max_length() {
+        let never_grant =
+            NeverGrantChecker::new(&[]).expect("NeverGrantChecker::new failed in test");
+        let backend = TestDenyBackend;
+        let config = SupervisorConfig {
+            never_grant: &never_grant,
+            approval_backend: &backend,
+            session_id: "test",
+            open_url_origins: &[],
+            open_url_allow_localhost: false,
+        };
+
+        let long_url = format!("https://example.com/{}", "a".repeat(MAX_URL_LENGTH));
+        let result = validate_url(&long_url, &config);
+        assert!(result.is_err());
+        assert!(result
+            .as_ref()
+            .err()
+            .map(|e| e.contains("maximum length"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn test_shell_quote_simple_path() {
+        assert_eq!(shell_quote("/usr/bin/nono"), "/usr/bin/nono");
+    }
+
+    #[test]
+    fn test_shell_quote_path_with_spaces() {
+        assert_eq!(shell_quote("/opt/my app/nono"), "'/opt/my app/nono'");
+    }
+
+    #[test]
+    fn test_shell_quote_path_with_single_quote() {
+        assert_eq!(shell_quote("/opt/it's/nono"), "'/opt/it'\\''s/nono'");
+    }
+
+    #[test]
+    fn test_shell_quote_empty_string() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn test_clear_close_on_exec_clears_flag() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (a, _b) = UnixStream::pair().expect("socketpair");
+        let fd = a.as_raw_fd();
+
+        let before = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(before >= 0, "F_GETFD before failed");
+        assert_ne!(before & libc::FD_CLOEXEC, 0, "fd should start CLOEXEC");
+
+        clear_close_on_exec(fd).expect("clear cloexec");
+
+        let after = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(after >= 0, "F_GETFD after failed");
+        assert_eq!(after & libc::FD_CLOEXEC, 0, "fd should not be CLOEXEC");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_create_open_shim_installs_helper_in_shim_dir() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let shim = create_open_shim(&exe).expect("create shim");
+
+        assert!(shim.dir.join("open").exists(), "open shim should exist");
+        assert!(shim.helper_exe.exists(), "helper copy should exist");
+        assert_eq!(
+            shim.helper_exe.parent(),
+            Some(shim.dir.as_path()),
+            "helper should live inside shim dir"
+        );
+
+        let script = std::fs::read_to_string(shim.dir.join("open")).expect("read shim");
+        let helper = shell_quote(&shim.helper_exe.display().to_string());
+        assert!(
+            script.contains(&format!("exec {helper} open-url-helper \"$last_arg\"")),
+            "shim should exec the copied helper"
+        );
     }
 }
