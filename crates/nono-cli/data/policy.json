@@ -301,7 +301,6 @@
           "/dev/zero",
           "/dev/full",
           "/dev/tty",
-          "/dev/pts",
           "$TMPDIR"
         ]
       }

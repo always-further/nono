@@ -18,6 +18,10 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{extension_consume, extension_issue_file, extension_release};
 
+// Re-export Linux Landlock ABI detection
+#[cfg(target_os = "linux")]
+pub use linux::{detect_abi, DetectedAbi};
+
 // Re-export Linux seccomp-notify primitives for supervisor use
 #[cfg(target_os = "linux")]
 pub use linux::{
@@ -62,11 +66,28 @@ pub struct SupportInfo {
 pub struct Sandbox;
 
 impl Sandbox {
+    /// Detect the Landlock ABI version supported by the running kernel.
+    ///
+    /// This is only available on Linux. Returns a `DetectedAbi` that can
+    /// be passed to `apply_with_abi()` to avoid re-probing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Landlock is not available.
+    #[cfg(target_os = "linux")]
+    #[must_use = "ABI detection result should be checked"]
+    pub fn detect_abi() -> Result<DetectedAbi> {
+        linux::detect_abi()
+    }
+
     /// Apply the sandbox with the given capabilities.
     ///
     /// This function applies OS-level restrictions that **cannot be undone**.
     /// After calling this, the current process (and all children) will
     /// only be able to access resources granted by the capabilities.
+    ///
+    /// On Linux, this auto-detects the Landlock ABI. Use `apply_with_abi()`
+    /// to skip re-detection when the ABI is already known.
     ///
     /// # Errors
     ///
@@ -99,6 +120,20 @@ impl Sandbox {
                 std::env::consts::OS.to_string(),
             ))
         }
+    }
+
+    /// Apply the sandbox with a pre-detected Landlock ABI (Linux only).
+    ///
+    /// Avoids re-probing the kernel when the caller has already detected
+    /// the ABI (e.g., probed once at startup).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if sandbox initialization fails.
+    #[cfg(target_os = "linux")]
+    #[must_use = "sandbox application result should be checked"]
+    pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
+        linux::apply_with_abi(caps, abi)
     }
 
     /// Check if sandboxing is supported on this platform
