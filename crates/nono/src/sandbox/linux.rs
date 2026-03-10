@@ -1,12 +1,13 @@
 //! Linux sandbox implementation using Landlock LSM
 
-use crate::capability::{AccessMode, CapabilitySet, NetworkMode};
+use crate::capability::{AccessMode, CapabilitySet, FsCapability, NetworkMode};
 use crate::error::{NonoError, Result};
 use crate::sandbox::SupportInfo;
 use landlock::{
     Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
     Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
 };
+use std::path::Path;
 use tracing::{debug, info};
 
 /// The target ABI version we support (highest we know about)
@@ -50,7 +51,7 @@ pub fn support_info() -> SupportInfo {
 /// Landlock requires `LANDLOCK_ACCESS_FS_REMOVE_DIR` on the source directory
 /// for `rename()` operations involving directories (e.g., cargo build
 /// incremental artifacts), so excluding it would cause spurious EACCES errors.
-fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
+fn access_to_landlock(access: AccessMode, abi: ABI) -> BitFlags<AccessFs> {
     match access {
         AccessMode::Read => AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
         AccessMode::Write => {
@@ -62,7 +63,7 @@ fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
             //   e.g., cargo build incremental artifacts)
             // - Refer: rename/hard link operations (required for atomic writes)
             // - Truncate: change file size (common write operation, ABI v3+)
-            AccessFs::WriteFile
+            let mut access = AccessFs::WriteFile
                 | AccessFs::MakeChar
                 | AccessFs::MakeDir
                 | AccessFs::MakeReg
@@ -72,13 +73,43 @@ fn access_to_landlock(access: AccessMode, _abi: ABI) -> BitFlags<AccessFs> {
                 | AccessFs::MakeSym
                 | AccessFs::RemoveFile
                 | AccessFs::RemoveDir
-                | AccessFs::Refer
-                | AccessFs::Truncate
+                | AccessFs::Refer;
+
+            if AccessFs::from_all(abi).contains(AccessFs::Truncate) {
+                access |= AccessFs::Truncate;
+            }
+
+            access
         }
         AccessMode::ReadWrite => {
-            access_to_landlock(AccessMode::Read, _abi) | access_to_landlock(AccessMode::Write, _abi)
+            access_to_landlock(AccessMode::Read, abi) | access_to_landlock(AccessMode::Write, abi)
         }
     }
+}
+
+/// Landlock ABI v5+ restricts device ioctls when `IoctlDev` is handled.
+///
+/// TTY-backed TUIs rely on ioctl operations like `TCSETS` to enter raw mode and
+/// resize correctly. Limit the extra grant to terminal device capabilities so we
+/// do not widen ioctl access for arbitrary read-write paths.
+fn access_to_landlock_for_capability(cap: &FsCapability, abi: ABI) -> BitFlags<AccessFs> {
+    let mut access = access_to_landlock(cap.access, abi);
+
+    if should_grant_tty_ioctl(cap, abi) {
+        access |= AccessFs::IoctlDev;
+    }
+
+    access
+}
+
+fn should_grant_tty_ioctl(cap: &FsCapability, abi: ABI) -> bool {
+    AccessFs::from_all(abi).contains(AccessFs::IoctlDev)
+        && matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite)
+        && is_tty_device_path(&cap.resolved)
+}
+
+fn is_tty_device_path(path: &Path) -> bool {
+    path == Path::new("/dev/tty") || path.starts_with(Path::new("/dev/pts"))
 }
 
 /// Apply Landlock sandbox with the given capabilities
@@ -208,7 +239,7 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
     // These MUST succeed - caller explicitly requested these capabilities
     // Failing silently would violate the principle of least surprise and fail-secure design
     for cap in caps.fs_capabilities() {
-        let access = access_to_landlock(cap.access, TARGET_ABI);
+        let access = access_to_landlock_for_capability(cap, TARGET_ABI);
 
         debug!(
             "Adding rule: {} with access {:?}",
@@ -914,6 +945,8 @@ pub fn deny_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::CapabilitySource;
+    use std::path::PathBuf;
 
     #[test]
     fn test_is_supported() {
@@ -953,6 +986,69 @@ mod tests {
         assert!(rw.contains(AccessFs::RemoveDir));
         assert!(rw.contains(AccessFs::Refer));
         assert!(rw.contains(AccessFs::Truncate));
+    }
+
+    #[test]
+    fn test_non_tty_paths_do_not_gain_ioctl_dev() {
+        let cap = FsCapability {
+            original: PathBuf::from("/tmp"),
+            resolved: PathBuf::from("/tmp"),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        };
+
+        let access = access_to_landlock_for_capability(&cap, TARGET_ABI);
+
+        assert!(!access.contains(AccessFs::IoctlDev));
+    }
+
+    #[test]
+    fn test_tty_paths_gain_ioctl_dev_when_supported() {
+        let tty = FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::Write,
+            is_file: true,
+            source: CapabilitySource::User,
+        };
+        let pts = FsCapability {
+            original: PathBuf::from("/dev/pts"),
+            resolved: PathBuf::from("/dev/pts"),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        };
+
+        let tty_access = access_to_landlock_for_capability(&tty, TARGET_ABI);
+        let pts_access = access_to_landlock_for_capability(&pts, TARGET_ABI);
+
+        assert!(tty_access.contains(AccessFs::IoctlDev));
+        assert!(pts_access.contains(AccessFs::IoctlDev));
+    }
+
+    #[test]
+    fn test_read_only_tty_path_does_not_gain_ioctl_dev() {
+        let cap = FsCapability {
+            original: PathBuf::from("/dev/tty"),
+            resolved: PathBuf::from("/dev/tty"),
+            access: AccessMode::Read,
+            is_file: true,
+            source: CapabilitySource::User,
+        };
+
+        let access = access_to_landlock_for_capability(&cap, TARGET_ABI);
+
+        assert!(!access.contains(AccessFs::IoctlDev));
+    }
+
+    #[test]
+    fn test_tty_device_path_detection() {
+        assert!(is_tty_device_path(Path::new("/dev/tty")));
+        assert!(is_tty_device_path(Path::new("/dev/pts")));
+        assert!(is_tty_device_path(Path::new("/dev/pts/3")));
+        assert!(!is_tty_device_path(Path::new("/dev/null")));
+        assert!(!is_tty_device_path(Path::new("/tmp")));
     }
 
     #[test]
