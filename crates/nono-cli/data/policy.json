@@ -364,7 +364,8 @@
           "~/.node",
           "~/.local/share/fnm",
           "/usr/local/lib/node_modules",
-          "~/Library/pnpm"
+          "~/Library/pnpm",
+          "~/.local/share/pnpm"
         ]
       }
     },
