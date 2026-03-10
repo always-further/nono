@@ -81,6 +81,7 @@ SUITES=(
     "test_rollback.sh:Rollback"
     "test_setup.sh:Setup"
     "test_learn.sh:Learn Mode"
+    "test_nix_paths.sh:Nix Paths"
 )
 
 TOTAL_SUITES=${#SUITES[@]}

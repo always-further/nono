@@ -1,0 +1,62 @@
+name: NixOS Integration Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  nix-integration:
+    name: Nix Integration Tests
+    if: ${{ !startsWith(github.head_ref, 'dependabot/github_actions/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd # v31
+
+      - name: Pin nixpkgs channel
+        run: |
+          nix-channel --remove nixpkgs || true
+          nix-channel --add https://nixos.org/channels/nixos-24.11 nixpkgs
+          nix-channel --update nixpkgs
+
+      - name: Install Nix test packages
+        run: |
+          nix-env -iA nixpkgs.coreutils
+          nix-env -iA nixpkgs.bash
+          nix-env -iA nixpkgs.python3
+          nix-env -iA nixpkgs.nodejs
+          nix-env -iA nixpkgs.curl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nix-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            nix-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run Nix integration tests
+        run: ./tests/run_nix_integration_tests.sh

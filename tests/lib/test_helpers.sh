@@ -302,6 +302,24 @@ require_working_sandbox() {
     return 1
 }
 
+# Check if Nix package manager is installed
+require_nix() {
+    local test_name="$1"
+    if ! command -v nix-env >/dev/null 2>&1; then
+        skip_test "$test_name" "nix not installed"
+        return 1
+    fi
+    return 0
+}
+
+# Resolve a command to its /nix/store path (follows all symlinks)
+nix_realpath() {
+    local cmd="$1"
+    local path
+    path=$(command -v "$cmd" 2>/dev/null) || return 1
+    readlink -f "$path" 2>/dev/null || realpath "$path" 2>/dev/null || echo "$path"
+}
+
 # Get the directory of the current script
 get_script_dir() {
     cd "$(dirname "${BASH_SOURCE[1]}")" && pwd
