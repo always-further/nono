@@ -1817,8 +1817,8 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
                     source: e,
                 })?;
 
-        // Only auto-add if CWD is not already covered by existing capabilities
-        if !caps.path_covered(&cwd_canonical) {
+        // Only auto-add if CWD is not already covered with sufficient access
+        if !caps.path_covered_with_access(&cwd_canonical, access) {
             if args.allow_cwd {
                 // --allow-cwd: add without prompting
                 info!("Auto-including CWD with {} access (--allow-cwd)", access);

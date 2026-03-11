@@ -56,6 +56,21 @@ pub enum AccessMode {
     ReadWrite,
 }
 
+impl AccessMode {
+    /// Returns true if `self` provides at least the permissions in `required`.
+    ///
+    /// ReadWrite contains Read, Write, and ReadWrite.
+    /// Read contains only Read. Write contains only Write.
+    #[must_use]
+    pub fn contains(self, required: AccessMode) -> bool {
+        match self {
+            AccessMode::ReadWrite => true,
+            AccessMode::Read => required == AccessMode::Read,
+            AccessMode::Write => required == AccessMode::Write,
+        }
+    }
+}
+
 impl std::fmt::Display for AccessMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -961,6 +976,18 @@ impl CapabilitySet {
             .any(|cap| !cap.is_file && path.starts_with(&cap.resolved))
     }
 
+    /// Check if the given path is already covered with at least the specified access mode.
+    ///
+    /// Like [`path_covered`](Self::path_covered), but also verifies the existing
+    /// capability provides sufficient permissions. A read-only parent does not
+    /// satisfy a readwrite requirement.
+    #[must_use]
+    pub fn path_covered_with_access(&self, path: &Path, required: AccessMode) -> bool {
+        self.fs.iter().any(|cap| {
+            !cap.is_file && path.starts_with(&cap.resolved) && cap.access.contains(required)
+        })
+    }
+
     /// Display a summary of capabilities (plain text)
     #[must_use]
     pub fn summary(&self) -> String {
@@ -1659,5 +1686,98 @@ mod tests {
     fn test_process_info_mode_allow_all() {
         let caps = CapabilitySet::new().set_process_info_mode(ProcessInfoMode::AllowAll);
         assert_eq!(caps.process_info_mode(), ProcessInfoMode::AllowAll);
+    }
+
+    #[test]
+    fn test_access_mode_contains() {
+        // ReadWrite subsumes everything
+        assert!(AccessMode::ReadWrite.contains(AccessMode::Read));
+        assert!(AccessMode::ReadWrite.contains(AccessMode::Write));
+        assert!(AccessMode::ReadWrite.contains(AccessMode::ReadWrite));
+
+        // Read only subsumes Read
+        assert!(AccessMode::Read.contains(AccessMode::Read));
+        assert!(!AccessMode::Read.contains(AccessMode::Write));
+        assert!(!AccessMode::Read.contains(AccessMode::ReadWrite));
+
+        // Write only subsumes Write
+        assert!(AccessMode::Write.contains(AccessMode::Write));
+        assert!(!AccessMode::Write.contains(AccessMode::Read));
+        assert!(!AccessMode::Write.contains(AccessMode::ReadWrite));
+    }
+
+    #[test]
+    fn test_path_covered_basic() {
+        let dir = tempdir().unwrap();
+        let parent = dir.path();
+        let child = parent.join("subdir");
+        fs::create_dir(&child).unwrap();
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_dir(parent, AccessMode::Read).unwrap());
+
+        assert!(caps.path_covered(&child.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_path_covered_not_matching() {
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_dir(dir1.path(), AccessMode::Read).unwrap());
+
+        assert!(!caps.path_covered(&dir2.path().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_path_covered_with_access_read_parent_does_not_satisfy_readwrite() {
+        // Regression: a read-only parent (e.g. /Volumes from system_read_macos)
+        // must not suppress a readwrite workdir grant for a child path.
+        let dir = tempdir().unwrap();
+        let parent = dir.path();
+        let child = parent.join("project");
+        fs::create_dir(&child).unwrap();
+        let child_canonical = child.canonicalize().unwrap();
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_dir(parent, AccessMode::Read).unwrap());
+
+        // path_covered (access-unaware) says yes
+        assert!(caps.path_covered(&child_canonical));
+        // path_covered_with_access correctly says no for write/readwrite
+        assert!(caps.path_covered_with_access(&child_canonical, AccessMode::Read));
+        assert!(!caps.path_covered_with_access(&child_canonical, AccessMode::Write));
+        assert!(!caps.path_covered_with_access(&child_canonical, AccessMode::ReadWrite));
+    }
+
+    #[test]
+    fn test_path_covered_with_access_readwrite_parent_satisfies_all() {
+        let dir = tempdir().unwrap();
+        let parent = dir.path();
+        let child = parent.join("project");
+        fs::create_dir(&child).unwrap();
+        let child_canonical = child.canonicalize().unwrap();
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_dir(parent, AccessMode::ReadWrite).unwrap());
+
+        assert!(caps.path_covered_with_access(&child_canonical, AccessMode::Read));
+        assert!(caps.path_covered_with_access(&child_canonical, AccessMode::Write));
+        assert!(caps.path_covered_with_access(&child_canonical, AccessMode::ReadWrite));
+    }
+
+    #[test]
+    fn test_path_covered_with_access_file_caps_ignored() {
+        // File capabilities should not count as covering a directory path.
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("file.txt");
+        fs::write(&file_path, "data").unwrap();
+        let file_canonical = file_path.canonicalize().unwrap();
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file_path, AccessMode::ReadWrite).unwrap());
+
+        assert!(!caps.path_covered_with_access(&file_canonical, AccessMode::Read));
     }
 }
