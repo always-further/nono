@@ -58,6 +58,27 @@ nono why --path ~/.ssh/id_rsa --op read
 nono run --allow-cwd --dry-run -- command
 ```
 
+## Themes
+
+The CLI supports named output themes for banners, summaries, warnings, and status text.
+
+Available themes: `mocha`, `latte`, `frappe`, `macchiato`, `tokyo-night`, `minimal`
+
+```bash
+# Per invocation
+nono --theme tokyo-night run --allow-cwd -- claude
+
+# Environment variable
+export NONO_THEME=latte
+
+# Config file
+# ~/.config/nono/config.toml
+# [ui]
+# theme = "frappe"
+```
+
+Precedence is: CLI flag, then `NONO_THEME`, then config file, then the default `mocha`.
+
 ## Built-in Profiles
 
 | Profile | Command |

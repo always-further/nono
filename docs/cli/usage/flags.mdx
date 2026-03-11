@@ -18,6 +18,39 @@ nono -s run --allow-cwd -- my-agent
 nono --silent why --path ~/.ssh/id_rsa --op read
 ```
 
+### `--theme`
+
+Select the CLI color theme for banners, summaries, warnings, and other styled output.
+
+Available themes:
+- `mocha`
+- `latte`
+- `frappe`
+- `macchiato`
+- `tokyo-night`
+- `minimal`
+
+Resolution order:
+- `--theme <NAME>`
+- `NONO_THEME`
+- `[ui] theme = "<NAME>"` in `~/.config/nono/config.toml`
+- default: `mocha`
+
+```bash
+# Per invocation
+nono --theme tokyo-night run --allow-cwd -- claude
+
+# Via environment variable
+NONO_THEME=latte nono run --allow-cwd -- codex
+
+# Config file
+# ~/.config/nono/config.toml
+# [ui]
+# theme = "frappe"
+```
+
+If an unknown theme is supplied, nono falls back to `mocha`.
+
 ## Commands
 
 ### `nono run`
