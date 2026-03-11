@@ -494,7 +494,8 @@ where
 /// Network configuration in a profile
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NetworkConfig {
-    /// Block network access (network allowed by default; true = blocked)
+    /// Block network access (network allowed by default; true = blocked).
+    /// Canonical profile key: `block`.
     #[serde(default)]
     pub block: bool,
     /// Network proxy profile name (from network-policy.json).
@@ -504,15 +505,17 @@ pub struct NetworkConfig {
     /// field inherits the base profile's value.
     #[serde(default)]
     pub network_profile: InheritableValue<String>,
-    /// Additional hosts to allow through the proxy (on top of profile hosts)
-    #[serde(default)]
+    /// Additional hosts to allow through the proxy (on top of profile hosts).
+    /// Canonical profile key: `allow_proxy` (legacy `proxy_allow` also accepted).
+    #[serde(default, alias = "allow_proxy")]
     pub proxy_allow: Vec<String>,
     /// Credential services to enable via reverse proxy
     #[serde(default)]
     pub proxy_credentials: Vec<String>,
     /// Localhost TCP ports to allow bidirectional IPC (connect + bind).
     /// Equivalent to `--allow-port` CLI flag.
-    #[serde(default)]
+    /// Canonical profile key: `allow_port` (legacy `port_allow` also accepted).
+    #[serde(default, alias = "allow_port")]
     pub port_allow: Vec<u16>,
     /// Custom credential definitions for services not in network-policy.json.
     /// Keys are service names (used with --proxy-credential), values define
@@ -2700,6 +2703,25 @@ mod tests {
             set.network.network_profile,
             InheritableValue::Set("developer".to_string())
         );
+    }
+
+    #[test]
+    fn test_network_config_accepts_verb_noun_collection_aliases() {
+        let profile: Profile = serde_json::from_str(
+            r#"{
+                "meta": { "name": "aliases" },
+                "network": {
+                    "block": true,
+                    "allow_proxy": ["api.openai.com"],
+                    "allow_port": [3000]
+                }
+            }"#,
+        )
+        .expect("parse profile with supported aliases");
+
+        assert!(profile.network.block);
+        assert_eq!(profile.network.proxy_allow, vec!["api.openai.com"]);
+        assert_eq!(profile.network.port_allow, vec![3000]);
     }
 
     #[test]

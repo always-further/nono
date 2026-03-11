@@ -105,15 +105,17 @@ See [Credential Injection](/cli/features/credential-injection) for details on st
 
 ### Network Configuration
 
-The `network` section controls network access and credential injection:
+The `network` section controls network access and credential injection.
+
+Within profile JSON, use `block` for the network toggle. The parser also accepts `allow_proxy` and `allow_port` for compatibility with the CLI naming style, while legacy `proxy_allow` and `port_allow` remain supported.
 
 ```json
 {
   "network": {
     "block": false,
     "network_profile": "claude-code",
-    "proxy_allow": ["my-internal-api.example.com"],
-    "port_allow": [3000],
+    "allow_proxy": ["my-internal-api.example.com"],
+    "allow_port": [3000],
     "proxy_credentials": ["openai", "anthropic"],
     "custom_credentials": {
       "telegram": {
@@ -131,8 +133,8 @@ The `network` section controls network access and credential injection:
 |-------|-------------|
 | `block` | Block all network access (default: `false`) |
 | `network_profile` | Network profile name for host filtering (e.g., `minimal`, `claude-code`, `enterprise`). Set to `null` in a child profile to clear an inherited value. |
-| `proxy_allow` | Additional hosts to allow through the proxy |
-| `port_allow` | Localhost TCP ports to allow bidirectional IPC (equivalent to `--allow-port`) |
+| `allow_proxy` | Additional hosts to allow through the proxy |
+| `allow_port` | Localhost TCP ports to allow bidirectional IPC (equivalent to `--allow-port`) |
 | `proxy_credentials` | Credential services to enable via reverse proxy (e.g., `openai`, `anthropic`) |
 | `custom_credentials` | Custom credential service definitions for APIs not in the built-in list |
 
