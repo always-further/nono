@@ -570,6 +570,18 @@ nono run --profile claude-code --allow-cwd -- claude
 nono -s run --profile claude-code --allow-cwd -- claude
 ```
 
+#### `--allow-launch-services`
+
+Allow direct LaunchServices opens on macOS for this session. This is intended for temporary login or setup flows that need to open a browser from inside the sandbox.
+
+```bash
+nono run --profile claude-code --allow-launch-services -- claude
+```
+
+<Note>
+  `--allow-launch-services` is only supported on macOS. It requires the selected profile to opt into `allow_launch_services` and configure `open_urls`; otherwise nono fails closed with an error.
+</Note>
+
 ### Execution Mode Flags
 
 #### `--rollback`

@@ -1818,11 +1818,10 @@ fn print_allow_launch_services_warning(silent: bool) {
     eprintln!(
         "  {}",
         "WARNING: --allow-launch-services permits the sandboxed process to ask macOS \
-         LaunchServices to open URLs, files, or apps.".yellow()
+         LaunchServices to open URLs, files, or apps."
+            .yellow()
     );
-    eprintln!(
-        "  Use this only for temporary login/setup flows, then exit and rerun without it."
-    );
+    eprintln!("  Use this only for temporary login/setup flows, then exit and rerun without it.");
     eprintln!("  Prefer using it from a trusted directory, not inside an untrusted project.");
 }
 

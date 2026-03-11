@@ -310,6 +310,9 @@ pub fn execute_supervised(
     // Build environment: inherit current env + add our vars
     let mut env_c: Vec<CString> = Vec::new();
 
+    #[cfg(target_os = "macos")]
+    let mut open_shim: Option<OpenShim> = None;
+
     // Copy current environment, filtering dangerous and overridden vars
     for (key, value) in std::env::vars_os() {
         if let (Some(k), Some(v)) = (key.to_str(), value.to_str()) {
@@ -382,7 +385,8 @@ pub fn execute_supervised(
                     // Prepend shim dir to PATH and also set BROWSER for any tool
                     // that does respect it.
                     let current_path = std::env::var("PATH").unwrap_or_default();
-                    let new_path = format!("PATH={}:{current_path}", shim.dir.display());
+                    let new_path =
+                        format!("PATH={}:{current_path}", shim.dir.path().display());
                     if let Ok(cstr) = CString::new(new_path) {
                         // Remove existing PATH from env_c, then add our modified one
                         env_c.retain(|c| !c.as_bytes().starts_with(b"PATH="));
@@ -393,10 +397,14 @@ pub fn execute_supervised(
                     if let Ok(cstr) = CString::new(browser_cmd) {
                         env_c.push(cstr);
                     }
+                    open_shim = Some(shim);
                 }
             }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    let _keep_open_shim_alive = open_shim;
 
     // Create null-terminated pointer arrays for execve
     let argv_ptrs: Vec<*const libc::c_char> = argv_c
@@ -1817,7 +1825,7 @@ pub(super) fn record_denial(denials: &mut Vec<DenialRecord>, record: DenialRecor
 /// Returns the path to the shim directory, or `None` on failure.
 #[cfg(target_os = "macos")]
 struct OpenShim {
-    dir: std::path::PathBuf,
+    dir: tempfile::TempDir,
     helper_exe: std::path::PathBuf,
 }
 
@@ -1825,15 +1833,16 @@ struct OpenShim {
 fn create_open_shim(nono_exe: &std::path::Path) -> Option<OpenShim> {
     use std::os::unix::fs::PermissionsExt;
 
-    let shim_dir = std::env::temp_dir().join(format!("nono-shim-{}", std::process::id()));
-    if std::fs::create_dir_all(&shim_dir).is_err() {
-        return None;
-    }
+    let shim_dir = tempfile::Builder::new()
+        .prefix("nono-shim-")
+        .tempdir()
+        .ok()?;
+    let shim_dir_path = shim_dir.path();
 
     // Keep the helper inside the shim directory so it is always readable and
     // executable under the sandbox's temp-dir allowlist, regardless of where
     // the original `nono` binary was launched from.
-    let helper_path = shim_dir.join("nono-open-url-helper");
+    let helper_path = shim_dir_path.join("nono-open-url-helper");
     if std::fs::copy(nono_exe, &helper_path).is_err() {
         return None;
     }
@@ -1841,25 +1850,30 @@ fn create_open_shim(nono_exe: &std::path::Path) -> Option<OpenShim> {
         return None;
     }
 
-    let shim_path = shim_dir.join("open");
+    let shim_path = shim_dir_path.join("open");
     let quoted_helper = shell_quote(&helper_path.display().to_string());
 
-    // The shim script checks if the last argument looks like a URL (starts with
-    // http:// or https://). If so, delegate to nono open-url-helper. Otherwise
-    // fall through to /usr/bin/open for non-URL uses (opening files, apps, etc.).
+    // The shim script scans all arguments for the first URL-like value. If one
+    // is present, delegate to nono open-url-helper. Otherwise fall through to
+    // /usr/bin/open for non-URL uses (opening files, apps, etc.).
     let script = format!(
         r#"#!/bin/sh
 # nono URL open shim — intercepts `open` calls for browser URL delegation
-# Get last argument (POSIX-compatible)
-for last_arg do :; done
-case "$last_arg" in
-    http://*|https://*)
-        exec {quoted_helper} open-url-helper "$last_arg"
-        ;;
-    *)
-        exec /usr/bin/open "$@"
-        ;;
-esac
+url_arg=""
+for arg in "$@"; do
+    case "$arg" in
+        http://*|https://*)
+            url_arg="$arg"
+            break
+            ;;
+    esac
+done
+
+if [ -n "$url_arg" ]; then
+    exec {quoted_helper} open-url-helper "$url_arg"
+else
+    exec /usr/bin/open "$@"
+fi
 "#
     );
 
@@ -2691,19 +2705,38 @@ mod tests {
         let exe = std::env::current_exe().expect("current_exe");
         let shim = create_open_shim(&exe).expect("create shim");
 
-        assert!(shim.dir.join("open").exists(), "open shim should exist");
+        assert!(
+            shim.dir.path().join("open").exists(),
+            "open shim should exist"
+        );
         assert!(shim.helper_exe.exists(), "helper copy should exist");
         assert_eq!(
             shim.helper_exe.parent(),
-            Some(shim.dir.as_path()),
+            Some(shim.dir.path()),
             "helper should live inside shim dir"
         );
 
-        let script = std::fs::read_to_string(shim.dir.join("open")).expect("read shim");
+        let script = std::fs::read_to_string(shim.dir.path().join("open")).expect("read shim");
         let helper = shell_quote(&shim.helper_exe.display().to_string());
         assert!(
-            script.contains(&format!("exec {helper} open-url-helper \"$last_arg\"")),
+            script.contains("for arg in \"$@\"; do"),
+            "shim should scan all arguments for a URL"
+        );
+        assert!(
+            script.contains(&format!("exec {helper} open-url-helper \"$url_arg\"")),
             "shim should exec the copied helper"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_open_shim_drop_cleans_up_directory() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let shim = create_open_shim(&exe).expect("create shim");
+        let dir = shim.dir.path().to_path_buf();
+
+        assert!(dir.exists(), "shim dir should exist before drop");
+        drop(shim);
+        assert!(!dir.exists(), "shim dir should be removed on drop");
     }
 }
