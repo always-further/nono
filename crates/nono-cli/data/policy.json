@@ -695,7 +695,7 @@
       "meta": {
         "name": "node-dev",
         "version": "1.0.0",
-        "description": "Node.js SDK development profile with nvm, fnm, pnpm,and npm support",
+        "description": "Node.js SDK development profile with nvm, fnm, pnpm, and npm support",
         "author": "nono-project"
       },
       "security": {
