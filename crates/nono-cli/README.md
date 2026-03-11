@@ -7,7 +7,6 @@ CLI for capability-based sandboxing using Landlock (Linux) and Seatbelt (macOS).
 ### Homebrew (macOS)
 
 ```bash
-brew tap always-further/nono
 brew install nono
 ```
 

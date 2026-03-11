@@ -279,6 +279,7 @@ pub struct SandboxArgs {
             "allow_proxy",
             "proxy_credential",
             "external_proxy",
+            "external_proxy_bypass",
             "proxy_port"
         ]
     )]
@@ -320,8 +321,19 @@ pub struct SandboxArgs {
 
     /// Chain through an external (enterprise) proxy.
     /// Format: host:port (e.g., squid.corp.internal:3128)
-    #[arg(long, value_name = "HOST:PORT")]
+    #[arg(long, value_name = "HOST:PORT", env = "NONO_EXTERNAL_PROXY")]
     pub external_proxy: Option<String>,
+
+    /// Domains to route directly instead of through the external proxy.
+    /// Supports exact hostnames and wildcards (e.g., *.internal.corp).
+    /// Can be specified multiple times. Requires --external-proxy (or profile equivalent).
+    #[arg(
+        long,
+        value_name = "HOST",
+        env = "NONO_EXTERNAL_PROXY_BYPASS",
+        value_delimiter = ','
+    )]
+    pub external_proxy_bypass: Vec<String>,
 
     /// Fixed port for the credential injection proxy (default: OS-assigned).
     /// Use this when the sandboxed application requires a known proxy port
@@ -405,6 +417,7 @@ impl SandboxArgs {
         self.network_profile.is_some()
             || !self.allow_proxy.is_empty()
             || !self.proxy_credential.is_empty()
+            || self.external_proxy.is_some()
     }
 }
 

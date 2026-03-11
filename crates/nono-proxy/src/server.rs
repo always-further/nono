@@ -141,6 +141,9 @@ struct ProxyState {
     active_connections: AtomicUsize,
     /// Shared network audit log for this proxy session.
     audit_log: audit::SharedAuditLog,
+    /// Matcher for hosts that bypass the external proxy and route direct.
+    /// Built once at startup from `ExternalProxyConfig.bypass_hosts`.
+    bypass_matcher: external::BypassMatcher,
 }
 
 /// Start the proxy server.
@@ -200,6 +203,13 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     .with_no_client_auth();
     let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
 
+    // Build bypass matcher from external proxy config (once, not per-request)
+    let bypass_matcher = config
+        .external_proxy
+        .as_ref()
+        .map(|ext| external::BypassMatcher::new(&ext.bypass_hosts))
+        .unwrap_or_else(|| external::BypassMatcher::new(&[]));
+
     // Shutdown channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let audit_log = audit::new_audit_log();
@@ -212,6 +222,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         tls_connector,
         active_connections: AtomicUsize::new(0),
         audit_log: Arc::clone(&audit_log),
+        bypass_matcher,
     });
 
     // Spawn accept loop as a task within the current runtime.
@@ -321,8 +332,34 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
 
     // Dispatch by method
     if first_line.starts_with("CONNECT ") {
-        // Check if external proxy is configured
-        if let Some(ref ext_config) = state.config.external_proxy {
+        // Check if external proxy is configured and host is not bypassed
+        let use_external = if let Some(ref ext_config) = state.config.external_proxy {
+            if state.bypass_matcher.is_empty() {
+                Some(ext_config)
+            } else {
+                // Parse host from CONNECT line to check bypass
+                let host = first_line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|authority| {
+                        authority
+                            .rsplit_once(':')
+                            .map(|(h, _)| h)
+                            .or(Some(authority))
+                    })
+                    .unwrap_or("");
+                if state.bypass_matcher.matches(host) {
+                    debug!("Bypassing external proxy for {}", host);
+                    None
+                } else {
+                    Some(ext_config)
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(ext_config) = use_external {
             external::handle_external_proxy(
                 first_line,
                 &mut stream,
@@ -330,6 +367,21 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                 &state.filter,
                 &state.session_token,
                 ext_config,
+                Some(&state.audit_log),
+            )
+            .await
+        } else if state.config.external_proxy.is_some() {
+            // Bypass route: enforce strict session token validation before
+            // routing direct. Without this, bypassed hosts would inherit
+            // connect::handle_connect()'s lenient auth (which tolerates
+            // missing Proxy-Authorization for Node.js undici compat).
+            token::validate_proxy_auth(&header_bytes, &state.session_token)?;
+            connect::handle_connect(
+                first_line,
+                &mut stream,
+                &state.filter,
+                &state.session_token,
+                &header_bytes,
                 Some(&state.audit_log),
             )
             .await

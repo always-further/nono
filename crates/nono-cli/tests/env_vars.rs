@@ -131,6 +131,109 @@ fn cli_flag_overrides_env_var() {
 }
 
 #[test]
+fn env_nono_external_proxy() {
+    let output = nono_bin()
+        .env("NONO_EXTERNAL_PROXY", "squid.corp:3128")
+        .args(["run", "--allow", "/tmp", "--dry-run", "echo"])
+        .output()
+        .expect("failed to run nono");
+
+    assert!(
+        output.status.success(),
+        "NONO_EXTERNAL_PROXY should be accepted, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn env_nono_external_proxy_bypass_comma_separated() {
+    let output = nono_bin()
+        .env("NONO_EXTERNAL_PROXY", "squid.corp:3128")
+        .env("NONO_EXTERNAL_PROXY_BYPASS", "internal.corp,*.private.net")
+        .args(["run", "--allow", "/tmp", "--dry-run", "echo"])
+        .output()
+        .expect("failed to run nono");
+
+    assert!(
+        output.status.success(),
+        "NONO_EXTERNAL_PROXY_BYPASS should be accepted, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn env_nono_external_proxy_bypass_requires_external_proxy() {
+    // NONO_EXTERNAL_PROXY_BYPASS without NONO_EXTERNAL_PROXY should fail
+    let output = nono_bin()
+        .env("NONO_EXTERNAL_PROXY_BYPASS", "internal.corp")
+        .args(["run", "--allow", "/tmp", "--dry-run", "echo"])
+        .output()
+        .expect("failed to run nono");
+
+    assert!(
+        !output.status.success(),
+        "NONO_EXTERNAL_PROXY_BYPASS without NONO_EXTERNAL_PROXY should fail"
+    );
+}
+
+#[test]
+fn env_allow_net_conflicts_with_external_proxy() {
+    // NONO_ALLOW_NET + NONO_EXTERNAL_PROXY should conflict at the clap level.
+    let output = nono_bin()
+        .env("NONO_EXTERNAL_PROXY", "squid.corp:3128")
+        .env("NONO_ALLOW_NET", "true")
+        .args(["run", "--allow", "/tmp", "--dry-run", "echo"])
+        .output()
+        .expect("failed to run nono");
+
+    assert!(
+        !output.status.success(),
+        "NONO_ALLOW_NET + NONO_EXTERNAL_PROXY should conflict"
+    );
+}
+
+#[test]
+fn allow_net_overrides_profile_external_proxy() {
+    // A profile with external_proxy should be overridden by --allow-net,
+    // resulting in unrestricted network (no proxy mode activation).
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let profile_path = dir.path().join("ext-proxy-profile.json");
+    std::fs::write(
+        &profile_path,
+        r#"{
+            "meta": { "name": "ext-proxy-test" },
+            "network": { "external_proxy": "squid.corp:3128" }
+        }"#,
+    )
+    .expect("write profile");
+
+    let output = nono_bin()
+        .args([
+            "run",
+            "--profile",
+            profile_path.to_str().expect("valid utf8"),
+            "--allow-net",
+            "--allow",
+            "/tmp",
+            "--dry-run",
+            "echo",
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "--allow-net should override profile external_proxy, stderr: {text}"
+    );
+    // Should show "allowed" network, not proxy mode
+    assert!(
+        text.contains("allowed"),
+        "expected unrestricted network in dry-run output, got:\n{text}"
+    );
+}
+
+#[test]
 fn env_conflict_allow_net_and_block_net() {
     let output = nono_bin()
         .env("NONO_ALLOW_NET", "true")

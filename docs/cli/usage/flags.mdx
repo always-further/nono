@@ -45,7 +45,7 @@ nono wrap [OPTIONS] -- <COMMAND> [ARGS...]
 ```
 
 <Note>
-  `nono wrap` does not support proxy flags (`--network-profile`, `--allow-proxy`, `--proxy-credential`, `--external-proxy`). The network proxy requires a parent process. Use `nono run` instead.
+  `nono wrap` does not support proxy flags (`--network-profile`, `--allow-proxy`, `--proxy-credential`, `--external-proxy`, `--external-proxy-bypass`). The network proxy requires a parent process. Use `nono run` instead.
 </Note>
 
 ### `nono why`
@@ -225,7 +225,7 @@ nono run --profile claude-code --allow-net -- claude
 ```
 
 <Note>
-  `--allow-net` disables proxy mode for that run, so it also disables proxy-based credential injection. It conflicts with `--block-net`, `--network-profile`, `--allow-proxy`, `--proxy-credential`, `--external-proxy`, and `--proxy-port`.
+  `--allow-net` disables proxy mode for that run, so it also disables proxy-based credential injection. It conflicts with `--block-net`, `--network-profile`, `--allow-proxy`, `--proxy-credential`, `--external-proxy`, `--external-proxy-bypass`, and `--proxy-port`.
 </Note>
 
 #### `--network-profile`
@@ -297,6 +297,30 @@ Chain outbound connections through an external (enterprise) proxy. Cloud metadat
 ```bash
 nono run --allow-cwd --network-profile enterprise --external-proxy squid.corp:3128 -- my-agent
 ```
+
+#### `--external-proxy-bypass`
+
+Route specific domains directly instead of through the external proxy. Supports exact hostnames and `*.` wildcard suffixes (case-insensitive). Requires `--external-proxy`.
+
+```bash
+# Bypass the enterprise proxy for internal services
+nono run --allow-cwd --network-profile enterprise \
+  --external-proxy squid.corp:3128 \
+  --external-proxy-bypass internal.corp \
+  --external-proxy-bypass "*.private.net" \
+  -- my-agent
+
+# Multiple bypass patterns
+nono run --allow-cwd \
+  --external-proxy squid.corp:3128 \
+  --external-proxy-bypass git.internal.corp \
+  --external-proxy-bypass "*.dev.local" \
+  -- my-agent
+```
+
+Bypass hosts are checked before routing. Matching hosts use a direct CONNECT tunnel (same as Mode 1); non-matching hosts chain through the external proxy.
+
+Can be specified multiple times.
 
 #### `--proxy-port`
 
@@ -947,6 +971,8 @@ CLI flags always take precedence over environment variables.
 | `--network-profile` | `NONO_NETWORK_PROFILE` | `NONO_NETWORK_PROFILE=claude-code` |
 | `--env-credential` | `NONO_ENV_CREDENTIAL` | `NONO_ENV_CREDENTIAL=key1,key2` |
 | `--capability-elevation` | `NONO_CAPABILITY_ELEVATION` | `NONO_CAPABILITY_ELEVATION=true` |
+| `--external-proxy` | `NONO_EXTERNAL_PROXY` | `NONO_EXTERNAL_PROXY=squid.corp:3128` |
+| `--external-proxy-bypass` | `NONO_EXTERNAL_PROXY_BYPASS` | `NONO_EXTERNAL_PROXY_BYPASS=internal.corp,*.private.net` (comma-separated) |
 
 Boolean variables accept `true`, `false`, `yes`, `no`, `1`, `0`.
 

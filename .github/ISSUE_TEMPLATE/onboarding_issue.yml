@@ -44,7 +44,7 @@ body:
     id: install-method
     attributes:
       label: How did you install nono?
-      placeholder: "e.g. Homebrew tap, cargo install, downloaded binary from GitHub releases..."
+      placeholder: "e.g. Homebrew, cargo install, downloaded binary from GitHub releases..."
     validations:
       required: true
 

@@ -522,6 +522,13 @@ pub struct NetworkConfig {
     /// how to route and inject credentials for that service.
     #[serde(default)]
     pub custom_credentials: HashMap<String, CustomCredentialDef>,
+    /// External proxy address (host:port) for enterprise proxy passthrough.
+    #[serde(default)]
+    pub external_proxy: Option<String>,
+    /// Hosts to bypass the external proxy and route directly.
+    /// Supports exact hostnames and `*.` wildcard suffixes.
+    #[serde(default)]
+    pub external_proxy_bypass: Vec<String>,
 }
 
 impl NetworkConfig {
@@ -534,6 +541,7 @@ impl NetworkConfig {
         self.resolved_network_profile().is_some()
             || !self.proxy_allow.is_empty()
             || !self.proxy_credentials.is_empty()
+            || self.external_proxy.is_some()
     }
 }
 
@@ -984,6 +992,12 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 merged.extend(child.network.custom_credentials);
                 merged
             },
+            // Child overrides base external proxy; if child has None, inherit base
+            external_proxy: child.network.external_proxy.or(base.network.external_proxy),
+            external_proxy_bypass: dedup_append(
+                &base.network.external_proxy_bypass,
+                &child.network.external_proxy_bypass,
+            ),
         },
         env_credentials: SecretsConfig {
             mappings: {
@@ -2017,6 +2031,8 @@ mod tests {
                 port_allow: vec![3000],
                 proxy_credentials: vec!["base_cred".to_string()],
                 custom_credentials: HashMap::new(),
+                external_proxy: None,
+                external_proxy_bypass: Vec::new(),
             },
             env_credentials: SecretsConfig {
                 mappings: {
@@ -2068,6 +2084,8 @@ mod tests {
                 port_allow: vec![3000, 5000],
                 proxy_credentials: vec![],
                 custom_credentials: HashMap::new(),
+                external_proxy: None,
+                external_proxy_bypass: Vec::new(),
             },
             env_credentials: SecretsConfig {
                 mappings: {

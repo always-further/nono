@@ -362,6 +362,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_proxy: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            external_proxy_bypass: vec![],
             override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
@@ -398,6 +399,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             allow_proxy: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            external_proxy_bypass: vec![],
             override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
@@ -472,6 +474,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     // Dry run mode - just show what would happen
     if args.dry_run {
         let prepared = prepare_sandbox(&args, silent)?;
+        validate_external_proxy_bypass(&args, &prepared)?;
         if !prepared.secrets.is_empty() && !silent {
             eprintln!(
                 "  Would inject {} credential(s) as environment variables",
@@ -582,6 +585,32 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let proxy_allow_hosts = effective_proxy.proxy_allow_hosts;
     let proxy_credentials = effective_proxy.proxy_credentials;
 
+    // Resolve effective external proxy: --allow-net clears it (same as other
+    // proxy settings), otherwise CLI overrides profile.
+    let effective_external_proxy = if args.allow_net {
+        None
+    } else {
+        args.external_proxy
+            .clone()
+            .or_else(|| prepared.external_proxy.clone())
+    };
+
+    // Resolve effective bypass hosts: cleared by --allow-net, otherwise
+    // CLI --external-proxy wins (use CLI bypass only), otherwise merge
+    // profile + CLI bypass hosts.
+    let effective_bypass = if args.allow_net {
+        Vec::new()
+    } else if args.external_proxy.is_some() {
+        args.external_proxy_bypass.clone()
+    } else {
+        let mut bypass = prepared.external_proxy_bypass.clone();
+        bypass.extend(args.external_proxy_bypass.clone());
+        bypass
+    };
+
+    // Validate: bypass hosts require an external proxy (from CLI or profile)
+    validate_external_proxy_bypass(&args, &prepared)?;
+
     // The proxy is needed when the network mode is ProxyOnly OR when there are
     // credential routes to inject. However, --block-net takes precedence: if
     // network is explicitly blocked, the proxy must NOT activate since that
@@ -590,6 +619,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         if !proxy_credentials.is_empty()
             || network_profile.is_some()
             || !proxy_allow_hosts.is_empty()
+            || effective_external_proxy.is_some()
         {
             warn!(
                 "--block-net is active; ignoring proxy configuration \
@@ -610,6 +640,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         ) || !proxy_credentials.is_empty()
             || network_profile.is_some()
             || !proxy_allow_hosts.is_empty()
+            || effective_external_proxy.is_some()
     };
 
     // Split --rollback-exclude values: glob metacharacters route to filename
@@ -663,7 +694,8 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             proxy_allow_hosts,
             proxy_credentials,
             custom_credentials: prepared.custom_credentials,
-            external_proxy: args.external_proxy.clone(),
+            external_proxy: effective_external_proxy,
+            external_proxy_bypass: effective_bypass,
             allow_bind_ports: args.allow_bind,
             proxy_port: args.proxy_port,
         },
@@ -743,10 +775,12 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
         || !args.allow_proxy.is_empty()
         || !args.proxy_credential.is_empty()
         || args.external_proxy.is_some()
+        || !args.external_proxy_bypass.is_empty()
     {
         return Err(NonoError::ConfigParse(
             "nono wrap does not support proxy flags (--network-profile, --allow-proxy, \
-             --proxy-credential, --external-proxy). Use `nono run` instead."
+             --proxy-credential, --external-proxy, --external-proxy-bypass). \
+             Use `nono run` instead."
                 .to_string(),
         ));
     }
@@ -772,6 +806,22 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
     }
 
     let prepared = prepare_sandbox(&args, silent)?;
+
+    // Also reject proxy flags that came from the profile (not just CLI).
+    // Profile-provided external_proxy / network settings activate ProxyOnly
+    // mode, which requires a parent process that wrap doesn't provide.
+    if prepared.external_proxy.is_some()
+        || matches!(
+            prepared.caps.network_mode(),
+            nono::NetworkMode::ProxyOnly { .. }
+        )
+    {
+        return Err(NonoError::ConfigParse(
+            "nono wrap does not support proxy mode (activated by profile network settings). \
+             Use `nono run` instead."
+                .to_string(),
+        ));
+    }
 
     execute_sandboxed(
         program,
@@ -827,6 +877,8 @@ struct ExecutionFlags {
     custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
     /// External proxy address (from --external-proxy)
     external_proxy: Option<String>,
+    /// Hosts to bypass the external proxy (from --external-proxy-bypass)
+    external_proxy_bypass: Vec<String>,
     /// Ports the sandboxed process is allowed to bind (from --allow-bind)
     allow_bind_ports: Vec<u16>,
     /// Fixed port for the credential proxy (from --proxy-port)
@@ -862,6 +914,7 @@ impl ExecutionFlags {
             proxy_credentials: Vec::new(),
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
+            external_proxy_bypass: Vec::new(),
             allow_bind_ports: Vec::new(),
             proxy_port: None,
         })
@@ -905,6 +958,23 @@ fn resolve_effective_proxy_settings(
         proxy_allow_hosts,
         proxy_credentials,
     }
+}
+
+/// Validate that bypass hosts are not specified without an external proxy.
+/// Called from both the dry-run and live execution paths.
+fn validate_external_proxy_bypass(args: &SandboxArgs, prepared: &PreparedSandbox) -> Result<()> {
+    let has_bypass =
+        !args.external_proxy_bypass.is_empty() || !prepared.external_proxy_bypass.is_empty();
+    let has_external_proxy = args.external_proxy.is_some() || prepared.external_proxy.is_some();
+
+    if has_bypass && !has_external_proxy {
+        return Err(NonoError::ConfigParse(
+            "--external-proxy-bypass requires --external-proxy \
+             (or external_proxy in profile network config)"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Apply sandbox pre-fork for Direct mode (both parent+child confined).
@@ -986,6 +1056,7 @@ fn build_proxy_config_from_flags(
         proxy_config.external_proxy = Some(nono_proxy::config::ExternalProxyConfig {
             address: addr.clone(),
             auth: None,
+            bypass_hosts: flags.external_proxy_bypass.clone(),
         });
     }
 
@@ -1022,9 +1093,27 @@ fn execute_sandboxed(
         });
     }
 
+    // Detect if we're launching Claude Code and inject system prompt
+    let prompt_file_path = if is_claude_command(&program) {
+        write_system_prompt_file(flags.silent)
+    } else {
+        None
+    };
+
+    // Build extra args for Claude Code (--append-system-prompt-file)
+    let extra_args: Vec<OsString> = if let Some(ref prompt_path) = prompt_file_path {
+        vec![
+            OsString::from("--append-system-prompt-file"),
+            OsString::from(prompt_path),
+        ]
+    } else {
+        vec![]
+    };
+
     // Convert OsString command to String for exec_strategy
     let command: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
         .chain(cmd_args.iter().map(|s| s.to_string_lossy().into_owned()))
+        .chain(extra_args.iter().map(|s| s.to_string_lossy().into_owned()))
         .collect();
 
     if command.is_empty() {
@@ -1476,6 +1565,9 @@ fn execute_sandboxed(
             }
 
             cleanup_capability_state_file(&cap_file_path);
+            if let Some(ref prompt_path) = prompt_file_path {
+                cleanup_capability_state_file(prompt_path);
+            }
             drop(config);
             drop(loaded_secrets);
             std::process::exit(exit_code);
@@ -1537,6 +1629,10 @@ struct PreparedSandbox {
     proxy_credentials: Vec<String>,
     /// Custom credential definitions from profile config
     custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
+    /// External proxy address from profile config (if any)
+    external_proxy: Option<String>,
+    /// Bypass hosts for external proxy from profile config
+    external_proxy_bypass: Vec<String>,
     /// Whether the profile enables runtime capability elevation (seccomp-notify + PTY)
     capability_elevation: bool,
 }
@@ -1580,6 +1676,11 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     // Load profile once if specified (used for both capabilities and secrets)
     let loaded_profile = if let Some(ref profile_name) = args.profile {
         let prof = profile::load_profile(profile_name)?;
+
+        // Remove legacy nono section from CLAUDE.md (one-time migration).
+        // Earlier versions injected instructions directly into CLAUDE.md which
+        // persisted when Claude was run without nono. Now uses --append-system-prompt-file.
+        hooks::remove_legacy_claude_md_section();
 
         // Install hooks defined in the profile (idempotent - only installs if needed)
         if !prof.hooks.hooks.is_empty() {
@@ -1659,6 +1760,13 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     let profile_custom_credentials = loaded_profile
         .as_ref()
         .map(|p| p.network.custom_credentials.clone())
+        .unwrap_or_default();
+    let profile_external_proxy = loaded_profile
+        .as_ref()
+        .and_then(|p| p.network.external_proxy.clone());
+    let profile_external_proxy_bypass = loaded_profile
+        .as_ref()
+        .map(|p| p.network.external_proxy_bypass.clone())
         .unwrap_or_default();
 
     // On Linux, pre-create paths that the claude-code profile grants but
@@ -1873,6 +1981,8 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         proxy_allow_hosts: profile_proxy_allow,
         proxy_credentials: profile_proxy_credentials,
         custom_credentials: profile_custom_credentials,
+        external_proxy: profile_external_proxy,
+        external_proxy_bypass: profile_external_proxy_bypass,
         capability_elevation,
     })
 }
@@ -1968,6 +2078,83 @@ fn enforce_rollback_limits(silent: bool) {
     }
 }
 
+/// Check if the command being executed is Claude Code.
+///
+/// Matches the binary name "claude" regardless of path (e.g. /usr/bin/claude,
+/// ~/.npm/bin/claude, claude).
+fn is_claude_command(program: &OsString) -> bool {
+    std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == "claude")
+        .unwrap_or(false)
+}
+
+/// System prompt content injected into Claude Code sessions via --append-system-prompt-file.
+///
+/// This is ephemeral — it only exists for the duration of the nono session.
+/// Unlike CLAUDE.md injection, it leaves no persistent state to clean up.
+const NONO_SYSTEM_PROMPT: &str = "\
+You are running inside the nono security sandbox. This is a capability-based \
+sandbox that CANNOT be bypassed or modified from within the session.
+
+On ANY \"operation not permitted\" or \"EPERM\" error:
+
+IMMEDIATELY tell the user:
+> This path is not accessible in the current nono sandbox session. You need to \
+exit and restart with:
+> `nono run --allow /path/to/needed -- claude`
+
+NEVER attempt:
+- Alternative file paths or locations
+- Copying files to accessible directories
+- Using sudo or permission changes
+- Manual workarounds for the user to try
+- ANY other approach besides restarting nono
+
+The sandbox is a hard security boundary. Once applied, it cannot be expanded. \
+The ONLY solution is to restart the session with additional --allow flags.";
+
+/// Write the system prompt file for Claude Code.
+///
+/// Returns the path to the temp file, or None if writing failed.
+fn write_system_prompt_file(silent: bool) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+
+    // SECURITY: Use tempfile crate to create file with O_EXCL and random name,
+    // preventing symlink attacks (CWE-377) on predictable paths in /tmp.
+    match tempfile::Builder::new()
+        .prefix(".nono-prompt-")
+        .suffix(".txt")
+        .tempfile()
+    {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(NONO_SYSTEM_PROMPT.as_bytes()) {
+                error!("Failed to write system prompt file: {}", e);
+                if !silent {
+                    eprintln!("  WARNING: System prompt file could not be written.");
+                }
+                return None;
+            }
+            // Persist the file so it outlives this scope (cleaned up manually after child exits)
+            match file.into_temp_path().keep() {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    error!("Failed to persist system prompt file: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to create system prompt file: {}", e);
+            if !silent {
+                eprintln!("  WARNING: System prompt file could not be written.");
+            }
+            None
+        }
+    }
+}
+
 fn write_capability_state_file(caps: &CapabilitySet, silent: bool) -> Option<std::path::PathBuf> {
     // Write sandbox state for `nono why --self`.
     let cap_file = std::env::temp_dir().join(format!(".nono-{}.json", std::process::id()));
@@ -2008,6 +2195,7 @@ mod tests {
             allow_proxy: vec![],
             proxy_credential: vec![],
             external_proxy: None,
+            external_proxy_bypass: vec![],
             override_deny: vec![],
             allow_command: vec![],
             block_command: vec![],
@@ -2117,6 +2305,8 @@ mod tests {
             proxy_allow_hosts: vec!["docs.python.org".to_string()],
             proxy_credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
+            external_proxy: None,
+            external_proxy_bypass: Vec::new(),
             capability_elevation: false,
         };
 
@@ -2149,6 +2339,8 @@ mod tests {
             proxy_allow_hosts: vec!["docs.python.org".to_string()],
             proxy_credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
+            external_proxy: None,
+            external_proxy_bypass: Vec::new(),
             capability_elevation: false,
         };
 
@@ -2219,5 +2411,29 @@ mod tests {
             select_exec_strategy(false, false, false, true),
             exec_strategy::ExecStrategy::Supervised
         );
+    }
+
+    #[test]
+    fn test_is_claude_command_bare_name() {
+        assert!(is_claude_command(&OsString::from("claude")));
+    }
+
+    #[test]
+    fn test_is_claude_command_absolute_path() {
+        assert!(is_claude_command(&OsString::from("/usr/local/bin/claude")));
+    }
+
+    #[test]
+    fn test_is_claude_command_home_path() {
+        assert!(is_claude_command(&OsString::from(
+            "/home/user/.npm/bin/claude"
+        )));
+    }
+
+    #[test]
+    fn test_is_claude_command_not_claude() {
+        assert!(!is_claude_command(&OsString::from("bash")));
+        assert!(!is_claude_command(&OsString::from("/usr/bin/python3")));
+        assert!(!is_claude_command(&OsString::from("claude-code")));
     }
 }

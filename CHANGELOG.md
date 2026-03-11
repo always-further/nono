@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.16.0] - 2026-03-10
+
+### Bug Fixes
+
+- Add pnpm paths to policy.json (#320) ([#320](https://github.com/always-further/nono/pull/320))
+
+- Add uv paths to python_runtime group (#313) ([#313](https://github.com/always-further/nono/pull/313))
+
+- Allow tty ioctls on Linux v5+ (#310) ([#310](https://github.com/always-further/nono/pull/310))
+
+
+### Documentation
+
+- Fix broken links and stale examples (#283) ([#283](https://github.com/always-further/nono/pull/283))
+
+
+### Features
+
+- Inject nono sandbox instructions via Claude Code system prompt (#322) ([#322](https://github.com/always-further/nono/pull/322))
+
+- Add `--external-proxy-bypass` for routing domains direct (#309) ([#309](https://github.com/always-further/nono/pull/309))
+
+- Abi-aware Landlock capability system (#256, #306) (#311) ([#311](https://github.com/always-further/nono/pull/311))
+
+- Add built-in swival profile (#312) ([#312](https://github.com/always-further/nono/pull/312))
+
+- Add same-sandbox process mode for signal and process-info (#299) ([#299](https://github.com/always-further/nono/pull/299))
+
+
+### Miscellaneous
+
+- Migrate Homebrew distribution from tap to homebrew-core (#321) ([#321](https://github.com/always-further/nono/pull/321))
+
+- Simplify instruction file signing with nono-attest Action (#317) ([#317](https://github.com/always-further/nono/pull/317))
+
 ## [0.15.0] - 2026-03-09
 
 ### Bug Fixes

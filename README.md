@@ -257,7 +257,6 @@ nono audit show 20260216-193311-20751 --json
 ### macOS
 
 ```bash
-brew tap always-further/nono
 brew install nono
 ```
 

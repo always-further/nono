@@ -363,7 +363,9 @@
           "~/.npm",
           "~/.node",
           "~/.local/share/fnm",
-          "/usr/local/lib/node_modules"
+          "/usr/local/lib/node_modules",
+          "~/Library/pnpm",
+          "~/.local/share/pnpm"
         ]
       }
     },
@@ -377,11 +379,12 @@
       }
     },
     "python_runtime": {
-      "description": "Python runtime paths",
+      "description": "Python runtime paths (pyenv, conda, uv)",
       "allow": {
         "read": [
           "~/.pyenv",
           "~/.local/lib",
+          "~/.local/share/uv",
           "~/.conda"
         ]
       }

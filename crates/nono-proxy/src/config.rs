@@ -142,6 +142,12 @@ pub struct ExternalProxyConfig {
 
     /// Optional authentication for the external proxy.
     pub auth: Option<ExternalProxyAuth>,
+
+    /// Hosts to bypass the external proxy and route directly.
+    /// Supports exact hostnames and `*.` wildcard suffixes (case-insensitive).
+    /// Empty = all traffic goes through the external proxy.
+    #[serde(default)]
+    pub bypass_hosts: Vec<String>,
 }
 
 /// Authentication for an external proxy.
@@ -183,5 +189,31 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: ProxyConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.allowed_hosts, vec!["api.openai.com"]);
+    }
+
+    #[test]
+    fn test_external_proxy_config_with_bypass_hosts() {
+        let config = ProxyConfig {
+            external_proxy: Some(ExternalProxyConfig {
+                address: "squid.corp:3128".to_string(),
+                auth: None,
+                bypass_hosts: vec!["internal.corp".to_string(), "*.private.net".to_string()],
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ProxyConfig = serde_json::from_str(&json).unwrap();
+        let ext = deserialized.external_proxy.unwrap();
+        assert_eq!(ext.address, "squid.corp:3128");
+        assert_eq!(ext.bypass_hosts.len(), 2);
+        assert_eq!(ext.bypass_hosts[0], "internal.corp");
+        assert_eq!(ext.bypass_hosts[1], "*.private.net");
+    }
+
+    #[test]
+    fn test_external_proxy_config_bypass_hosts_default_empty() {
+        let json = r#"{"address": "proxy:3128", "auth": null}"#;
+        let ext: ExternalProxyConfig = serde_json::from_str(json).unwrap();
+        assert!(ext.bypass_hosts.is_empty());
     }
 }

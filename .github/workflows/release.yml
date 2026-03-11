@@ -156,50 +156,17 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  update-homebrew:
-    name: Update Homebrew Formula
+  update-homebrew-core:
+    name: Bump Homebrew Core Formula
     needs: release
     runs-on: ubuntu-latest
-    # Only update stable formula for non-prerelease versions
     if: ${{ !contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
     steps:
-      - name: Checkout homebrew-nono
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Bump homebrew-core formula
+        uses: mislav/bump-homebrew-formula-action@56a283fa15557e9abaa4bdb63b8212abc68e655c # v3.6
         with:
-          repository: always-further/homebrew-nono
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-nono
-
-      - name: Download macOS artifacts
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
-        with:
-          pattern: nono-*-apple-darwin
-          path: artifacts
-
-      - name: Update formula
-        run: |
-          VERSION="${{ env.RELEASE_TAG }}"
-          VERSION="${VERSION#v}"
-
-          # Calculate SHA256 for both architectures
-          ARM64_SHA=$(sha256sum artifacts/nono-aarch64-apple-darwin/nono-*-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
-          X64_SHA=$(sha256sum artifacts/nono-x86_64-apple-darwin/nono-*-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
-
-          # Update formula version and checksums
-          cd homebrew-nono
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/nono.rb
-          # Update URLs (both directory path and filename)
-          sed -i "s|releases/download/v[^/]*/nono-v[^-]*-|releases/download/v${VERSION}/nono-v${VERSION}-|g" Formula/nono.rb
-          # Update ARM64 SHA (first sha256 in on_arm block)
-          sed -i "/on_arm/,/end/{s/sha256 \"[^\"]*\"/sha256 \"${ARM64_SHA}\"/}" Formula/nono.rb
-          # Update x64 SHA (sha256 in on_intel block)
-          sed -i "/on_intel/,/end/{s/sha256 \"[^\"]*\"/sha256 \"${X64_SHA}\"/}" Formula/nono.rb
-
-      - name: Commit and push
-        run: |
-          cd homebrew-nono
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/nono.rb
-          git diff --staged --quiet || git commit -m "Update nono to ${{ env.RELEASE_TAG }}"
-          git push
+          formula-name: nono
+          tag-name: ${{ env.RELEASE_TAG }}
+          download-url: "https://github.com/always-further/nono/archive/refs/tags/${{ env.RELEASE_TAG }}.tar.gz"
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_CORE_TOKEN }}

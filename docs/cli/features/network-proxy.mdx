@@ -92,6 +92,39 @@ nono run --allow-cwd --network-profile enterprise --external-proxy squid.corp:31
 
 CONNECT requests are chained through the corporate proxy. Cloud metadata endpoints are still denied.
 
+#### Bypassing the External Proxy
+
+Some domains may need to bypass the enterprise proxy and connect directly (e.g., internal services that are not reachable through the proxy, or services that the proxy interferes with):
+
+```bash
+nono run --allow-cwd --network-profile enterprise \
+  --external-proxy squid.corp:3128 \
+  --external-proxy-bypass git.internal.corp \
+  --external-proxy-bypass "*.dev.local" \
+  -- my-agent
+```
+
+Bypass patterns support exact hostnames and `*.` wildcard suffixes (case-insensitive). Matching hosts are routed directly via a CONNECT tunnel; everything else goes through the enterprise proxy.
+
+This can also be configured in a profile:
+
+```json
+{
+  "network": {
+    "external_proxy": "squid.corp:3128",
+    "external_proxy_bypass": ["git.internal.corp", "*.dev.local"]
+  }
+}
+```
+
+Or via environment variables:
+
+```bash
+export NONO_EXTERNAL_PROXY=squid.corp:3128
+export NONO_EXTERNAL_PROXY_BYPASS=git.internal.corp,*.dev.local
+nono run --allow-cwd -- my-agent
+```
+
 ## Network Profiles
 
 Network profiles are composable groups of allowed hosts, similar to filesystem policy groups. They're defined in `network-policy.json` (embedded in the binary).
@@ -133,6 +166,22 @@ User profiles can specify a network profile in the `network` section:
   "network": {
     "network_profile": "claude-code",
     "allow_proxy": ["my-internal-api.example.com"]
+  }
+}
+```
+
+Enterprise profiles can include external proxy and bypass configuration:
+
+```json
+{
+  "meta": { "name": "corp-agent" },
+  "filesystem": {
+    "allow": ["$WORKDIR"]
+  },
+  "network": {
+    "network_profile": "enterprise",
+    "external_proxy": "squid.corp:3128",
+    "external_proxy_bypass": ["git.internal.corp", "*.dev.local"]
   }
 }
 ```

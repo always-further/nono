@@ -14,6 +14,76 @@ use tokio::net::TcpStream;
 use tracing::debug;
 use zeroize::Zeroizing;
 
+/// Matcher for hosts that should bypass the external proxy.
+///
+/// Supports exact hostname match and `*.` wildcard suffix match,
+/// both case-insensitive. Uses the same `*`-prefix parsing pattern
+/// as `HostFilter::new()`.
+#[derive(Debug, Clone)]
+pub struct BypassMatcher {
+    /// Exact hostnames (lowercased)
+    exact: Vec<String>,
+    /// Wildcard suffixes (e.g., ".internal.corp", lowercased)
+    suffixes: Vec<String>,
+}
+
+impl BypassMatcher {
+    /// Create a new bypass matcher from a list of host patterns.
+    ///
+    /// Entries starting with `*.` are wildcard patterns matching any subdomain.
+    /// All other entries are exact matches. Matching is case-insensitive.
+    ///
+    /// Only the `*.domain` form is accepted for wildcards. Bare `*` and
+    /// patterns like `*corp` (without the dot) are treated as exact hostnames
+    /// to prevent accidental over-broad matching.
+    #[must_use]
+    pub fn new(hosts: &[String]) -> Self {
+        let mut exact = Vec::new();
+        let mut suffixes = Vec::new();
+
+        for host in hosts {
+            let lower = host.to_lowercase();
+            if let Some(suffix) = lower.strip_prefix("*.") {
+                // *.example.com -> .example.com
+                if !suffix.is_empty() {
+                    suffixes.push(format!(".{suffix}"));
+                }
+                // Bare "*." with nothing after is silently ignored (no valid domain)
+            } else {
+                exact.push(lower);
+            }
+        }
+
+        Self { exact, suffixes }
+    }
+
+    /// Check whether a host should bypass the external proxy.
+    #[must_use]
+    pub fn matches(&self, host: &str) -> bool {
+        let lower = host.to_lowercase();
+
+        // Exact match
+        if self.exact.contains(&lower) {
+            return true;
+        }
+
+        // Wildcard suffix match
+        for suffix in &self.suffixes {
+            if lower.ends_with(suffix.as_str()) && lower.len() > suffix.len() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Whether any bypass hosts are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.exact.is_empty() && self.suffixes.is_empty()
+    }
+}
+
 /// Handle a CONNECT request by chaining it to an external proxy.
 ///
 /// 1. Validate session token
@@ -235,5 +305,87 @@ mod tests {
     #[test]
     fn test_parse_status_code_malformed() {
         assert!(parse_status_code("garbage").is_err());
+    }
+
+    #[test]
+    fn test_bypass_matcher_exact() {
+        let matcher = BypassMatcher::new(&["internal.corp".to_string()]);
+        assert!(matcher.matches("internal.corp"));
+        assert!(!matcher.matches("other.corp"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_case_insensitive() {
+        let matcher = BypassMatcher::new(&["Internal.Corp".to_string()]);
+        assert!(matcher.matches("internal.corp"));
+        assert!(matcher.matches("INTERNAL.CORP"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_wildcard() {
+        let matcher = BypassMatcher::new(&["*.internal.corp".to_string()]);
+        assert!(matcher.matches("app.internal.corp"));
+        assert!(matcher.matches("deep.sub.internal.corp"));
+        // Bare domain should NOT match wildcard
+        assert!(!matcher.matches("internal.corp"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_wildcard_case_insensitive() {
+        let matcher = BypassMatcher::new(&["*.Internal.Corp".to_string()]);
+        assert!(matcher.matches("APP.INTERNAL.CORP"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_no_match() {
+        let matcher =
+            BypassMatcher::new(&["internal.corp".to_string(), "*.private.net".to_string()]);
+        assert!(!matcher.matches("api.openai.com"));
+        assert!(!matcher.matches("evil.com"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_empty() {
+        let matcher = BypassMatcher::new(&[]);
+        assert!(matcher.is_empty());
+        assert!(!matcher.matches("anything.com"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_mixed() {
+        let matcher =
+            BypassMatcher::new(&["exact.host.com".to_string(), "*.wildcard.com".to_string()]);
+        assert!(matcher.matches("exact.host.com"));
+        assert!(matcher.matches("sub.wildcard.com"));
+        assert!(!matcher.matches("wildcard.com"));
+        assert!(!matcher.matches("other.com"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_bare_star_is_not_wildcard() {
+        // Bare "*" must NOT bypass everything — it should be treated as
+        // a literal (non-matching) hostname, not a universal wildcard.
+        let matcher = BypassMatcher::new(&["*".to_string()]);
+        assert!(!matcher.matches("anything.com"));
+        assert!(!matcher.matches("internal.corp"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_star_without_dot_is_literal() {
+        // "*corp" (no dot) must NOT be treated as a wildcard suffix.
+        // Only "*.corp" is a valid wildcard pattern.
+        let matcher = BypassMatcher::new(&["*corp".to_string()]);
+        assert!(!matcher.matches("internal.corp"));
+        assert!(!matcher.matches("subcorp"));
+        // It's treated as the literal hostname "*corp"
+        assert!(matcher.matches("*corp"));
+    }
+
+    #[test]
+    fn test_bypass_matcher_star_dot_only_is_ignored() {
+        // "*." with nothing after is not a valid domain pattern.
+        let matcher = BypassMatcher::new(&["*.".to_string()]);
+        assert!(matcher.is_empty());
+        assert!(!matcher.matches("anything.com"));
     }
 }

@@ -117,6 +117,8 @@ Within profile JSON, use `block` for the network toggle. The parser also accepts
     "allow_proxy": ["my-internal-api.example.com"],
     "allow_port": [3000],
     "proxy_credentials": ["openai", "anthropic"],
+    "external_proxy": "squid.corp:3128",
+    "external_proxy_bypass": ["git.internal.corp", "*.dev.local"],
     "custom_credentials": {
       "telegram": {
         "upstream": "https://api.telegram.org",
@@ -137,6 +139,8 @@ Within profile JSON, use `block` for the network toggle. The parser also accepts
 | `allow_port` | Localhost TCP ports to allow bidirectional IPC (equivalent to `--allow-port`) |
 | `proxy_credentials` | Credential services to enable via reverse proxy (e.g., `openai`, `anthropic`) |
 | `custom_credentials` | Custom credential service definitions for APIs not in the built-in list |
+| `external_proxy` | External (enterprise) proxy address, e.g., `squid.corp:3128` |
+| `external_proxy_bypass` | Domains to bypass the external proxy (exact hostnames and `*.` wildcards) |
 
 #### Custom Credentials
 
@@ -340,7 +344,7 @@ nono ships with 22 built-in groups:
 **Runtime groups** (language toolchain paths):
 - `node_runtime` - nvm, fnm, npm, volta
 - `rust_runtime` - rustup, cargo
-- `python_runtime` - pyenv, conda, pip
+- `python_runtime` - pyenv, conda, pip, uv
 - `user_tools` - Local bins, .desktop files, man pages, shell completions
 
 **Protection groups**:

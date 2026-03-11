@@ -125,10 +125,6 @@ fn install_claude_code_hook(config: &HookConfig) -> Result<HookInstallResult> {
     // Update settings.json to register the hook
     let settings_modified = update_claude_settings(&settings_path, config)?;
 
-    // Update CLAUDE.md with nono sandbox instructions
-    let claude_md_path = home.join(".claude").join("CLAUDE.md");
-    update_claude_md(&claude_md_path)?;
-
     // Determine result based on what changed
     let result = if needs_install && !script_existed {
         HookInstallResult::Installed
@@ -236,106 +232,54 @@ fn update_claude_settings(settings_path: &PathBuf, config: &HookConfig) -> Resul
     }
 }
 
-/// Nono sandbox section marker for CLAUDE.md
-const NONO_SECTION_START: &str = "<!-- nono-sandbox-start -->";
-const NONO_SECTION_END: &str = "<!-- nono-sandbox-end -->";
-
-/// Content for the nono sandbox section in CLAUDE.md
-const NONO_CLAUDE_MD_CONTENT: &str = r#"## Nono Sandbox - CRITICAL
-
-**You are running inside the nono security sandbox.** This is a capability-based sandbox that CANNOT be bypassed or modified from within the session.
-
-### On ANY "operation not permitted" or "EPERM" error:
-
-**IMMEDIATELY tell the user:**
-> This path is not accessible in the current nono sandbox session. You need to exit and restart with:
-> `nono run --allow /path/to/needed -- claude`
-
-**NEVER attempt:**
-- Alternative file paths or locations
-- Copying files to accessible directories
-- Using sudo or permission changes
-- Manual workarounds for the user to try
-- ANY other approach besides restarting nono
-
-The sandbox is a hard security boundary. Once applied, it cannot be expanded. The ONLY solution is to restart the session with additional --allow flags.
-"#;
-
-/// Update ~/.claude/CLAUDE.md with nono sandbox instructions
+/// Remove legacy nono sandbox section from ~/.claude/CLAUDE.md.
 ///
-/// Adds or updates a nono-managed section in CLAUDE.md. This provides
-/// upfront context to Claude about the sandbox restrictions.
-fn update_claude_md(claude_md_path: &PathBuf) -> Result<()> {
-    let nono_section = format!(
-        "{}\n{}{}",
-        NONO_SECTION_START, NONO_CLAUDE_MD_CONTENT, NONO_SECTION_END
-    );
+/// Earlier versions of nono injected sandbox instructions directly into CLAUDE.md
+/// between `<!-- nono-sandbox-start -->` and `<!-- nono-sandbox-end -->` markers.
+/// This caused stale instructions to persist when Claude was run without nono.
+/// The instructions are now injected via `--append-system-prompt-file` instead.
+pub fn remove_legacy_claude_md_section() {
+    let home = match xdg_home::home_dir() {
+        Some(h) => h,
+        None => return,
+    };
+    let claude_md_path = home.join(".claude").join("CLAUDE.md");
+    if !claude_md_path.exists() {
+        return;
+    }
 
-    let content = if claude_md_path.exists() {
-        let existing = fs::read_to_string(claude_md_path).map_err(|e| {
-            NonoError::HookInstall(format!(
-                "Failed to read {}: {}",
-                claude_md_path.display(),
-                e
-            ))
-        })?;
-
-        // Check if nono section already exists
-        if existing.contains(NONO_SECTION_START) {
-            // Replace existing section
-            let start_idx = existing.find(NONO_SECTION_START);
-            let end_idx = existing.find(NONO_SECTION_END);
-
-            // Validate: both markers exist and end comes after start
-            if let (Some(start), Some(end)) = (start_idx, end_idx) {
-                if end > start {
-                    let end_of_section = end + NONO_SECTION_END.len();
-                    let before = &existing[..start];
-                    let after = &existing[end_of_section..];
-                    format!("{}\n\n{}{}", before.trim_end(), nono_section, after)
-                } else {
-                    // Markers in wrong order - malformed, append fresh
-                    tracing::warn!("Malformed nono section markers in CLAUDE.md (end before start), appending fresh");
-                    format!("{}\n\n{}", existing.trim_end(), nono_section)
-                }
-            } else {
-                // Only one marker present - malformed, append fresh
-                tracing::warn!(
-                    "Malformed nono section in CLAUDE.md (missing marker), appending fresh"
-                );
-                format!("{}\n\n{}", existing.trim_end(), nono_section)
-            }
-        } else {
-            // Append section
-            format!("{}\n\n{}", existing.trim_end(), nono_section)
-        }
-    } else {
-        // Create new file with just the nono section
-        nono_section
+    let existing = match fs::read_to_string(&claude_md_path) {
+        Ok(content) => content,
+        Err(_) => return,
     };
 
-    // Atomic write: write to temp file, then rename
-    let temp_path = claude_md_path.with_extension("md.tmp");
-    fs::write(&temp_path, &content).map_err(|e| {
-        NonoError::HookInstall(format!(
-            "Failed to write temp file {}: {}",
-            temp_path.display(),
-            e
-        ))
-    })?;
+    const START_MARKER: &str = "<!-- nono-sandbox-start -->";
+    const END_MARKER: &str = "<!-- nono-sandbox-end -->";
 
-    fs::rename(&temp_path, claude_md_path).map_err(|e| {
-        // Clean up temp file on rename failure
-        let _ = fs::remove_file(&temp_path);
-        NonoError::HookInstall(format!(
-            "Failed to rename temp file to {}: {}",
-            claude_md_path.display(),
-            e
-        ))
-    })?;
+    if !existing.contains(START_MARKER) {
+        return;
+    }
 
-    tracing::info!("Updated {}", claude_md_path.display());
-    Ok(())
+    let start_idx = existing.find(START_MARKER);
+    let end_idx = existing.find(END_MARKER);
+
+    if let (Some(start), Some(end)) = (start_idx, end_idx) {
+        if end > start {
+            let end_of_section = end + END_MARKER.len();
+            let before = &existing[..start];
+            let after = &existing[end_of_section..];
+            let cleaned = format!("{}{}", before.trim_end(), after);
+            let cleaned = cleaned.trim().to_string();
+
+            if cleaned.is_empty() {
+                // File only contained the nono section — remove it entirely
+                let _ = fs::remove_file(&claude_md_path);
+            } else {
+                let _ = fs::write(&claude_md_path, format!("{}\n", cleaned));
+            }
+            tracing::info!("Removed legacy nono section from CLAUDE.md");
+        }
+    }
 }
 
 /// Install all hooks from a profile's hooks configuration
