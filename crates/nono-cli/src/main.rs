@@ -980,7 +980,7 @@ struct ExecutionFlags {
     open_url_origins: Vec<String>,
     /// Whether to allow http://localhost URL opens
     open_url_allow_localhost: bool,
-    /// Skip agent system prompt injection
+    /// Skip agent hook installation and system prompt injection
     no_hooks: bool,
 }
 

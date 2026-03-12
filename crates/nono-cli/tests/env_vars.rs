@@ -248,10 +248,14 @@ fn env_nono_no_hooks() {
         .output()
         .expect("failed to run nono");
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "NONO_NO_HOOKS=true should be accepted, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "NONO_NO_HOOKS=true should be accepted, stderr: {stderr}",
+    );
+    assert!(
+        !stderr.contains("Installing hook"),
+        "hooks should not be installed with NONO_NO_HOOKS=true, got: {stderr}",
     );
 }
 
