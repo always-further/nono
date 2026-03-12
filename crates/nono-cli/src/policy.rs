@@ -1996,4 +1996,61 @@ mod tests {
             err
         );
     }
+
+    // =========================================================================
+    // Security: system_read_linux must not grant broad /etc access
+    // =========================================================================
+
+    /// Verify that the embedded policy's system_read_linux group does not contain
+    /// bare "/etc" in its allow.read list. Granting the entire /etc subtree via
+    /// Landlock (which is strictly allow-list with no deny-within-allow) would let
+    /// sandboxed processes read /etc/shadow, /etc/sudoers, /etc/passwd, etc.
+    #[test]
+    fn test_system_read_linux_does_not_grant_bare_etc() {
+        let policy = load_embedded_policy().expect("embedded policy must parse");
+        let group = policy
+            .groups
+            .get("system_read_linux")
+            .expect("system_read_linux group must exist");
+        let read_paths = group
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+        assert!(
+            !read_paths.iter().any(|p| p == "/etc"),
+            "system_read_linux must not grant bare '/etc' — use specific paths instead. \
+             Found paths: {:?}",
+            read_paths
+        );
+    }
+
+    /// Verify that /etc/shadow is not reachable as an allowed read path through
+    /// system_read_linux. Any entry in allow.read that is a prefix of /etc/shadow
+    /// (i.e., "/etc" or "/") would recursively grant read access to /etc/shadow
+    /// under Landlock's allow-list model.
+    #[test]
+    fn test_system_read_linux_does_not_expose_etc_shadow() {
+        let policy = load_embedded_policy().expect("embedded policy must parse");
+        let group = policy
+            .groups
+            .get("system_read_linux")
+            .expect("system_read_linux group must exist");
+        let read_paths = group
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+
+        let shadow = PathBuf::from("/etc/shadow");
+        for path_str in read_paths {
+            let path = PathBuf::from(path_str);
+            assert!(
+                !shadow.starts_with(&path),
+                "system_read_linux allow.read entry '{}' covers /etc/shadow — \
+                 this would grant Landlock read access to the system password file",
+                path_str
+            );
+        }
+    }
 }
