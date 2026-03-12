@@ -254,20 +254,21 @@ fn run_sign_keyless(args: TrustSignArgs) -> Result<()> {
 
     // Discover OIDC token from ambient environment (GitHub Actions, GitLab CI, etc.)
     let token = discover_oidc_token(&rt)?;
+    let jwt = token.raw().to_string();
 
     let context = sigstore_sign::SigningContext::production();
     let signer = context.signer(token);
 
     // Multi-file: produce a single .nono-trust.bundle with all subjects
     if files.len() > 1 {
-        return rt.block_on(run_sign_multi_keyless(&files, &signer));
+        return rt.block_on(run_sign_multi_keyless(&files, &signer, &jwt));
     }
 
     let mut success_count = 0u32;
     let mut fail_count = 0u32;
 
     for file_path in &files {
-        match rt.block_on(sign_file_keyless(file_path, &signer)) {
+        match rt.block_on(sign_file_keyless(file_path, &signer, &jwt)) {
             Ok(()) => {
                 let bundle_path = trust::bundle_path_for(file_path);
                 eprintln!(
@@ -309,9 +310,13 @@ fn run_sign_keyless(args: TrustSignArgs) -> Result<()> {
 }
 
 /// Sign multiple files into a single multi-subject bundle (keyless via Fulcio + Rekor).
-async fn run_sign_multi_keyless(files: &[PathBuf], signer: &sigstore_sign::Signer) -> Result<()> {
+async fn run_sign_multi_keyless(
+    files: &[PathBuf],
+    signer: &sigstore_sign::Signer,
+    jwt: &str,
+) -> Result<()> {
     let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
-    let signer_predicate = build_keyless_predicate();
+    let signer_predicate = build_keyless_predicate(jwt);
 
     let mut attestation =
         sigstore_sign::Attestation::new(trust::NONO_MULTI_SUBJECT_PREDICATE_TYPE, signer_predicate);
@@ -383,6 +388,7 @@ async fn run_sign_multi_keyless(files: &[PathBuf], signer: &sigstore_sign::Signe
 async fn sign_file_keyless(
     file_path: &Path,
     signer: &sigstore_sign::Signer,
+    jwt: &str,
 ) -> std::result::Result<(), String> {
     let content = std::fs::read(file_path).map_err(|e| format!("failed to read file: {e}"))?;
 
@@ -396,8 +402,7 @@ async fn sign_file_keyless(
     let digest_hash = sigstore_sign::types::Sha256Hash::from_hex(&digest_hex)
         .map_err(|e| format!("failed to parse digest: {e}"))?;
 
-    // Build the signer predicate with OIDC metadata from environment
-    let signer_predicate = build_keyless_predicate();
+    let signer_predicate = build_keyless_predicate(jwt);
 
     // Build the attestation using sigstore-sign's Attestation type
     let attestation = sigstore_sign::Attestation::new(trust::NONO_PREDICATE_TYPE, signer_predicate)
@@ -418,60 +423,32 @@ async fn sign_file_keyless(
     Ok(())
 }
 
-fn gitlab_keyless_predicate() -> Option<serde_json::Value> {
-    if std::env::var("GITLAB_CI").as_deref() != Ok("true") {
+fn decode_jwt_claims(jwt: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() != 3 {
         return None;
     }
-
-    let host = std::env::var("CI_SERVER_HOST").unwrap_or_else(|_| "gitlab.com".to_string());
-    let port = std::env::var("CI_SERVER_PORT").unwrap_or_else(|_| "443".to_string());
-    let project_path = std::env::var("CI_PROJECT_PATH").unwrap_or_default();
-
-    let host_authority = if port == "443" {
-        host.clone()
-    } else {
-        format!("{host}:{port}")
-    };
-
-    let git_ref = match std::env::var("CI_COMMIT_TAG") {
-        Ok(tag) if !tag.is_empty() => format!("refs/tags/{tag}"),
-        _ => format!(
-            "refs/heads/{}",
-            std::env::var("CI_COMMIT_REF_NAME").unwrap_or_default()
-        ),
-    };
-
-    let workflow = format!("{host_authority}/{project_path}//.gitlab-ci.yml@{git_ref}");
-
-    Some(serde_json::json!({
-        "version": 1,
-        "signer": {
-            "kind": "keyless",
-            "oidc_issuer": std::env::var("CI_SERVER_URL")
-                .unwrap_or_else(|_| "https://gitlab.com".to_string()),
-            "repository": project_path,
-            "workflow": workflow,
-            "ref": git_ref
-        }
-    }))
+    let payload_bytes = nono::trust::base64::base64url_decode(parts[1]).ok()?;
+    serde_json::from_slice(&payload_bytes).ok()
 }
 
-/// Build the keyless signer predicate from ambient OIDC environment variables.
-fn build_keyless_predicate() -> serde_json::Value {
-    if let Some(gitlab_predicate) = gitlab_keyless_predicate() {
-        return gitlab_predicate;
+/// Build the keyless signer predicate from ambient OIDC token.
+fn build_keyless_predicate(jwt: &str) -> serde_json::Value {
+    let mut signer = serde_json::Map::new();
+    signer.insert(
+        "kind".to_string(),
+        serde_json::Value::String("keyless".to_string()),
+    );
+
+    if let Some(claims) = decode_jwt_claims(jwt) {
+        for (key, value) in &claims {
+            signer.entry(key.clone()).or_insert_with(|| value.clone());
+        }
     }
 
     serde_json::json!({
         "version": 1,
-        "signer": {
-            "kind": "keyless",
-            "oidc_issuer": std::env::var("ACTIONS_ID_TOKEN_ISSUER")
-                .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string()),
-            "repository": std::env::var("GITHUB_REPOSITORY").unwrap_or_default(),
-            "workflow": std::env::var("GITHUB_WORKFLOW_REF").unwrap_or_default(),
-            "ref": std::env::var("GITHUB_REF").unwrap_or_default()
-        }
+        "signer": serde_json::Value::Object(signer)
     })
 }
 
@@ -1105,11 +1082,10 @@ fn canonicalize_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 fn format_identity(identity: &trust::SignerIdentity) -> String {
     match identity {
         trust::SignerIdentity::Keyed { key_id } => format!("{key_id} (keyed)"),
-        trust::SignerIdentity::Keyless { workflow, .. }
-            if workflow.contains("//.gitlab-ci.yml@") =>
-        {
-            workflow.clone()
-        }
+        // TODO: Refactor to return build_config_uri extension if the same as workflow.
+        trust::SignerIdentity::Keyless {
+            build_signer_uri, ..
+        } if !build_signer_uri.is_empty() => build_signer_uri.clone(),
         trust::SignerIdentity::Keyless {
             repository,
             workflow,
@@ -1169,6 +1145,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: String::new(),
         };
         assert_eq!(
             format_identity(&id),
@@ -1179,10 +1156,12 @@ mod tests {
     #[test]
     fn format_identity_keyless_gitlab() {
         let id = trust::SignerIdentity::Keyless {
+            git_ref: "refs/heads/main".to_string(),
             issuer: "https://gitlab.com".to_string(),
             repository: "my-group/my-project".to_string(),
             workflow: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
-            git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+                .to_string(),
         };
         assert_eq!(
             format_identity(&id),
@@ -1198,6 +1177,8 @@ mod tests {
             workflow: "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
                 .to_string(),
             git_ref: "refs/heads/develop".to_string(),
+            build_signer_uri: "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
+                .to_string(),
         };
         assert_eq!(
             format_identity(&id),
@@ -1205,72 +1186,65 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_keyless_predicate_defaults_to_github() {
-        std::env::remove_var("GITLAB_CI");
-        let predicate = build_keyless_predicate();
-        let signer = &predicate["signer"];
-        assert_eq!(signer["kind"], "keyless");
-        assert!(signer.get("oidc_issuer").is_some());
-        assert!(signer.get("repository").is_some());
-        assert!(signer.get("workflow").is_some());
-        assert!(signer.get("ref").is_some());
+    fn fake_jwt(claims_json: &str) -> String {
+        let header = nono::trust::base64::base64url_encode(br#"{"alg":"none"}"#);
+        let payload = nono::trust::base64::base64url_encode(claims_json.as_bytes());
+        format!("{header}.{payload}.signature")
     }
 
     #[test]
-    fn build_keyless_predicate_gitlab() {
-        std::env::set_var("GITLAB_CI", "true");
-        std::env::set_var("CI_SERVER_HOST", "gitlab.com");
-        std::env::set_var("CI_SERVER_PORT", "443");
-        std::env::set_var("CI_PROJECT_PATH", "my-group/my-project");
-        std::env::set_var("CI_COMMIT_REF_NAME", "main");
-        std::env::remove_var("CI_COMMIT_TAG");
-        let predicate = build_keyless_predicate();
-        let signer = &predicate["signer"];
-        assert_eq!(signer["kind"], "keyless");
-        assert_eq!(signer["repository"], "my-group/my-project");
-        assert_eq!(
-            signer["workflow"],
-            "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+    fn build_keyless_predicate_includes_github_claims() {
+        let jwt = fake_jwt(
+            r#"{
+            "aud": "sigstore",
+            "exp": 9999999999,
+            "iat": 1000000000,
+            "iss": "https://token.actions.githubusercontent.com",
+            "ref": "refs/heads/main",
+            "repository": "org/repo",
+            "sub": "repo:org/repo:ref:refs/heads/main",
+            "workflow_ref": ".github/workflows/sign.yml"
+        }"#,
         );
+        let predicate = build_keyless_predicate(&jwt);
+        let signer = &predicate["signer"];
+        assert_eq!(signer["iss"], "https://token.actions.githubusercontent.com");
+        assert_eq!(signer["kind"], "keyless");
+        assert_eq!(signer["sub"], "repo:org/repo:ref:refs/heads/main");
         assert_eq!(signer["ref"], "refs/heads/main");
-        std::env::remove_var("GITLAB_CI");
-        std::env::remove_var("CI_SERVER_HOST");
-        std::env::remove_var("CI_SERVER_PORT");
-        std::env::remove_var("CI_PROJECT_PATH");
-        std::env::remove_var("CI_COMMIT_REF_NAME");
+        assert_eq!(signer["repository"], "org/repo");
+        assert_eq!(signer["workflow_ref"], ".github/workflows/sign.yml");
     }
 
     #[test]
-    fn build_keyless_predicate_gitlab_custom_port() {
-        std::env::set_var("GITLAB_CI", "true");
-        std::env::set_var("CI_SERVER_HOST", "gitlab.example.com");
-        std::env::set_var("CI_SERVER_PORT", "8443");
-        std::env::set_var("CI_PROJECT_PATH", "team/app");
-        std::env::set_var("CI_COMMIT_REF_NAME", "develop");
-        std::env::remove_var("CI_COMMIT_TAG");
-        let predicate = build_keyless_predicate();
-        let signer = &predicate["signer"];
-        assert_eq!(
-            signer["workflow"],
-            "gitlab.example.com:8443/team/app//.gitlab-ci.yml@refs/heads/develop"
+    fn build_keyless_predicate_includes_custom_claims() {
+        let jwt = fake_jwt(
+            r#"{
+            "aud": "sigstore",
+            "exp": 9999999999,
+            "iat": 1000000000,
+            "iss": "https://gitlab.com",
+            "namespace_path": "my-group",
+            "pipeline_id": "12345",
+            "project_path": "my-group/my-project",
+            "ref_type": "branch",
+            "ref": "main",
+            "sub": "project_path:my-group/my-project:ref_type:branch:ref:main"
+        }"#,
         );
-        std::env::remove_var("GITLAB_CI");
-        std::env::remove_var("CI_SERVER_HOST");
-        std::env::remove_var("CI_SERVER_PORT");
-        std::env::remove_var("CI_PROJECT_PATH");
-        std::env::remove_var("CI_COMMIT_REF_NAME");
-    }
-
-    #[test]
-    fn build_keyless_predicate_gitlab_takes_precedence() {
-        std::env::set_var("GITLAB_CI", "true");
-        std::env::set_var("CI_SERVER_URL", "https://gitlab.example.com");
-        let predicate = build_keyless_predicate();
+        let predicate = build_keyless_predicate(&jwt);
         let signer = &predicate["signer"];
-        assert_eq!(signer["oidc_issuer"], "https://gitlab.example.com");
-        std::env::remove_var("GITLAB_CI");
-        std::env::remove_var("CI_SERVER_URL");
+        assert_eq!(signer["iss"], "https://gitlab.com");
+        assert_eq!(signer["kind"], "keyless");
+        assert_eq!(signer["namespace_path"], "my-group");
+        assert_eq!(signer["pipeline_id"], "12345");
+        assert_eq!(signer["project_path"], "my-group/my-project");
+        assert_eq!(signer["ref_type"], "branch");
+        assert_eq!(signer["ref"], "main");
+        assert_eq!(
+            signer["sub"],
+            "project_path:my-group/my-project:ref_type:branch:ref:main"
+        );
     }
 
     #[test]

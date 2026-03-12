@@ -365,6 +365,7 @@ mod tests {
             ref_pattern: None,
             key_id: Some(key_id.to_string()),
             public_key: None,
+            build_signer_uri: None,
         }
     }
 
@@ -377,6 +378,7 @@ mod tests {
             ref_pattern: Some("*".to_string()),
             key_id: None,
             public_key: None,
+            build_signer_uri: None,
         }
     }
 
@@ -671,6 +673,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/tags/v1.0.0".to_string(),
+            build_signer_uri: String::new(),
         };
         let result = evaluate_file(&policy, Path::new("CLAUDE.md"), "abcd", Some(&identity));
         assert!(result.outcome.is_verified());
@@ -688,6 +691,7 @@ mod tests {
             ref_pattern: Some("refs/heads/*".to_string()),
             key_id: None,
             public_key: None,
+            build_signer_uri: None,
         };
         let policy = make_policy(Enforcement::Deny, vec![publisher], vec![]);
         let identity = SignerIdentity::Keyless {
@@ -695,6 +699,7 @@ mod tests {
             repository: "my-group/my-project".to_string(),
             workflow: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
             git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: String::new(),
         };
         let result = evaluate_file(&policy, Path::new("SKILLS.md"), "abcd", Some(&identity));
         assert!(result.outcome.is_verified());
@@ -715,6 +720,7 @@ mod tests {
             ref_pattern: Some("refs/heads/*".to_string()),
             key_id: None,
             public_key: None,
+            build_signer_uri: None,
         };
         let policy = make_policy(Enforcement::Deny, vec![publisher], vec![]);
         let identity = SignerIdentity::Keyless {
@@ -723,6 +729,7 @@ mod tests {
             workflow: "gitlab.example.com/internal/project//.gitlab-ci.yml@refs/heads/release"
                 .to_string(),
             git_ref: "refs/heads/release".to_string(),
+            build_signer_uri: String::new(),
         };
         let result = evaluate_file(&policy, Path::new("CLAUDE.md"), "abcd", Some(&identity));
         assert!(result.outcome.is_verified());
@@ -743,6 +750,7 @@ mod tests {
             ref_pattern: Some("refs/heads/*".to_string()),
             key_id: None,
             public_key: None,
+            build_signer_uri: None,
         };
         let policy = make_policy(Enforcement::Deny, vec![publisher], vec![]);
         let identity = SignerIdentity::Keyless {
@@ -750,6 +758,7 @@ mod tests {
             repository: "evil/project".to_string(),
             workflow: "gitlab.example.com/evil/project//.gitlab-ci.yml@refs/heads/main".to_string(),
             git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: String::new(),
         };
         let result = evaluate_file(&policy, Path::new("SKILLS.md"), "abcd", Some(&identity));
         assert!(matches!(
@@ -793,6 +802,7 @@ mod tests {
             repository: "evil/repo".to_string(),
             workflow: "*".to_string(),
             git_ref: "*".to_string(),
+            build_signer_uri: String::new(),
         };
         let result = evaluate_file(&policy, Path::new("SKILLS.md"), "abcd", Some(&identity));
         assert!(matches!(
@@ -832,6 +842,7 @@ mod tests {
             repository: "evil/repo".to_string(),
             workflow: "*".to_string(),
             git_ref: "*".to_string(),
+            build_signer_uri: String::new(),
         };
         let result = evaluate_file(
             &policy,
@@ -850,6 +861,7 @@ mod tests {
             repository: "good/repo".to_string(),
             workflow: "*".to_string(),
             git_ref: "*".to_string(),
+            build_signer_uri: String::new(),
         };
         let result = evaluate_file(
             &policy,

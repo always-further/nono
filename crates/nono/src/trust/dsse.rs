@@ -326,6 +326,7 @@ impl InTotoStatement {
                     repository,
                     workflow,
                     git_ref,
+                    build_signer_uri: String::new(),
                 })
             }
             other => Err(NonoError::TrustVerification {
@@ -810,6 +811,7 @@ mod tests {
                 repository,
                 workflow,
                 git_ref,
+                ..
             } => {
                 assert_eq!(issuer, "https://token.actions.githubusercontent.com");
                 assert_eq!(repository, "org/repo");
