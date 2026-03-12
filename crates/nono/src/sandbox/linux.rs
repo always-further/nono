@@ -1381,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_requested_scopes_isolated_is_empty() {
+    fn test_requested_scopes_isolated_uses_signal_scope_on_v6() {
         let caps = CapabilitySet::new().set_signal_mode(SignalMode::Isolated);
         let scopes = requested_scopes(&caps, &DetectedAbi::new(ABI::V6));
         assert!(matches!(scopes, Ok(actual) if actual == BitFlags::from(Scope::Signal)));
@@ -1441,7 +1441,7 @@ mod tests {
             Err(_) => return,
         };
 
-        if detected.abi != ABI::V6 {
+        if !detected.has_scoping() {
             return;
         }
 
