@@ -368,10 +368,9 @@ pub enum SignalMode {
     /// delivering SIGINT to the foreground process group) are delivered
     /// by the kernel and bypass the sandbox filter.
     ///
-    /// On Linux: not fully enforceable with current Landlock semantics.
-    /// Landlock V6 `LANDLOCK_SCOPE_SIGNAL` can restrict signaling to
-    /// processes in the same sandbox, but it cannot express "self only".
-    /// This mode therefore remains best-effort on Linux.
+    /// On Linux: best-effort. Landlock V6 `LANDLOCK_SCOPE_SIGNAL` restricts
+    /// signaling to processes in the same sandbox, which is stronger than no
+    /// filtering but not equivalent to "self only".
     #[default]
     Isolated,
     /// Signals allowed to child processes in the same sandbox only.

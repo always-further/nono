@@ -286,7 +286,14 @@ fn is_device_directory(path: &Path) -> bool {
 /// sandbox domain, not to the calling process alone.
 fn requested_scopes(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<BitFlags<Scope>> {
     match caps.signal_mode() {
-        SignalMode::AllowAll | SignalMode::Isolated => Ok(BitFlags::EMPTY),
+        SignalMode::AllowAll => Ok(BitFlags::EMPTY),
+        SignalMode::Isolated => {
+            if abi.has_scoping() {
+                Ok(Scope::Signal.into())
+            } else {
+                Ok(BitFlags::EMPTY)
+            }
+        }
         SignalMode::AllowSameSandbox => {
             if !abi.has_scoping() {
                 return Err(NonoError::SandboxInit(
@@ -389,8 +396,13 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
 
     if matches!(caps.signal_mode(), SignalMode::Isolated) && abi.has_scoping() {
         warn!(
-            "SignalMode::Isolated cannot be enforced exactly on Linux: \
+            "SignalMode::Isolated is approximated on Linux with same-sandbox signal scoping: \
              Landlock can restrict signals to the same sandbox, but not to self only"
+        );
+    } else if matches!(caps.signal_mode(), SignalMode::Isolated) {
+        warn!(
+            "SignalMode::Isolated is not enforceable on this kernel: \
+             Landlock ABI V6+ is required for signal scoping"
         );
     }
 
@@ -1372,6 +1384,13 @@ mod tests {
     fn test_requested_scopes_isolated_is_empty() {
         let caps = CapabilitySet::new().set_signal_mode(SignalMode::Isolated);
         let scopes = requested_scopes(&caps, &DetectedAbi::new(ABI::V6));
+        assert!(matches!(scopes, Ok(actual) if actual == BitFlags::from(Scope::Signal)));
+    }
+
+    #[test]
+    fn test_requested_scopes_isolated_is_empty_without_v6() {
+        let caps = CapabilitySet::new().set_signal_mode(SignalMode::Isolated);
+        let scopes = requested_scopes(&caps, &DetectedAbi::new(ABI::V5));
         assert!(matches!(scopes, Ok(actual) if actual.is_empty()));
     }
 
@@ -1394,6 +1413,29 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_signal_scope_blocks_external_kill_on_v6() {
+        struct ChildCleanup {
+            sandbox_pid: Option<libc::pid_t>,
+            target_pid: Option<libc::pid_t>,
+        }
+
+        impl Drop for ChildCleanup {
+            fn drop(&mut self) {
+                if let Some(pid) = self.sandbox_pid.take() {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                        libc::waitpid(pid, std::ptr::null_mut(), 0);
+                    }
+                }
+
+                if let Some(pid) = self.target_pid.take() {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                        libc::waitpid(pid, std::ptr::null_mut(), 0);
+                    }
+                }
+            }
+        }
+
         let detected = match detect_abi() {
             Ok(detected) => detected,
             Err(_) => return,
@@ -1409,6 +1451,10 @@ mod tests {
 
         let target_pid = unsafe { libc::fork() };
         assert!(target_pid >= 0, "fork() for target failed");
+        let mut cleanup = ChildCleanup {
+            sandbox_pid: None,
+            target_pid: Some(target_pid),
+        };
 
         if target_pid == 0 {
             unsafe {
@@ -1422,6 +1468,7 @@ mod tests {
 
         let sandbox_pid = unsafe { libc::fork() };
         assert!(sandbox_pid >= 0, "fork() for sandbox failed");
+        cleanup.sandbox_pid = Some(sandbox_pid);
 
         if sandbox_pid == 0 {
             let mut payload = [0_u8; 2];
@@ -1433,7 +1480,9 @@ mod tests {
             match apply_with_abi(&caps, &detected) {
                 Ok(()) => {
                     let kill_result = unsafe { libc::kill(target_pid, libc::SIGUSR1) };
-                    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                    let errno = std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(255);
                     payload[0] = if kill_result == -1 { 1 } else { 0 };
                     payload[1] = u8::try_from(errno).unwrap_or(u8::MAX);
                 }
@@ -1473,6 +1522,7 @@ mod tests {
             unsafe { libc::WIFEXITED(sandbox_status) },
             "sandbox child did not exit normally"
         );
+        cleanup.sandbox_pid = None;
         assert_eq!(
             unsafe { libc::WEXITSTATUS(sandbox_status) },
             0,
@@ -1510,6 +1560,7 @@ mod tests {
             libc::kill(target_pid, libc::SIGKILL);
             libc::waitpid(target_pid, std::ptr::null_mut(), 0);
         }
+        cleanup.target_pid = None;
     }
 
     #[test]
