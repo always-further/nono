@@ -2025,12 +2025,15 @@ mod tests {
         );
     }
 
-    /// Verify that /etc/shadow is not reachable as an allowed read path through
-    /// system_read_linux. Any entry in allow.read that is a prefix of /etc/shadow
-    /// (i.e., "/etc" or "/") would recursively grant read access to /etc/shadow
-    /// under Landlock's allow-list model.
+    /// Verify that no entry in system_read_linux.allow.read is an ancestor of any
+    /// path in the never_grant list. Under Landlock's recursive allow-list model,
+    /// granting a parent directory (e.g. "/etc") transitively grants every file
+    /// beneath it, including protected paths like "/etc/shadow" or "/etc/sudoers".
+    ///
+    /// Exact matches (allow.read path == never_grant path) are intentional explicit
+    /// grants and are not flagged; only ancestor relationships are errors.
     #[test]
-    fn test_system_read_linux_does_not_expose_etc_shadow() {
+    fn test_system_read_linux_does_not_expose_never_grant_paths() {
         let policy = load_embedded_policy().expect("embedded policy must parse");
         let group = policy
             .groups
@@ -2042,15 +2045,21 @@ mod tests {
             .map(|a| a.read.as_slice())
             .unwrap_or(&[]);
 
-        let shadow = PathBuf::from("/etc/shadow");
-        for path_str in read_paths {
-            let path = PathBuf::from(path_str);
-            assert!(
-                !shadow.starts_with(&path),
-                "system_read_linux allow.read entry '{}' covers /etc/shadow — \
-                 this would grant Landlock read access to the system password file",
-                path_str
-            );
+        for never_grant_str in &policy.never_grant {
+            let never_grant_path = PathBuf::from(never_grant_str);
+            for allow_str in read_paths {
+                let allow_path = PathBuf::from(allow_str);
+                // Only flag ancestor relationships (allow_path is a parent directory of
+                // never_grant_path). Exact matches are intentional explicit grants.
+                if never_grant_path.starts_with(&allow_path) && allow_path != never_grant_path {
+                    panic!(
+                        "system_read_linux allow.read entry '{}' is an ancestor of \
+                         never_grant path '{}' — this would grant Landlock read \
+                         access to a protected path",
+                        allow_str, never_grant_str
+                    );
+                }
+            }
         }
     }
 }
