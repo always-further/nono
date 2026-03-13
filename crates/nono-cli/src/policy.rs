@@ -2046,17 +2046,24 @@ mod tests {
             .unwrap_or(&[]);
 
         for never_grant_str in &policy.never_grant {
-            let never_grant_path = PathBuf::from(never_grant_str);
+            let never_grant_path = expand_path(never_grant_str).unwrap_or_else(|e| {
+                panic!("expand_path({never_grant_str}) failed in never_grant: {e}")
+            });
             for allow_str in read_paths {
-                let allow_path = PathBuf::from(allow_str);
+                let allow_path = expand_path(allow_str).unwrap_or_else(|e| {
+                    panic!("expand_path({allow_str}) failed in system_read_linux allow.read: {e}")
+                });
                 // Only flag ancestor relationships (allow_path is a parent directory of
                 // never_grant_path). Exact matches are intentional explicit grants.
                 if never_grant_path.starts_with(&allow_path) && allow_path != never_grant_path {
                     panic!(
-                        "system_read_linux allow.read entry '{}' is an ancestor of \
-                         never_grant path '{}' — this would grant Landlock read \
-                         access to a protected path",
-                        allow_str, never_grant_str
+                        "system_read_linux allow.read entry '{}' (expanded: '{}') is an \
+                         ancestor of never_grant path '{}' (expanded: '{}'), which would \
+                         grant Landlock read access to a protected path",
+                        allow_str,
+                        allow_path.display(),
+                        never_grant_str,
+                        never_grant_path.display(),
                     );
                 }
             }
