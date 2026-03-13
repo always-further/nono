@@ -958,12 +958,12 @@ pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
     result
 }
 
-/// Validate that trust_groups does not attempt to remove any required groups.
+/// Validate that a group exclusion list does not attempt to remove required groups.
 ///
 /// Required groups have `required: true` in policy.json and cannot be excluded
 /// by profiles or user configuration. Returns an error listing all violations.
-pub fn validate_trust_groups(policy: &Policy, trust_groups: &[String]) -> Result<()> {
-    let violations: Vec<&String> = trust_groups
+pub fn validate_group_exclusions(policy: &Policy, excluded_groups: &[String]) -> Result<()> {
+    let violations: Vec<&String> = excluded_groups
         .iter()
         .filter(|name| policy.groups.get(name.as_str()).is_some_and(|g| g.required))
         .collect();
@@ -982,6 +982,11 @@ pub fn validate_trust_groups(policy: &Policy, trust_groups: &[String]) -> Result
         "Cannot exclude required groups via trust_groups: {}",
         names
     )))
+}
+
+/// Backward-compatible validator name for existing trust_groups callers.
+pub fn validate_trust_groups(policy: &Policy, trust_groups: &[String]) -> Result<()> {
+    validate_group_exclusions(policy, trust_groups)
 }
 
 /// Common deny + system groups shared by all sandbox invocations.

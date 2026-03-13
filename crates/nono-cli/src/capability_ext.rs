@@ -37,6 +37,29 @@ fn try_new_file(path: &Path, access: AccessMode, label: &str) -> Result<Option<F
     }
 }
 
+fn apply_profile_dir_allows(
+    path_templates: &[String],
+    access: AccessMode,
+    workdir: &Path,
+    protected_roots: &ProtectedRoots,
+    caps: &mut CapabilitySet,
+    label_prefix: &str,
+) -> Result<()> {
+    for path_template in path_templates {
+        let path = expand_vars(path_template, workdir)?;
+        validate_requested_dir(&path, "Profile", protected_roots)?;
+        let label = format!(
+            "{label_prefix} '{}' does not exist, skipping",
+            path_template
+        );
+        if let Some(mut cap) = try_new_dir(&path, access, &label)? {
+            cap.source = CapabilitySource::Profile;
+            caps.add_fs(cap);
+        }
+    }
+    Ok(())
+}
+
 fn validate_requested_dir(
     path: &Path,
     source: &str,
@@ -173,14 +196,16 @@ impl CapabilitySetExt for CapabilitySet {
         // Resolve policy groups from profile
         // All profiles must have groups; if empty, use base_groups() as fallback
         let loaded_policy = policy::load_embedded_policy()?;
-        policy::validate_trust_groups(&loaded_policy, &profile.policy.exclude_groups)?;
+        policy::validate_group_exclusions(&loaded_policy, &profile.policy.exclude_groups)?;
         let mut groups = if profile.security.groups.is_empty() {
             policy::base_groups()?
         } else {
             profile.security.groups.clone()
         };
         if !profile.policy.exclude_groups.is_empty() {
-            groups.retain(|g| !profile.policy.exclude_groups.contains(g));
+            let exclude_set: std::collections::HashSet<&String> =
+                profile.policy.exclude_groups.iter().collect();
+            groups.retain(|g| !exclude_set.contains(g));
         }
         let mut resolved = policy::resolve_groups(&loaded_policy, &groups, &mut caps)?;
         debug!("Resolved {} policy groups", resolved.names.len());
@@ -258,44 +283,30 @@ impl CapabilitySetExt for CapabilitySet {
         }
 
         // Policy patch additions
-        for path_template in &profile.policy.add_allow_readwrite {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
-            let label = format!(
-                "Profile policy path '{}' does not exist, skipping",
-                path_template
-            );
-            if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
-
-        for path_template in &profile.policy.add_allow_read {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
-            let label = format!(
-                "Profile policy path '{}' does not exist, skipping",
-                path_template
-            );
-            if let Some(mut cap) = try_new_dir(&path, AccessMode::Read, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
-
-        for path_template in &profile.policy.add_allow_write {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
-            let label = format!(
-                "Profile policy path '{}' does not exist, skipping",
-                path_template
-            );
-            if let Some(mut cap) = try_new_dir(&path, AccessMode::Write, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
+        apply_profile_dir_allows(
+            &profile.policy.add_allow_readwrite,
+            AccessMode::ReadWrite,
+            workdir,
+            &protected_roots,
+            &mut caps,
+            "Profile policy path",
+        )?;
+        apply_profile_dir_allows(
+            &profile.policy.add_allow_read,
+            AccessMode::Read,
+            workdir,
+            &protected_roots,
+            &mut caps,
+            "Profile policy path",
+        )?;
+        apply_profile_dir_allows(
+            &profile.policy.add_allow_write,
+            AccessMode::Write,
+            workdir,
+            &protected_roots,
+            &mut caps,
+            "Profile policy path",
+        )?;
 
         for path_template in &profile.policy.add_deny_access {
             let path = expand_vars(path_template, workdir)?;
