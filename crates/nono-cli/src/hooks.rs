@@ -232,56 +232,6 @@ fn update_claude_settings(settings_path: &PathBuf, config: &HookConfig) -> Resul
     }
 }
 
-/// Remove legacy nono sandbox section from ~/.claude/CLAUDE.md.
-///
-/// Earlier versions of nono injected sandbox instructions directly into CLAUDE.md
-/// between `<!-- nono-sandbox-start -->` and `<!-- nono-sandbox-end -->` markers.
-/// This caused stale instructions to persist when Claude was run without nono.
-/// The instructions are now injected via `--append-system-prompt-file` instead.
-pub fn remove_legacy_claude_md_section() {
-    let home = match xdg_home::home_dir() {
-        Some(h) => h,
-        None => return,
-    };
-    let claude_md_path = home.join(".claude").join("CLAUDE.md");
-    if !claude_md_path.exists() {
-        return;
-    }
-
-    let existing = match fs::read_to_string(&claude_md_path) {
-        Ok(content) => content,
-        Err(_) => return,
-    };
-
-    const START_MARKER: &str = "<!-- nono-sandbox-start -->";
-    const END_MARKER: &str = "<!-- nono-sandbox-end -->";
-
-    if !existing.contains(START_MARKER) {
-        return;
-    }
-
-    let start_idx = existing.find(START_MARKER);
-    let end_idx = existing.find(END_MARKER);
-
-    if let (Some(start), Some(end)) = (start_idx, end_idx) {
-        if end > start {
-            let end_of_section = end + END_MARKER.len();
-            let before = &existing[..start];
-            let after = &existing[end_of_section..];
-            let cleaned = format!("{}{}", before.trim_end(), after);
-            let cleaned = cleaned.trim().to_string();
-
-            if cleaned.is_empty() {
-                // File only contained the nono section — remove it entirely
-                let _ = fs::remove_file(&claude_md_path);
-            } else {
-                let _ = fs::write(&claude_md_path, format!("{}\n", cleaned));
-            }
-            tracing::info!("Removed legacy nono section from CLAUDE.md");
-        }
-    }
-}
-
 /// Install all hooks from a profile's hooks configuration
 /// Returns a list of (target, result) pairs for each hook installed
 pub fn install_profile_hooks(

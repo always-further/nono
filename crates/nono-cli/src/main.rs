@@ -1188,27 +1188,9 @@ fn execute_sandboxed(
         });
     }
 
-    // Detect if we're launching Claude Code and inject system prompt
-    let prompt_file_path = if is_claude_command(&program) {
-        write_system_prompt_file(flags.silent)
-    } else {
-        None
-    };
-
-    // Build extra args for Claude Code (--append-system-prompt-file)
-    let extra_args: Vec<OsString> = if let Some(ref prompt_path) = prompt_file_path {
-        vec![
-            OsString::from("--append-system-prompt-file"),
-            OsString::from(prompt_path),
-        ]
-    } else {
-        vec![]
-    };
-
     // Convert OsString command to String for exec_strategy
     let command: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
         .chain(cmd_args.iter().map(|s| s.to_string_lossy().into_owned()))
-        .chain(extra_args.iter().map(|s| s.to_string_lossy().into_owned()))
         .collect();
 
     if command.is_empty() {
@@ -1662,9 +1644,6 @@ fn execute_sandboxed(
             }
 
             cleanup_capability_state_file(&cap_file_path);
-            if let Some(ref prompt_path) = prompt_file_path {
-                cleanup_capability_state_file(prompt_path);
-            }
             drop(config);
             drop(loaded_secrets);
             std::process::exit(exit_code);
@@ -1844,11 +1823,6 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     // Load profile once if specified (used for both capabilities and secrets)
     let loaded_profile = if let Some(ref profile_name) = args.profile {
         let prof = profile::load_profile(profile_name)?;
-
-        // Remove legacy nono section from CLAUDE.md (one-time migration).
-        // Earlier versions injected instructions directly into CLAUDE.md which
-        // persisted when Claude was run without nono. Now uses --append-system-prompt-file.
-        hooks::remove_legacy_claude_md_section();
 
         // Install hooks defined in the profile (idempotent - only installs if needed)
         if !prof.hooks.hooks.is_empty() {
@@ -2271,83 +2245,6 @@ fn enforce_rollback_limits(silent: bool) {
     }
 }
 
-/// Check if the command being executed is Claude Code.
-///
-/// Matches the binary name "claude" regardless of path (e.g. /usr/bin/claude,
-/// ~/.npm/bin/claude, claude).
-fn is_claude_command(program: &OsString) -> bool {
-    std::path::Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == "claude")
-        .unwrap_or(false)
-}
-
-/// System prompt content injected into Claude Code sessions via --append-system-prompt-file.
-///
-/// This is ephemeral — it only exists for the duration of the nono session.
-/// Unlike CLAUDE.md injection, it leaves no persistent state to clean up.
-const NONO_SYSTEM_PROMPT: &str = "\
-You are running inside the nono security sandbox. This is a capability-based \
-sandbox that CANNOT be bypassed or modified from within the session.
-
-On ANY \"operation not permitted\" or \"EPERM\" error:
-
-IMMEDIATELY tell the user:
-> This path is not accessible in the current nono sandbox session. You need to \
-exit and restart with:
-> `nono run --allow /path/to/needed -- claude`
-
-NEVER attempt:
-- Alternative file paths or locations
-- Copying files to accessible directories
-- Using sudo or permission changes
-- Manual workarounds for the user to try
-- ANY other approach besides restarting nono
-
-The sandbox is a hard security boundary. Once applied, it cannot be expanded. \
-The ONLY solution is to restart the session with additional --allow flags.";
-
-/// Write the system prompt file for Claude Code.
-///
-/// Returns the path to the temp file, or None if writing failed.
-fn write_system_prompt_file(silent: bool) -> Option<std::path::PathBuf> {
-    use std::io::Write;
-
-    // SECURITY: Use tempfile crate to create file with O_EXCL and random name,
-    // preventing symlink attacks (CWE-377) on predictable paths in /tmp.
-    match tempfile::Builder::new()
-        .prefix(".nono-prompt-")
-        .suffix(".txt")
-        .tempfile()
-    {
-        Ok(mut file) => {
-            if let Err(e) = file.write_all(NONO_SYSTEM_PROMPT.as_bytes()) {
-                error!("Failed to write system prompt file: {}", e);
-                if !silent {
-                    eprintln!("  WARNING: System prompt file could not be written.");
-                }
-                return None;
-            }
-            // Persist the file so it outlives this scope (cleaned up manually after child exits)
-            match file.into_temp_path().keep() {
-                Ok(path) => Some(path),
-                Err(e) => {
-                    error!("Failed to persist system prompt file: {}", e);
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            error!("Failed to create system prompt file: {}", e);
-            if !silent {
-                eprintln!("  WARNING: System prompt file could not be written.");
-            }
-            None
-        }
-    }
-}
-
 fn write_capability_state_file(caps: &CapabilitySet, silent: bool) -> Option<std::path::PathBuf> {
     // Write sandbox state for `nono why --self`.
     let cap_file = std::env::temp_dir().join(format!(".nono-{}.json", std::process::id()));
@@ -2612,31 +2509,6 @@ mod tests {
             exec_strategy::ExecStrategy::Supervised
         );
     }
-
-    #[test]
-    fn test_is_claude_command_bare_name() {
-        assert!(is_claude_command(&OsString::from("claude")));
-    }
-
-    #[test]
-    fn test_is_claude_command_absolute_path() {
-        assert!(is_claude_command(&OsString::from("/usr/local/bin/claude")));
-    }
-
-    #[test]
-    fn test_is_claude_command_home_path() {
-        assert!(is_claude_command(&OsString::from(
-            "/home/user/.npm/bin/claude"
-        )));
-    }
-
-    #[test]
-    fn test_is_claude_command_not_claude() {
-        assert!(!is_claude_command(&OsString::from("bash")));
-        assert!(!is_claude_command(&OsString::from("/usr/bin/python3")));
-        assert!(!is_claude_command(&OsString::from("claude-code")));
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn test_maybe_enable_macos_launch_services_adds_rule_when_enabled() {
