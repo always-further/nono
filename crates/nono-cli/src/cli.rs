@@ -40,6 +40,7 @@ const STYLES: Styles = Styles::plain().header(Style::new().bold());
   audit      View audit trail of sandboxed commands
   trust      Manage instruction file trust and attestation
 
+\x1b[1mOPTIONS\x1b[0m
 {options}
 
 \x1b[1mLEARN MORE\x1b[0m
@@ -52,7 +53,7 @@ pub struct Cli {
     pub silent: bool,
 
     /// Color theme for output (mocha, latte, frappe, macchiato, tokyo-night, minimal)
-    #[arg(long, global = true, env = "NONO_THEME", value_name = "THEME")]
+    #[arg(long, global = true, env = "NONO_THEME", value_name = "THEME", help_heading = "OPTIONS")]
     pub theme: Option<String>,
 
     #[command(subcommand)]
@@ -179,7 +180,7 @@ pub enum Commands {
 
     // ── Session management ───────────────────────────────────────────────
     /// Manage rollback sessions (browse, restore, cleanup)
-    #[command(subcommand_help_heading = "COMMANDS")]
+    #[command(subcommand_help_heading = "COMMANDS", disable_help_subcommand = true)]
     #[command(help_template = "\
 {about}
 
@@ -199,7 +200,7 @@ pub enum Commands {
     Rollback(RollbackArgs),
 
     /// View audit trail of sandboxed commands
-    #[command(subcommand_help_heading = "COMMANDS")]
+    #[command(subcommand_help_heading = "COMMANDS", disable_help_subcommand = true)]
     #[command(help_template = "\
 {about}
 
@@ -217,7 +218,7 @@ pub enum Commands {
     Audit(AuditArgs),
 
     /// Manage instruction file trust and attestation
-    #[command(subcommand_help_heading = "COMMANDS")]
+    #[command(subcommand_help_heading = "COMMANDS", disable_help_subcommand = true)]
     #[command(help_template = "\
 {about}
 
@@ -300,7 +301,7 @@ pub struct SandboxArgs {
     pub workdir: Option<PathBuf>,
 
     // ── Network ──────────────────────────────────────────────────────────
-    /// Block all network access
+    /// Block outbound network access (allowed by default)
     #[arg(
         long = "block-net",
         alias = "net-block",
@@ -312,7 +313,7 @@ pub struct SandboxArgs {
     )]
     pub block_net: bool,
 
-    /// Allow unrestricted network (overrides proxy filtering)
+    /// Allow unrestricted network; disables proxy filtering and credential injection
     #[arg(
         long = "allow-net",
         alias = "net-allow",
@@ -453,10 +454,7 @@ pub struct RunArgs {
     #[command(flatten)]
     pub sandbox: SandboxArgs,
 
-    /// Suppress diagnostic footer on command failure
-    #[arg(long, help_heading = "OPTIONS")]
-    pub no_diagnostics: bool,
-
+    // ── Rollback ──────────────────────────────────────────────────────
     /// Enable atomic rollback snapshots for the session
     #[arg(long, conflicts_with = "no_rollback", help_heading = "ROLLBACK")]
     pub rollback: bool,
@@ -481,11 +479,16 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "rollback_include", help_heading = "ROLLBACK")]
     pub rollback_all: bool,
 
+    // ── Options ────────────────────────────────────────────────────────
+    /// Suppress diagnostic footer on command failure
+    #[arg(long, help_heading = "OPTIONS")]
+    pub no_diagnostics: bool,
+
     /// Disable the audit trail for this session
     #[arg(long, conflicts_with = "rollback", help_heading = "OPTIONS")]
     pub no_audit: bool,
 
-    /// Disable trust verification for instruction files (dev/testing only)
+    /// Disable trust verification for instruction files (not recommended for production)
     #[arg(long, help_heading = "OPTIONS")]
     pub trust_override: bool,
 
@@ -1637,6 +1640,32 @@ mod tests {
     }
 
     #[test]
+    fn test_root_help_shows_all_flags() {
+        // Every non-hidden root-level flag must appear in the rendered help.
+        // Catches flags missing a help_heading (which puts them in an unnamed
+        // group that our custom template doesn't render).
+        let cmd = Cli::command();
+        let mut buf = Vec::new();
+        cmd.clone()
+            .write_help(&mut buf)
+            .expect("failed to write help");
+        let help = String::from_utf8(buf).expect("help is not utf-8");
+
+        for arg in cmd.get_arguments() {
+            if arg.is_hide_set() {
+                continue;
+            }
+            if let Some(long) = arg.get_long() {
+                assert!(
+                    help.contains(&format!("--{long}")),
+                    "Root --help is missing flag `--{long}`. \
+                     Add `help_heading = \"OPTIONS\"` to its #[arg] attribute.",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_subcommand_help_structure() {
         let root = Cli::command();
 
@@ -1693,11 +1722,7 @@ mod tests {
                     if let Some(flag) = token.strip_prefix("--") {
                         let flag =
                             flag.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
-                        if flag.is_empty()
-                            || flag == "help"
-                            || flag == "dry-run" && name == "rollback"
-                        {
-                            // --dry-run in rollback examples refers to sub-subcommand flags
+                        if flag.is_empty() || flag == "help" {
                             continue;
                         }
                         let valid = known_flags.iter().any(|f| f == flag)
