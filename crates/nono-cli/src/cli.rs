@@ -57,7 +57,13 @@ pub struct Cli {
     pub silent: bool,
 
     /// Color theme for output (mocha, latte, frappe, macchiato, tokyo-night, minimal)
-    #[arg(long, global = true, env = "NONO_THEME", value_name = "THEME", help_heading = "OPTIONS")]
+    #[arg(
+        long,
+        global = true,
+        env = "NONO_THEME",
+        value_name = "THEME",
+        help_heading = "OPTIONS"
+    )]
     pub theme: Option<String>,
 
     #[command(subcommand)]
@@ -521,7 +527,12 @@ pub struct SandboxArgs {
     pub network_profile: Option<String>,
 
     /// Allow additional hosts through the proxy (repeatable)
-    #[arg(long = "allow-proxy", alias = "proxy-allow", value_name = "HOST", help_heading = "NETWORK")]
+    #[arg(
+        long = "allow-proxy",
+        alias = "proxy-allow",
+        value_name = "HOST",
+        help_heading = "NETWORK"
+    )]
     pub allow_proxy: Vec<String>,
 
     /// Allow binding on a TCP port. macOS: enables blanket inbound (no per-port filtering)
