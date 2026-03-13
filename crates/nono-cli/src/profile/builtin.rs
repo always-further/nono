@@ -162,16 +162,6 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_base_groups_back_default_profile() {
-        let groups = crate::policy::load_embedded_policy()
-            .expect("load embedded policy")
-            .base_groups;
-        assert!(!groups.is_empty());
-        assert!(groups.contains(&"deny_credentials".to_string()));
-        assert!(groups.contains(&"system_read_macos".to_string()));
-    }
-
-    #[test]
     fn test_profile_group_merging() {
         let profile = get_builtin("claude-code").expect("Profile not found");
         // Should have default profile groups
@@ -211,11 +201,27 @@ mod tests {
     }
 
     #[test]
-    fn test_default_profile_group_set_matches_legacy_base_groups() {
+    fn test_default_profile_group_set_is_explicit() {
         let profile = get_builtin("default").expect("default profile");
-        let mut expected = crate::policy::load_embedded_policy()
-            .expect("load embedded policy")
-            .base_groups;
+        let mut expected = vec![
+            "dangerous_commands".to_string(),
+            "dangerous_commands_linux".to_string(),
+            "dangerous_commands_macos".to_string(),
+            "deny_browser_data_linux".to_string(),
+            "deny_browser_data_macos".to_string(),
+            "deny_credentials".to_string(),
+            "deny_keychains_linux".to_string(),
+            "deny_keychains_macos".to_string(),
+            "deny_macos_private".to_string(),
+            "deny_shell_configs".to_string(),
+            "deny_shell_history".to_string(),
+            "homebrew".to_string(),
+            "system_read_linux".to_string(),
+            "system_read_macos".to_string(),
+            "system_write_linux".to_string(),
+            "system_write_macos".to_string(),
+            "user_tools".to_string(),
+        ];
         let mut actual = profile.security.groups.clone();
         expected.sort();
         actual.sort();

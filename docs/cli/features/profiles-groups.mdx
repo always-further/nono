@@ -288,19 +288,17 @@ Groups are named, composable collections of security rules. Profiles reference g
 Every profile's effective capability set is built through composition:
 
 ```
-((default_profile_groups + profile.security.groups) - effective_group_exclusions) + profile.filesystem + CLI flags
+((default_profile_groups + profile.security.groups) - profile.policy.exclude_groups) + profile.filesystem + CLI flags
 ```
 
 1. **default_profile_groups** come from the built-in `default` profile
-   The legacy `base_groups` field still backs that profile for compatibility, but is deprecated.
-2. **effective_group_exclusions** come from `policy.exclude_groups`
-   Legacy `security.trust_groups` is still honored for backward compatibility, but is deprecated.
+2. **profile.policy.exclude_groups** removes groups from the composed set
 3. **profile.security.groups** add additional groups on top
 4. **profile.filesystem** entries are additive
 5. **CLI overrides** (`--allow`, `--read`, etc.) are applied last
 
 Exclusions are applied after group addition. If the same group appears in both
-`security.groups` and the effective exclusions, the exclusion wins.
+`security.groups` and `policy.exclude_groups`, the exclusion wins.
 
 ### Group Taxonomy
 

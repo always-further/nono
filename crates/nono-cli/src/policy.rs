@@ -23,11 +23,6 @@ pub struct Policy {
     /// Consumed by `NeverGrantChecker` during supervisor orchestration.
     #[serde(default)]
     pub never_grant: Vec<String>,
-    /// Deprecated compatibility backing for the built-in `default` profile.
-    /// New code should treat `profiles.default` as the canonical default
-    /// composition and not consume `base_groups` directly.
-    #[serde(default)]
-    pub base_groups: Vec<String>,
     pub groups: HashMap<String, Group>,
     /// Built-in profile definitions
     #[serde(default)]
@@ -112,11 +107,6 @@ pub struct ProfileDef {
     /// Preferred built-in profile exclusions.
     #[serde(default)]
     pub exclude_groups: Vec<String>,
-    /// Deprecated legacy built-in profile exclusions.
-    /// Kept for backward-compatible deserialization of embedded/user-authored
-    /// policy JSON that still uses `trust_groups`.
-    #[serde(default)]
-    pub trust_groups: Vec<String>,
     #[serde(default)]
     pub filesystem: profile::FilesystemConfig,
     #[serde(default)]
@@ -143,14 +133,13 @@ impl ProfileDef {
     /// Convert to a raw Profile without merging implicit default groups.
     pub fn to_raw_profile(&self) -> profile::Profile {
         let mut policy = self.policy.clone();
-        let combined = profile::dedup_append(&self.exclude_groups, &self.trust_groups);
-        policy.exclude_groups = profile::dedup_append(&combined, &self.policy.exclude_groups);
+        policy.exclude_groups =
+            profile::dedup_append(&self.exclude_groups, &self.policy.exclude_groups);
         profile::Profile {
             extends: self.extends.clone(),
             meta: self.meta.clone(),
             security: profile::SecurityConfig {
                 groups: self.security.groups.clone(),
-                trust_groups: Vec::new(),
                 allowed_commands: self.security.allowed_commands.clone(),
                 signal_mode: self.security.signal_mode,
                 process_info_mode: self.security.process_info_mode,
@@ -1616,7 +1605,7 @@ mod tests {
         // under an allowed subtree, and allowing + denying the same directory
         // means the allow wins. Both cases silently disable the deny.
         //
-        // We check every group (not just base_groups) because profiles can
+        // We check every group because profiles can
         // combine arbitrary groups, and validate_deny_overlaps is warn-only
         // for group-sourced capabilities at runtime. This test is the real
         // safety net for the embedded policy.
@@ -1733,7 +1722,6 @@ mod tests {
     fn test_profile_def_to_raw_profile_combines_exclude_groups() {
         let def = ProfileDef {
             exclude_groups: vec!["preferred".to_string()],
-            trust_groups: vec!["legacy".to_string()],
             policy: profile::PolicyPatchConfig {
                 exclude_groups: vec!["policy".to_string()],
                 ..Default::default()
@@ -1745,13 +1733,8 @@ mod tests {
 
         assert_eq!(
             raw.policy.exclude_groups,
-            vec![
-                "preferred".to_string(),
-                "legacy".to_string(),
-                "policy".to_string()
-            ]
+            vec!["preferred".to_string(), "policy".to_string()]
         );
-        assert!(raw.security.trust_groups.is_empty());
     }
 
     #[cfg(target_os = "linux")]

@@ -28,25 +28,6 @@
     "/proc/kcore",
     "/proc/kmem"
   ],
-  "base_groups": [
-    "deny_credentials",
-    "deny_keychains_macos",
-    "deny_keychains_linux",
-    "deny_browser_data_macos",
-    "deny_browser_data_linux",
-    "deny_macos_private",
-    "deny_shell_history",
-    "deny_shell_configs",
-    "system_read_macos",
-    "system_read_linux",
-    "system_write_macos",
-    "system_write_linux",
-    "user_tools",
-    "homebrew",
-    "dangerous_commands",
-    "dangerous_commands_macos",
-    "dangerous_commands_linux"
-  ],
   "groups": {
     "deny_credentials": {
       "description": "Block access to cryptographic keys, tokens, and cloud credentials",
@@ -587,7 +568,25 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": [],
+        "groups": [
+          "deny_credentials",
+          "deny_keychains_macos",
+          "deny_keychains_linux",
+          "deny_browser_data_macos",
+          "deny_browser_data_linux",
+          "deny_macos_private",
+          "deny_shell_history",
+          "deny_shell_configs",
+          "system_read_macos",
+          "system_read_linux",
+          "system_write_macos",
+          "system_write_linux",
+          "user_tools",
+          "homebrew",
+          "dangerous_commands",
+          "dangerous_commands_macos",
+          "dangerous_commands_linux"
+        ],
         "signal_mode": "isolated"
       },
       "filesystem": {},

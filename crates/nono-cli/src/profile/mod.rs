@@ -11,7 +11,6 @@ use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 // Re-export InjectMode from nono-proxy for use in profiles
 pub use nono_proxy::config::InjectMode;
@@ -688,10 +687,6 @@ pub struct SecurityConfig {
     /// Policy group names to resolve (from policy.json)
     #[serde(default)]
     pub groups: Vec<String>,
-    /// Deprecated legacy exclusions. Prefer `policy.exclude_groups`.
-    /// Kept for backward-compatible deserialization and merge behavior.
-    #[serde(default)]
-    pub trust_groups: Vec<String>,
     /// Commands to allow even when blocked by default policy (e.g. `["rm"]`).
     /// Applied before CLI `--allow-command` overrides.
     #[serde(default)]
@@ -846,17 +841,6 @@ pub fn load_profile_from_path(path: &Path) -> Result<Profile> {
 
 /// Resolve inheritance and apply implicit default-group merging for a raw profile.
 pub(crate) fn finalize_profile(mut profile: Profile) -> Result<Profile> {
-    if !profile.security.trust_groups.is_empty() {
-        let profile_name = if profile.meta.name.is_empty() {
-            "<unnamed>"
-        } else {
-            profile.meta.name.as_str()
-        };
-        warn!(
-            "profile '{}' uses deprecated security.trust_groups; use policy.exclude_groups instead",
-            profile_name
-        );
-    }
     merge_implicit_default_groups(&mut profile)?;
     Ok(profile)
 }
@@ -868,13 +852,11 @@ pub(crate) fn resolve_and_finalize_profile(profile: Profile) -> Result<Profile> 
 
 /// Get the implicit default groups for a finalized profile.
 ///
-/// `base_groups` remains as deprecated compatibility backing for the built-in
-/// `default` profile only. All other profiles should inherit default behavior
-/// through the resolved `default` profile rather than consuming `base_groups`
-/// directly.
+/// The built-in `default` profile is now the canonical source of implicit
+/// groups. The `default` profile itself does not inherit any additional groups.
 fn implicit_default_groups(profile: &Profile) -> Result<Vec<String>> {
     if profile.meta.name == "default" {
-        return Ok(crate::policy::load_embedded_policy()?.base_groups);
+        return Ok(Vec::new());
     }
 
     let default = crate::policy::get_policy_profile("default")?
@@ -888,14 +870,13 @@ fn implicit_default_groups(profile: &Profile) -> Result<Vec<String>> {
 /// `security.groups`. Built-in profiles also resolve through the same raw
 /// profile pipeline before implicit default groups are merged.
 /// This function applies:
-/// `((implicit_default_groups + profile.groups) - effective_exclusions)`.
+/// `((implicit_default_groups + profile.groups) - profile.policy.exclude_groups)`.
 ///
 /// This means exclusions win even if the same group is also added explicitly in
-/// `security.groups`. That is an intentional shift toward a single, consistent
-/// exclusion model as `trust_groups` and `base_groups` are deprecated.
+/// `security.groups`.
 fn merge_implicit_default_groups(profile: &mut Profile) -> Result<()> {
     let policy = crate::policy::load_embedded_policy()?;
-    let exclusions = effective_group_exclusions(profile);
+    let exclusions = profile.policy.exclude_groups.clone();
     crate::policy::validate_group_exclusions(&policy, &exclusions)?;
 
     let mut merged = implicit_default_groups(profile)?;
@@ -912,14 +893,6 @@ fn merge_implicit_default_groups(profile: &mut Profile) -> Result<()> {
     }
     profile.security.groups = merged;
     Ok(())
-}
-
-/// Merge legacy `security.trust_groups` with preferred `policy.exclude_groups`.
-pub(crate) fn effective_group_exclusions(profile: &Profile) -> Vec<String> {
-    dedup_append(
-        &profile.security.trust_groups,
-        &profile.policy.exclude_groups,
-    )
 }
 
 /// Parse a profile JSON file without resolving inheritance.
@@ -1034,7 +1007,6 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
         meta: child.meta,
         security: SecurityConfig {
             groups: dedup_append(&base.security.groups, &child.security.groups),
-            trust_groups: dedup_append(&base.security.trust_groups, &child.security.trust_groups),
             allowed_commands: dedup_append(
                 &base.security.allowed_commands,
                 &child.security.allowed_commands,
@@ -1555,29 +1527,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_implicit_default_groups_respects_trust_groups() {
-        let mut profile = Profile {
-            security: SecurityConfig {
-                groups: vec!["node_runtime".to_string()],
-                trust_groups: vec!["dangerous_commands".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        merge_implicit_default_groups(&mut profile).expect("merge should succeed");
-
-        // Legacy trust_groups exclusions should still be honored.
-        assert!(
-            !profile
-                .security
-                .groups
-                .contains(&"dangerous_commands".to_string()),
-            "trusted group 'dangerous_commands' should be excluded"
-        );
-    }
-
-    #[test]
     fn test_merge_implicit_default_groups_respects_policy_exclude_groups() {
         let mut profile = Profile {
             security: SecurityConfig {
@@ -1599,31 +1548,6 @@ mod tests {
                 .groups
                 .contains(&"dangerous_commands".to_string()),
             "excluded group 'dangerous_commands' should be removed"
-        );
-    }
-
-    #[test]
-    fn test_merge_implicit_default_groups_rejects_required_trust_group() {
-        let mut profile = Profile {
-            security: SecurityConfig {
-                groups: vec![],
-                trust_groups: vec!["deny_credentials".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let result = merge_implicit_default_groups(&mut profile);
-        assert!(
-            result.is_err(),
-            "Trusting a required group must be rejected"
-        );
-        assert!(
-            result
-                .expect_err("expected error")
-                .to_string()
-                .contains("deny_credentials"),
-            "Error should name the required group"
         );
     }
 
@@ -2141,7 +2065,6 @@ mod tests {
             },
             security: SecurityConfig {
                 groups: vec!["base_group".to_string()],
-                trust_groups: vec!["base_trust".to_string()],
                 ..Default::default()
             },
             filesystem: FilesystemConfig {
@@ -2206,7 +2129,6 @@ mod tests {
             },
             security: SecurityConfig {
                 groups: vec!["child_group".to_string()],
-                trust_groups: vec![],
                 ..Default::default()
             },
             filesystem: FilesystemConfig {
@@ -2286,10 +2208,6 @@ mod tests {
         let merged = merge_profiles(base_profile(), child_profile());
         assert!(merged.security.groups.contains(&"base_group".to_string()));
         assert!(merged.security.groups.contains(&"child_group".to_string()));
-        assert!(merged
-            .security
-            .trust_groups
-            .contains(&"base_trust".to_string()));
     }
 
     #[test]
@@ -2410,38 +2328,6 @@ mod tests {
 
         let merged = merge_profiles(base, child);
         assert_eq!(merged.workdir.access, WorkdirAccess::Read);
-    }
-
-    #[test]
-    fn test_merge_profiles_trust_groups_additive() {
-        let mut base = base_profile();
-        base.security.trust_groups = vec!["base_trust".to_string()];
-
-        let mut child = child_profile();
-        child.security.trust_groups = vec!["child_trust".to_string()];
-
-        let merged = merge_profiles(base, child);
-        // trust_groups are additive — child can add its own
-        assert!(merged
-            .security
-            .trust_groups
-            .contains(&"base_trust".to_string()));
-        assert!(merged
-            .security
-            .trust_groups
-            .contains(&"child_trust".to_string()));
-    }
-
-    #[test]
-    fn test_effective_group_exclusions_combines_legacy_and_policy_fields() {
-        let mut profile = Profile::default();
-        profile.security.trust_groups = vec!["legacy_exclusion".to_string()];
-        profile.policy.exclude_groups = vec!["new_exclusion".to_string()];
-
-        let exclusions = effective_group_exclusions(&profile);
-
-        assert!(exclusions.contains(&"legacy_exclusion".to_string()));
-        assert!(exclusions.contains(&"new_exclusion".to_string()));
     }
 
     #[test]
