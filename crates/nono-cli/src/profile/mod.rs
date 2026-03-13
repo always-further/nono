@@ -876,7 +876,7 @@ fn implicit_default_groups(profile: &Profile) -> Result<Vec<String>> {
 /// `security.groups`.
 fn merge_implicit_default_groups(profile: &mut Profile) -> Result<()> {
     let policy = crate::policy::load_embedded_policy()?;
-    let exclusions = profile.policy.exclude_groups.clone();
+    let exclusions = &profile.policy.exclude_groups;
     crate::policy::validate_group_exclusions(&policy, &exclusions)?;
 
     let mut merged = implicit_default_groups(profile)?;
