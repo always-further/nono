@@ -173,11 +173,15 @@ impl CapabilitySetExt for CapabilitySet {
         // Resolve policy groups from profile
         // All profiles must have groups; if empty, use base_groups() as fallback
         let loaded_policy = policy::load_embedded_policy()?;
-        let groups = if profile.security.groups.is_empty() {
+        policy::validate_trust_groups(&loaded_policy, &profile.policy.exclude_groups)?;
+        let mut groups = if profile.security.groups.is_empty() {
             policy::base_groups()?
         } else {
             profile.security.groups.clone()
         };
+        if !profile.policy.exclude_groups.is_empty() {
+            groups.retain(|g| !profile.policy.exclude_groups.contains(g));
+        }
         let mut resolved = policy::resolve_groups(&loaded_policy, &groups, &mut caps)?;
         debug!("Resolved {} policy groups", resolved.names.len());
 
@@ -251,6 +255,57 @@ impl CapabilitySetExt for CapabilitySet {
                 cap.source = CapabilitySource::Profile;
                 caps.add_fs(cap);
             }
+        }
+
+        // Policy patch additions
+        for path_template in &profile.policy.add_allow_readwrite {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_dir(&path, "Profile", &protected_roots)?;
+            let label = format!(
+                "Profile policy path '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
+                cap.source = CapabilitySource::Profile;
+                caps.add_fs(cap);
+            }
+        }
+
+        for path_template in &profile.policy.add_allow_read {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_dir(&path, "Profile", &protected_roots)?;
+            let label = format!(
+                "Profile policy path '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) = try_new_dir(&path, AccessMode::Read, &label)? {
+                cap.source = CapabilitySource::Profile;
+                caps.add_fs(cap);
+            }
+        }
+
+        for path_template in &profile.policy.add_allow_write {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_dir(&path, "Profile", &protected_roots)?;
+            let label = format!(
+                "Profile policy path '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) = try_new_dir(&path, AccessMode::Write, &label)? {
+                cap.source = CapabilitySource::Profile;
+                caps.add_fs(cap);
+            }
+        }
+
+        for path_template in &profile.policy.add_deny_access {
+            let path = expand_vars(path_template, workdir)?;
+            let path_str = path.to_str().ok_or_else(|| {
+                NonoError::ConfigParse(format!(
+                    "Profile policy deny path contains non-UTF-8 bytes: {}",
+                    path.display()
+                ))
+            })?;
+            policy::add_deny_access_rules(path_str, &mut caps, &mut resolved.deny_paths)?;
         }
 
         // Network blocking or proxy mode from profile
@@ -543,6 +598,218 @@ mod tests {
         assert!(
             caps.allowed_commands().contains(&"shred".to_string()),
             "profile allowed_commands should include 'shred'"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_exclude_groups_removes_non_required_group() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("exclude-groups.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "exclude-groups" },
+                "filesystem": { "allow": ["/tmp"] },
+                "policy": {
+                    "exclude_groups": ["dangerous_commands", "dangerous_commands_linux"]
+                }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+        assert!(
+            !caps.blocked_commands().contains(&"rm".to_string()),
+            "excluded dangerous_commands should remove rm from blocked commands"
+        );
+        assert!(
+            !caps.blocked_commands().contains(&"shred".to_string()),
+            "excluded dangerous_commands_linux should remove shred from blocked commands"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_add_allow_paths_add_capabilities() {
+        let dir = tempdir().expect("tmpdir");
+        let read_dir = dir.path().join("read-dir");
+        let write_dir = dir.path().join("write-dir");
+        let rw_dir = dir.path().join("rw-dir");
+        std::fs::create_dir_all(&read_dir).expect("mkdir read");
+        std::fs::create_dir_all(&write_dir).expect("mkdir write");
+        std::fs::create_dir_all(&rw_dir).expect("mkdir rw");
+
+        let profile_path = dir.path().join("policy-adds.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "policy-adds" }},
+                    "policy": {{
+                        "add_allow_read": ["{}"],
+                        "add_allow_write": ["{}"],
+                        "add_allow_readwrite": ["{}"]
+                    }}
+                }}"#,
+                read_dir.display(),
+                write_dir.display(),
+                rw_dir.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        let read_canonical = read_dir.canonicalize().expect("canonicalize read");
+        let write_canonical = write_dir.canonicalize().expect("canonicalize write");
+        let rw_canonical = rw_dir.canonicalize().expect("canonicalize rw");
+
+        let read_cap = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| c.resolved == read_canonical)
+            .expect("read dir cap");
+        let write_cap = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| c.resolved == write_canonical)
+            .expect("write dir cap");
+        let rw_cap = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| c.resolved == rw_canonical)
+            .expect("rw dir cap");
+
+        assert_eq!(read_cap.access, AccessMode::Read);
+        assert_eq!(write_cap.access, AccessMode::Write);
+        assert_eq!(rw_cap.access, AccessMode::ReadWrite);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_from_profile_policy_add_deny_access_participates_in_overlap_validation() {
+        let dir = tempdir().expect("tmpdir");
+        let allowed = dir.path().join("allowed");
+        let denied = allowed.join("child");
+        std::fs::create_dir_all(&denied).expect("mkdir denied child");
+
+        let profile_path = dir.path().join("policy-deny.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "policy-deny" }},
+                    "policy": {{
+                        "add_allow_readwrite": ["{}"],
+                        "add_deny_access": ["{}"]
+                    }}
+                }}"#,
+                allowed.display(),
+                denied.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let err = CapabilitySet::from_profile(&profile, workdir.path(), &args)
+            .expect_err("profile deny overlap should fail on linux");
+        assert!(
+            err.to_string().contains("Landlock deny-overlap"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_from_profile_policy_add_deny_access_tracks_symlink_target_for_overlap_validation() {
+        let dir = tempdir().expect("tmpdir");
+        let target_dir = dir.path().join("target");
+        let denied_target = target_dir.join("child");
+        std::fs::create_dir_all(&denied_target).expect("mkdir denied target");
+
+        let symlink_dir = dir.path().join("symlinked");
+        std::os::unix::fs::symlink(&target_dir, &symlink_dir).expect("create symlink");
+
+        let profile_path = dir.path().join("policy-deny-symlink.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "policy-deny-symlink" }},
+                    "policy": {{
+                        "add_allow_readwrite": ["{}"],
+                        "add_deny_access": ["{}"]
+                    }}
+                }}"#,
+                target_dir.display(),
+                symlink_dir.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let err = CapabilitySet::from_profile(&profile, workdir.path(), &args)
+            .expect_err("symlinked deny overlap should fail on linux");
+        assert!(
+            err.to_string().contains("Landlock deny-overlap"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_from_profile_policy_add_deny_access_emits_seatbelt_rules() {
+        let dir = tempdir().expect("tmpdir");
+        let denied = dir.path().join("denied");
+        std::fs::create_dir_all(&denied).expect("mkdir denied");
+
+        let profile_path = dir.path().join("policy-deny-macos.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "policy-deny-macos" }},
+                    "policy": {{
+                        "add_deny_access": ["{}"]
+                    }}
+                }}"#,
+                denied.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        let rules = caps.platform_rules().join("\n");
+        assert!(
+            rules.contains("deny file-read-data"),
+            "expected macOS deny read rule, got:\n{}",
+            rules
+        );
+        assert!(
+            rules.contains("deny file-write*"),
+            "expected macOS deny write rule, got:\n{}",
+            rules
         );
     }
 

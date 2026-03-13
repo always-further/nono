@@ -51,6 +51,29 @@ pub struct FilesystemConfig {
     pub write_file: Vec<String>,
 }
 
+/// Policy patch configuration in a profile.
+///
+/// These fields provide explicit subtractive/additive composition on top of
+/// inherited groups and existing filesystem configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PolicyPatchConfig {
+    /// Group names to remove from the resolved group set.
+    #[serde(default)]
+    pub exclude_groups: Vec<String>,
+    /// Additional read-only directories to allow.
+    #[serde(default)]
+    pub add_allow_read: Vec<String>,
+    /// Additional write-only directories to allow.
+    #[serde(default)]
+    pub add_allow_write: Vec<String>,
+    /// Additional read-write directories to allow.
+    #[serde(default)]
+    pub add_allow_readwrite: Vec<String>,
+    /// Additional deny.access paths to apply.
+    #[serde(default)]
+    pub add_deny_access: Vec<String>,
+}
+
 /// Custom credential route definition for reverse proxy.
 ///
 /// Allows users to define their own credential services in profiles,
@@ -665,8 +688,8 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub groups: Vec<String>,
     /// Base groups to exclude for this profile (overrides base policy).
-    /// Populated during deserialization; read by `ProfileDef::to_profile()` in the
-    /// policy resolver. Will also be consumed by `--trust-group` CLI flag handling.
+    /// Populated during deserialization and consumed during base-group merging.
+    /// Will also be consumed by `--trust-group` CLI flag handling.
     #[serde(default)]
     #[allow(dead_code)]
     pub trust_groups: Vec<String>,
@@ -740,6 +763,8 @@ pub struct Profile {
     #[serde(default)]
     pub filesystem: FilesystemConfig,
     #[serde(default)]
+    pub policy: PolicyPatchConfig,
+    #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default, alias = "secrets")]
     pub env_credentials: SecretsConfig,
@@ -792,9 +817,7 @@ pub fn load_profile(name_or_path: &str) -> Result<Profile> {
     let profile_path = get_user_profile_path(name_or_path)?;
     if profile_path.exists() {
         tracing::info!("Loading user profile from: {}", profile_path.display());
-        let mut profile = load_from_file(&profile_path)?;
-        merge_base_groups(&mut profile)?;
-        return Ok(profile);
+        return finalize_profile(load_from_file(&profile_path)?);
     }
 
     // 2. Fall back to built-in profiles
@@ -819,17 +842,26 @@ pub fn load_profile_from_path(path: &Path) -> Result<Profile> {
     }
 
     tracing::info!("Loading profile from path: {}", path.display());
-    let mut profile = load_from_file(path)?;
+    finalize_profile(load_from_file(path)?)
+}
+
+/// Resolve inheritance and apply base-group merging for a raw profile.
+pub(crate) fn finalize_profile(mut profile: Profile) -> Result<Profile> {
     merge_base_groups(&mut profile)?;
     Ok(profile)
+}
+
+/// Resolve inheritance and apply base-group merging for a raw profile.
+pub(crate) fn resolve_and_finalize_profile(profile: Profile) -> Result<Profile> {
+    finalize_profile(resolve_extends(profile, &mut Vec::new(), 0)?)
 }
 
 /// Merge base_groups from policy.json into a user profile.
 ///
 /// User profiles loaded from file only declare their own groups in
-/// `security.groups`. Built-in profiles get base_groups merged by
-/// `ProfileDef::to_profile()`, but user profiles bypass that path.
-/// This function applies the same merge: `(base_groups - trust_groups) + profile.groups`.
+/// `security.groups`. Built-in profiles also resolve through the same raw
+/// profile pipeline before base_groups are merged.
+/// This function applies: `(base_groups - trust_groups) + profile.groups`.
 fn merge_base_groups(profile: &mut Profile) -> Result<()> {
     let policy = crate::policy::load_embedded_policy()?;
     crate::policy::validate_trust_groups(&policy, &profile.security.trust_groups)?;
@@ -924,8 +956,8 @@ fn resolve_extends(child: Profile, visited: &mut Vec<String>, depth: usize) -> R
 /// Load a base profile by name WITHOUT applying `merge_base_groups`.
 ///
 /// Checks user profiles first, then built-in profiles. Built-in profiles
-/// are loaded via direct field copy from `ProfileDef` (not `to_profile()`,
-/// which would merge base_groups prematurely).
+/// are loaded as raw profile definitions so inheritance can resolve before
+/// base_groups are merged.
 fn load_base_profile_raw(name: &str) -> Result<Profile> {
     if !is_valid_profile_name(name) {
         return Err(NonoError::ProfileInheritance(format!(
@@ -943,27 +975,7 @@ fn load_base_profile_raw(name: &str) -> Result<Profile> {
     // 2. Fall back to built-in profile from embedded policy
     let policy = crate::policy::load_embedded_policy()?;
     if let Some(def) = policy.profiles.get(name) {
-        return Ok(Profile {
-            extends: None,
-            meta: def.meta.clone(),
-            security: SecurityConfig {
-                groups: def.security.groups.clone(),
-                trust_groups: def.trust_groups.clone(),
-                allowed_commands: def.security.allowed_commands.clone(),
-                signal_mode: def.security.signal_mode,
-                process_info_mode: def.security.process_info_mode,
-                capability_elevation: def.security.capability_elevation,
-            },
-            filesystem: def.filesystem.clone(),
-            network: def.network.clone(),
-            env_credentials: def.env_credentials.clone(),
-            workdir: def.workdir.clone(),
-            hooks: def.hooks.clone(),
-            rollback: def.rollback.clone(),
-            open_urls: def.open_urls.clone(),
-            allow_launch_services: def.allow_launch_services,
-            interactive: def.interactive,
-        });
+        return Ok(def.to_raw_profile());
     }
 
     Err(NonoError::ProfileInheritance(format!(
@@ -1004,6 +1016,22 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             allow_file: dedup_append(&base.filesystem.allow_file, &child.filesystem.allow_file),
             read_file: dedup_append(&base.filesystem.read_file, &child.filesystem.read_file),
             write_file: dedup_append(&base.filesystem.write_file, &child.filesystem.write_file),
+        },
+        policy: PolicyPatchConfig {
+            exclude_groups: dedup_append(&base.policy.exclude_groups, &child.policy.exclude_groups),
+            add_allow_read: dedup_append(&base.policy.add_allow_read, &child.policy.add_allow_read),
+            add_allow_write: dedup_append(
+                &base.policy.add_allow_write,
+                &child.policy.add_allow_write,
+            ),
+            add_allow_readwrite: dedup_append(
+                &base.policy.add_allow_readwrite,
+                &child.policy.add_allow_readwrite,
+            ),
+            add_deny_access: dedup_append(
+                &base.policy.add_deny_access,
+                &child.policy.add_deny_access,
+            ),
         },
         network: NetworkConfig {
             block: base.network.block || child.network.block,
@@ -2059,6 +2087,13 @@ mod tests {
                 read_file: vec!["/base/file.txt".to_string()],
                 write_file: vec![],
             },
+            policy: PolicyPatchConfig {
+                exclude_groups: vec!["base_excluded".to_string()],
+                add_allow_read: vec!["/base/policy-read".to_string()],
+                add_allow_write: vec![],
+                add_allow_readwrite: vec![],
+                add_deny_access: vec!["/base/policy-deny".to_string()],
+            },
             network: NetworkConfig {
                 block: false,
                 network_profile: InheritableValue::Set("base-net".to_string()),
@@ -2116,6 +2151,13 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec![],
                 write_file: vec![],
+            },
+            policy: PolicyPatchConfig {
+                exclude_groups: vec!["child_excluded".to_string()],
+                add_allow_read: vec![],
+                add_allow_write: vec!["/child/policy-write".to_string()],
+                add_allow_readwrite: vec!["/child/policy-rw".to_string()],
+                add_deny_access: vec!["/child/policy-deny".to_string()],
             },
             network: NetworkConfig {
                 block: false,
@@ -2775,6 +2817,39 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_profiles_merges_policy_patches() {
+        let merged = merge_profiles(base_profile(), child_profile());
+        assert!(merged
+            .policy
+            .exclude_groups
+            .contains(&"base_excluded".to_string()));
+        assert!(merged
+            .policy
+            .exclude_groups
+            .contains(&"child_excluded".to_string()));
+        assert!(merged
+            .policy
+            .add_allow_read
+            .contains(&"/base/policy-read".to_string()));
+        assert!(merged
+            .policy
+            .add_allow_write
+            .contains(&"/child/policy-write".to_string()));
+        assert!(merged
+            .policy
+            .add_allow_readwrite
+            .contains(&"/child/policy-rw".to_string()));
+        assert!(merged
+            .policy
+            .add_deny_access
+            .contains(&"/base/policy-deny".to_string()));
+        assert!(merged
+            .policy
+            .add_deny_access
+            .contains(&"/child/policy-deny".to_string()));
+    }
+
+    #[test]
     fn test_extends_field_deserialization() {
         let json_str = r#"{
             "extends": "claude-code",
@@ -2814,6 +2889,29 @@ mod tests {
             set.network.network_profile,
             InheritableValue::Set("developer".to_string())
         );
+    }
+
+    #[test]
+    fn test_policy_patch_deserialization() {
+        let profile: Profile = serde_json::from_str(
+            r#"{
+                "meta": { "name": "patchy" },
+                "policy": {
+                    "exclude_groups": ["deny_shell_configs"],
+                    "add_allow_read": ["/tmp/read"],
+                    "add_allow_write": ["/tmp/write"],
+                    "add_allow_readwrite": ["/tmp/rw"],
+                    "add_deny_access": ["/tmp/deny"]
+                }
+            }"#,
+        )
+        .expect("parse profile with policy patch");
+
+        assert_eq!(profile.policy.exclude_groups, vec!["deny_shell_configs"]);
+        assert_eq!(profile.policy.add_allow_read, vec!["/tmp/read"]);
+        assert_eq!(profile.policy.add_allow_write, vec!["/tmp/write"]);
+        assert_eq!(profile.policy.add_allow_readwrite, vec!["/tmp/rw"]);
+        assert_eq!(profile.policy.add_deny_access, vec!["/tmp/deny"]);
     }
 
     #[test]
