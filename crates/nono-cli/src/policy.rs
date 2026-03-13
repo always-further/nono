@@ -989,16 +989,6 @@ pub fn validate_trust_groups(policy: &Policy, trust_groups: &[String]) -> Result
     validate_group_exclusions(policy, trust_groups)
 }
 
-/// Common deny + system groups shared by all sandbox invocations.
-///
-/// Reads from the embedded policy.json `base_groups` array. This is the base
-/// set of groups that both `from_args()` (non-profile CLI) and built-in
-/// profiles use. Profiles extend this with additional groups.
-pub fn base_groups() -> Result<Vec<String>> {
-    let policy = load_embedded_policy()?;
-    Ok(policy.base_groups)
-}
-
 /// Get a built-in profile from embedded policy.json.
 ///
 /// Returns `None` if the profile name is not defined in policy.json.

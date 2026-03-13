@@ -2024,20 +2024,13 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     // Final deny/allow overlap validation after ALL path grants are finalized,
     // including auto-included CWD. This closes the Linux Landlock blind spot
     // where deny-within-allow cannot be enforced.
-    let active_groups = if let Some(ref prof) = loaded_profile {
-        if prof.security.groups.is_empty() {
-            policy::get_policy_profile("default")?
-                .ok_or_else(|| NonoError::ProfileNotFound("default".to_string()))?
-                .security
-                .groups
-        } else {
-            prof.security.groups.clone()
-        }
+    let active_groups = if let Some(prof) = loaded_profile
+        .as_ref()
+        .filter(|p| !p.security.groups.is_empty())
+    {
+        prof.security.groups.clone()
     } else {
-        policy::get_policy_profile("default")?
-            .ok_or_else(|| NonoError::ProfileNotFound("default".to_string()))?
-            .security
-            .groups
+        crate::capability_ext::default_profile_groups()?
     };
     let loaded_policy = policy::load_embedded_policy()?;
     let deny_paths = policy::resolve_deny_paths_for_groups(&loaded_policy, &active_groups)?;

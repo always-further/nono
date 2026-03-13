@@ -86,7 +86,7 @@ fn validate_requested_file(
     )
 }
 
-fn default_profile_groups() -> Result<Vec<String>> {
+pub(crate) fn default_profile_groups() -> Result<Vec<String>> {
     let profile = crate::policy::get_policy_profile("default")?
         .ok_or_else(|| NonoError::ProfileNotFound("default".to_string()))?;
     Ok(profile.security.groups)
@@ -594,11 +594,7 @@ mod tests {
         let (caps, _) = CapabilitySet::from_args(&args).expect("build caps from args");
 
         let policy = crate::policy::load_embedded_policy().expect("load embedded policy");
-        let default_groups = crate::policy::get_policy_profile("default")
-            .expect("load default profile")
-            .expect("default profile")
-            .security
-            .groups;
+        let default_groups = default_profile_groups().expect("get default profile groups");
         let deny_paths = crate::policy::resolve_deny_paths_for_groups(&policy, &default_groups)
             .expect("resolve deny paths");
 

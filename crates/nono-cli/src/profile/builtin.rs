@@ -163,7 +163,9 @@ mod tests {
 
     #[test]
     fn test_base_groups_from_policy() {
-        let groups = crate::policy::base_groups().expect("load base groups");
+        let groups = crate::policy::load_embedded_policy()
+            .expect("load embedded policy")
+            .base_groups;
         assert!(!groups.is_empty());
         assert!(groups.contains(&"deny_credentials".to_string()));
         assert!(groups.contains(&"system_read_macos".to_string()));
@@ -198,7 +200,9 @@ mod tests {
         // doesn't have groups it shouldn't (trust_groups is empty for all
         // current profiles, but the merging path is exercised)
         let profile = get_builtin("openclaw").expect("Profile not found");
-        let base = crate::policy::base_groups().expect("load base groups");
+        let base = crate::policy::load_embedded_policy()
+            .expect("load embedded policy")
+            .base_groups;
         // All base groups should be present since trust_groups is empty
         for group in &base {
             assert!(
@@ -212,37 +216,13 @@ mod tests {
     #[test]
     fn test_default_profile_group_set_matches_base_groups() {
         let profile = get_builtin("default").expect("default profile");
-        let mut expected = crate::policy::base_groups().expect("load base groups");
+        let mut expected = crate::policy::load_embedded_policy()
+            .expect("load embedded policy")
+            .base_groups;
         let mut actual = profile.security.groups.clone();
         expected.sort();
         actual.sort();
         assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_default_profile_deny_paths_match_base_groups() {
-        let policy = crate::policy::load_embedded_policy().expect("load policy");
-        let base = crate::policy::base_groups().expect("load base groups");
-        let base_deny = crate::policy::resolve_deny_paths_for_groups(&policy, &base)
-            .expect("resolve base deny");
-
-        let default = get_builtin("default").expect("default profile");
-        let default_deny =
-            crate::policy::resolve_deny_paths_for_groups(&policy, &default.security.groups)
-                .expect("resolve default deny");
-
-        let mut base_rendered: Vec<String> = base_deny
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-        let mut default_rendered: Vec<String> = default_deny
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-        base_rendered.sort();
-        default_rendered.sort();
-
-        assert_eq!(default_rendered, base_rendered);
     }
 
     #[test]

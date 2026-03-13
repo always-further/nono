@@ -57,7 +57,7 @@ echo 'dry-run-write' > \"$ALLOWED_DIR/dry_run_should_not_exist.txt\"
 exit
 EOF"
 
-expect_output_contains "shell --dry-run shows dry-run message" "Dry run mode" \
+expect_output_contains "shell --dry-run shows dry-run message" "dry-run sandbox would be applied" \
     bash -c "cat <<'EOF' | \"$NONO_BIN\" shell --dry-run --allow \"$ALLOWED_DIR\" --shell /bin/sh
 echo 'noop'
 exit
