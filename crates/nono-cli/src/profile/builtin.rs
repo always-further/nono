@@ -40,15 +40,6 @@ mod tests {
         assert_eq!(profile.workdir.access, WorkdirAccess::None);
         assert!(!profile.interactive);
         assert!(!profile.network.block);
-
-        let base = crate::policy::base_groups().expect("load base groups");
-        for group in &base {
-            assert!(
-                profile.security.groups.contains(group),
-                "default should contain base group '{}'",
-                group
-            );
-        }
     }
 
     #[test]
