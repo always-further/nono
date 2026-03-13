@@ -740,7 +740,7 @@ mod tests {
         std::fs::create_dir_all(&denied_target).expect("mkdir denied target");
 
         let symlink_dir = dir.path().join("symlinked");
-        std::os::unix::fs::symlink(&target_dir, &symlink_dir).expect("create symlink");
+        std::os::unix::fs::symlink(&denied_target, &symlink_dir).expect("create symlink");
 
         let profile_path = dir.path().join("policy-deny-symlink.json");
         std::fs::write(
