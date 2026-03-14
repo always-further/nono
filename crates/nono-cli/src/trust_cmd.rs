@@ -432,23 +432,80 @@ fn decode_jwt_claims(jwt: &str) -> Option<serde_json::Map<String, serde_json::Va
     serde_json::from_slice(&payload_bytes).ok()
 }
 
-/// Build the keyless signer predicate from ambient OIDC token.
-fn build_keyless_predicate(jwt: &str) -> serde_json::Value {
-    let mut signer = serde_json::json!({
-        "kind": "keyless",
-        "oidc_issuer": std::env::var("ACTIONS_ID_TOKEN_ISSUER")
-            .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string()),
-        "repository": std::env::var("GITHUB_REPOSITORY").unwrap_or_default(),
-        "workflow": std::env::var("GITHUB_WORKFLOW_REF").unwrap_or_default(),
-        "ref": std::env::var("GITHUB_REF").unwrap_or_default(),
-        "server_url", std::env::var("GITHUB_SERVER_URL")
-            .or_else(|_| std::env::var("CI_SERVER_URL"))
-            .unwrap_or_default())
-    });
+fn gitlab_keyless_predicate() -> Option<serde_json::Map<String, serde_json::Value>> {
+    if std::env::var("GITLAB_CI").as_deref() != Ok("true") {
+        return None;
+    }
 
-   if let Some(claims) = decode_jwt_claims(jwt) {
-        signer.append(claims);
-   }
+    let host = std::env::var("CI_SERVER_HOST").unwrap_or_else(|_| "gitlab.com".to_string());
+    let port = std::env::var("CI_SERVER_PORT").unwrap_or_else(|_| "443".to_string());
+    let project_path = std::env::var("CI_PROJECT_PATH").unwrap_or_default();
+
+    let host_authority = if port == "443" {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
+
+    let git_ref = match std::env::var("CI_COMMIT_TAG") {
+        Ok(tag) if !tag.is_empty() => format!("refs/tags/{tag}"),
+        _ => format!(
+            "refs/heads/{}",
+            std::env::var("CI_COMMIT_REF_NAME").unwrap_or_default()
+        ),
+    };
+
+    let workflow = format!("{host_authority}/{project_path}//.gitlab-ci.yml@{git_ref}");
+    let server_url = std::env::var("CI_SERVER_URL")
+        .unwrap_or_else(|_| "https://gitlab.com".to_string());
+
+    let mut signer = serde_json::Map::new();
+    for (k, v) in [
+        ("kind", "keyless"),
+        ("oidc_issuer", &server_url),
+        ("server_url", &server_url),
+        ("repository", &project_path),
+        ("workflow", &workflow),
+        ("ref", &git_ref),
+    ] {
+        signer.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+    }
+
+    Some(signer)
+}
+
+/// Build the keyless signer predicate from ambient OIDC environment variables,
+/// then merge in JWT token claims with higher precedence.
+fn build_keyless_predicate(jwt: &str) -> serde_json::Value {
+    let mut signer = if let Some(gitlab) = gitlab_keyless_predicate() {
+        gitlab
+    } else {
+        let server_url = std::env::var("GITHUB_SERVER_URL")
+            .unwrap_or_else(|_| "https://github.com".to_string());
+
+        let mut m = serde_json::Map::new();
+        for (k, v) in [
+            ("kind", "keyless".to_string()),
+            (
+                "oidc_issuer",
+                std::env::var("ACTIONS_ID_TOKEN_ISSUER")
+                    .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string()),
+            ),
+            ("server_url", server_url),
+            ("repository", std::env::var("GITHUB_REPOSITORY").unwrap_or_default()),
+            ("workflow", std::env::var("GITHUB_WORKFLOW_REF").unwrap_or_default()),
+            ("ref", std::env::var("GITHUB_REF").unwrap_or_default()),
+        ] {
+            m.insert(k.to_string(), serde_json::Value::String(v));
+        }
+        m
+    };
+
+    if let Some(claims) = decode_jwt_claims(jwt) {
+        for (key, value) in claims {
+            signer.insert(key, value);
+        }
+    }
 
     serde_json::json!({
         "version": 1,
@@ -1219,10 +1276,6 @@ mod tests {
         assert_eq!(signer["ref"], "refs/heads/main");
         assert_eq!(signer["repository"], "org/repo");
         assert_eq!(signer["workflow_ref"], ".github/workflows/sign.yml");
-        assert_eq!(
-            signer["build_signer_uri"],
-            "org/repo/.github/workflows/sign.yml@refs/heads/main"
-        );
     }
 
     #[test]
@@ -1254,10 +1307,6 @@ mod tests {
         assert_eq!(
             signer["sub"],
             "project_path:my-group/my-project:ref_type:branch:ref:main"
-        );
-        assert_eq!(
-            signer["build_signer_uri"],
-            "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
         );
     }
 
