@@ -529,7 +529,7 @@ fn discover_oidc_token(rt: &tokio::runtime::Runtime) -> Result<sigstore_sign::oi
                 path: String::new(),
                 reason: "no ambient OIDC credentials found. \
                          Keyless signing requires a CI environment with OIDC support \
-                         (e.g., GitHub Actions with `permissions: id-token: write`)."
+                         (e.g. GitHub Actions with `permissions: id-token: write`, GitLab CI Job with `id_tokens: SIGSTORE_ID_TOKEN: aud: sigstore`)."
                     .to_string(),
             })
     })
