@@ -434,26 +434,21 @@ fn decode_jwt_claims(jwt: &str) -> Option<serde_json::Map<String, serde_json::Va
 
 /// Build the keyless signer predicate from ambient OIDC token.
 fn build_keyless_predicate(jwt: &str) -> serde_json::Value {
-    let mut signer = serde_json::Map::new();
-    signer.insert(
-        "kind".to_string(),
-        serde_json::Value::String("keyless".to_string()),
-    );
+    let mut signer = serde_json::json!({
+        "kind": "keyless",
+        "oidc_issuer": std::env::var("ACTIONS_ID_TOKEN_ISSUER")
+            .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string()),
+        "repository": std::env::var("GITHUB_REPOSITORY").unwrap_or_default(),
+        "workflow": std::env::var("GITHUB_WORKFLOW_REF").unwrap_or_default(),
+        "ref": std::env::var("GITHUB_REF").unwrap_or_default(),
+        "server_url", std::env::var("GITHUB_SERVER_URL")
+            .or_else(|_| std::env::var("CI_SERVER_URL"))
+            .unwrap_or_default())
+    });
 
-    if let Some(claims) = decode_jwt_claims(jwt) {
-        for (key, value) in &claims {
-            signer.entry(key.clone()).or_insert_with(|| value.clone());
-        }
-    }
-
-    if !signer.contains_key("build_signer_uri") {
-        let build_signer_uri = signer
-            .get("job_workflow_ref")
-            .or_else(|| signer.get("ci_config_ref_uri"))
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::String(String::new()));
-        signer.insert("build_signer_uri".to_string(), build_signer_uri);
-    }
+   if let Some(claims) = decode_jwt_claims(jwt) {
+        signer.append(claims);
+   }
 
     serde_json::json!({
         "version": 1,
