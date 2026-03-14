@@ -456,8 +456,8 @@ fn gitlab_keyless_predicate() -> Option<serde_json::Map<String, serde_json::Valu
     };
 
     let workflow = format!("{host_authority}/{project_path}//.gitlab-ci.yml@{git_ref}");
-    let server_url = std::env::var("CI_SERVER_URL")
-        .unwrap_or_else(|_| "https://gitlab.com".to_string());
+    let server_url =
+        std::env::var("CI_SERVER_URL").unwrap_or_else(|_| "https://gitlab.com".to_string());
 
     serde_json::json!({
         "oidc_issuer": server_url,
@@ -475,8 +475,8 @@ fn github_keyless_predicate() -> Option<serde_json::Map<String, serde_json::Valu
         return None;
     }
 
-    let server_url = std::env::var("GITHUB_SERVER_URL")
-        .unwrap_or_else(|_| "https://github.com".to_string());
+    let server_url =
+        std::env::var("GITHUB_SERVER_URL").unwrap_or_else(|_| "https://github.com".to_string());
 
     serde_json::json!({
         "oidc_issuer": std::env::var("ACTIONS_ID_TOKEN_ISSUER")
@@ -493,7 +493,10 @@ fn github_keyless_predicate() -> Option<serde_json::Map<String, serde_json::Valu
 /// Build the keyless signer predicate from ambient OIDC environment variables,
 /// then merge in JWT token claims with higher precedence.
 fn build_keyless_predicate(jwt: &str) -> serde_json::Value {
-    let base = std::iter::once(("kind".to_string(), serde_json::Value::String("keyless".to_string())));
+    let base = std::iter::once((
+        "kind".to_string(),
+        serde_json::Value::String("keyless".to_string()),
+    ));
     let provider = gitlab_keyless_predicate()
         .or_else(github_keyless_predicate)
         .unwrap_or_default();
