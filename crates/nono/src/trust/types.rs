@@ -406,7 +406,7 @@ pub enum SignerIdentity {
         issuer: String,
         /// Source repository (e.g., `org/repo`)
         repository: String,
-        /// Workflow reference that performed the signing
+        /// Workflow file that performed the signing
         workflow: String,
         /// Git ref at signing time
         git_ref: String,
