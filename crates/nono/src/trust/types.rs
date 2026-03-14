@@ -407,7 +407,6 @@ pub enum SignerIdentity {
         /// Source repository (e.g., `org/repo`)
         repository: String,
         /// Workflow reference that performed the signing
-        /// (e.g., `.github/workflows/sign.yml`)
         workflow: String,
         /// Git ref at signing time
         git_ref: String,
