@@ -656,13 +656,7 @@ mod tests {
     #[test]
     fn test_from_loaded_profile_extends_default_respects_excluded_blocked_commands() {
         let dir = tempdir().expect("tmpdir");
-        let original_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", dir.path());
-        std::fs::create_dir_all(dir.path().join(".config/nono/profiles")).expect("mkdir profiles");
-
-        let profile_path = dir
-            .path()
-            .join(".config/nono/profiles/no-dangerous-commands.json");
+        let profile_path = dir.path().join("no-dangerous-commands.json");
         std::fs::write(
             &profile_path,
             r#"{
@@ -680,17 +674,11 @@ mod tests {
         )
         .expect("write profile");
 
-        let profile = crate::profile::load_profile("no-dangerous-commands").expect("load profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
         let workdir = tempdir().expect("workdir");
         let args = sandbox_args();
         let (caps, _) =
             CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
 
         assert!(
             !caps.blocked_commands().contains(&"rm".to_string()),

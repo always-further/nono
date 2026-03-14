@@ -1554,13 +1554,7 @@ mod tests {
     #[test]
     fn test_load_profile_extends_default_respects_excluded_groups() {
         let dir = tempdir().expect("tmpdir");
-        let original_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", dir.path());
-        std::fs::create_dir_all(dir.path().join(".config/nono/profiles")).expect("mkdir profiles");
-
-        let profile_path = dir
-            .path()
-            .join(".config/nono/profiles/no-dangerous-commands.json");
+        let profile_path = dir.path().join("no-dangerous-commands.json");
         std::fs::write(
             &profile_path,
             r#"{
@@ -1578,16 +1572,13 @@ mod tests {
         )
         .expect("write profile");
 
-        let profile = load_profile("no-dangerous-commands").expect("load profile");
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
+        let profile = load_profile_from_path(&profile_path).expect("load profile");
 
         assert!(
-            !profile.security.groups.contains(&"dangerous_commands".to_string()),
+            !profile
+                .security
+                .groups
+                .contains(&"dangerous_commands".to_string()),
             "excluded dangerous_commands should not be present in finalized groups"
         );
         assert!(
