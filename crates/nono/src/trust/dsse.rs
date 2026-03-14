@@ -321,12 +321,13 @@ impl InTotoStatement {
                         path: String::new(),
                         reason: "keyless signer missing 'subject'".to_string(),
                     })?;
+                let build_signer_uri = get_str_field(signer, "build_signer_uri")?;
                 Ok(super::types::SignerIdentity::Keyless {
                     issuer,
                     repository,
                     workflow,
                     git_ref,
-                    build_signer_uri: String::new(),
+                    build_signer_uri,
                 })
             }
             other => Err(NonoError::TrustVerification {
@@ -798,7 +799,8 @@ mod tests {
                     "issuer": "https://token.actions.githubusercontent.com",
                     "subject": "repo:org/repo:ref:refs/tags/v1.0.0",
                     "repository": "org/repo",
-                    "workflow_ref": ".github/workflows/sign.yml@refs/heads/main"
+                    "workflow_ref": ".github/workflows/sign.yml@refs/heads/main",
+                    "build_signer_uri": "https://github.com/org/repo/.github/workflows/sign.yml@refs/heads/main"
                 }
             }
         })
@@ -811,12 +813,58 @@ mod tests {
                 repository,
                 workflow,
                 git_ref,
-                ..
+                build_signer_uri,
             } => {
                 assert_eq!(issuer, "https://token.actions.githubusercontent.com");
                 assert_eq!(repository, "org/repo");
                 assert_eq!(workflow, ".github/workflows/sign.yml");
                 assert_eq!(git_ref, "refs/tags/v1.0.0");
+                assert_eq!(
+                    build_signer_uri,
+                    "https://github.com/org/repo/.github/workflows/sign.yml@refs/heads/main"
+                );
+            }
+            _ => panic!("expected keyless signer"),
+        }
+    }
+
+    #[test]
+    fn statement_extract_keyless_gitlab_signer() {
+        let json = serde_json::json!({
+            "_type": IN_TOTO_STATEMENT_TYPE,
+            "subject": [{ "name": "SKILLS.md", "digest": { "sha256": "abc" } }],
+            "predicateType": NONO_PREDICATE_TYPE,
+            "predicate": {
+                "version": 1,
+                "signer": {
+                    "kind": "keyless",
+                    "issuer": "https://gitlab.com",
+                    "subject": "project_path:my-group/my-project:ref_type:branch:ref:main",
+                    "repository": "my-group/my-project",
+                    "workflow_ref": "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main",
+                    "build_signer_uri": "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+                }
+            }
+        })
+        .to_string();
+        let stmt = InTotoStatement::from_json(&json).unwrap();
+        let identity = stmt.extract_signer().unwrap();
+        match identity {
+            super::super::types::SignerIdentity::Keyless {
+                issuer,
+                repository,
+                workflow,
+                git_ref,
+                build_signer_uri,
+            } => {
+                assert_eq!(issuer, "https://gitlab.com");
+                assert_eq!(repository, "my-group/my-project");
+                assert_eq!(workflow, "gitlab.com/my-group/my-project//.gitlab-ci.yml");
+                assert_eq!(git_ref, "main");
+                assert_eq!(
+                    build_signer_uri,
+                    "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+                );
             }
             _ => panic!("expected keyless signer"),
         }

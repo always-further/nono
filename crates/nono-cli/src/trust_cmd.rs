@@ -446,6 +446,15 @@ fn build_keyless_predicate(jwt: &str) -> serde_json::Value {
         }
     }
 
+    if !signer.contains_key("build_signer_uri") {
+        let build_signer_uri = signer
+            .get("job_workflow_ref")
+            .or_else(|| signer.get("ci_config_ref_uri"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::String(String::new()));
+        signer.insert("build_signer_uri".to_string(), build_signer_uri);
+    }
+
     serde_json::json!({
         "version": 1,
         "signer": serde_json::Value::Object(signer)
@@ -1200,6 +1209,7 @@ mod tests {
             "exp": 9999999999,
             "iat": 1000000000,
             "iss": "https://token.actions.githubusercontent.com",
+            "job_workflow_ref": "org/repo/.github/workflows/sign.yml@refs/heads/main",
             "ref": "refs/heads/main",
             "repository": "org/repo",
             "sub": "repo:org/repo:ref:refs/heads/main",
@@ -1214,6 +1224,10 @@ mod tests {
         assert_eq!(signer["ref"], "refs/heads/main");
         assert_eq!(signer["repository"], "org/repo");
         assert_eq!(signer["workflow_ref"], ".github/workflows/sign.yml");
+        assert_eq!(
+            signer["build_signer_uri"],
+            "org/repo/.github/workflows/sign.yml@refs/heads/main"
+        );
     }
 
     #[test]
@@ -1221,6 +1235,7 @@ mod tests {
         let jwt = fake_jwt(
             r#"{
             "aud": "sigstore",
+            "ci_config_ref_uri": "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main",
             "exp": 9999999999,
             "iat": 1000000000,
             "iss": "https://gitlab.com",
@@ -1244,6 +1259,10 @@ mod tests {
         assert_eq!(
             signer["sub"],
             "project_path:my-group/my-project:ref_type:branch:ref:main"
+        );
+        assert_eq!(
+            signer["build_signer_uri"],
+            "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
         );
     }
 

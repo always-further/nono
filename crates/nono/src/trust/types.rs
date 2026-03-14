@@ -599,7 +599,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/tags/v1.0.0".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         let matches = policy.matching_publishers(&identity);
         assert_eq!(matches.len(), 1);
@@ -614,7 +614,7 @@ mod tests {
             repository: "evil/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/tags/v1.0.0".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         let matches = policy.matching_publishers(&identity);
         assert!(matches.is_empty());
@@ -628,7 +628,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/heads/main".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         let matches = policy.matching_publishers(&identity);
         assert!(matches.is_empty());
@@ -647,7 +647,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/tags/v1.0.0".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         assert!(policy.matching_publishers(&keyless_identity).is_empty());
     }
@@ -669,7 +669,7 @@ mod tests {
             repository: "my-org/any-repo".to_string(),
             workflow: ".github/workflows/anything.yml".to_string(),
             git_ref: "refs/heads/main".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         assert!(publisher.matches(&identity));
     }
@@ -693,7 +693,7 @@ mod tests {
             repository: "my-group/my-project".to_string(),
             workflow: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
             git_ref: "refs/heads/main".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         assert!(publisher.matches(&identity));
     }
@@ -718,7 +718,7 @@ mod tests {
             workflow: "gitlab.example.com/internal/project//.gitlab-ci.yml@refs/heads/main"
                 .to_string(),
             git_ref: "refs/heads/main".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         assert!(publisher.matches(&identity));
     }
@@ -743,7 +743,7 @@ mod tests {
             workflow: "gitlab.example.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
                 .to_string(),
             git_ref: "refs/heads/main".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         assert!(!publisher.matches(&identity));
     }
@@ -767,7 +767,7 @@ mod tests {
             repository: "release/app".to_string(),
             workflow: "gitlab.example.com/release/app//.gitlab-ci.yml@refs/tags/v2.0.0".to_string(),
             git_ref: "refs/tags/v2.0.0".to_string(),
-            build_signer_uri: String::new(),
+            build_signer_uri: "*".to_string(),
         };
         assert!(publisher.matches(&identity));
     }

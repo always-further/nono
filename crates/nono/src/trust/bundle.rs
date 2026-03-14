@@ -21,6 +21,7 @@
 //! | .1.1 | — | Issuer | OIDC issuer URL |
 //! | .1.12 | .1.5 | Source Repository | `org/repo` (v2 URI normalized) |
 //! | .1.14 | .1.6 | Source Repository Ref | Git ref at signing time |
+//! | .1.9 | — | Build Signer URI | Build instructions responsible for signing |
 //! | .1.18 | — | Build Config URI | Workflow path (v2 URI normalized) or GitLab CI config URI |
 
 use crate::error::{NonoError, Result};
@@ -57,6 +58,11 @@ const OID_SOURCE_REPOSITORY_REF: &str = "1.3.6.1.4.1.57264.1.14";
 /// Fulcio OID for build config URI (workflow): 1.3.6.1.4.1.57264.1.18
 /// Value: `https://github.com/<org>/<repo>/.github/workflows/<file>@<ref>`
 const OID_BUILD_CONFIG_URI: &str = "1.3.6.1.4.1.57264.1.18";
+
+/// Fulcio OID for build signer URI: 1.3.6.1.4.1.57264.1.9
+/// Value: fully qualified reference to the build instructions responsible for signing.
+/// For GitHub Actions this is a reusable workflow ref; for GitLab CI an Orb-style URI.
+const OID_BUILD_SIGNER_URI: &str = "1.3.6.1.4.1.57264.1.9";
 
 /// Fulcio v1 OID for source repository (short form): 1.3.6.1.4.1.57264.1.5
 /// Value: `<org>/<repo>` (v1 fallback, no URI prefix)
@@ -464,6 +470,7 @@ pub fn extract_predicate_type(bundle: &Bundle, bundle_path: &Path) -> Result<Str
 ///
 /// For bundles with a Fulcio certificate (keyless), extracts:
 /// - OIDC issuer (OID .1.1)
+/// - Build signer URI (OID .1.9)
 /// - Source repository (OID .1.12, v1 fallback .1.5)
 /// - Build config / workflow (OID .1.18)
 /// - Source repository ref (OID .1.14, v1 fallback .1.6)
@@ -543,7 +550,7 @@ fn extract_identity_from_cert(cert_der: &[u8], bundle_path: &Path) -> Result<Sig
             .build_signer_uri
             .ok_or_else(|| NonoError::TrustVerification {
                 path: bundle_path.display().to_string(),
-                reason: "signing certificate missing build config URI extension (OID .1.18)"
+                reason: "signing certificate missing build signer URI extension (OID .1.9)"
                     .to_string(),
             })?;
 
@@ -613,6 +620,7 @@ fn extract_fulcio_extensions(cert_der: &[u8], bundle_path: &Path) -> Result<Fulc
         }
     };
 
+    let mut build_config_uri = None;
     let mut build_signer_uri = None;
     let mut repository_uri = None; // v2: full URI
     let mut repository_v1 = None; // v1: org/repo
@@ -629,6 +637,9 @@ fn extract_fulcio_extensions(cert_der: &[u8], bundle_path: &Path) -> Result<Fulc
                 repository_v1 = decode_utf8_extension(ext.extn_value.as_bytes());
             }
             OID_BUILD_CONFIG_URI => {
+                build_config_uri = decode_utf8_extension(ext.extn_value.as_bytes());
+            }
+            OID_BUILD_SIGNER_URI => {
                 build_signer_uri = decode_utf8_extension(ext.extn_value.as_bytes());
             }
             OID_SOURCE_REPOSITORY_REF => {
@@ -648,7 +659,7 @@ fn extract_fulcio_extensions(cert_der: &[u8], bundle_path: &Path) -> Result<Fulc
         .or(repository_v1)
         .map(|uri| normalize_github_uri(&uri));
 
-    let workflow = build_signer_uri.as_deref().map(normalize_workflow_uri);
+    let workflow = build_config_uri.as_deref().map(normalize_workflow_uri);
 
     Ok(FulcioExtensions {
         build_signer_uri,
