@@ -1552,6 +1552,54 @@ mod tests {
     }
 
     #[test]
+    fn test_load_profile_extends_default_respects_excluded_groups() {
+        let dir = tempdir().expect("tmpdir");
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+        std::fs::create_dir_all(dir.path().join(".config/nono/profiles")).expect("mkdir profiles");
+
+        let profile_path = dir
+            .path()
+            .join(".config/nono/profiles/no-dangerous-commands.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "no-dangerous-commands", "version": "1.0.0" },
+                "extends": "default",
+                "policy": {
+                    "exclude_groups": [
+                        "dangerous_commands",
+                        "dangerous_commands_linux",
+                        "dangerous_commands_macos"
+                    ]
+                },
+                "workdir": { "access": "readwrite" }
+            }"#,
+        )
+        .expect("write profile");
+
+        let profile = load_profile("no-dangerous-commands").expect("load profile");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert!(
+            !profile.security.groups.contains(&"dangerous_commands".to_string()),
+            "excluded dangerous_commands should not be present in finalized groups"
+        );
+        assert!(
+            !profile
+                .security
+                .groups
+                .contains(&"dangerous_commands_macos".to_string()),
+            "excluded dangerous_commands_macos should not be present in finalized groups"
+        );
+    }
+
+    #[test]
     fn test_workdir_config_readwrite() {
         let json_str = r#"{
             "meta": { "name": "test-profile" },
