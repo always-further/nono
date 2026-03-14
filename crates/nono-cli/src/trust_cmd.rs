@@ -459,53 +459,48 @@ fn gitlab_keyless_predicate() -> Option<serde_json::Map<String, serde_json::Valu
     let server_url = std::env::var("CI_SERVER_URL")
         .unwrap_or_else(|_| "https://gitlab.com".to_string());
 
-    let mut signer = serde_json::Map::new();
-    for (k, v) in [
-        ("kind", "keyless"),
-        ("oidc_issuer", &server_url),
-        ("server_url", &server_url),
-        ("repository", &project_path),
-        ("workflow", &workflow),
-        ("ref", &git_ref),
-    ] {
-        signer.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+    serde_json::json!({
+        "oidc_issuer": server_url,
+        "server_url": server_url,
+        "repository": project_path,
+        "workflow": workflow,
+        "ref": git_ref
+    })
+    .as_object()
+    .cloned()
+}
+
+fn github_keyless_predicate() -> Option<serde_json::Map<String, serde_json::Value>> {
+    if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true") {
+        return None;
     }
 
-    Some(signer)
+    let server_url = std::env::var("GITHUB_SERVER_URL")
+        .unwrap_or_else(|_| "https://github.com".to_string());
+
+    serde_json::json!({
+        "oidc_issuer": std::env::var("ACTIONS_ID_TOKEN_ISSUER")
+            .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string()),
+        "server_url": server_url,
+        "repository": std::env::var("GITHUB_REPOSITORY").unwrap_or_default(),
+        "workflow": std::env::var("GITHUB_WORKFLOW_REF").unwrap_or_default(),
+        "ref": std::env::var("GITHUB_REF").unwrap_or_default()
+    })
+    .as_object()
+    .cloned()
 }
 
 /// Build the keyless signer predicate from ambient OIDC environment variables,
 /// then merge in JWT token claims with higher precedence.
 fn build_keyless_predicate(jwt: &str) -> serde_json::Value {
-    let mut signer = if let Some(gitlab) = gitlab_keyless_predicate() {
-        gitlab
-    } else {
-        let server_url = std::env::var("GITHUB_SERVER_URL")
-            .unwrap_or_else(|_| "https://github.com".to_string());
+    let base = std::iter::once(("kind".to_string(), serde_json::Value::String("keyless".to_string())));
+    let provider = gitlab_keyless_predicate()
+        .or_else(github_keyless_predicate)
+        .unwrap_or_default();
+    let claims = decode_jwt_claims(jwt).unwrap_or_default();
 
-        let mut m = serde_json::Map::new();
-        for (k, v) in [
-            ("kind", "keyless".to_string()),
-            (
-                "oidc_issuer",
-                std::env::var("ACTIONS_ID_TOKEN_ISSUER")
-                    .unwrap_or_else(|_| "https://token.actions.githubusercontent.com".to_string()),
-            ),
-            ("server_url", server_url),
-            ("repository", std::env::var("GITHUB_REPOSITORY").unwrap_or_default()),
-            ("workflow", std::env::var("GITHUB_WORKFLOW_REF").unwrap_or_default()),
-            ("ref", std::env::var("GITHUB_REF").unwrap_or_default()),
-        ] {
-            m.insert(k.to_string(), serde_json::Value::String(v));
-        }
-        m
-    };
-
-    if let Some(claims) = decode_jwt_claims(jwt) {
-        for (key, value) in claims {
-            signer.insert(key, value);
-        }
-    }
+    let signer: serde_json::Map<String, serde_json::Value> =
+        base.chain(provider).chain(claims).collect();
 
     serde_json::json!({
         "version": 1,
