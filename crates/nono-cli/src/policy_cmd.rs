@@ -14,6 +14,12 @@ use colored::Colorize;
 use nono::{NonoError, Result};
 use std::collections::BTreeSet;
 
+/// Serialize a value to pretty-printed JSON, propagating serialization errors.
+fn to_json(val: &serde_json::Value) -> Result<String> {
+    serde_json::to_string_pretty(val)
+        .map_err(|e| NonoError::ProfileParse(format!("JSON serialization failed: {e}")))
+}
+
 /// Prefix used for all policy command output
 fn prefix() -> colored::ColoredString {
     let t = theme::current();
@@ -66,7 +72,7 @@ fn cmd_groups_list(pol: &policy::Policy, json: bool, all_platforms: bool) -> Res
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
+        println!("{}", to_json(&serde_json::Value::Array(arr))?);
         return Ok(());
     }
 
@@ -108,7 +114,7 @@ fn cmd_groups_detail(pol: &policy::Policy, name: &str, json: bool) -> Result<()>
 
     if json {
         let val = group_to_json(name, group);
-        println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+        println!("{}", to_json(&val)?);
         return Ok(());
     }
 
@@ -360,7 +366,7 @@ fn cmd_profiles(args: PolicyProfilesArgs) -> Result<()> {
             .map(|(n, p)| format_entry(n, p))
             .chain(user_profiles.iter().map(|(n, p)| format_entry(n, p)))
             .collect();
-        println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
+        println!("{}", to_json(&serde_json::Value::Array(arr))?);
         return Ok(());
     }
 
@@ -424,7 +430,7 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
 
     if args.json {
         let val = profile_to_json(&args.profile, &profile, &raw_extends);
-        println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+        println!("{}", to_json(&val)?);
         return Ok(());
     }
 
@@ -774,7 +780,7 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
 
     if args.json {
         let val = diff_to_json(&args.profile1, &args.profile2, &p1, &p2);
-        println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+        println!("{}", to_json(&val)?);
         return Ok(());
     }
 
@@ -1685,7 +1691,7 @@ fn cmd_validate(args: PolicyValidateArgs) -> Result<()> {
             "errors": errors,
             "warnings": warnings,
         });
-        println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+        println!("{}", to_json(&val)?);
         if !errors.is_empty() {
             return Err(NonoError::ProfileParse("validation failed".into()));
         }
