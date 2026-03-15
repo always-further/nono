@@ -135,6 +135,9 @@ pub struct Publisher {
     /// Workflow file pattern, supports wildcards (keyless publishers only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow: Option<String>,
+    /// Build signer URI pattern, supports wildcards (keyless publishers only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_signer_uri: Option<String>,
     /// Git ref pattern, supports wildcards (keyless publishers only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_pattern: Option<String>,
@@ -174,8 +177,8 @@ impl Publisher {
                 repository,
                 workflow,
                 git_ref,
+                build_signer_uri,
             } => {
-                // Reject empty identity fields — they must never match any pattern
                 if issuer.is_empty()
                     || repository.is_empty()
                     || workflow.is_empty()
@@ -191,10 +194,13 @@ impl Publisher {
                     .as_deref()
                     .is_some_and(|pattern| wildcard_match(pattern, repository));
 
-                let workflow_match = self
-                    .workflow
-                    .as_deref()
-                    .is_some_and(|pattern| wildcard_match(pattern, workflow));
+                let workflow_match = if let Some(pattern) = self.build_signer_uri.as_deref() {
+                    !build_signer_uri.is_empty() && wildcard_match(pattern, build_signer_uri)
+                } else {
+                    self.workflow
+                        .as_deref()
+                        .is_some_and(|pattern| wildcard_match(pattern, workflow))
+                };
 
                 let ref_match = self
                     .ref_pattern
@@ -404,6 +410,8 @@ pub enum SignerIdentity {
         workflow: String,
         /// Git ref at signing time
         git_ref: String,
+        #[serde(default)]
+        build_signer_uri: String,
     },
 }
 
@@ -497,6 +505,7 @@ mod tests {
                     ref_pattern: Some("refs/tags/v*".to_string()),
                     key_id: None,
                     public_key: None,
+                    build_signer_uri: None,
                 },
                 Publisher {
                     name: "local-dev".to_string(),
@@ -506,6 +515,7 @@ mod tests {
                     ref_pattern: None,
                     key_id: Some("nono-keystore:default".to_string()),
                     public_key: None,
+                    build_signer_uri: None,
                 },
             ],
             blocklist: Blocklist {
@@ -588,6 +598,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/tags/v1.0.0".to_string(),
+            build_signer_uri: "*".to_string(),
         };
         let matches = policy.matching_publishers(&identity);
         assert_eq!(matches.len(), 1);
@@ -602,6 +613,7 @@ mod tests {
             repository: "evil/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/tags/v1.0.0".to_string(),
+            build_signer_uri: "*".to_string(),
         };
         let matches = policy.matching_publishers(&identity);
         assert!(matches.is_empty());
@@ -615,6 +627,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: "*".to_string(),
         };
         let matches = policy.matching_publishers(&identity);
         assert!(matches.is_empty());
@@ -633,6 +646,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: ".github/workflows/sign.yml".to_string(),
             git_ref: "refs/tags/v1.0.0".to_string(),
+            build_signer_uri: "*".to_string(),
         };
         assert!(policy.matching_publishers(&keyless_identity).is_empty());
     }
@@ -647,12 +661,112 @@ mod tests {
             ref_pattern: Some("*".to_string()),
             key_id: None,
             public_key: None,
+            build_signer_uri: None,
         };
         let identity = SignerIdentity::Keyless {
             issuer: "https://token.actions.githubusercontent.com".to_string(),
             repository: "my-org/any-repo".to_string(),
             workflow: ".github/workflows/anything.yml".to_string(),
             git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: "*".to_string(),
+        };
+        assert!(publisher.matches(&identity));
+    }
+
+    #[test]
+    fn publisher_matches_gitlab_keyless() {
+        let publisher = Publisher {
+            name: "gitlab-ci".to_string(),
+            issuer: Some("https://gitlab.com".to_string()),
+            repository: Some("my-group/my-project".to_string()),
+            workflow: Some(
+                "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/main".to_string()),
+            key_id: None,
+            public_key: None,
+            build_signer_uri: None,
+        };
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.com".to_string(),
+            repository: "my-group/my-project".to_string(),
+            workflow: "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main".to_string(),
+            git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: "*".to_string(),
+        };
+        assert!(publisher.matches(&identity));
+    }
+
+    #[test]
+    fn publisher_matches_gitlab_self_managed_keyless() {
+        let publisher = Publisher {
+            name: "gitlab-self-managed".to_string(),
+            issuer: Some("https://gitlab.example.com".to_string()),
+            repository: Some("internal/project".to_string()),
+            workflow: Some(
+                "gitlab.example.com/internal/project//.gitlab-ci.yml@refs/heads/*".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/*".to_string()),
+            key_id: None,
+            public_key: None,
+            build_signer_uri: None,
+        };
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com".to_string(),
+            repository: "internal/project".to_string(),
+            workflow: "gitlab.example.com/internal/project//.gitlab-ci.yml@refs/heads/main"
+                .to_string(),
+            git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: "*".to_string(),
+        };
+        assert!(publisher.matches(&identity));
+    }
+
+    #[test]
+    fn publisher_no_match_gitlab_wrong_issuer() {
+        let publisher = Publisher {
+            name: "gitlab-ci".to_string(),
+            issuer: Some("https://gitlab.com".to_string()),
+            repository: Some("my-group/my-project".to_string()),
+            workflow: Some(
+                "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/*".to_string(),
+            ),
+            ref_pattern: Some("refs/heads/*".to_string()),
+            key_id: None,
+            public_key: None,
+            build_signer_uri: None,
+        };
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com".to_string(),
+            repository: "my-group/my-project".to_string(),
+            workflow: "gitlab.example.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main"
+                .to_string(),
+            git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: "*".to_string(),
+        };
+        assert!(!publisher.matches(&identity));
+    }
+
+    #[test]
+    fn publisher_matches_gitlab_tag_ref() {
+        let publisher = Publisher {
+            name: "gitlab-release".to_string(),
+            issuer: Some("https://gitlab.example.com".to_string()),
+            repository: Some("release/app".to_string()),
+            workflow: Some(
+                "gitlab.example.com/release/app//.gitlab-ci.yml@refs/tags/*".to_string(),
+            ),
+            ref_pattern: Some("refs/tags/*".to_string()),
+            key_id: None,
+            public_key: None,
+            build_signer_uri: None,
+        };
+        let identity = SignerIdentity::Keyless {
+            issuer: "https://gitlab.example.com".to_string(),
+            repository: "release/app".to_string(),
+            workflow: "gitlab.example.com/release/app//.gitlab-ci.yml@refs/tags/v2.0.0".to_string(),
+            git_ref: "refs/tags/v2.0.0".to_string(),
+            build_signer_uri: "*".to_string(),
         };
         assert!(publisher.matches(&identity));
     }
@@ -705,6 +819,7 @@ mod tests {
             ref_pattern: Some("*".to_string()),
             key_id: None,
             public_key: None,
+            build_signer_uri: None,
         };
 
         // Empty issuer
@@ -713,6 +828,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: "wf.yml".to_string(),
             git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: String::new(),
         };
         assert!(!publisher.matches(&empty_issuer));
 
@@ -722,6 +838,7 @@ mod tests {
             repository: String::new(),
             workflow: "wf.yml".to_string(),
             git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: String::new(),
         };
         assert!(!publisher.matches(&empty_repo));
 
@@ -731,6 +848,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: String::new(),
             git_ref: "refs/heads/main".to_string(),
+            build_signer_uri: String::new(),
         };
         assert!(!publisher.matches(&empty_wf));
 
@@ -740,6 +858,7 @@ mod tests {
             repository: "org/repo".to_string(),
             workflow: "wf.yml".to_string(),
             git_ref: String::new(),
+            build_signer_uri: String::new(),
         };
         assert!(!publisher.matches(&empty_ref));
     }
@@ -835,6 +954,7 @@ mod tests {
             ref_pattern: None,
             key_id: Some("id".to_string()),
             public_key: None,
+            build_signer_uri: None,
         };
         assert!(keyed.is_keyed());
         assert!(!keyed.is_keyless());
@@ -847,6 +967,7 @@ mod tests {
             ref_pattern: Some("*".to_string()),
             key_id: None,
             public_key: None,
+            build_signer_uri: None,
         };
         assert!(!keyless.is_keyed());
         assert!(keyless.is_keyless());
