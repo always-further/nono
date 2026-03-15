@@ -13,6 +13,7 @@ nono works with any CLI tool, but these guides walk through setup and best pract
 | [Codex](/cli/clients/codex) | `codex` | Allowed | OpenAI's CLI coding agent |
 | [OpenCode](/cli/clients/opencode) | `opencode` | Allowed | Open-source AI coding assistant |
 | [OpenClaw](/cli/clients/openclaw) | `openclaw` | Allowed | Multi-channel AI agent platform |
+| Swival | `swival` | Allowed | Swival CLI coding agent |
 
 ## Quick Start
 
@@ -56,6 +57,6 @@ When you run a client through nono:
 2. Sensitive paths (`~/.ssh`, `~/.aws`, etc.) are blocked by default
 3. Network can be allowed or blocked per-profile
 4. All child processes inherit the same restrictions
-5. The sandbox cannot be escaped or expanded at runtime
+5. The sandbox cannot be escaped at runtime - expansion requires explicit supervisor approval (Linux only)
 
 See [Security Model](/cli/internals/security-model) for full details.

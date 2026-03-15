@@ -3,11 +3,13 @@ title: Learn (Path & Network Discovery)
 description: Trace commands to discover required filesystem paths and network activity
 ---
 
-The `learn` command uses `strace` to trace a command's file accesses and network activity, then reports which paths and endpoints it needs. This helps you build accurate profiles without guessing.
+The `learn` command traces a command's file accesses and network activity, then reports which paths and endpoints it needs. This helps you build accurate profiles without guessing.
 
-<Warning>
-`nono learn` is Linux-only. It requires `strace` to be installed.
-</Warning>
+On Linux, `nono learn` uses `strace`. On macOS, it uses `fs_usage` (requires `sudo`).
+
+<Note>
+Linux requires `strace` to be installed (`apt install strace` or equivalent). macOS requires root privileges for `fs_usage`.
+</Note>
 
 ## Basic Usage
 
@@ -15,7 +17,7 @@ The `learn` command uses `strace` to trace a command's file accesses and network
 nono learn -- my-command --with-args
 ```
 
-nono runs the command under `strace`, captures all file access and network syscalls, and produces a summary:
+nono runs the command under `strace` (Linux) or `fs_usage` (macOS), captures all file access and network syscalls, and produces a summary:
 
 ```
 Read access needed:

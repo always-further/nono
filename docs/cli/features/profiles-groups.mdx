@@ -46,7 +46,6 @@ Profiles use JSON format:
     "version": "1.0.0",
     "description": "Profile for my custom agent"
   },
-  "interactive": false,
   "workdir": {
     "access": "readwrite"
   },
@@ -60,6 +59,13 @@ Profiles use JSON format:
     "allow_file": [],
     "read_file": ["$HOME/.gitconfig"],
     "write_file": []
+  },
+  "policy": {
+    "exclude_groups": [],
+    "add_allow_read": [],
+    "add_allow_write": [],
+    "add_allow_readwrite": [],
+    "add_deny_access": []
   },
   "network": {
     "block": false
@@ -80,13 +86,13 @@ The `workdir` section controls whether and how the current working directory is 
 
 When a profile specifies a workdir access level, nono will prompt the user to confirm CWD sharing (unless `--allow-cwd` is used to skip the prompt).
 
-### Secrets
+### Environment Credential Injection
 
-The `secrets` section maps keystore account names to environment variable names. Secrets are loaded from the system keystore (macOS Keychain / Linux Secret Service) before the sandbox is applied, then injected as environment variables.
+The `env_credentials` section maps keystore account names to environment variable names. Credentials are loaded from the system keystore (macOS Keychain / Linux Secret Service) before the sandbox is applied, then injected as environment variables.
 
 ```json
 {
-  "secrets": {
+  "env_credentials": {
     "openai_api_key": "OPENAI_API_KEY",
     "database_url": "DATABASE_URL"
   }
@@ -97,10 +103,90 @@ The `secrets` section maps keystore account names to environment variable names.
 nono run --profile my-agent -- my-command
 ```
 
-See [Credential Injection](/cli/features/credential-injection) for details on storing secrets in the keystore.
+The legacy field name `"secrets"` is accepted as an alias for backward compatibility.
+
+See [Credential Injection](/cli/features/credential-injection) for details on storing credentials in the keystore.
 
 <Note>
   For API keys, prefer [Credential Injection](/cli/features/credential-injection) over environment variable injection. Credential injection routes API calls through a reverse proxy that injects credentials transparently - the API key never enters the sandbox, even as an environment variable.
+</Note>
+
+### Policy Overrides
+
+The `policy` section provides fine-grained, additive and subtractive composition on top of inherited groups and filesystem configuration. This is the primary mechanism for surgically customizing inherited profiles without redefining everything from scratch.
+
+| Field | Description |
+|-------|-------------|
+| `exclude_groups` | Remove groups from the resolved group set (exclusion wins over addition) |
+| `add_allow_read` | Additional read-only directories to allow |
+| `add_allow_write` | Additional write-only directories to allow |
+| `add_allow_readwrite` | Additional read+write directories to allow |
+| `add_deny_access` | Additional deny rules to apply (block read and write content) |
+
+#### Adding a Deny Rule to an Inherited Profile
+
+Block a specific path that a base profile would otherwise allow:
+
+```json
+{
+  "meta": {
+    "name": "claude-deny-git",
+    "version": "1.0.0"
+  },
+  "extends": "claude-code",
+  "policy": {
+    "add_deny_access": ["$HOME/.gitconfig"]
+  }
+}
+```
+
+```bash
+nono run --profile claude-deny-git -- claude
+```
+
+#### Adding Write-Only Access
+
+Grant write-only access to a directory without granting read:
+
+```json
+{
+  "meta": {
+    "name": "write-only-cache",
+    "version": "1.0.0"
+  },
+  "extends": "default",
+  "policy": {
+    "add_allow_write": ["$HOME/.cache/my-agent-cache"]
+  },
+  "workdir": {
+    "access": "none"
+  }
+}
+```
+
+#### Removing Groups from an Inherited Profile
+
+Remove the dangerous command blocking group to allow `rm`, `chmod`, etc.:
+
+```json
+{
+  "meta": {
+    "name": "no-dangerous-commands",
+    "version": "1.0.0"
+  },
+  "extends": "default",
+  "policy": {
+    "exclude_groups": [
+      "dangerous_commands",
+      "dangerous_commands_linux",
+      "dangerous_commands_macos"
+    ]
+  }
+}
+```
+
+<Note>
+  `policy` fields are additive across inheritance. A child profile's `add_deny_access` is merged with the base profile's `add_deny_access`, and `exclude_groups` from both levels are combined. The `filesystem` section works the same way - use `policy` when you need deny rules or write-only access that `filesystem` cannot express.
 </Note>
 
 ### Network Configuration
@@ -288,14 +374,15 @@ Groups are named, composable collections of security rules. Profiles reference g
 Every profile's effective capability set is built through composition:
 
 ```
-((default_profile_groups + profile.security.groups) - profile.policy.exclude_groups) + profile.filesystem + CLI flags
+((default_profile_groups + profile.security.groups) - profile.policy.exclude_groups) + profile.policy.add_* + profile.filesystem + CLI flags
 ```
 
 1. **default_profile_groups** come from the built-in `default` profile
-2. **profile.policy.exclude_groups** removes groups from the composed set
-3. **profile.security.groups** add additional groups on top
-4. **profile.filesystem** entries are additive
-5. **CLI overrides** (`--allow`, `--read`, etc.) are applied last
+2. **profile.security.groups** add additional groups on top
+3. **profile.policy.exclude_groups** removes groups from the composed set (exclusion wins)
+4. **profile.policy.add_allow_*** and **profile.policy.add_deny_access** apply additive overrides
+5. **profile.filesystem** entries are additive
+6. **CLI overrides** (`--allow`, `--read`, etc.) are applied last
 
 Exclusions are applied after group addition. If the same group appears in both
 `security.groups` and `policy.exclude_groups`, the exclusion wins.
@@ -329,14 +416,23 @@ Groups use a structured allow/deny taxonomy:
 
 ### Built-in Groups
 
-nono ships with 22 built-in groups:
+nono ships with 32 built-in groups:
 
 **Deny groups** (block sensitive content):
-- `deny_credentials` - SSH keys, cloud credentials, GPG keys
-- `deny_keychains_macos` - macOS Keychain databases
-- `deny_browser_data_macos` - Browser data (Chrome, Firefox, Safari, etc.)
-- `deny_shell_history` - Shell history files
-- `deny_shell_configs` - Shell config files (may contain API keys)
+- `deny_credentials` - SSH keys, cloud credentials, GPG keys, container and package manager tokens
+- `deny_keychains_macos` - macOS Keychain databases, 1Password, password-store
+- `deny_keychains_linux` - Linux keyring, 1Password, password-store
+- `deny_browser_data_macos` - Browser data on macOS (Chrome, Firefox, Safari, Edge, Arc, Brave)
+- `deny_browser_data_linux` - Browser data on Linux (Chrome, Firefox, Edge, Brave)
+- `deny_macos_private` - macOS Messages, Mail, Cookies, MobileSync
+- `deny_shell_history` - Shell history files (.bash_history, .zsh_history, .python_history)
+- `deny_shell_configs` - Shell config files that may contain API keys (.bashrc, .zshrc, .profile, .env)
+
+**Protection groups**:
+- `unlink_protection` - Prevents file deletion, with override for user-writable paths
+- `dangerous_commands` - Blocks `rm`, `dd`, `chmod`, `sudo`, `mkfs`, `pip`, `npm`, `kill`, etc.
+- `dangerous_commands_macos` - macOS-specific: `srm`, `brew`, `launchctl`
+- `dangerous_commands_linux` - Linux-specific: `shred`, `mkfs.*`, `fdisk`, `systemctl`, `apt`, `yum`, `dnf`, `pacman`
 
 **System path groups** (grant necessary system access):
 - `system_read_macos` - macOS system libraries, frameworks, dyld cache
@@ -344,15 +440,27 @@ nono ships with 22 built-in groups:
 - `system_write_macos` - macOS temp directories, cache paths
 - `system_write_linux` - Linux temp directories
 
+**Cache groups** (user-level caches and state):
+- `user_caches_macos` - ~/Library/Caches, ~/Library/Logs, ~/Library/Preferences
+- `user_caches_linux` - ~/.cache, ~/.local/state
+
 **Runtime groups** (language toolchain paths):
 - `node_runtime` - nvm, fnm, npm, pnpm, volta
 - `rust_runtime` - rustup, cargo
 - `python_runtime` - pyenv, conda, pip, uv
+- `go_runtime` - ~/go, /usr/local/go
+- `nix_runtime` - Nix profile paths, /nix/var (Linux only)
 - `user_tools` - Local bins, .desktop files, man pages, shell completions
+- `homebrew` - /opt/homebrew, /usr/local/Cellar, /usr/local/opt (macOS only)
 
-**Protection groups**:
-- `unlink_protection` - Prevents file deletion, with override for user-writable paths
-- `dangerous_commands` - Blocks `rm`, `dd`, `chmod`, `sudo`, `mkfs`, etc.
+**Tool-specific groups** (paths for specific applications):
+- `claude_code_macos` - macOS Keychain for Claude Code credential storage
+- `claude_code_linux` - ~/.local/share/claude
+- `claude_cache_linux` - ~/.cache/claude-cli-nodejs
+- `codex_macos` - macOS Keychain for Codex credential storage
+- `opencode_linux` - ~/.opencode/bin (Linux only, needed for Landlock exec)
+- `vscode_macos` - ~/.vscode, ~/Library/Application Support/Code
+- `vscode_linux` - ~/.vscode, ~/.config/Code
 
 <Note>
   Command blocking is a best-effort surface-level control. It matches against the executable name being invoked directly. A process can bypass this by calling the equivalent syscall from within an allowed interpreter (e.g., `os.remove()` in Python, `fs.unlinkSync()` in Node.js) or by invoking a renamed copy of the binary. For hard filesystem protection, rely on the kernel-enforced deny groups and `unlink_protection`, which cannot be bypassed from userspace regardless of how the operation is invoked.
@@ -388,19 +496,31 @@ Platform-specific groups use `_macos` or `_linux` suffixes by convention.
 
 ## Built-in Profiles
 
+### default
+
+The base profile that all other profiles extend. Provides system path access, deny groups for sensitive content, and dangerous command blocking. Does not grant working directory access or any user-specific paths.
+
+**Groups:** `deny_credentials`, `deny_keychains_macos`, `deny_keychains_linux`, `deny_browser_data_macos`, `deny_browser_data_linux`, `deny_macos_private`, `deny_shell_history`, `deny_shell_configs`, `system_read_macos`, `system_read_linux`, `system_write_macos`, `system_write_linux`, `user_tools`, `homebrew`, `dangerous_commands`, `dangerous_commands_macos`, `dangerous_commands_linux`
+
+**Network:** Allowed
+
+**CWD:** None
+
 ### claude-code
 
 ```bash
 nono run --profile claude-code -- claude
 ```
 
-**Groups:** `claude_code_macos`, `claude_code_linux`, `user_caches_macos`, `node_runtime`, `rust_runtime`, `python_runtime`, `vscode_macos`, `vscode_linux`, `unlink_protection` (plus the built-in `default` profile groups)
+**Groups:** `claude_code_macos`, `claude_code_linux`, `user_caches_macos`, `claude_cache_linux`, `node_runtime`, `rust_runtime`, `python_runtime`, `vscode_macos`, `vscode_linux`, `nix_runtime`, `unlink_protection` (plus `default` groups)
 
-**Filesystem:** `~/.claude` (read+write), `~/.claude.json` (read+write), plus platform-specific Claude Code and VS Code paths from the matching `_macos` or `_linux` groups
+**Filesystem:** `~/.claude` (read+write), `~/.claude.json` and `~/.claude.json.lock` (read+write), `~/.gitconfig`, `~/.gitignore_global`, `~/.config/git/ignore` (read), plus platform-specific Claude Code and VS Code paths from the matching `_macos` or `_linux` groups
 
 **Network:** Allowed
 
-**Special:** Auto-installs Claude Code hooks
+**CWD:** Read+write
+
+**Special:** Auto-installs Claude Code hooks. OAuth2 login support via `open_urls` (allows `https://claude.ai` and localhost). Profile opts into `allow_launch_services` for macOS browser opening.
 
 ### codex
 
@@ -408,13 +528,15 @@ nono run --profile claude-code -- claude
 nono run --profile codex -- codex
 ```
 
-**Filesystem:** `~/.codex` (read+write)
+**Groups:** `codex_macos`, `node_runtime`, `rust_runtime`, `python_runtime`, `nix_runtime`, `unlink_protection` (plus `default` groups)
 
-**Groups:** `node_runtime`, `rust_runtime`, `python_runtime`, `nix_runtime`, `unlink_protection` (plus the built-in `default` profile groups)
+**Filesystem:** `~/.codex` (read+write)
 
 **Network:** Allowed
 
-**Interactive:** Enabled
+**CWD:** Read+write
+
+**Special:** OAuth2 login support via `open_urls` (allows `https://auth.openai.com` and localhost). Profile opts into `allow_launch_services`.
 
 ### opencode
 
@@ -422,11 +544,13 @@ nono run --profile codex -- codex
 nono run --profile opencode -- opencode
 ```
 
-**Groups:** Base groups only
+**Groups:** `user_caches_macos`, `user_caches_linux`, `node_runtime`, `opencode_linux`, `unlink_protection` (plus `default` groups)
 
-**Filesystem:** `~/.config/opencode`, `~/.cache/opencode`, `~/.local/share/opencode` (all read+write)
+**Filesystem:** `~/.config/opencode`, `~/.cache/opencode`, `~/.local/share/opencode`, `~/.local/share/opentui` (all read+write)
 
 **Network:** Allowed
+
+**CWD:** Read+write
 
 ### openclaw
 
@@ -434,13 +558,75 @@ nono run --profile opencode -- opencode
 nono run --profile openclaw -- openclaw
 ```
 
-**Groups:** Base groups only
+**Groups:** `node_runtime` (plus `default` groups)
 
 **Filesystem:** `~/.openclaw`, `~/.config/openclaw`, `~/.local`, `$TMPDIR/openclaw-$UID` (all read+write)
 
+**Network:** Allowed
+
 **CWD:** Read-only
 
+### swival
+
+```bash
+nono run --profile swival -- swival
+```
+
+**Groups:** `python_runtime`, `node_runtime`, `user_caches_macos`, `user_caches_linux`, `unlink_protection` (plus `default` groups)
+
+**Filesystem:** `~/.config/swival`, `~/.local/share/swival` (read+write), `~/.gitconfig`, `~/.gitignore_global`, `~/.config/git/ignore` (read)
+
 **Network:** Allowed
+
+**CWD:** Read+write
+
+### python-dev
+
+```bash
+nono run --profile python-dev -- my-python-app
+```
+
+**Groups:** `python_runtime` (plus `default` groups)
+
+**Network:** Allowed, with `developer` network profile for host filtering
+
+**CWD:** Read+write
+
+### node-dev
+
+```bash
+nono run --profile node-dev -- npm start
+```
+
+**Groups:** `node_runtime` (plus `default` groups)
+
+**Network:** Allowed, with `developer` network profile for host filtering
+
+**CWD:** Read+write
+
+### go-dev
+
+```bash
+nono run --profile go-dev -- go run .
+```
+
+**Groups:** `go_runtime` (plus `default` groups)
+
+**Network:** Allowed, with `developer` network profile for host filtering
+
+**CWD:** Read+write
+
+### rust-dev
+
+```bash
+nono run --profile rust-dev -- cargo run
+```
+
+**Groups:** `rust_runtime` (plus `default` groups)
+
+**Network:** Allowed, with `developer` network profile for host filtering
+
+**CWD:** Read+write
 
 ---
 

@@ -93,7 +93,7 @@ nono why --self --path <PATH> --op <OP> [OPTIONS]  # Inside sandbox
 
 ### `nono learn`
 
-Trace a command to discover required filesystem paths. Uses strace to monitor file accesses and outputs paths that would need to be allowed in a nono profile. (Linux only)
+Trace a command to discover required filesystem paths and network activity. Uses `strace` on Linux and `fs_usage` on macOS to monitor accesses and outputs paths that would need to be allowed in a nono profile.
 
 ```bash
 nono learn [OPTIONS] -- <COMMAND> [ARGS...]
@@ -126,7 +126,7 @@ Subcommands:
 ## `nono learn` Options
 
 <Note>
-  `nono learn` is only available on Linux as it requires strace. The command runs WITHOUT sandbox restrictions to discover what paths your application needs.
+  `nono learn` runs WITHOUT sandbox restrictions to discover what paths your application needs. On Linux it uses `strace` (install with `apt install strace`). On macOS it uses `fs_usage` (requires `sudo`).
 </Note>
 
 ### `--profile`, `-p`
@@ -273,7 +273,7 @@ nono run --allow-cwd --network-profile claude-code -- claude
 nono run --allow-cwd --network-profile minimal -- my-agent
 ```
 
-Available profiles: `claude-code`, `developer`, `minimal`, `opencode`, `enterprise`. See [Network Proxy](/cli/features/network-proxy) for details.
+Available profiles: `minimal`, `developer`, `claude-code`, `codex`, `opencode`, `enterprise`. See [Network Proxy](/cli/features/network-proxy) for details.
 
 <Note>
   `--network-profile` and `--allow-proxy` activate proxy mode, which forces supervised execution. The proxy runs in the unsandboxed parent process.
@@ -431,7 +431,7 @@ Can be specified multiple times for multiple ports.
 
 ## `nono shell` Options
 
-`nono shell` supports the same permission, profile, secrets, and dry-run flags as `nono run`, plus:
+`nono shell` supports the same permission, profile, credential, and dry-run flags as `nono run`, plus:
 
 ### `--shell`
 
