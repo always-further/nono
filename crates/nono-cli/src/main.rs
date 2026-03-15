@@ -784,6 +784,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             proxy_port: args.proxy_port,
             open_url_origins: prepared.open_url_origins,
             open_url_allow_localhost: prepared.open_url_allow_localhost,
+            allow_launch_services_active: prepared.allow_launch_services_active,
         },
     )
 }
@@ -993,6 +994,8 @@ struct ExecutionFlags {
     open_url_origins: Vec<String>,
     /// Whether to allow http://localhost URL opens
     open_url_allow_localhost: bool,
+    /// Whether direct LaunchServices opening is enabled for this session.
+    allow_launch_services_active: bool,
 }
 
 impl ExecutionFlags {
@@ -1031,6 +1034,7 @@ impl ExecutionFlags {
             proxy_port: None,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
+            allow_launch_services_active: false,
         })
     }
 }
@@ -1579,6 +1583,7 @@ fn execute_sandboxed(
                 session_id: &supervisor_session_id,
                 open_url_origins: &flags.open_url_origins,
                 open_url_allow_localhost: flags.open_url_allow_localhost,
+                allow_launch_services_active: flags.allow_launch_services_active,
             };
 
             let trust_interceptor = if flags.trust_interception_active {

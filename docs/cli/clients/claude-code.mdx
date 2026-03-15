@@ -3,27 +3,27 @@ title: Claude Code
 description: Sandboxing Anthropic Claude Code with nono
 ---
 
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) is Anthropic's CLI coding agent. It reads and writes files, runs commands, and interacts with git on your behalf. Running it under nono ensures it can only access what you explicitly allow.
-
 ## Why Sandbox Claude Code?
 
-Claude Code operates includes its own sandbox mechanism, but the Agent is able to override the sandbox by calling `dangerouslyOverrideSandbox: true` and access any file and perform any operation on the system.
+Claude Code includes its own sandbox mechanism, but the agent is able to override the sandbox by calling `dangerouslyOverrideSandbox: true` and access any file and perform any operation on the system.
 
 ![Claude Code using dangerouslyOverrideSandbox](/assets/claude-code-overrides-the-sandbox-without-permission.webp)
-
-This creates several risks:
-
-- It could read sensitive files outside your project (SSH keys, cloud credentials)
-- A prompt injection in a dependency could trigger unintended file access
-- Mistakes in file operations could affect directories outside your workspace
-
-nono's kernel-enforced sandbox makes these scenarios structurally impossible.
 
 ## Quick Start
 
 ```bash
 nono run --profile claude-code -- claude
 ```
+
+<Warning>
+**macOS users:** Claude Code needs to open a browser on **first use** (e.g., for `claude /login`), you must add the `--allow-launch-services` flag:
+
+```bash
+nono run --profile claude-code --allow-launch-services -- claude
+```
+After this initial login, you can exit and rerun without `--allow-launch-services` for better security.
+See [OAuth2 Login](#oauth2-login) for details.
+</Warning>
 
 The built-in profile provides:
 - **Read+write access** to the current working directory

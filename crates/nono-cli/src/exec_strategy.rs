@@ -207,6 +207,13 @@ pub struct SupervisorConfig<'a> {
     pub open_url_origins: &'a [String],
     /// Whether to allow http://localhost and http://127.0.0.1 URLs.
     pub open_url_allow_localhost: bool,
+    /// Whether direct LaunchServices opening is enabled for this session.
+    pub allow_launch_services_active: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn should_install_macos_open_shim(supervisor: Option<&SupervisorConfig<'_>>) -> bool {
+    supervisor.is_some_and(|cfg| !cfg.allow_launch_services_active)
 }
 
 /// Execute a command using the Direct strategy (exec, nono disappears).
@@ -384,25 +391,27 @@ pub fn execute_supervised(
 
             #[cfg(target_os = "macos")]
             {
-                // Create a shim `open` script that delegates to nono open-url-helper.
-                // The npm `open` package spawns `open <url>` on macOS; by placing our
-                // shim earlier in PATH, we intercept the call.
-                if let Some(shim) = create_open_shim(&nono_exe) {
-                    // Prepend shim dir to PATH and also set BROWSER for any tool
-                    // that does respect it.
-                    let current_path = std::env::var("PATH").unwrap_or_default();
-                    let new_path = format!("PATH={}:{current_path}", shim.dir.path().display());
-                    if let Ok(cstr) = CString::new(new_path) {
-                        // Remove existing PATH from env_c, then add our modified one
-                        env_c.retain(|c| !c.as_bytes().starts_with(b"PATH="));
-                        env_c.push(cstr);
+                if should_install_macos_open_shim(supervisor) {
+                    // Create a shim `open` script that delegates to nono open-url-helper.
+                    // The npm `open` package spawns `open <url>` on macOS; by placing our
+                    // shim earlier in PATH, we intercept the call.
+                    if let Some(shim) = create_open_shim(&nono_exe) {
+                        // Prepend shim dir to PATH and also set BROWSER for any tool
+                        // that does respect it.
+                        let current_path = std::env::var("PATH").unwrap_or_default();
+                        let new_path = format!("PATH={}:{current_path}", shim.dir.path().display());
+                        if let Ok(cstr) = CString::new(new_path) {
+                            // Remove existing PATH from env_c, then add our modified one
+                            env_c.retain(|c| !c.as_bytes().starts_with(b"PATH="));
+                            env_c.push(cstr);
+                        }
+                        let quoted_helper = shell_quote(&shim.helper_exe.display().to_string());
+                        let browser_cmd = format!("BROWSER={quoted_helper} open-url-helper");
+                        if let Ok(cstr) = CString::new(browser_cmd) {
+                            env_c.push(cstr);
+                        }
+                        open_shim = Some(shim);
                     }
-                    let quoted_helper = shell_quote(&shim.helper_exe.display().to_string());
-                    let browser_cmd = format!("BROWSER={quoted_helper} open-url-helper");
-                    if let Ok(cstr) = CString::new(browser_cmd) {
-                        env_c.push(cstr);
-                    }
-                    open_shim = Some(shim);
                 }
             }
         }
@@ -2506,6 +2515,8 @@ mod tests {
             session_id: "test-session",
             open_url_origins: &[],
             open_url_allow_localhost: false,
+            #[cfg(target_os = "macos")]
+            allow_launch_services_active: false,
         };
 
         // Fork a child that closes its socket end and exits immediately.
@@ -2579,6 +2590,8 @@ mod tests {
             session_id: "test",
             open_url_origins: &origins,
             open_url_allow_localhost: false,
+            #[cfg(target_os = "macos")]
+            allow_launch_services_active: false,
         };
 
         // Allowed origin: validation passes
@@ -2604,6 +2617,8 @@ mod tests {
             session_id: "test",
             open_url_origins: &[],
             open_url_allow_localhost: false,
+            #[cfg(target_os = "macos")]
+            allow_launch_services_active: false,
         };
 
         let result = validate_url("file:///etc/passwd", &config);
@@ -2627,6 +2642,8 @@ mod tests {
             session_id: "test",
             open_url_origins: &[],
             open_url_allow_localhost: true,
+            #[cfg(target_os = "macos")]
+            allow_launch_services_active: false,
         };
         let config_deny = SupervisorConfig {
             protected_roots: &[],
@@ -2634,6 +2651,8 @@ mod tests {
             session_id: "test",
             open_url_origins: &[],
             open_url_allow_localhost: false,
+            #[cfg(target_os = "macos")]
+            allow_launch_services_active: false,
         };
 
         // Localhost denied when not allowed
@@ -2662,6 +2681,8 @@ mod tests {
             session_id: "test",
             open_url_origins: &[],
             open_url_allow_localhost: false,
+            #[cfg(target_os = "macos")]
+            allow_launch_services_active: false,
         };
 
         let long_url = format!("https://example.com/{}", "a".repeat(MAX_URL_LENGTH));
@@ -2739,6 +2760,44 @@ mod tests {
         assert!(
             script.contains(&format!("exec {helper} open-url-helper \"$url_arg\"")),
             "shim should exec the copied helper"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_should_install_macos_open_shim_respects_launch_services_flag() {
+        struct TestBackend;
+        impl ApprovalBackend for TestBackend {
+            fn request_capability(
+                &self,
+                _req: &nono::supervisor::CapabilityRequest,
+            ) -> nono::Result<ApprovalDecision> {
+                Ok(ApprovalDecision::Denied {
+                    reason: "test".to_string(),
+                })
+            }
+            fn backend_name(&self) -> &str {
+                "test"
+            }
+        }
+
+        let backend = TestBackend;
+        let config = SupervisorConfig {
+            protected_roots: &[],
+            approval_backend: &backend,
+            session_id: "test",
+            open_url_origins: &[],
+            open_url_allow_localhost: false,
+            allow_launch_services_active: true,
+        };
+
+        assert!(
+            !should_install_macos_open_shim(Some(&config)),
+            "launch services sessions should skip the macOS open shim"
+        );
+        assert!(
+            !should_install_macos_open_shim(None),
+            "without supervisor config, the helper should not install the macOS open shim"
         );
     }
 
