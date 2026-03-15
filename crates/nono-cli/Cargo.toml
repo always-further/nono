@@ -69,7 +69,7 @@ tempfile = "3"
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", features = ["process", "signal", "fs", "user", "term"] }
 landlock = "0.4"
-dns-lookup = "2"
+dns-lookup = "3"
 keyring = { version = "3", features = ["sync-secret-service"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
