@@ -16,7 +16,7 @@ if ! command -v jq &> /dev/null; then
 fi
 
 # Read capabilities from the cap file
-CAPS=$(jq -r '.fs[] | "  " + .path + " (" + .access + ")"' "$NONO_CAP_FILE" 2>/dev/null)
+CAPS=$(jq -r '.fs[] | "  " + .resolved + " (" + .access + ")"' "$NONO_CAP_FILE" 2>/dev/null)
 NET=$(jq -r 'if .net_blocked then "blocked" else "allowed" end' "$NONO_CAP_FILE" 2>/dev/null)
 
 # Build context message with clear, actionable instructions
