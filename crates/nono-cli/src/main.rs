@@ -392,11 +392,16 @@ fn run_why(args: WhyArgs) -> Result<()> {
     use query_ext::{print_result, query_network, query_path, QueryResult};
     use sandbox_state::load_sandbox_state;
 
-    // Build capability set from args or load from sandbox state
-    let caps = if args.self_query {
+    // Build capability set from args or load from sandbox state.
+    // Also collect overridden paths so the query can skip sensitive-path checks
+    // for paths that have been exempted via override_deny.
+    let (caps, overridden_paths): (CapabilitySet, Vec<std::path::PathBuf>) = if args.self_query {
         // Inside sandbox - load from state file
         match load_sandbox_state() {
-            Some(state) => state.to_caps()?,
+            Some(state) => {
+                let paths = state.override_deny_as_paths();
+                (state.to_caps()?, paths)
+            }
             None => {
                 let result = QueryResult::NotSandboxed {
                     message: "Not running inside a nono sandbox".to_string(),
@@ -421,7 +426,6 @@ fn run_why(args: WhyArgs) -> Result<()> {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        // Create a minimal SandboxArgs to pass to from_profile
         let sandbox_args = SandboxArgs {
             allow: args.allow.clone(),
             read: args.read.clone(),
@@ -430,36 +434,29 @@ fn run_why(args: WhyArgs) -> Result<()> {
             read_file: args.read_file.clone(),
             write_file: args.write_file.clone(),
             block_net: args.block_net,
-            allow_net: false,
-            network_profile: None,
-            allow_proxy: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            external_proxy_bypass: vec![],
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            env_credential_map: vec![],
-            profile: None,
-            allow_cwd: false,
-            allow_launch_services: false,
             workdir: args.workdir.clone(),
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            proxy_port: None,
+            ..SandboxArgs::default()
         };
+
+        // Collect overridden paths from profile for the query
+        let mut override_paths = Vec::new();
+        for tmpl in &prof.policy.override_deny {
+            let expanded = profile::expand_vars(tmpl, &workdir)?;
+            if expanded.exists() {
+                if let Ok(c) = expanded.canonicalize() {
+                    override_paths.push(c);
+                }
+            } else {
+                override_paths.push(expanded);
+            }
+        }
 
         let (mut caps, needs_unlink) = CapabilitySet::from_profile(&prof, &workdir, &sandbox_args)?;
         if needs_unlink {
             crate::policy::apply_unlink_overrides(&mut caps);
         }
-        caps
+        (caps, override_paths)
     } else {
-        // Build from CLI args
         let sandbox_args = SandboxArgs {
             allow: args.allow.clone(),
             read: args.read.clone(),
@@ -468,34 +465,15 @@ fn run_why(args: WhyArgs) -> Result<()> {
             read_file: args.read_file.clone(),
             write_file: args.write_file.clone(),
             block_net: args.block_net,
-            allow_net: false,
-            network_profile: None,
-            allow_proxy: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            external_proxy_bypass: vec![],
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            env_credential_map: vec![],
-            profile: None,
-            allow_cwd: false,
-            allow_launch_services: false,
             workdir: args.workdir.clone(),
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            proxy_port: None,
+            ..SandboxArgs::default()
         };
 
         let (mut caps, needs_unlink) = CapabilitySet::from_args(&sandbox_args)?;
         if needs_unlink {
             crate::policy::apply_unlink_overrides(&mut caps);
         }
-        caps
+        (caps, vec![])
     };
 
     // Execute the query
@@ -506,7 +484,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             Some(WhyOp::ReadWrite) => AccessMode::ReadWrite,
             None => AccessMode::Read, // Default to read
         };
-        query_path(path, op, &caps)?
+        query_path(path, op, &caps, &overridden_paths)?
     } else if let Some(ref host) = args.host {
         query_network(host, args.port, &caps)
     } else {
@@ -785,6 +763,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             open_url_origins: prepared.open_url_origins,
             open_url_allow_localhost: prepared.open_url_allow_localhost,
             allow_launch_services_active: prepared.allow_launch_services_active,
+            override_deny_paths: prepared.override_deny_paths,
         },
     )
 }
@@ -855,6 +834,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
                 .unwrap_or_else(|| std::path::PathBuf::from(".")),
             no_diagnostics: true,
             capability_elevation: prepared.capability_elevation,
+            override_deny_paths: prepared.override_deny_paths,
             ..ExecutionFlags::defaults(silent)?
         },
     )
@@ -937,6 +917,7 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from(".")),
             no_diagnostics,
+            override_deny_paths: prepared.override_deny_paths,
             ..ExecutionFlags::defaults(silent)?
         },
     )
@@ -996,6 +977,8 @@ struct ExecutionFlags {
     open_url_allow_localhost: bool,
     /// Whether direct LaunchServices opening is enabled for this session.
     allow_launch_services_active: bool,
+    /// Canonicalized paths exempted from deny groups via override_deny
+    override_deny_paths: Vec<std::path::PathBuf>,
 }
 
 impl ExecutionFlags {
@@ -1035,6 +1018,7 @@ impl ExecutionFlags {
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             allow_launch_services_active: false,
+            override_deny_paths: Vec::new(),
         })
     }
 }
@@ -1243,7 +1227,7 @@ fn execute_sandboxed(
     let resolved_program = exec_strategy::resolve_program(&command[0])?;
 
     // Write capability state file BEFORE applying sandbox
-    let cap_file = write_capability_state_file(&caps, flags.silent);
+    let cap_file = write_capability_state_file(&caps, &flags.override_deny_paths, flags.silent);
     let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
     // Validate that secret env var names are not dangerous (e.g. LD_PRELOAD).
@@ -1757,6 +1741,8 @@ struct PreparedSandbox {
     open_url_origins: Vec<String>,
     /// Whether to allow http://localhost URL opens
     open_url_allow_localhost: bool,
+    /// Canonicalized paths exempted from deny groups via override_deny
+    override_deny_paths: Vec<std::path::PathBuf>,
 }
 
 fn parse_env_credential_map_args(values: &[String]) -> Result<Vec<(String, String)>> {
@@ -1911,6 +1897,46 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Collect override_deny paths from profile (canonicalized for query use)
+    let override_deny_paths: Vec<std::path::PathBuf> = loaded_profile
+        .as_ref()
+        .map(|prof| {
+            prof.policy
+                .override_deny
+                .iter()
+                .filter_map(|tmpl| {
+                    profile::expand_vars(tmpl, &workdir).ok().map(|expanded| {
+                        if expanded.exists() {
+                            expanded.canonicalize().unwrap_or(expanded)
+                        } else {
+                            expanded
+                        }
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Also include CLI --override-deny paths.
+    // Apply the same ~ / $HOME expansion that apply_deny_overrides uses
+    // so the stored paths match the canonicalized form used by query_path.
+    let override_deny_paths: Vec<std::path::PathBuf> = {
+        let mut paths = override_deny_paths;
+        for p in &args.override_deny {
+            let path_str = p.to_string_lossy();
+            let expanded = profile::expand_vars(&path_str, &workdir).unwrap_or_else(|_| p.clone());
+            let canonical = if expanded.exists() {
+                expanded.canonicalize().unwrap_or(expanded)
+            } else {
+                expanded
+            };
+            if !paths.contains(&canonical) {
+                paths.push(canonical);
+            }
+        }
+        paths
+    };
 
     // Extract config before profile is consumed for secrets
     let capability_elevation = loaded_profile
@@ -2190,6 +2216,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         allow_launch_services_active,
         open_url_origins,
         open_url_allow_localhost,
+        override_deny_paths,
     })
 }
 
@@ -2284,10 +2311,14 @@ fn enforce_rollback_limits(silent: bool) {
     }
 }
 
-fn write_capability_state_file(caps: &CapabilitySet, silent: bool) -> Option<std::path::PathBuf> {
+fn write_capability_state_file(
+    caps: &CapabilitySet,
+    override_deny_paths: &[std::path::PathBuf],
+    silent: bool,
+) -> Option<std::path::PathBuf> {
     // Write sandbox state for `nono why --self`.
     let cap_file = std::env::temp_dir().join(format!(".nono-{}.json", std::process::id()));
-    let state = sandbox_state::SandboxState::from_caps(caps);
+    let state = sandbox_state::SandboxState::from_caps(caps, override_deny_paths);
     if let Err(e) = state.write_to_file(&cap_file) {
         error!(
             "Failed to write capability state file: {}. \
@@ -2311,36 +2342,7 @@ mod tests {
     use super::*;
 
     fn sandbox_args() -> SandboxArgs {
-        SandboxArgs {
-            allow: vec![],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-            block_net: false,
-            allow_net: false,
-            network_profile: None,
-            allow_proxy: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            external_proxy_bypass: vec![],
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            env_credential_map: vec![],
-            profile: None,
-            allow_cwd: false,
-            allow_launch_services: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            proxy_port: None,
-        }
+        SandboxArgs::default()
     }
 
     #[test]
@@ -2440,6 +2442,7 @@ mod tests {
             allow_launch_services_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
+            override_deny_paths: Vec::new(),
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -2477,6 +2480,7 @@ mod tests {
             allow_launch_services_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
+            override_deny_paths: Vec::new(),
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);

@@ -65,7 +65,8 @@ Profiles use JSON format:
     "add_allow_read": [],
     "add_allow_write": [],
     "add_allow_readwrite": [],
-    "add_deny_access": []
+    "add_deny_access": [],
+    "override_deny": []
   },
   "network": {
     "block": false
@@ -122,6 +123,7 @@ The `policy` section provides fine-grained, additive and subtractive composition
 | `add_allow_write` | Additional write-only directories to allow |
 | `add_allow_readwrite` | Additional read+write directories to allow |
 | `add_deny_access` | Additional deny rules to apply (block read and write content) |
+| `override_deny` | Paths to exempt from deny groups (must also have a matching grant) |
 
 #### Adding a Deny Rule to an Inherited Profile
 
@@ -183,6 +185,34 @@ Remove the dangerous command blocking group to allow `rm`, `chmod`, etc.:
     ]
   }
 }
+```
+
+#### Overriding a Deny Rule for a Specific Path
+
+Some deny groups (like `deny_credentials`) are marked as required and cannot be excluded. Use `override_deny` to punch a targeted hole through a deny group for a specific path. The path must also be explicitly granted via `filesystem` or `policy.add_allow_*`.
+
+```json
+{
+  "meta": {
+    "name": "docker-agent",
+    "version": "1.0.0"
+  },
+  "extends": "opencode",
+  "filesystem": {
+    "allow": ["$HOME/.docker"]
+  },
+  "policy": {
+    "override_deny": ["$HOME/.docker"]
+  }
+}
+```
+
+This allows access to `~/.docker` even though `deny_credentials` blocks it by default. The deny override does not implicitly grant access -- the matching `filesystem.allow` entry is required.
+
+This is equivalent to the CLI flag `--override-deny`:
+
+```bash
+nono run --profile opencode --allow ~/.docker --override-deny ~/.docker -- opencode
 ```
 
 <Note>
@@ -374,7 +404,7 @@ Groups are named, composable collections of security rules. Profiles reference g
 Every profile's effective capability set is built through composition:
 
 ```
-((default_profile_groups + profile.security.groups) - profile.policy.exclude_groups) + profile.policy.add_* + profile.filesystem + CLI flags
+((default_profile_groups + profile.security.groups) - profile.policy.exclude_groups) + profile.policy.add_* + profile.filesystem - deny_groups + profile.policy.override_deny + CLI flags
 ```
 
 1. **default_profile_groups** come from the built-in `default` profile
@@ -382,7 +412,8 @@ Every profile's effective capability set is built through composition:
 3. **profile.policy.exclude_groups** removes groups from the composed set (exclusion wins)
 4. **profile.policy.add_allow_*** and **profile.policy.add_deny_access** apply additive overrides
 5. **profile.filesystem** entries are additive
-6. **CLI overrides** (`--allow`, `--read`, etc.) are applied last
+6. **profile.policy.override_deny** punches targeted holes through deny groups (requires matching grant)
+7. **CLI overrides** (`--allow`, `--read`, `--override-deny`, etc.) are applied last
 
 Exclusions are applied after group addition. If the same group appears in both
 `security.groups` and `policy.exclude_groups`, the exclusion wins.

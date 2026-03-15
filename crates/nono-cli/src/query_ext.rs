@@ -35,7 +35,16 @@ pub enum QueryResult {
 }
 
 /// Query whether a path operation is permitted
-pub fn query_path(path: &Path, requested: AccessMode, caps: &CapabilitySet) -> Result<QueryResult> {
+///
+/// `overridden_paths` contains canonicalized paths that have been exempted from
+/// deny groups via `override_deny`. The sensitive-path check is skipped for any
+/// query path that is equal to or a child of an overridden path.
+pub fn query_path(
+    path: &Path,
+    requested: AccessMode,
+    caps: &CapabilitySet,
+    overridden_paths: &[std::path::PathBuf],
+) -> Result<QueryResult> {
     // Canonicalize the path for proper comparison
     let canonical = if path.exists() {
         path.canonicalize()
@@ -63,15 +72,23 @@ pub fn query_path(path: &Path, requested: AccessMode, caps: &CapabilitySet) -> R
         }
     };
 
-    // First, check if this is a sensitive path (CLI security policy)
-    if let Some(matched) = config::check_sensitive_path(&canonical.to_string_lossy())? {
-        return Ok(QueryResult::Denied {
-            reason: "sensitive_path".to_string(),
-            details: Some(format!(
-                "Path matches sensitive pattern '{}'. Access blocked by security policy.",
-                matched
-            )),
-        });
+    // Check if this path is covered by an override_deny exemption
+    let is_overridden = overridden_paths
+        .iter()
+        .any(|op| canonical == *op || canonical.starts_with(op));
+
+    // Check if this is a sensitive path (CLI security policy), but skip
+    // the check for paths that have been explicitly overridden.
+    if !is_overridden {
+        if let Some(matched) = config::check_sensitive_path(&canonical.to_string_lossy())? {
+            return Ok(QueryResult::Denied {
+                reason: "sensitive_path".to_string(),
+                details: Some(format!(
+                    "Path matches sensitive pattern '{}'. Access blocked by security policy.",
+                    matched
+                )),
+            });
+        }
     }
 
     // Check capabilities. Prefer the most specific matching grant so broad system
@@ -207,7 +224,7 @@ mod tests {
         let test_file = dir.path().join("test.txt");
         std::fs::write(&test_file, "test").expect("Failed to write test file");
 
-        let result = query_path(&test_file, AccessMode::Read, &caps).expect("Query failed");
+        let result = query_path(&test_file, AccessMode::Read, &caps, &[]).expect("Query failed");
         assert!(matches!(result, QueryResult::Allowed { .. }));
     }
 
@@ -216,7 +233,7 @@ mod tests {
         let caps = CapabilitySet::new();
         let path = PathBuf::from("/some/random/path");
 
-        let result = query_path(&path, AccessMode::Read, &caps).expect("Query failed");
+        let result = query_path(&path, AccessMode::Read, &caps, &[]).expect("Query failed");
         assert!(matches!(result, QueryResult::Denied { .. }));
     }
 
@@ -252,7 +269,7 @@ mod tests {
         let test_file = dir_canon.join("test.txt");
         std::fs::write(&test_file, "test").expect("Failed to write test file");
 
-        let result = query_path(&test_file, AccessMode::Write, &caps).expect("Query failed");
+        let result = query_path(&test_file, AccessMode::Write, &caps, &[]).expect("Query failed");
         assert!(matches!(result, QueryResult::Allowed { .. }));
     }
 

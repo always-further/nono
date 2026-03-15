@@ -301,6 +301,12 @@ pub fn print_sandbox_active(silent: bool) {
     eprintln!();
 }
 
+/// Print a styled warning message to stderr
+pub fn print_warning(message: &str) {
+    let t = theme::current();
+    eprintln!("  {} {}", fg("warning:", t.red).bold(), fg(message, t.text),);
+}
+
 /// Print dry run message
 pub fn print_dry_run(program: &OsStr, cmd_args: &[OsString], silent: bool) {
     if silent {

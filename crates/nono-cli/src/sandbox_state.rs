@@ -25,6 +25,9 @@ pub struct SandboxState {
     pub allowed_commands: Vec<String>,
     /// Commands explicitly blocked
     pub blocked_commands: Vec<String>,
+    /// Paths exempted from deny groups via override_deny (canonicalized)
+    #[serde(default)]
+    pub override_deny_paths: Vec<String>,
 }
 
 /// Serializable filesystem capability state
@@ -41,8 +44,8 @@ pub struct FsCapState {
 }
 
 impl SandboxState {
-    /// Create sandbox state from a CapabilitySet
-    pub fn from_caps(caps: &CapabilitySet) -> Self {
+    /// Create sandbox state from a CapabilitySet and override_deny paths
+    pub fn from_caps(caps: &CapabilitySet, override_deny_paths: &[PathBuf]) -> Self {
         Self {
             fs: caps
                 .fs_capabilities()
@@ -61,7 +64,16 @@ impl SandboxState {
             net_blocked: caps.is_network_blocked(),
             allowed_commands: caps.allowed_commands().to_vec(),
             blocked_commands: caps.blocked_commands().to_vec(),
+            override_deny_paths: override_deny_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
         }
+    }
+
+    /// Get override_deny paths as PathBufs for query use
+    pub fn override_deny_as_paths(&self) -> Vec<PathBuf> {
+        self.override_deny_paths.iter().map(PathBuf::from).collect()
     }
 
     /// Convert back to a CapabilitySet
@@ -346,7 +358,7 @@ mod tests {
         let mut caps = CapabilitySet::new().block_network();
         caps.add_allowed_command("pip".to_string());
 
-        let state = SandboxState::from_caps(&caps);
+        let state = SandboxState::from_caps(&caps, &[]);
         assert!(state.net_blocked);
         assert_eq!(state.allowed_commands, vec!["pip"]);
 
@@ -364,7 +376,7 @@ mod tests {
 
         let caps = CapabilitySet::new().block_network();
 
-        let state = SandboxState::from_caps(&caps);
+        let state = SandboxState::from_caps(&caps, &[]);
         state
             .write_to_file(&file_path)
             .expect("Failed to write state");

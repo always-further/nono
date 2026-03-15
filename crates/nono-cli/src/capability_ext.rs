@@ -8,7 +8,7 @@ use crate::policy;
 use crate::profile::{expand_vars, Profile};
 use crate::protected_paths::{self, ProtectedRoots};
 use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 /// Try to create a directory capability, warning and skipping on PathNotFound.
@@ -186,7 +186,7 @@ impl CapabilitySetExt for CapabilitySet {
             caps.add_blocked_command(cmd.clone());
         }
 
-        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args)?;
+        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args, &[])?;
 
         Ok((caps, resolved.needs_unlink_overrides))
     }
@@ -355,7 +355,20 @@ impl CapabilitySetExt for CapabilitySet {
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
 
-        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args)?;
+        // Expand profile-level override_deny paths for finalize_caps
+        let mut profile_overrides = Vec::with_capacity(profile.policy.override_deny.len());
+        for path_template in &profile.policy.override_deny {
+            let path = expand_vars(path_template, workdir)?;
+            profile_overrides.push(path);
+        }
+
+        finalize_caps(
+            &mut caps,
+            &mut resolved,
+            &loaded_policy,
+            args,
+            &profile_overrides,
+        )?;
 
         Ok((caps, resolved.needs_unlink_overrides))
     }
@@ -371,8 +384,12 @@ fn finalize_caps(
     resolved: &mut policy::ResolvedGroups,
     _loaded_policy: &policy::Policy,
     args: &SandboxArgs,
+    profile_override_deny: &[PathBuf],
 ) -> Result<()> {
-    // Apply deny overrides before validation (punch holes through deny groups)
+    // Apply profile-level deny overrides first, then CLI overrides.
+    // Profile overrides come from `policy.override_deny` in the profile JSON.
+    // CLI `--override-deny` flags are applied on top.
+    policy::apply_deny_overrides(profile_override_deny, &mut resolved.deny_paths, caps)?;
     policy::apply_deny_overrides(&args.override_deny, &mut resolved.deny_paths, caps)?;
 
     // Remove exact file grants for the deny paths that remain after overrides.
@@ -488,36 +505,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn sandbox_args() -> SandboxArgs {
-        SandboxArgs {
-            allow: vec![],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-            block_net: false,
-            allow_net: false,
-            network_profile: None,
-            allow_proxy: vec![],
-            proxy_credential: vec![],
-            external_proxy: None,
-            external_proxy_bypass: vec![],
-            override_deny: vec![],
-            allow_command: vec![],
-            block_command: vec![],
-            env_credential: None,
-            env_credential_map: vec![],
-            profile: None,
-            allow_cwd: false,
-            allow_launch_services: false,
-            workdir: None,
-            config: None,
-            verbose: 0,
-            dry_run: false,
-            allow_bind: vec![],
-            allow_port: vec![],
-            proxy_port: None,
-        }
+        SandboxArgs::default()
     }
 
     #[test]
@@ -916,6 +904,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_from_profile_policy_override_deny_via_symlink_path() {
+        let dir = tempdir().expect("tmpdir");
+        let target = dir.path().join("real_gitconfig");
+        std::fs::write(&target, "[user]\n").expect("write target");
+        let target_canonical = target.canonicalize().expect("canonicalize target");
+        let link = dir.path().join(".gitconfig");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        // Override via the symlink path (not the canonical target)
+        let profile_path = dir.path().join("override-deny-symlink.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "override-deny-symlink" }},
+                    "filesystem": {{
+                        "read_file": ["{target}"]
+                    }},
+                    "policy": {{
+                        "add_deny_access": ["{link}"],
+                        "override_deny": ["{link}"]
+                    }}
+                }}"#,
+                target = target.display(),
+                link = link.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        assert!(
+            caps.fs_capabilities()
+                .iter()
+                .any(|cap| cap.is_file && cap.resolved == target_canonical),
+            "override via symlink path should preserve the file grant for the canonical target"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_from_profile_policy_add_deny_access_emits_seatbelt_rules() {
@@ -955,6 +988,83 @@ mod tests {
             rules.contains("deny file-write*"),
             "expected macOS deny write rule, got:\n{}",
             rules
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_override_deny_punches_through_deny_group() {
+        let dir = tempdir().expect("tmpdir");
+        let denied = dir.path().join("denied_dir");
+        std::fs::create_dir_all(&denied).expect("mkdir denied");
+
+        let profile_path = dir.path().join("override-deny-profile.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "override-deny-test" }},
+                    "policy": {{
+                        "add_allow_readwrite": ["{path}"],
+                        "add_deny_access": ["{path}"],
+                        "override_deny": ["{path}"]
+                    }}
+                }}"#,
+                path = denied.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        // The allow should survive because override_deny punches through the deny
+        let canonical = denied.canonicalize().expect("canonicalize");
+        assert!(
+            caps.fs_capabilities()
+                .iter()
+                .any(|cap| !cap.is_file && cap.resolved == canonical),
+            "override_deny should preserve the directory grant despite deny group"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_override_deny_requires_matching_grant() {
+        // Override path is under temp dir which is covered by system groups,
+        // but the grant check requires user-intent sources (User/Profile),
+        // so group coverage is not sufficient.
+        let dir = tempdir().expect("tmpdir");
+        let denied = dir.path().join("denied_no_grant");
+        std::fs::create_dir_all(&denied).expect("mkdir denied");
+
+        let profile_path = dir.path().join("override-deny-no-grant.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "override-deny-no-grant" }},
+                    "policy": {{
+                        "add_deny_access": ["{path}"],
+                        "override_deny": ["{path}"]
+                    }}
+                }}"#,
+                path = denied.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let err = CapabilitySet::from_profile(&profile, workdir.path(), &args)
+            .expect_err("override_deny without user-intent grant should fail");
+        assert!(
+            err.to_string().contains("no matching grant"),
+            "unexpected error: {err}"
         );
     }
 

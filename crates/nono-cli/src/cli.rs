@@ -234,7 +234,7 @@ pub struct OpenUrlHelperArgs {
     pub url: String,
 }
 
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug, Clone, Default)]
 pub struct SandboxArgs {
     // === Directory permissions (recursive) ===
     /// Directories to allow read+write access (recursive).

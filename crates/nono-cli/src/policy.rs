@@ -625,51 +625,90 @@ pub fn apply_deny_overrides(
             expanded.clone()
         };
 
-        // Verify the override path is actually granted via --allow/--read/--write.
-        // Without a grant, the deny removal is a no-op on Linux (Landlock is allow-list),
-        // but on macOS the Seatbelt allow rules below would implicitly grant access,
-        // creating a platform behavior divergence.
-        let is_granted = caps.fs_capabilities().iter().any(|cap| {
-            if cap.is_file {
+        // Verify the override path is actually granted via explicit user intent
+        // (CLI flags or profile filesystem/policy config), not just covered by a
+        // system or group grant. Without this, a deny override under /tmp would
+        // silently pass because system_write_macos grants /var/folders, creating
+        // an unintended permission grant.
+        //
+        // Compute the union of access modes across ALL matching user-intent grants.
+        // This runs before deduplicate() which merges complementary Read + Write
+        // grants into ReadWrite, so we must aggregate here to avoid emitting
+        // Seatbelt allow rules for only the first grant's access mode.
+        let mut grant_has_read = false;
+        let mut grant_has_write = false;
+        for cap in caps.fs_capabilities() {
+            if !cap.source.is_user_intent() {
+                continue;
+            }
+            let covers = if cap.is_file {
                 cap.resolved == canonical
             } else {
                 canonical.starts_with(&cap.resolved)
+            };
+            if covers {
+                match cap.access {
+                    AccessMode::Read => grant_has_read = true,
+                    AccessMode::Write => grant_has_write = true,
+                    AccessMode::ReadWrite => {
+                        grant_has_read = true;
+                        grant_has_write = true;
+                    }
+                }
             }
-        });
-        if !is_granted {
+        }
+        if !grant_has_read && !grant_has_write {
             return Err(NonoError::SandboxInit(format!(
-                "--override-deny '{}' has no matching grant. \
-                 Add --allow, --read, or --write for this path.",
+                "override_deny '{}' has no matching grant. \
+                 Add a filesystem allow (--allow, --read, --write, or profile filesystem/policy) \
+                 for this path.",
                 override_path.display(),
             )));
         }
 
         // Warn about the security relaxation
-        eprintln!(
-            "nono: warning: --override-deny relaxing deny rule for '{}'",
+        crate::output::print_warning(&format!(
+            "override_deny relaxing deny rule for '{}'",
             canonical.display()
-        );
+        ));
 
-        // On macOS: emit Seatbelt allow rules to punch through deny
+        // On macOS: emit Seatbelt allow rules to punch through deny.
+        // Only emit rules matching the effective access mode from the union
+        // of all covering grants to preserve least-privilege.
         if cfg!(target_os = "macos") {
-            let path_utf8 = path_to_utf8(&canonical)?;
-            let escaped = escape_seatbelt_path(path_utf8)?;
+            // Emit allow rules for both the canonical path and the original
+            // expanded path (if it differs, e.g. symlink). This mirrors
+            // add_deny_access_rules which denies both the symlink and target.
+            let mut override_paths = vec![canonical.clone()];
+            if expanded != canonical {
+                override_paths.push(expanded.clone());
+            }
 
-            let filter = if canonical.exists() && canonical.is_file() {
-                format!("literal \"{}\"", escaped)
-            } else {
-                format!("subpath \"{}\"", escaped)
-            };
+            for op in &override_paths {
+                let path_utf8 = path_to_utf8(op)?;
+                let escaped = escape_seatbelt_path(path_utf8)?;
 
-            // Allow read and write, overriding the deny rules
-            caps.add_platform_rule(format!("(allow file-read-data ({}))", filter))?;
-            caps.add_platform_rule(format!("(allow file-write* ({}))", filter))?;
+                let filter = if op.exists() && op.is_file() {
+                    format!("literal \"{}\"", escaped)
+                } else {
+                    format!("subpath \"{}\"", escaped)
+                };
+
+                if grant_has_read {
+                    caps.add_platform_rule(format!("(allow file-read-data ({}))", filter))?;
+                }
+                if grant_has_write {
+                    caps.add_platform_rule(format!("(allow file-write* ({}))", filter))?;
+                }
+            }
         }
 
         // Remove deny entries that the override covers (equal or child of the override path).
-        // Do NOT remove broader deny entries when the override is a child — e.g., overriding
-        // ~/.aws must not remove a deny on the entire home directory.
-        deny_paths.retain(|dp| !dp.starts_with(&canonical));
+        // Check both the canonical and expanded (symlink) forms so that deny entries
+        // recorded for either the symlink or its target are removed.
+        // Do NOT remove broader deny entries when the override is a child — e.g.,
+        // overriding ~/.aws must not remove a deny on the entire home directory.
+        deny_paths.retain(|dp| !dp.starts_with(&canonical) && !dp.starts_with(&expanded));
     }
 
     Ok(())
@@ -1852,6 +1891,94 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_apply_deny_overrides_respects_read_only_grant() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let denied = dir.path().join("readonly");
+        std::fs::create_dir_all(&denied).expect("mkdir");
+
+        let denied_canonical = denied.canonicalize().expect("canonicalize");
+        let mut deny_paths = vec![denied_canonical];
+        let mut caps = CapabilitySet::new();
+        // Grant read-only access
+        caps.add_fs(FsCapability::new_dir(&denied, AccessMode::Read).expect("grant"));
+        let overrides = vec![denied];
+
+        apply_deny_overrides(&overrides, &mut deny_paths, &mut caps).expect("should succeed");
+
+        let rules = caps.platform_rules().join("\n");
+        assert!(
+            rules.contains("allow file-read-data"),
+            "should emit read rule for read-only grant, got: {}",
+            rules
+        );
+        assert!(
+            !rules.contains("allow file-write*"),
+            "must NOT emit write rule for read-only grant, got: {}",
+            rules
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_apply_deny_overrides_respects_write_only_grant() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let denied = dir.path().join("writeonly");
+        std::fs::create_dir_all(&denied).expect("mkdir");
+
+        let denied_canonical = denied.canonicalize().expect("canonicalize");
+        let mut deny_paths = vec![denied_canonical];
+        let mut caps = CapabilitySet::new();
+        // Grant write-only access
+        caps.add_fs(FsCapability::new_dir(&denied, AccessMode::Write).expect("grant"));
+        let overrides = vec![denied];
+
+        apply_deny_overrides(&overrides, &mut deny_paths, &mut caps).expect("should succeed");
+
+        let rules = caps.platform_rules().join("\n");
+        assert!(
+            !rules.contains("allow file-read-data"),
+            "must NOT emit read rule for write-only grant, got: {}",
+            rules
+        );
+        assert!(
+            rules.contains("allow file-write*"),
+            "should emit write rule for write-only grant, got: {}",
+            rules
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_apply_deny_overrides_merges_complementary_read_write_grants() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let denied = dir.path().join("merged_rw");
+        std::fs::create_dir_all(&denied).expect("mkdir");
+
+        let denied_canonical = denied.canonicalize().expect("canonicalize");
+        let mut deny_paths = vec![denied_canonical];
+        let mut caps = CapabilitySet::new();
+        // Two separate grants: Read and Write (not yet deduplicated)
+        caps.add_fs(FsCapability::new_dir(&denied, AccessMode::Read).expect("read grant"));
+        caps.add_fs(FsCapability::new_dir(&denied, AccessMode::Write).expect("write grant"));
+        let overrides = vec![denied];
+
+        apply_deny_overrides(&overrides, &mut deny_paths, &mut caps).expect("should succeed");
+
+        let rules = caps.platform_rules().join("\n");
+        assert!(
+            rules.contains("allow file-read-data"),
+            "should emit read rule from merged Read+Write grants, got: {}",
+            rules
+        );
+        assert!(
+            rules.contains("allow file-write*"),
+            "should emit write rule from merged Read+Write grants, got: {}",
+            rules
+        );
+    }
+
     #[test]
     fn test_apply_deny_overrides_does_not_remove_broader_deny() {
         // Overriding a child path must NOT remove a broader parent deny.
@@ -1893,6 +2020,59 @@ mod tests {
             err.to_string().contains("no matching grant"),
             "error should mention missing grant, got: {}",
             err
+        );
+    }
+
+    #[test]
+    fn test_apply_deny_overrides_rejects_group_sourced_grant() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let denied = dir.path().join("group_granted");
+        std::fs::create_dir_all(&denied).expect("mkdir");
+
+        let denied_canonical = denied.canonicalize().expect("canonicalize");
+        let mut deny_paths = vec![denied_canonical];
+        let mut caps = CapabilitySet::new();
+        // Add a group-sourced grant (not user intent)
+        let mut cap = FsCapability::new_dir(dir.path(), AccessMode::ReadWrite).expect("grant");
+        cap.source = CapabilitySource::Group("system_write".to_string());
+        caps.add_fs(cap);
+        let overrides = vec![denied];
+
+        let result = apply_deny_overrides(&overrides, &mut deny_paths, &mut caps);
+        assert!(result.is_err());
+        let err = result.expect_err("expected error");
+        assert!(
+            err.to_string().contains("no matching grant"),
+            "group grant should not satisfy override_deny, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_apply_deny_overrides_removes_symlink_and_target_deny_paths() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let target = dir.path().join("real_dir");
+        std::fs::create_dir_all(&target).expect("mkdir target");
+        let link = dir.path().join("link_dir");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let target_canonical = target.canonicalize().expect("canonicalize target");
+        let link_expanded = link.clone();
+
+        // add_deny_access_rules records both the symlink path and the resolved target
+        let mut deny_paths = vec![link_expanded.clone(), target_canonical.clone()];
+        let mut caps = CapabilitySet::new();
+        // Grant via the target (which is what profile filesystem grants canonicalize to)
+        caps.add_fs(FsCapability::new_dir(&target, AccessMode::ReadWrite).expect("grant"));
+        // Override via the symlink path (what the user writes in their profile)
+        let overrides = vec![link];
+
+        apply_deny_overrides(&overrides, &mut deny_paths, &mut caps).expect("should succeed");
+
+        assert!(
+            deny_paths.is_empty(),
+            "both symlink and target deny paths should be removed, remaining: {:?}",
+            deny_paths
         );
     }
 }
