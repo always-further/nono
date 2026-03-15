@@ -158,6 +158,7 @@ fn run(cli: Cli) -> Result<()> {
             run_why(*args)
         }
         Commands::Setup(args) => {
+            output::print_banner(cli.silent);
             show_update_notification(&mut update_handle, cli.silent);
             run_setup(args)
         }

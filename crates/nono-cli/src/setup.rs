@@ -26,9 +26,6 @@ impl SetupRunner {
     }
 
     pub fn run(&self) -> Result<()> {
-        // Print ASCII art banner with random quote
-        self.print_banner();
-
         // Installation verification
         self.check_installation()?;
 
@@ -57,31 +54,6 @@ impl SetupRunner {
         self.show_summary();
 
         Ok(())
-    }
-
-    fn print_banner(&self) {
-        // ASCII art with random motivational quote
-        let quotes = [
-            "Don't YOLO when you can NONO!",
-            "Security first, sandbox always!",
-            "Trust but verify!",
-            "Kernel-level security for user-level peace!",
-            "Capability-based security FTW!",
-            "Sandbox all the things!",
-            "Zero trust, maximum safety!",
-        ];
-
-        // Use simple deterministic selection based on timestamp
-        // to avoid needing rand dependency
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let quote = quotes[(now as usize) % quotes.len()];
-
-        println!(" ▄▀▄      nono v{}", env!("CARGO_PKG_VERSION"));
-        println!("▀▄█▄▀    - {}", quote);
-        println!();
     }
 
     fn check_installation(&self) -> Result<()> {
