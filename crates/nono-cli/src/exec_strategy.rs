@@ -208,6 +208,7 @@ pub struct SupervisorConfig<'a> {
     /// Whether to allow http://localhost and http://127.0.0.1 URLs.
     pub open_url_allow_localhost: bool,
     /// Whether direct LaunchServices opening is enabled for this session.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub allow_launch_services_active: bool,
 }
 
@@ -2515,7 +2516,6 @@ mod tests {
             session_id: "test-session",
             open_url_origins: &[],
             open_url_allow_localhost: false,
-            #[cfg(target_os = "macos")]
             allow_launch_services_active: false,
         };
 
@@ -2590,7 +2590,6 @@ mod tests {
             session_id: "test",
             open_url_origins: &origins,
             open_url_allow_localhost: false,
-            #[cfg(target_os = "macos")]
             allow_launch_services_active: false,
         };
 
@@ -2617,7 +2616,6 @@ mod tests {
             session_id: "test",
             open_url_origins: &[],
             open_url_allow_localhost: false,
-            #[cfg(target_os = "macos")]
             allow_launch_services_active: false,
         };
 
@@ -2642,7 +2640,6 @@ mod tests {
             session_id: "test",
             open_url_origins: &[],
             open_url_allow_localhost: true,
-            #[cfg(target_os = "macos")]
             allow_launch_services_active: false,
         };
         let config_deny = SupervisorConfig {
@@ -2651,7 +2648,6 @@ mod tests {
             session_id: "test",
             open_url_origins: &[],
             open_url_allow_localhost: false,
-            #[cfg(target_os = "macos")]
             allow_launch_services_active: false,
         };
 
@@ -2681,7 +2677,6 @@ mod tests {
             session_id: "test",
             open_url_origins: &[],
             open_url_allow_localhost: false,
-            #[cfg(target_os = "macos")]
             allow_launch_services_active: false,
         };
 
