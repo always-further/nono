@@ -85,16 +85,13 @@ impl DetectedAbi {
             features.push("File truncation (Truncate)".to_string());
         }
         if self.has_network() {
-            features.push(format!(
-                "TCP network filtering ({:?})",
-                AccessNet::from_all(self.abi)
-            ));
+            features.push("TCP network filtering".to_string());
         }
         if self.has_ioctl_dev() {
-            features.push("Device ioctl filtering (IoctlDev)".to_string());
+            features.push("Device ioctl filtering".to_string());
         }
         if self.has_scoping() {
-            features.push(format!("Process scoping ({:?})", Scope::from_all(self.abi)));
+            features.push("Process scoping".to_string());
         }
         features
     }
@@ -395,12 +392,12 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
     };
 
     if matches!(caps.signal_mode(), SignalMode::Isolated) && abi.has_scoping() {
-        warn!(
+        debug!(
             "SignalMode::Isolated is approximated on Linux with same-sandbox signal scoping: \
              Landlock can restrict signals to the same sandbox, but not to self only"
         );
     } else if matches!(caps.signal_mode(), SignalMode::Isolated) {
-        warn!(
+        debug!(
             "SignalMode::Isolated is not enforceable on this kernel: \
              Landlock ABI V6+ is required for signal scoping"
         );
