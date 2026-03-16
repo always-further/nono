@@ -449,65 +449,45 @@ pub(crate) fn add_deny_access_rules(
     let path = expand_path(path_str)?;
     deny_paths.push(path.clone());
 
-    // If the deny path is a symlink, also deny the resolved target.
-    // Without this, `--read-file ~/.zshrc` where ~/.zshrc is a symlink
-    // canonicalizes to the target, which wouldn't match the deny path.
-    let resolved = if path.is_symlink() {
-        path.canonicalize().ok()
-    } else {
-        None
-    };
-    if let Some(ref resolved) = resolved {
-        if *resolved != path {
-            deny_paths.push(resolved.clone());
+    // Canonicalize to resolve symlinks anywhere in the path (the deny target
+    // itself, or any parent directory such as /var -> /private/var on macOS).
+    // Seatbelt operates on kernel-resolved paths, so deny rules must use
+    // the canonical form. We also keep the original to cover both forms.
+    let canonical = path.canonicalize().ok();
+    if let Some(ref canonical) = canonical {
+        if *canonical != path {
+            deny_paths.push(canonical.clone());
         }
     }
 
     // Seatbelt deny rules only apply on macOS
     if cfg!(target_os = "macos") {
-        let escaped = escape_seatbelt_path(path_to_utf8(&path)?)?;
-
-        // Determine filter type: literal for files, subpath for directories
-        let filter = if path.exists() && path.is_file() {
-            format!("literal \"{}\"", escaped)
-        } else {
-            // Default to subpath for dirs and non-existent paths (defensive)
-            format!("subpath \"{}\"", escaped)
+        // Helper: emit metadata-allow + read-deny + write-deny for a single path
+        let emit_deny_rules = |p: &Path, caps: &mut CapabilitySet| -> Result<()> {
+            let escaped = escape_seatbelt_path(path_to_utf8(p)?)?;
+            let filter = if p.exists() && p.is_file() {
+                format!("literal \"{}\"", escaped)
+            } else {
+                format!("subpath \"{}\"", escaped)
+            };
+            caps.add_platform_rule(format!("(allow file-read-metadata ({}))", filter))?;
+            caps.add_platform_rule(format!("(deny file-read-data ({}))", filter))?;
+            caps.add_platform_rule(format!("(deny file-write* ({}))", filter))?;
+            Ok(())
         };
 
-        caps.add_platform_rule(format!("(allow file-read-metadata ({}))", filter))?;
-        caps.add_platform_rule(format!("(deny file-read-data ({}))", filter))?;
-        caps.add_platform_rule(format!("(deny file-write* ({}))", filter))?;
+        // Emit deny rules for the original path
+        emit_deny_rules(&path, caps)?;
 
-        // Emit deny rules for the symlink target too
-        if let Some(ref resolved) = resolved {
-            if *resolved != path {
-                if let Ok(resolved_utf8) = path_to_utf8(resolved) {
-                    if let Ok(resolved_escaped) = escape_seatbelt_path(resolved_utf8) {
-                        let resolved_filter = if resolved.is_file() {
-                            format!("literal \"{}\"", resolved_escaped)
-                        } else {
-                            format!("subpath \"{}\"", resolved_escaped)
-                        };
-
-                        if let Err(e) = caps.add_platform_rule(format!(
-                            "(allow file-read-metadata ({}))",
-                            resolved_filter
-                        )) {
-                            warn!("Skipping symlink target deny metadata rule: {}", e);
-                        }
-                        if let Err(e) = caps.add_platform_rule(format!(
-                            "(deny file-read-data ({}))",
-                            resolved_filter
-                        )) {
-                            warn!("Skipping symlink target deny read rule: {}", e);
-                        }
-                        if let Err(e) = caps
-                            .add_platform_rule(format!("(deny file-write* ({}))", resolved_filter))
-                        {
-                            warn!("Skipping symlink target deny write rule: {}", e);
-                        }
-                    }
+        // Emit deny rules for the canonical path too (covers parent symlinks)
+        if let Some(ref canonical) = canonical {
+            if *canonical != path {
+                if let Err(e) = emit_deny_rules(canonical, caps) {
+                    warn!(
+                        "Skipping canonical deny rules for {}: {}",
+                        canonical.display(),
+                        e
+                    );
                 }
             }
         }
@@ -1387,10 +1367,17 @@ mod tests {
 
     #[test]
     fn test_deny_access_non_symlink_no_duplicate() {
-        // A regular (non-symlink) file should only produce one deny_paths entry
+        // A regular (non-symlink) file whose parents also resolve to the same
+        // canonical path should produce one deny_paths entry. On macOS tempdir
+        // lives under /var/folders (symlink to /private/var/folders), so the
+        // canonical and original paths differ — that's two entries, which is
+        // correct because Seatbelt needs both forms.
         let dir = tempfile::tempdir().expect("create tempdir");
         let file = dir.path().join("regular_file");
         std::fs::write(&file, "content").expect("write file");
+
+        let canonical = file.canonicalize().expect("canonicalize");
+        let parent_is_symlinked = canonical != file;
 
         let mut caps = CapabilitySet::new();
         let mut deny_paths = Vec::new();
@@ -1398,10 +1385,14 @@ mod tests {
         add_deny_access_rules(file_str, &mut caps, &mut deny_paths)
             .expect("add deny rules for regular file");
 
+        let expected = if parent_is_symlinked { 2 } else { 1 };
         assert_eq!(
             deny_paths.len(),
-            1,
-            "regular file should have one deny_paths entry"
+            expected,
+            "deny_paths entries: expected {} (parent symlinked: {}), got {:?}",
+            expected,
+            parent_is_symlinked,
+            deny_paths
         );
     }
 

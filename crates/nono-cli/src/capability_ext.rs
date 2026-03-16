@@ -951,6 +951,63 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn test_from_profile_workdir_deny_env_extends_claude_code() {
+        let workdir = tempdir().expect("workdir");
+        std::fs::write(workdir.path().join(".env"), "SECRET=test").expect("write .env");
+
+        let profile_path = workdir.path().join("deny-env.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "extends": "claude-code",
+                "meta": { "name": "claude-code-deny-env" },
+                "policy": {
+                    "add_deny_access": ["$WORKDIR/.env"]
+                }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let args = sandbox_args();
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        let rules = caps.platform_rules().join("\n");
+        // On macOS, tempdir is under /var/folders which is a symlink to /private/var/folders.
+        // The deny rule must use the canonical path so it matches the kernel-resolved path
+        // that Seatbelt sees at runtime.
+        let env_path = workdir.path().join(".env");
+        let env_canonical = env_path.canonicalize().expect("canonicalize .env");
+
+        // Check: does the deny rule use the canonical path?
+        let has_canonical_deny = rules.contains(&format!(
+            "deny file-read-data (literal \"{}\")",
+            env_canonical.display()
+        ));
+        // Check: does the deny rule use the original (possibly non-canonical) path?
+        let has_original_deny = rules.contains(&format!(
+            "deny file-read-data (literal \"{}\")",
+            env_path.display()
+        ));
+
+        // The deny must cover the canonical path, otherwise Seatbelt won't enforce it
+        assert!(
+            has_canonical_deny,
+            "deny rule must use canonical path {}.\n\
+             Has original path deny: {}\n\
+             Original path: {}\n\
+             Canonical path: {}\n\
+             All platform rules:\n{}",
+            env_canonical.display(),
+            has_original_deny,
+            env_path.display(),
+            env_canonical.display(),
+            rules
+        );
+    }
+
+    #[test]
     fn test_from_profile_policy_add_deny_access_emits_seatbelt_rules() {
         let dir = tempdir().expect("tmpdir");
         let denied = dir.path().join("denied");

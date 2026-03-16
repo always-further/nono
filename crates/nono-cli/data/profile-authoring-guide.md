@@ -283,6 +283,45 @@ When a deny group blocks a path you need access to, use `override_deny` together
 }
 ```
 
+### Denying specific project files
+
+Block access to a file in the working directory while keeping the rest accessible. Use `$WORKDIR` to reference the current working directory — relative paths like `./` are not expanded:
+
+```json
+{
+  "extends": "claude-code",
+  "meta": {
+    "name": "no-dotenv",
+    "description": "Claude Code without .env access"
+  },
+  "policy": {
+    "add_deny_access": ["$WORKDIR/.env"]
+  }
+}
+```
+
+**macOS**: This works directly. Seatbelt can deny a specific file within an allowed directory.
+
+**Linux**: Landlock is strictly allow-list and cannot deny a child of an allowed parent. Use supervised mode instead, which intercepts file opens via seccomp-notify and checks them against the deny list before granting access:
+
+```json
+{
+  "extends": "claude-code",
+  "meta": {
+    "name": "no-dotenv",
+    "description": "Claude Code without .env access"
+  },
+  "security": {
+    "capability_elevation": true
+  },
+  "policy": {
+    "add_deny_access": ["$WORKDIR/.env"]
+  }
+}
+```
+
+With `capability_elevation` enabled, nono runs in supervised mode where every file access outside the initial grant set is trapped and evaluated. The deny list is checked before the supervisor prompts for approval, so denied paths are blocked regardless of platform.
+
 ### Profile with group exclusion
 
 Remove an inherited deny group that is too restrictive for your use case:
