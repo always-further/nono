@@ -260,25 +260,25 @@ pub fn find_instruction_files<P: AsRef<Path>>(
 
 /// Well-known directory names that never contain instruction files and are
 /// typically very large. Skipping these prevents multi-second walks through
-/// dependency trees and build artifacts.
+/// dependency trees and build artifacts. Sorted for binary search.
 const SKIP_DIRS: &[&str] = &[
-    "node_modules",
-    "target",
-    "__pycache__",
-    ".venv",
-    ".tox",
-    "dist",
-    "build",
+    ".cache",
+    ".gradle",
+    ".mypy_cache",
     ".next",
     ".nuxt",
-    ".gradle",
-    ".cache",
-    "vendor",
-    ".terraform",
-    "venv",
-    ".mypy_cache",
-    ".ruff_cache",
     ".pytest_cache",
+    ".ruff_cache",
+    ".terraform",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+    "venv",
 ];
 
 /// Recursively walk a directory, collecting files matching instruction patterns.
@@ -321,7 +321,7 @@ fn find_files_recursive(
                 continue;
             }
             // Skip well-known heavy directories that never contain instruction files
-            if SKIP_DIRS.contains(&name_str.as_ref()) {
+            if SKIP_DIRS.binary_search(&name_str.as_ref()).is_ok() {
                 continue;
             }
 
