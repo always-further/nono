@@ -258,10 +258,34 @@ pub fn find_instruction_files<P: AsRef<Path>>(
     Ok(results)
 }
 
+/// Well-known directory names that never contain instruction files and are
+/// typically very large. Skipping these prevents multi-second walks through
+/// dependency trees and build artifacts.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    ".tox",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".gradle",
+    ".cache",
+    "vendor",
+    ".terraform",
+    "venv",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+];
+
 /// Recursively walk a directory, collecting files matching instruction patterns.
 ///
 /// Tracks visited directory inodes to prevent symlink cycle DoS, and enforces
-/// a maximum recursion depth of 16 levels.
+/// a maximum recursion depth of 16 levels. Skips well-known heavy directories
+/// (node_modules, target, etc.) that never contain instruction files.
 fn find_files_recursive(
     root: &Path,
     dir: &Path,
@@ -294,6 +318,10 @@ fn find_files_recursive(
             let name_str = name.to_string_lossy();
             // Skip hidden directories except .claude
             if name_str.starts_with('.') && name_str != ".claude" {
+                continue;
+            }
+            // Skip well-known heavy directories that never contain instruction files
+            if SKIP_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
 
