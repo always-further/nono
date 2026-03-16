@@ -66,7 +66,7 @@ expect_success "bash from nix store path runs command" \
     "$NONO_BIN" run --read /nix --allow "$TMPDIR" -- "$NIX_BASH" -c "echo ok"
 
 # Verify binaries accessed via symlink chain (e.g. ~/.nix-profile/bin/echo)
-SYMLINK_ECHO=$(command -v echo 2>/dev/null || true)
+SYMLINK_ECHO=$(type -P -- echo 2>/dev/null || true)
 if [[ -n "$SYMLINK_ECHO" && "$SYMLINK_ECHO" == *nix* ]]; then
     expect_output_contains "echo via nix symlink chain" "symlink ok" \
         "$NONO_BIN" run --read /nix --allow "$TMPDIR" -- "$SYMLINK_ECHO" "symlink ok"
@@ -120,7 +120,7 @@ echo "--- Wrapper Script Resolution ---"
 
 # Nix python3 is often a wrapper script. Verify --version reports Python, not
 # some other runtime (issue #287: opencode resolved to Bun).
-PYTHON3_WHICH=$(command -v python3 2>/dev/null || true)
+PYTHON3_WHICH=$(type -P -- python3 2>/dev/null || true)
 if [[ -n "$PYTHON3_WHICH" && "$PYTHON3_WHICH" == *nix* ]]; then
     expect_output_contains "python3 wrapper resolves to Python" "Python" \
         "$NONO_BIN" run --read /nix --allow "$TMPDIR" -- "$PYTHON3_WHICH" --version
@@ -139,7 +139,7 @@ else
 fi
 
 # Same for node
-NODE_WHICH=$(command -v node 2>/dev/null || true)
+NODE_WHICH=$(type -P -- node 2>/dev/null || true)
 if [[ -n "$NODE_WHICH" && "$NODE_WHICH" == *nix* ]]; then
     expect_output_contains "node wrapper resolves to Node" "ok" \
         "$NONO_BIN" run --read /nix --allow "$TMPDIR" -- "$NODE_WHICH" -e "console.log('ok')"

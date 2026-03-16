@@ -315,8 +315,19 @@ require_nix() {
 # Resolve a command to its /nix/store path (follows all symlinks)
 nix_realpath() {
     local cmd="$1"
-    local path
-    path=$(command -v "$cmd" 2>/dev/null) || return 1
+    local path=""
+
+    # `command -v` returns shell builtins/functions for names like `echo`.
+    # Use `type -P` first so we only resolve real executables on disk.
+    path=$(type -P -- "$cmd" 2>/dev/null || true)
+    if [[ -z "$path" ]]; then
+        path=$(command -v -- "$cmd" 2>/dev/null || true)
+    fi
+
+    if [[ -z "$path" || "$path" != */* || ! -e "$path" ]]; then
+        return 1
+    fi
+
     readlink -f "$path" 2>/dev/null || realpath "$path" 2>/dev/null || echo "$path"
 }
 
