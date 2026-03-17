@@ -41,13 +41,18 @@ jobs:
             os: macos-14
             artifact: nono
 
+          # Linux aarch64 (ARM64)
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            artifact: nono
+
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.target != 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Install Rust toolchain
@@ -55,8 +60,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install cross (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo install cross
+
       - name: Build
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --target ${{ matrix.target }} -p nono-cli
+
+      - name: Build (cross aarch64-unknown-linux-gnu)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cross build --release --target aarch64-unknown-linux-gnu -p nono-cli
 
       - name: Package
         shell: bash
@@ -66,10 +80,10 @@ jobs:
           cd ../../..
 
       - name: Install cargo-deb
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: runner.os == 'Linux' && (matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu')
         run: cargo install cargo-deb
 
-      - name: Build .deb
+      - name: Build .deb (x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           VERSION="${{ env.RELEASE_TAG }}"
@@ -77,13 +91,31 @@ jobs:
           cd crates/nono-cli
           cargo deb --deb-version "$VERSION"
 
+      - name: Build .deb (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          VERSION="${{ env.RELEASE_TAG }}"
+          VERSION="${VERSION#v}"
+          cd crates/nono-cli
+          cargo deb --target aarch64-unknown-linux-gnu --no-build --deb-version "$VERSION"
+
+      - name: Prepare upload
+        shell: bash
+        run: |
+          mkdir -p artifact_staging
+          cp "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz" artifact_staging/
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ] && [ -d target/debian ]; then
+            cp target/debian/*.deb artifact_staging/
+          fi
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ] && [ -d target/aarch64-unknown-linux-gnu/debian ]; then
+            cp target/aarch64-unknown-linux-gnu/debian/*.deb artifact_staging/
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: nono-${{ matrix.target }}
-          path: |
-            nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz
-            target/debian/*.deb
+          path: artifact_staging
 
   release:
     name: Create Release

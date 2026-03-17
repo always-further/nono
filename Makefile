@@ -6,7 +6,7 @@
 #   make check        Run clippy and format check
 #   make release      Build release binaries
 
-.PHONY: all build build-lib build-cli build-ffi test test-lib test-cli test-ffi check clippy fmt clean install audit help
+.PHONY: all build build-lib build-cli build-ffi build-arm64 test test-lib test-cli test-ffi check clippy fmt clean install audit help
 
 # Default target
 all: build
@@ -31,6 +31,18 @@ build-release-lib:
 
 build-release-cli:
 	cargo build --release -p nono-cli
+
+# Cross-compilation: Linux ARM64 (aarch64-unknown-linux-gnu)
+# On native Linux ARM64: uses cargo (need libdbus-1-dev, pkg-config, rustup target add aarch64-unknown-linux-gnu).
+# On other hosts (x86_64 Linux, macOS): uses cross. If cross fails with "may not be able to run on this system",
+# install from git: cargo install cross --git https://github.com/cross-rs/cross
+build-arm64:
+	@HOST=$$(rustc -vV 2>/dev/null | sed -n 's/^host: *//p'); \
+	if [ "$$HOST" = "aarch64-unknown-linux-gnu" ]; then \
+		cargo build --release --target aarch64-unknown-linux-gnu -p nono-cli; \
+	else \
+		cross build --release --target aarch64-unknown-linux-gnu -p nono-cli; \
+	fi
 
 # Test targets
 test: test-lib test-cli test-ffi
@@ -112,6 +124,7 @@ help:
 	@echo "  make build-cli      Build CLI only"
 	@echo "  make build-ffi      Build C FFI bindings"
 	@echo "  make build-release  Build release binaries"
+	@echo "  make build-arm64    Build CLI for Linux ARM64 (cargo on Linux ARM64; cross elsewhere)"
 	@echo ""
 	@echo "Test:"
 	@echo "  make test           Run all tests"
