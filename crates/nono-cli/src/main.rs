@@ -993,6 +993,7 @@ struct ExecutionFlags {
     allow_launch_services_active: bool,
     /// Inject `--no-sandbox` into the command on macOS to disable Chromium's
     /// internal sandbox, which conflicts with nono's Seatbelt profile.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     disable_chromium_sandbox: bool,
     /// Canonicalized paths exempted from deny groups via override_deny
     override_deny_paths: Vec<std::path::PathBuf>,
@@ -1233,7 +1234,7 @@ fn execute_sandboxed(
     }
 
     // Convert OsString command to String for exec_strategy
-    let mut command: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
+    let command: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
         .chain(cmd_args.iter().map(|s| s.to_string_lossy().into_owned()))
         .collect();
 
@@ -1244,10 +1245,15 @@ fn execute_sandboxed(
     // --no-sandbox tells Chromium to skip sandbox_init() in child processes;
     // nono's Seatbelt is already enforced so the process tree remains sandboxed.
     #[cfg(target_os = "macos")]
-    if flags.disable_chromium_sandbox && !command.iter().any(|a| a == "--no-sandbox") {
-        command.insert(1, "--no-sandbox".to_string());
+    let command = if flags.disable_chromium_sandbox && !command.iter().any(|a| a == "--no-sandbox")
+    {
+        let mut c = command;
+        c.insert(1, "--no-sandbox".to_string());
         info!("Injected --no-sandbox for Electron/Chromium nested sandbox compatibility");
-    }
+        c
+    } else {
+        command
+    };
 
     if command.is_empty() {
         return Err(NonoError::NoCommand);
