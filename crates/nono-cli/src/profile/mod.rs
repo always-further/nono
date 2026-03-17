@@ -811,6 +811,13 @@ pub struct Profile {
     /// When `None`, inherits from the base profile.
     #[serde(default)]
     pub allow_launch_services: Option<bool>,
+    /// When `true`, nono injects `--no-sandbox` into the command on macOS.
+    /// Chromium/Electron apps spawn helper processes that call `sandbox_init()`
+    /// internally, which fails under nono's Seatbelt because macOS does not
+    /// support nested sandbox profiles. This flag disables Chromium's internal
+    /// sandbox so only nono's kernel-enforced sandbox is active.
+    #[serde(default)]
+    pub disable_chromium_sandbox: Option<bool>,
     /// Deprecated: Parsed for backward compatibility but ignored.
     /// Supervised mode preserves TTY by default, making this unnecessary.
     #[serde(default)]
@@ -1187,6 +1194,9 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             None => base.open_urls,
         },
         allow_launch_services: child.allow_launch_services.or(base.allow_launch_services),
+        disable_chromium_sandbox: child
+            .disable_chromium_sandbox
+            .or(base.disable_chromium_sandbox),
         interactive: base.interactive || child.interactive,
     }
 }
@@ -2234,6 +2244,7 @@ mod tests {
                 allow_localhost: false,
             }),
             allow_launch_services: Some(false),
+            disable_chromium_sandbox: None,
             interactive: false,
         }
     }
@@ -2299,6 +2310,7 @@ mod tests {
                 allow_localhost: true,
             }),
             allow_launch_services: Some(true),
+            disable_chromium_sandbox: None,
             interactive: false,
         }
     }

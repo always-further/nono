@@ -41,12 +41,19 @@ fn main() {
         println!("cargo:rustc-env=NETWORK_POLICY_JSON_EMBEDDED=0");
     }
 
-    // === Embed hook script ===
-    let hook_path = Path::new("data/hooks/nono-hook.sh");
-    if hook_path.exists() {
-        let content = fs::read_to_string(hook_path).expect("Failed to read hook script");
-        fs::write(out_path.join("nono-hook.sh"), &content)
-            .expect("Failed to write hook script to OUT_DIR");
+    // === Embed hook scripts ===
+    for hook_name in &[
+        "nono-hook.sh",
+        "nono-hook-cursor-session.sh",
+        "nono-hook-cursor-tool.sh",
+    ] {
+        let hook_path = Path::new("data/hooks").join(hook_name);
+        if hook_path.exists() {
+            let content = fs::read_to_string(&hook_path)
+                .unwrap_or_else(|_| panic!("Failed to read hook script {}", hook_name));
+            fs::write(out_path.join(hook_name), &content)
+                .unwrap_or_else(|_| panic!("Failed to write hook script {} to OUT_DIR", hook_name));
+        }
     }
 
     // === Embed profile JSON Schema ===

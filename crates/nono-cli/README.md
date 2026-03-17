@@ -42,6 +42,9 @@ nono run --allow-cwd --block-net -- command
 # Use a built-in profile
 nono run --profile claude-code -- claude
 
+# Use the Cursor profile
+nono run --profile cursor -- cursor
+
 # Use the Codex profile
 nono run --profile codex -- codex
 
@@ -84,6 +87,7 @@ Precedence is: CLI flag, then `NONO_THEME`, then config file, then the default `
 | Profile | Command |
 |---------|---------|
 | Claude Code | `nono run --profile claude-code -- claude` |
+| Cursor | `nono run --profile cursor -- cursor` |
 | Codex | `nono run --profile codex -- codex` |
 | OpenCode | `nono run --profile opencode -- opencode` |
 | OpenClaw | `nono run --profile openclaw -- openclaw gateway` |

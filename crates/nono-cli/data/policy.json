@@ -442,6 +442,27 @@
         ]
       }
     },
+    "cursor_app_macos": {
+      "description": "Cursor IDE configuration and extension directories for macOS",
+      "platform": "macos",
+      "allow": {
+        "readwrite": [
+          "$HOME/.cursor",
+          "$HOME/Library/Application Support/Cursor",
+          "$HOME/Library/Application Support/Microsoft"
+        ]
+      }
+    },
+    "cursor_app_linux": {
+      "description": "Cursor IDE configuration and extension directories for Linux",
+      "platform": "linux",
+      "allow": {
+        "readwrite": [
+          "$HOME/.cursor",
+          "$HOME/.config/Cursor"
+        ]
+      }
+    },
     "nix_runtime": {
       "description": "Nix package manager runtime paths",
       "platform": "linux",
@@ -624,6 +645,65 @@
           "event": "PostToolUseFailure",
           "matcher": "Read|Write|Edit|Bash",
           "script": "nono-hook.sh"
+        }
+      },
+      "undo": {
+        "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
+        "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
+      },
+      "interactive": true
+    },
+    "cursor": {
+      "extends": "default",
+      "meta": {
+        "name": "cursor",
+        "version": "1.0.0",
+        "description": "Cursor AI-powered IDE",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "user_caches_macos",
+          "user_caches_linux",
+          "node_runtime",
+          "rust_runtime",
+          "python_runtime",
+          "cursor_app_macos",
+          "cursor_app_linux",
+          "vscode_macos",
+          "vscode_linux",
+          "nix_runtime",
+          "git_config",
+          "unlink_protection"
+        ],
+        "signal_mode": "isolated",
+        "capability_elevation": false
+      },
+      "filesystem": {
+        "read": [
+          "$HOME/.local/share/cursor-agent"
+        ],
+        "read_file": [
+          "$HOME/Library/Keychains/login.keychain-db"
+        ]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "open_urls": {
+        "allow_origins": [
+          "https://cursor.com",
+          "https://www.cursor.sh",
+          "https://authenticator.cursor.sh"
+        ],
+        "allow_localhost": true
+      },
+      "allow_launch_services": true,
+      "disable_chromium_sandbox": true,
+      "hooks": {
+        "cursor": {
+          "event": "sessionStart",
+          "matcher": "",
+          "script": "nono-hook-cursor-session.sh"
         }
       },
       "undo": {

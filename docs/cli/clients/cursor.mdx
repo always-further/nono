@@ -1,0 +1,185 @@
+---
+title: Cursor
+description: Sandboxing Cursor AI-powered IDE with nono
+---
+
+Cursor is an AI-powered IDE built on VS Code. Its agent mode reads repositories, writes files, runs commands, and stores local state. Running it under nono keeps that access confined to the project and state paths you intentionally grant.
+
+## Why Sandbox Cursor?
+
+Cursor's agent can read and modify any file on your system, run arbitrary commands, and access the network. Without isolation:
+
+- It could read files outside the repository you meant to expose
+- A prompt injection or tool mistake could modify unrelated files on the same machine
+- Cursor extensions and agent tools inherit the same unrestricted access
+
+nono makes those boundaries kernel-enforced instead of advisory.
+
+## Quick Start
+
+```bash
+nono run --profile cursor -- cursor
+```
+
+<Warning>
+**macOS users:** Cursor needs to open a browser for account management and authentication flows. You must add the `--allow-launch-services` flag:
+
+```bash
+nono run --profile cursor --allow-launch-services -- cursor
+```
+
+See [Authentication and Browser Opening](#authentication-and-browser-opening) for details.
+</Warning>
+
+The built-in profile provides:
+
+- **Read+write access** to the current working directory
+- **Read+write access** to `~/.cursor` (config, extensions, agent state)
+- **Read+write access** to the OS-specific Cursor app data directory:
+  `~/Library/Application Support/Cursor` on macOS, `~/.config/Cursor` on Linux
+- **Read+write access** to `~/Library/Application Support/Microsoft` on macOS (shared VS Code state)
+- **Read+write access** to VS Code directories (`~/.vscode`, `~/Library/Application Support/Code` on macOS, `~/.config/Code` on Linux)
+- **Read access** to `~/.local/share/cursor-agent` (agent runtime data)
+- **Read access** to `~/Library/Keychains/login.keychain-db` on macOS (keychain for auth tokens)
+- **Read access** to common user-local runtime paths for Rust, Node.js, Python, and Nix toolchains
+- **Network access** enabled (required for Cursor API)
+- **Interactive mode** enabled (preserves TTY for Cursor's terminal UI)
+- **Automatic hook installation** for sandbox-aware error handling
+- **Chromium sandbox disabled** via `--no-sandbox` injection (prevents nested sandbox crash on macOS)
+
+## Authentication and Browser Opening
+
+Cursor opens URLs in the browser for account management and authentication. On macOS, this requires the `--allow-launch-services` flag so the sandboxed process can ask macOS LaunchServices to open the browser.
+
+The built-in profile includes an origin allowlist that controls which URLs may be opened:
+
+- `https://cursor.com`
+- `https://www.cursor.sh`
+- `https://authenticator.cursor.sh`
+- `localhost` callbacks
+
+On Linux, no additional flags are needed:
+
+```bash
+nono run --profile cursor -- cursor
+```
+
+On macOS:
+
+```bash
+nono run --profile cursor --allow-launch-services -- cursor
+```
+
+<Warning>
+`--allow-launch-services` lets the sandboxed Cursor process ask macOS LaunchServices to open URLs for that session. The nono sandbox filesystem restrictions remain fully enforced.
+</Warning>
+
+## Known Limitations
+
+### Chromium Nested Sandbox (macOS)
+
+Cursor is an Electron (Chromium) application. On macOS, Chromium spawns helper processes (GPU, renderer, network) that attempt to apply their own Seatbelt sandbox via `sandbox_init()`. Since macOS does not support nested `sandbox_init()` calls, these helper processes crash with `EPERM` when nono's Seatbelt profile is already active.
+
+The built-in cursor profile sets `disable_chromium_sandbox`, which causes nono to automatically inject `--no-sandbox` into the Cursor command. This disables Chromium's internal sandbox while nono's kernel-enforced Seatbelt profile remains active on the entire process tree.
+
+<Note>
+If you create a custom profile for another Electron/Chromium application, add `"disable_chromium_sandbox": true` to avoid the same nested sandbox crash.
+</Note>
+
+### Cursor Agent CLI (`agent`)
+
+The `agent` CLI binary unconditionally spawns `/usr/bin/security` on macOS to read keychain entries on every startup, even when auth tokens are provided via environment variables. This is incompatible with nono's sandbox. See [issue #153](https://github.com/always-further/nono/issues/153) for details and workarounds.
+
+The IDE (`cursor`) works correctly under nono.
+
+## Custom Profile
+
+Create `~/.config/nono/profiles/cursor.json` if you need different permissions:
+
+```json
+{
+  "meta": {
+    "name": "cursor",
+    "version": "1.0.0",
+    "description": "Cursor with additional project access"
+  },
+  "filesystem": {
+    "allow": ["$WORKDIR", "$HOME/.cursor"],
+    "read": ["$HOME/shared-libs"]
+  },
+  "network": {
+    "block": false
+  }
+}
+```
+
+<Note>
+Custom profiles with the same name override the built-in profile. Remove or rename the file to revert to the built-in version.
+</Note>
+
+## Security Tips
+
+### Restrict to a Specific Project
+
+The built-in profile grants access to the directory you run Cursor from. To pin access to a specific repository:
+
+```bash
+nono run --profile cursor --workdir ~/projects/my-app -- cursor
+```
+
+### Read-Only Workspace
+
+If you want Cursor to keep its local state but not modify the repository:
+
+```bash
+nono run --read . --allow ~/.cursor -- cursor
+```
+
+### Block Network for Local-Only Work
+
+If you want to inspect local code without allowing outbound access:
+
+```bash
+nono run --profile cursor --block-net -- cursor
+```
+
+### Additional Home-Directory Tools
+
+The built-in profile covers common Rust, Node.js, Python, and Nix runtime locations under `~/`, but some developer tools install into other home-directory paths such as `~/go/bin` or `~/.bun/bin`.
+
+If a tool exists on your `PATH` but Cursor cannot launch it inside the sandbox, grant read access to the specific path entry:
+
+```bash
+nono run --profile cursor \
+  --read ~/.bun/bin \
+  --read ~/go/bin \
+  -- cursor
+```
+
+## Automatic Hook Integration
+
+When you first run `nono run --profile cursor`, nono automatically installs hooks and a rules file into `~/.cursor/`:
+
+- **`~/.cursor/hooks/nono-hook-cursor-session.sh`** — runs on session start, injects sandbox context into the agent
+- **`~/.cursor/hooks/nono-hook-cursor-tool.sh`** — runs after tool use failures, provides sandbox-aware error guidance
+- **`~/.cursor/rules/nono-sandbox.mdc`** — Cursor rules file that teaches the agent about sandbox boundaries
+
+The hooks only activate when running inside a nono sandbox (detected via `$NONO_CAP_FILE`).
+
+<Note>
+Hook installation is idempotent — it only installs once and updates automatically when nono is upgraded.
+</Note>
+
+## Overriding Profile Settings
+
+CLI flags always take precedence over profile settings:
+
+```bash
+# Use profile but add extra directory access
+nono run --profile cursor --allow ~/other-project -- cursor
+
+# Use profile but block network
+nono run --profile cursor --block-net -- cursor
+```
+
+See [Security Profiles](/cli/features/profiles-groups) for details on profile format and precedence rules.

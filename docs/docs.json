@@ -54,6 +54,7 @@
         "group": "Agents & Clients",
         "pages": [
           "cli/clients/claude-code",
+          "cli/clients/cursor",
           "cli/clients/codex",
           "cli/clients/opencode",
           "cli/clients/openclaw"

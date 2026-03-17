@@ -776,6 +776,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             open_url_origins: prepared.open_url_origins,
             open_url_allow_localhost: prepared.open_url_allow_localhost,
             allow_launch_services_active: prepared.allow_launch_services_active,
+            disable_chromium_sandbox: prepared.disable_chromium_sandbox,
             override_deny_paths: prepared.override_deny_paths,
         },
     )
@@ -990,6 +991,9 @@ struct ExecutionFlags {
     open_url_allow_localhost: bool,
     /// Whether direct LaunchServices opening is enabled for this session.
     allow_launch_services_active: bool,
+    /// Inject `--no-sandbox` into the command on macOS to disable Chromium's
+    /// internal sandbox, which conflicts with nono's Seatbelt profile.
+    disable_chromium_sandbox: bool,
     /// Canonicalized paths exempted from deny groups via override_deny
     override_deny_paths: Vec<std::path::PathBuf>,
 }
@@ -1031,6 +1035,7 @@ impl ExecutionFlags {
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             allow_launch_services_active: false,
+            disable_chromium_sandbox: false,
             override_deny_paths: Vec::new(),
         })
     }
@@ -1228,9 +1233,21 @@ fn execute_sandboxed(
     }
 
     // Convert OsString command to String for exec_strategy
-    let command: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
+    let mut command: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
         .chain(cmd_args.iter().map(|s| s.to_string_lossy().into_owned()))
         .collect();
+
+    // Disable Chromium's internal sandbox for Electron apps on macOS.
+    // macOS does not support nested sandbox_init() — once nono applies its
+    // Seatbelt profile, Chromium helper processes (GPU, renderer, network)
+    // crash with EPERM when they try to apply their own profile.
+    // --no-sandbox tells Chromium to skip sandbox_init() in child processes;
+    // nono's Seatbelt is already enforced so the process tree remains sandboxed.
+    #[cfg(target_os = "macos")]
+    if flags.disable_chromium_sandbox && !command.iter().any(|a| a == "--no-sandbox") {
+        command.insert(1, "--no-sandbox".to_string());
+        info!("Injected --no-sandbox for Electron/Chromium nested sandbox compatibility");
+    }
 
     if command.is_empty() {
         return Err(NonoError::NoCommand);
@@ -1750,6 +1767,8 @@ struct PreparedSandbox {
     capability_elevation: bool,
     /// Whether direct LaunchServices opens are enabled for this session.
     allow_launch_services_active: bool,
+    /// Whether to inject --no-sandbox for Chromium/Electron apps on macOS.
+    disable_chromium_sandbox: bool,
     /// Allowed URL origins for supervisor-delegated browser opens
     open_url_origins: Vec<String>,
     /// Whether to allow http://localhost URL opens
@@ -1816,9 +1835,6 @@ fn maybe_enable_macos_launch_services(
         ));
     }
 
-    // Allow LaunchServices URL opening directly from inside the Seatbelt sandbox.
-    // This bypasses supervisor URL validation on macOS, so it must be gated by
-    // both profile opt-in and an explicit CLI flag.
     caps.add_platform_rule("(allow lsopen)")?;
     warn!("--allow-launch-services enabled: allowing direct LaunchServices opens on macOS");
     Ok(true)
@@ -1871,10 +1887,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
                         match result {
                             hooks::HookInstallResult::Installed => {
                                 if !silent {
-                                    eprintln!(
-                                        "  Installing {} hook to ~/.claude/hooks/nono-hook.sh",
-                                        target
-                                    );
+                                    eprintln!("  Installing {} hook", target);
                                 }
                             }
                             hooks::HookInstallResult::Updated => {
@@ -2003,6 +2016,10 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .as_ref()
         .and_then(|p| p.allow_launch_services)
         .unwrap_or(false);
+    let disable_chromium_sandbox = loaded_profile
+        .as_ref()
+        .and_then(|p| p.disable_chromium_sandbox)
+        .unwrap_or(false);
 
     // On Linux, pre-create paths that the claude-code profile grants but
     // may not exist yet. Non-existent paths are skipped during capability
@@ -2052,6 +2069,16 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         &open_url_origins,
         open_url_allow_localhost,
     )?;
+
+    // Chromium/Electron apps on macOS need additional Seatbelt operations
+    // beyond filesystem access. Without these, helper processes (GPU, renderer)
+    // segfault on startup.
+    #[cfg(target_os = "macos")]
+    if disable_chromium_sandbox {
+        caps.add_platform_rule("(allow iokit-open)")?;
+        caps.add_platform_rule("(allow user-preference-read)")?;
+        caps.add_platform_rule("(allow mach-register)")?;
+    }
 
     // Auto-include CWD based on profile [workdir] config or default behavior
     let cwd_access = if let Some(ref access) = profile_workdir_access {
@@ -2227,6 +2254,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         external_proxy_bypass: profile_external_proxy_bypass,
         capability_elevation,
         allow_launch_services_active,
+        disable_chromium_sandbox,
         open_url_origins,
         open_url_allow_localhost,
         override_deny_paths,
@@ -2453,6 +2481,7 @@ mod tests {
             external_proxy_bypass: Vec::new(),
             capability_elevation: false,
             allow_launch_services_active: false,
+            disable_chromium_sandbox: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             override_deny_paths: Vec::new(),
@@ -2491,6 +2520,7 @@ mod tests {
             external_proxy_bypass: Vec::new(),
             capability_elevation: false,
             allow_launch_services_active: false,
+            disable_chromium_sandbox: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             override_deny_paths: Vec::new(),

@@ -122,6 +122,8 @@ pub struct ProfileDef {
     #[serde(default)]
     pub allow_launch_services: Option<bool>,
     #[serde(default)]
+    pub disable_chromium_sandbox: Option<bool>,
+    #[serde(default)]
     pub interactive: bool,
 }
 
@@ -150,6 +152,7 @@ impl ProfileDef {
             rollback: self.rollback.clone(),
             open_urls: self.open_urls.clone(),
             allow_launch_services: self.allow_launch_services,
+            disable_chromium_sandbox: self.disable_chromium_sandbox,
             interactive: self.interactive,
         }
     }
