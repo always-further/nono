@@ -322,7 +322,7 @@ nono learn --json -- my-app
 ```
 
 <Note>
-  `nono learn` is only available on Linux (requires strace). The command runs WITHOUT sandbox restrictions to accurately trace file accesses.
+  `nono learn` is available on Linux (requires `strace`) and macOS (requires `sudo` for `fs_usage` and `nettop`). The command runs WITHOUT sandbox restrictions to accurately trace file and network accesses.
 </Note>
 
 ### Example Workflow

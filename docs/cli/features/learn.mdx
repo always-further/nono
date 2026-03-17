@@ -5,10 +5,10 @@ description: Trace commands to discover required filesystem paths and network ac
 
 The `learn` command traces a command's file accesses and network activity, then reports which paths and endpoints it needs. This helps you build accurate profiles without guessing.
 
-On Linux, `nono learn` uses `strace`. On macOS, it uses `fs_usage` (requires `sudo`).
+On Linux, `nono learn` uses `strace`. On macOS, it uses `fs_usage` for filesystem tracing and `nettop` for network connection discovery (both require `sudo`).
 
 <Note>
-Linux requires `strace` to be installed (`apt install strace` or equivalent). macOS requires root privileges for `fs_usage`.
+Linux requires `strace` to be installed (`apt install strace` or equivalent). macOS requires root privileges for `fs_usage` and `nettop`.
 </Note>
 
 ## Basic Usage
@@ -17,7 +17,7 @@ Linux requires `strace` to be installed (`apt install strace` or equivalent). ma
 nono learn -- my-command --with-args
 ```
 
-nono runs the command under `strace` (Linux) or `fs_usage` (macOS), captures all file access and network syscalls, and produces a summary:
+nono runs the command under `strace` (Linux) or `fs_usage` + `nettop` (macOS), captures all file access and network activity, and produces a summary:
 
 ```
 Read access needed:
@@ -90,35 +90,52 @@ nono learn --json -- my-command
 
 ## How It Works
 
+### Linux (strace)
+
 Under the hood, `nono learn` runs:
 
 ```
 strace -f -s 256 -e openat,open,access,stat,execve,creat,mkdir,rename,unlink,connect,bind,sendto,sendmsg -- <command>
 ```
 
-It then:
+`strace -f` follows forks, so network and filesystem activity from subprocesses is captured automatically. Both filesystem and network syscalls are traced in a single pass.
 
-1. Parses all file access syscalls from the trace output
-2. Categorizes each file access as read, write, or readwrite
-3. Filters out paths already covered by base groups (system libraries, etc.)
-4. Collapses individual file paths to parent directories where appropriate
-5. Captures outbound connections (`connect`) and listening ports (`bind`)
-6. Resolves IP addresses to hostnames using a three-tier strategy
-7. Produces the summary or JSON output
+### macOS (fs_usage + nettop)
+
+On macOS, two tools run concurrently:
+
+- **`fs_usage -w -f filesys -f pathname`** traces filesystem operations (open, stat, mkdir, etc.)
+- **`nettop -L 0 -n -s 1`** polls active network connections at 1-second intervals
+
+`fs_usage` is started before the child command and filters by process name. `nettop` is started after the child and filters by PID, which causes it to follow the entire process tree and capture network activity from subprocesses (e.g. `node` spawned by a wrapper binary). `nettop` identifies outbound connections (Established state) and listening ports (Listen state) from its CSV output.
+
+### Processing
+
+On both platforms, the raw trace data is then:
+
+1. Categorized as read, write, or readwrite (filesystem) or connect/bind (network)
+2. Filtered to remove paths already covered by base groups (system libraries, etc.)
+3. Collapsed from individual file paths to parent directories where appropriate
+4. Resolved from IP addresses to hostnames
+5. Formatted as summary or JSON output
 
 ## Network Discovery
 
-`nono learn` captures outbound connections and listening ports alongside filesystem accesses. Network activity is discovered by tracing `connect`, `bind`, and `sendto` syscalls.
+`nono learn` captures outbound connections and listening ports alongside filesystem accesses on both Linux and macOS.
+
+On Linux, network activity is discovered by tracing `connect`, `bind`, and `sendto` syscalls. On macOS, `nettop` polls active TCP and UDP connections.
 
 ### Hostname Resolution
 
-Captured IP addresses are resolved to hostnames using three strategies, applied in priority order:
+Captured IP addresses are resolved to hostnames. On Linux, three strategies are applied in priority order:
 
 1. **Timing correlation** — attaches the hostname from the preceding DNS query directly to each `connect()` call. This handles DNS round-robin correctly because the mapping is per-PID.
 2. **Forward DNS** — resolves captured hostnames to build an IP-to-hostname map. This gives the hostname the program intended (e.g., `google.com`) rather than infrastructure names from reverse DNS.
 3. **Reverse DNS** — fallback for IPs with no other mapping.
 
-Both direct DNS queries (`sendto` to port 53) and systemd-resolved (Varlink JSON protocol over Unix socket) are supported.
+Both direct DNS queries (`sendto` to port 53) and systemd-resolved (Varlink JSON protocol over Unix socket) are supported on Linux.
+
+On macOS, reverse DNS is used to resolve IP addresses to hostnames since `nettop` provides IP-level data without DNS query interception.
 
 Use `--no-rdns` to skip all DNS resolution, which avoids network calls during analysis:
 

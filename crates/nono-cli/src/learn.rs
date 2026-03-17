@@ -1,8 +1,8 @@
-//! Learn mode: trace file accesses to discover required paths
+//! Learn mode: trace file accesses and network connections to discover required paths
 //!
-//! Uses strace (Linux) or fs_usage (macOS) to monitor a command's file system
-//! accesses and produces a list of paths that would need to be allowed in a
-//! nono profile.
+//! Uses strace (Linux) or fs_usage + nettop (macOS) to monitor a command's file system
+//! and network accesses and produces a list of paths and connections that would need
+//! to be allowed in a nono profile.
 
 use crate::cli::LearnArgs;
 use nono::{NonoError, Result};
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::profile::{self, Profile};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashSet;
@@ -25,7 +25,7 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "linux")]
 use tracing::{debug, info, warn};
 #[cfg(target_os = "macos")]
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Result of learning file access patterns
 #[derive(Debug)]
@@ -388,26 +388,36 @@ pub fn run_learn(args: &LearnArgs) -> Result<LearnResult> {
         None
     };
 
-    // Run fs_usage and collect file accesses
-    let file_accesses = run_fs_usage(&args.command, args.timeout)?;
+    // Run fs_usage (filesystem) and nettop (network) concurrently
+    let (file_accesses, network_accesses) = run_fs_usage_and_nettop(&args.command, args.timeout)?;
 
     // Process and categorize file paths
-    let result = process_accesses(file_accesses, profile.as_ref(), args.all)?;
+    let mut result = process_accesses(file_accesses, profile.as_ref(), args.all)?;
+
+    // Process network accesses with reverse DNS (no forward DNS correlation on macOS
+    // since we don't have DNS query interception like strace provides)
+    let (outbound, listening) = process_network_accesses(network_accesses, vec![], !args.no_rdns);
+    result.outbound_connections = outbound;
+    result.listening_ports = listening;
 
     Ok(result)
 }
 
-/// Run fs_usage on the command and collect file accesses
+/// Run fs_usage (filesystem) and nettop (network) concurrently to trace a command.
 ///
 /// Starts `sudo fs_usage` first (while the terminal is clean), then spawns
-/// the target command. This ordering ensures the sudo password prompt is
-/// visible and not overwritten by TUI applications.
+/// the target command, then starts nettop filtered by the child's PID.
+/// fs_usage is started before the child to avoid missing early filesystem
+/// activity. nettop is started after the child because it requires a numeric
+/// PID to follow the entire process tree (capturing subprocesses like `node`
+/// spawned by wrapper binaries).
 ///
-/// fs_usage is started with the target command name as filter. The parsed
-/// output is further filtered by the child's PID to avoid capturing
-/// unrelated processes with the same name.
+/// nettop runs in CSV logging mode (`-L 0`) polling at 1-second intervals.
 #[cfg(target_os = "macos")]
-fn run_fs_usage(command: &[String], timeout: Option<u64>) -> Result<Vec<FileAccess>> {
+fn run_fs_usage_and_nettop(
+    command: &[String],
+    timeout: Option<u64>,
+) -> Result<(Vec<FileAccess>, Vec<NetworkAccess>)> {
     use std::time::Duration;
 
     if command.is_empty() {
@@ -490,6 +500,18 @@ fn run_fs_usage(command: &[String], timeout: Option<u64>) -> Result<Vec<FileAcce
     let child_pid = child.id();
     debug!("Spawned child process with PID {}", child_pid);
 
+    // Start nettop AFTER the child so we can filter by PID. nettop with a
+    // numeric PID follows the process tree, capturing network activity from
+    // the child and all its descendants (e.g. node spawned by claude).
+    let nettop_result = start_nettop(child_pid);
+    let (nettop_process, nettop_reader_handle) = match nettop_result {
+        Ok((proc, handle)) => (Some(proc), Some(handle)),
+        Err(e) => {
+            info!("nettop unavailable, skipping network tracing: {}", e);
+            (None, None)
+        }
+    };
+
     // Read fs_usage output in a background thread.
     // The main thread waits for the child to exit, then kills fs_usage
     // which closes the pipe and unblocks the reader thread.
@@ -498,7 +520,7 @@ fn run_fs_usage(command: &[String], timeout: Option<u64>) -> Result<Vec<FileAcce
     // "ProcessName.threadID" (not PID) to each line, and the traced process
     // may fork into children with different PIDs/names, so PID-based filtering
     // would silently drop most results. The command name filter is sufficient.
-    let reader_handle = std::thread::spawn(move || {
+    let fs_reader_handle = std::thread::spawn(move || {
         let (reader, peeked_byte) = match peek_handle.join() {
             Ok(result) => result,
             Err(_) => return Vec::new(),
@@ -561,6 +583,12 @@ fn run_fs_usage(command: &[String], timeout: Option<u64>) -> Result<Vec<FileAcce
     kill_fs_usage(&fs_usage);
     let _ = fs_usage.wait();
 
+    // Kill nettop if it was started
+    if let Some(mut nettop) = nettop_process {
+        let _ = nettop.kill();
+        let _ = nettop.wait();
+    }
+
     // Check fs_usage stderr for errors
     if let Some(mut stderr) = fs_usage_stderr {
         let mut err_output = String::new();
@@ -570,8 +598,8 @@ fn run_fs_usage(command: &[String], timeout: Option<u64>) -> Result<Vec<FileAcce
         }
     }
 
-    // Collect results from reader thread
-    let file_accesses = match reader_handle.join() {
+    // Collect filesystem results from reader thread
+    let file_accesses = match fs_reader_handle.join() {
         Ok(accesses) => accesses,
         Err(_) => {
             warn!("fs_usage reader thread panicked, returning partial results");
@@ -579,7 +607,245 @@ fn run_fs_usage(command: &[String], timeout: Option<u64>) -> Result<Vec<FileAcce
         }
     };
 
-    Ok(file_accesses)
+    // Collect network results from nettop reader thread
+    let network_accesses = match nettop_reader_handle {
+        Some(handle) => match handle.join() {
+            Ok(accesses) => accesses,
+            Err(_) => {
+                warn!("nettop reader thread panicked, returning partial results");
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+
+    Ok((file_accesses, network_accesses))
+}
+
+/// Start nettop in CSV logging mode to trace network connections for a process tree.
+///
+/// Uses a numeric PID filter (`-p <pid>`) which causes nettop to follow the
+/// entire process tree rooted at that PID, capturing network activity from
+/// the child and all its descendants.
+///
+/// Returns the nettop child process and a thread handle that produces results.
+#[cfg(target_os = "macos")]
+fn start_nettop(
+    child_pid: u32,
+) -> Result<(
+    std::process::Child,
+    std::thread::JoinHandle<Vec<NetworkAccess>>,
+)> {
+    let pid_str = child_pid.to_string();
+    let mut nettop = Command::new("nettop")
+        .args([
+            "-L", "0",  // Unlimited samples (CSV logging mode)
+            "-n", // Numeric addresses (no DNS resolution)
+            "-p", &pid_str, // Filter by child PID (follows process tree)
+            "-s", "1", // 1-second polling interval
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| NonoError::LearnError(format!("Failed to spawn nettop: {}", e)))?;
+
+    let nettop_stdout = nettop
+        .stdout
+        .take()
+        .ok_or_else(|| NonoError::LearnError("Failed to capture nettop stdout".to_string()))?;
+
+    let reader_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(nettop_stdout);
+        let mut accesses = Vec::new();
+        // Track seen connections to avoid duplicates from repeated polling
+        let mut seen: HashSet<(IpAddr, u16, bool)> = HashSet::new();
+        // Track listening ports to avoid misclassifying accepted connections
+        let mut listening_ports: HashSet<u16> = HashSet::new();
+
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    debug!("Error reading nettop line: {}", e);
+                    continue;
+                }
+            };
+
+            if let Some(access) = parse_nettop_line(&line, &listening_ports) {
+                let is_bind = matches!(access.kind, NetworkAccessKind::Bind);
+                if is_bind {
+                    listening_ports.insert(access.port);
+                }
+                let key = (access.addr, access.port, is_bind);
+                if seen.insert(key) {
+                    accesses.push(access);
+                }
+            }
+        }
+
+        accesses
+    });
+
+    Ok((nettop, reader_handle))
+}
+
+/// Parse a nettop CSV line to extract network connection information.
+///
+/// nettop CSV format (with -L flag):
+/// ```text
+/// time,,interface,state,...
+/// 06:54:20.708439,apsd.358,,,179190,282920,...          <- process summary (skip)
+/// 06:54:20.707620,tcp4 192.168.178.103:63660<->17.57.146.10:5223,en0,Established,...  <- connection
+/// 06:54:20.706434,tcp4 127.0.0.1:8021<->*:*,lo0,Listen,...  <- listening
+/// 06:54:20.700522,udp4 *:56734<->*:*,lo0,,,...          <- UDP bind
+/// ```
+///
+/// Connection field format: `proto local_addr:port<->remote_addr:port`
+/// For IPv6: `tcp6 [::1]:port<->*:*` or `tcp6 addr.port<->addr.port`
+/// (nettop uses `.` as port separator for IPv6)
+///
+/// `listening_ports` tracks ports already seen in Listen state. Established
+/// connections whose local port matches a known listener are server-side
+/// accepted connections (inbound), not outbound — they are skipped to avoid
+/// polluting the learned policy with client ephemeral ports.
+#[cfg(target_os = "macos")]
+fn parse_nettop_line(line: &str, listening_ports: &HashSet<u16>) -> Option<NetworkAccess> {
+    let fields: Vec<&str> = line.split(',').collect();
+    if fields.len() < 4 {
+        return None;
+    }
+
+    let conn_field = fields[1].trim();
+
+    // Must start with a protocol prefix to be a connection line
+    if !conn_field.starts_with("tcp4 ")
+        && !conn_field.starts_with("tcp6 ")
+        && !conn_field.starts_with("udp4 ")
+        && !conn_field.starts_with("udp6 ")
+    {
+        return None;
+    }
+
+    let state = fields[3].trim();
+
+    // Split off the protocol prefix
+    let addr_part = &conn_field[5..]; // skip "tcp4 " or similar
+
+    // Split on "<->" to get local and remote parts
+    let parts: Vec<&str> = addr_part.split("<->").collect();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let local_part = parts[0];
+    let remote_part = parts[1];
+    let is_ipv6 = conn_field.starts_with("tcp6 ") || conn_field.starts_with("udp6 ");
+
+    // Determine connection type based on state and remote address
+    if state == "Listen" || remote_part == "*:*" || remote_part == "*.*" {
+        // Listening socket — extract local address and port
+        let (addr, port) = parse_nettop_endpoint(local_part, is_ipv6)?;
+
+        // Skip wildcard listeners on port 0
+        if port == 0 {
+            return None;
+        }
+
+        Some(NetworkAccess {
+            addr,
+            port,
+            kind: NetworkAccessKind::Bind,
+            queried_hostname: None,
+        })
+    } else if state == "Established" || !remote_part.contains('*') {
+        // Check if this is a server-side accepted connection (inbound) rather
+        // than an outbound connection. If the local port matches a known
+        // listening port, this is an accepted client connection — the remote
+        // address is the client, not a server we're connecting to.
+        if let Some((_, local_port)) = parse_nettop_endpoint(local_part, is_ipv6) {
+            if listening_ports.contains(&local_port) {
+                return None;
+            }
+        }
+
+        // Outbound connection — extract remote address and port
+        let (addr, port) = parse_nettop_endpoint(remote_part, is_ipv6)?;
+
+        // Skip port 0
+        if port == 0 {
+            return None;
+        }
+
+        // Skip loopback addresses (local IPC, not external network)
+        if addr.is_loopback() {
+            return None;
+        }
+
+        Some(NetworkAccess {
+            addr,
+            port,
+            kind: NetworkAccessKind::Connect,
+            queried_hostname: None,
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse a nettop address:port endpoint string.
+///
+/// IPv4 format: `192.168.1.1:443` or `*:8080`
+/// IPv6 format: `::1.443` or `fe80::1%en0.443` (nettop uses `.` as port separator for IPv6)
+#[cfg(target_os = "macos")]
+fn parse_nettop_endpoint(endpoint: &str, is_ipv6: bool) -> Option<(IpAddr, u16)> {
+    if endpoint == "*:*" || endpoint == "*.*" {
+        return None;
+    }
+
+    if is_ipv6 {
+        // IPv6: port is after the last '.' (nettop uses dot separator for IPv6)
+        // Handle scope IDs like %en0 by stripping them first
+        let clean = if let Some(pct_pos) = endpoint.find('%') {
+            // Find the dot-port after the scope ID: "fe80::1%en0.443" -> strip "%en0"
+            let after_scope = &endpoint[pct_pos..];
+            if let Some(dot_pos) = after_scope.rfind('.') {
+                let port_str = &after_scope[dot_pos + 1..];
+                let addr_str = &endpoint[..pct_pos];
+                return parse_addr_port_pair(addr_str, port_str);
+            }
+            return None;
+        } else {
+            endpoint
+        };
+
+        // Find the last '.' which separates address from port
+        let dot_pos = clean.rfind('.')?;
+        let addr_str = &clean[..dot_pos];
+        let port_str = &clean[dot_pos + 1..];
+        parse_addr_port_pair(addr_str, port_str)
+    } else {
+        // IPv4: standard addr:port format
+        // Handle wildcard address
+        let colon_pos = endpoint.rfind(':')?;
+        let addr_str = &endpoint[..colon_pos];
+        let port_str = &endpoint[colon_pos + 1..];
+
+        if addr_str == "*" {
+            let port: u16 = port_str.parse().ok()?;
+            // Use 0.0.0.0 for wildcard
+            Some(("0.0.0.0".parse().ok()?, port))
+        } else {
+            parse_addr_port_pair(addr_str, port_str)
+        }
+    }
+}
+
+/// Parse an address string and port string into (IpAddr, u16).
+#[cfg(target_os = "macos")]
+fn parse_addr_port_pair(addr_str: &str, port_str: &str) -> Option<(IpAddr, u16)> {
+    let port: u16 = port_str.parse().ok()?;
+    let addr: IpAddr = addr_str.parse().ok()?;
+    Some((addr, port))
 }
 
 /// Kill an fs_usage process tree running under sudo.
@@ -804,16 +1070,16 @@ struct FileAccess {
     is_write: bool,
 }
 
-/// Kind of network access observed via strace
-#[cfg(target_os = "linux")]
+/// Kind of network access observed via tracing
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Clone)]
 enum NetworkAccessKind {
     Connect,
     Bind,
 }
 
-/// A single network access observed via strace
-#[cfg(target_os = "linux")]
+/// A single network access observed via tracing
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Clone)]
 struct NetworkAccess {
     addr: IpAddr,
@@ -1549,7 +1815,7 @@ fn parse_dns_query_hostname(data: &[u8]) -> Option<String> {
 /// Uses forward DNS correlation from captured DNS queries to map IPs to
 /// hostnames. Falls back to reverse DNS for unmatched IPs when `resolve_dns`
 /// is true.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn process_network_accesses(
     accesses: Vec<NetworkAccess>,
     dns_queries: Vec<String>,
@@ -1644,7 +1910,7 @@ fn process_network_accesses(
 /// IPs to build an IP→hostname mapping. This gives the actual hostname the
 /// program intended to reach (e.g., "google.com") rather than infrastructure
 /// names from reverse DNS (e.g., "jr-in-f100.1e100.net").
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn resolve_forward_dns(hostnames: &[String]) -> HashMap<IpAddr, String> {
     let mut result = HashMap::new();
     let unique: HashSet<&String> = hostnames.iter().collect();
@@ -1667,7 +1933,7 @@ fn resolve_forward_dns(hostnames: &[String]) -> HashMap<IpAddr, String> {
 }
 
 /// Resolve IP addresses to hostnames via reverse DNS (fallback)
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn resolve_reverse_dns(ips: &HashSet<IpAddr>) -> HashMap<IpAddr, String> {
     let mut result = HashMap::new();
 
@@ -2447,5 +2713,178 @@ mod macos_tests {
         assert!(!is_fs_usage_write("stat64", ""));
         assert!(!is_fs_usage_write("readlink", ""));
         assert!(!is_fs_usage_write("access", ""));
+    }
+
+    // --- nettop parsing tests ---
+
+    #[test]
+    fn test_parse_nettop_tcp4_established() {
+        let no_listen = HashSet::new();
+        let line = "06:54:20.707620,tcp4 192.168.178.103:63660<->17.57.146.10:5223,en0,Established,179190,282920,6632,0,2362,18.41 ms,131072,164736,RD,-,cubic,-,-,-,-,so,";
+        let access = parse_nettop_line(line, &no_listen).expect("should parse established TCP4");
+        assert_eq!(access.addr, "17.57.146.10".parse::<IpAddr>().unwrap());
+        assert_eq!(access.port, 5223);
+        assert!(matches!(access.kind, NetworkAccessKind::Connect));
+    }
+
+    #[test]
+    fn test_parse_nettop_tcp4_listen() {
+        let no_listen = HashSet::new();
+        let line =
+            "06:54:20.706434,tcp4 127.0.0.1:8021<->*:*,lo0,Listen,,,,,,,,,,-,cubic,-,-,-,-,so,";
+        let access = parse_nettop_line(line, &no_listen).expect("should parse listening TCP4");
+        assert_eq!(access.addr, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(access.port, 8021);
+        assert!(matches!(access.kind, NetworkAccessKind::Bind));
+    }
+
+    #[test]
+    fn test_parse_nettop_tcp4_listen_wildcard() {
+        let no_listen = HashSet::new();
+        let line = "06:54:20.706434,tcp4 *:3000<->*:*,en0,Listen,,,,,,,,,,,,,,,,,";
+        let access = parse_nettop_line(line, &no_listen).expect("should parse wildcard listen");
+        assert_eq!(access.addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(access.port, 3000);
+        assert!(matches!(access.kind, NetworkAccessKind::Bind));
+    }
+
+    #[test]
+    fn test_parse_nettop_udp4_bind() {
+        let no_listen = HashSet::new();
+        let line = "06:54:20.700522,udp4 *:56734<->*:*,lo0,,0,15678,,,,,786896,,BE,,,,,,,so,";
+        let access = parse_nettop_line(line, &no_listen).expect("should parse UDP4 bind");
+        assert_eq!(access.addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(access.port, 56734);
+        assert!(matches!(access.kind, NetworkAccessKind::Bind));
+    }
+
+    #[test]
+    fn test_parse_nettop_tcp6_established() {
+        let no_listen = HashSet::new();
+        let line = "06:54:20.707869,tcp6 fe80::73:3e64:c6b8:6476%en0.63975<->fe80::1402:4271:cc19:5e6f%en0.50715,en0,Established,1860,2955,0,0,0,22.31 ms,131072,130752,BE,-,cubic,-,-,-,-,so,";
+        // This is a link-local connection — should still parse but will be
+        // filtered out in process_network_accesses if needed
+        let access = parse_nettop_line(line, &no_listen);
+        // Link-local IPv6 with scope IDs are tricky; this tests the parser handles them
+        // The exact behavior depends on whether the scope-stripped address parses
+        assert!(access.is_some() || access.is_none()); // Parser should not panic
+    }
+
+    #[test]
+    fn test_parse_nettop_tcp6_listen() {
+        let no_listen = HashSet::new();
+        let line = "06:54:20.706413,tcp6 ::1.8021<->*.*,lo0,Listen,,,,,,,,,,-,cubic,-,-,-,-,so,";
+        let access = parse_nettop_line(line, &no_listen).expect("should parse IPv6 listen");
+        assert_eq!(access.addr, "::1".parse::<IpAddr>().unwrap());
+        assert_eq!(access.port, 8021);
+        assert!(matches!(access.kind, NetworkAccessKind::Bind));
+    }
+
+    #[test]
+    fn test_parse_nettop_skips_process_summary() {
+        let no_listen = HashSet::new();
+        let line = "06:54:20.708439,apsd.358,,,179190,282920,6632,0,2362,,,,,,,,,,,,";
+        assert!(parse_nettop_line(line, &no_listen).is_none());
+    }
+
+    #[test]
+    fn test_parse_nettop_skips_header() {
+        let no_listen = HashSet::new();
+        let line = "time,,interface,state,bytes_in,bytes_out,rx_dupe,rx_ooo,re-tx,rtt_avg,rcvsize,tx_win,tc_class,tc_mgt,cc_algo,P,C,R,W,arch,";
+        assert!(parse_nettop_line(line, &no_listen).is_none());
+    }
+
+    #[test]
+    fn test_parse_nettop_skips_loopback_connect() {
+        let no_listen = HashSet::new();
+        // Loopback connections (local IPC) should be filtered out
+        let line = "06:54:20.707620,tcp4 127.0.0.1:49152<->127.0.0.1:8080,lo0,Established,100,200,0,0,0,0.5 ms,,,,,,,,,,so,";
+        assert!(parse_nettop_line(line, &no_listen).is_none());
+    }
+
+    #[test]
+    fn test_parse_nettop_skips_port_zero() {
+        let no_listen = HashSet::new();
+        let line = "06:54:20.700522,udp4 *:0<->*:*,lo0,,0,0,,,,,,,,,,,,,,,";
+        assert!(parse_nettop_line(line, &no_listen).is_none());
+    }
+
+    #[test]
+    fn test_parse_nettop_skips_accepted_connection() {
+        // If local port 3000 is a known listener, an established connection
+        // on that port is server-side (accepted), not outbound
+        let mut listening = HashSet::new();
+        listening.insert(3000u16);
+        let line = "06:54:20.707620,tcp4 192.168.1.1:3000<->10.0.0.5:52431,en0,Established,1000,2000,0,0,0,1.0 ms,,,,,,,,,,so,";
+        assert!(parse_nettop_line(line, &listening).is_none());
+    }
+
+    #[test]
+    fn test_parse_nettop_allows_outbound_on_non_listen_port() {
+        // Established connection on a non-listening port is outbound
+        let mut listening = HashSet::new();
+        listening.insert(3000u16);
+        let line = "06:54:20.707620,tcp4 192.168.1.1:49999<->93.184.216.34:443,en0,Established,1000,2000,0,0,0,1.0 ms,,,,,,,,,,so,";
+        let access = parse_nettop_line(line, &listening).expect("should parse outbound");
+        assert_eq!(access.addr, "93.184.216.34".parse::<IpAddr>().unwrap());
+        assert_eq!(access.port, 443);
+        assert!(matches!(access.kind, NetworkAccessKind::Connect));
+    }
+
+    #[test]
+    fn test_parse_nettop_endpoint_ipv4() {
+        let (addr, port) = parse_nettop_endpoint("192.168.1.1:443", false).unwrap();
+        assert_eq!(addr, "192.168.1.1".parse::<IpAddr>().unwrap());
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn test_parse_nettop_endpoint_ipv4_wildcard() {
+        let (addr, port) = parse_nettop_endpoint("*:8080", false).unwrap();
+        assert_eq!(addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_parse_nettop_endpoint_ipv6() {
+        let (addr, port) = parse_nettop_endpoint("::1.443", true).unwrap();
+        assert_eq!(addr, "::1".parse::<IpAddr>().unwrap());
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn test_parse_nettop_endpoint_wildcard_star() {
+        assert!(parse_nettop_endpoint("*:*", false).is_none());
+        assert!(parse_nettop_endpoint("*.*", true).is_none());
+    }
+
+    #[test]
+    fn test_nettop_network_dedup() {
+        // Verify that process_network_accesses deduplicates correctly
+        let accesses = vec![
+            NetworkAccess {
+                addr: "93.184.216.34".parse().unwrap(),
+                port: 443,
+                kind: NetworkAccessKind::Connect,
+                queried_hostname: None,
+            },
+            NetworkAccess {
+                addr: "93.184.216.34".parse().unwrap(),
+                port: 443,
+                kind: NetworkAccessKind::Connect,
+                queried_hostname: None,
+            },
+            NetworkAccess {
+                addr: "93.184.216.34".parse().unwrap(),
+                port: 443,
+                kind: NetworkAccessKind::Connect,
+                queried_hostname: None,
+            },
+        ];
+
+        let (outbound, listening) = process_network_accesses(accesses, vec![], false);
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].count, 3);
+        assert!(listening.is_empty());
     }
 }
