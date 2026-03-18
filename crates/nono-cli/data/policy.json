@@ -708,6 +708,7 @@
       },
       "filesystem": {
         "allow": [
+          "$HOME/.opencode",
           "$HOME/.config/opencode",
           "$HOME/.cache/opencode",
           "$HOME/.local/share/opencode",

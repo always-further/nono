@@ -121,6 +121,10 @@ mod tests {
         assert!(profile
             .filesystem
             .allow
+            .contains(&"$HOME/.opencode".to_string()));
+        assert!(profile
+            .filesystem
+            .allow
             .contains(&"$HOME/.local/share/opentui".to_string()));
     }
 
