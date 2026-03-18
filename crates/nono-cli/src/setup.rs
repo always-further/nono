@@ -185,6 +185,8 @@ impl SetupRunner {
                 e
             )))?;
 
+        println!("  * Landlock enabled (syscall probe)");
+
         println!("  * {}", detected);
         println!("  * Available features:");
 
