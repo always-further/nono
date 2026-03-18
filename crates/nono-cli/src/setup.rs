@@ -173,26 +173,17 @@ impl SetupRunner {
             println!("  * Kernel version: {}", version);
         }
 
-        // Check LSM list
-        let lsm_list = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
-
-        if !lsm_list.contains("landlock") {
-            return Err(NonoError::Setup(
-                "Landlock is not enabled in kernel LSM list.\n\n\
+        // Check Landlock support via syscall probe
+        let detected = nono::Sandbox::detect_abi()
+            .map_err(|e| NonoError::Setup(format!(
+                "Landlock is not available: {}\n\n\
                 To enable Landlock:\n\
                   1. Check your kernel config: CONFIG_SECURITY_LANDLOCK=y\n\
                   2. Add to boot params: lsm=landlock,lockdown,yama,integrity,apparmor\n\
                   3. Reboot your system\n\n\
-                See: https://github.com/always-further/nono/docs/troubleshooting.md#landlock-not-supported"
-                    .to_string(),
-            ));
-        }
-
-        println!("  * Landlock enabled in LSM list");
-
-        // Use the library's detect_abi() instead of local probing
-        let detected = nono::Sandbox::detect_abi()
-            .map_err(|e| NonoError::Setup(format!("Failed to detect Landlock ABI: {}", e)))?;
+                See: https://github.com/always-further/nono/docs/troubleshooting.md#landlock-not-supported",
+                e
+            )))?;
 
         println!("  * {}", detected);
         println!("  * Available features:");
