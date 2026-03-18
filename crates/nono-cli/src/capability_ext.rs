@@ -1366,4 +1366,54 @@ mod tests {
             "profile ipc_mode should propagate to CapabilitySet"
         );
     }
+
+    #[test]
+    fn test_from_profile_ipc_mode_shared_memory_only() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("ipc-test-shm.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "ipc-test-shm" },
+                "filesystem": { "allow": ["/tmp"] },
+                "security": { "ipc_mode": "shared_memory_only" }
+            }"#,
+        )
+        .expect("write profile");
+        let workdir = tempdir().expect("tmpdir");
+        let args = sandbox_args();
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+        assert_eq!(
+            caps.ipc_mode(),
+            nono::IpcMode::SharedMemoryOnly,
+            "profile ipc_mode: shared_memory_only should propagate to CapabilitySet"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_ipc_mode_default() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("ipc-test-default.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "ipc-test-default" },
+                "filesystem": { "allow": ["/tmp"] },
+                "security": {}
+            }"#,
+        )
+        .expect("write profile");
+        let workdir = tempdir().expect("tmpdir");
+        let args = sandbox_args();
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+        assert_eq!(
+            caps.ipc_mode(),
+            nono::IpcMode::SharedMemoryOnly,
+            "absent profile ipc_mode should default to SharedMemoryOnly"
+        );
+    }
 }
