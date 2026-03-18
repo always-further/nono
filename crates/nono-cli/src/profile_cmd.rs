@@ -363,7 +363,7 @@ mod tests {
         let json = serde_json::to_string(&skeleton).expect("serialize");
         let profile: Profile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(profile.meta.name, "full-test");
-        assert_eq!(profile.extends, Some("default".to_string()));
+        assert_eq!(profile.extends, Some(vec!["default".to_string()]));
         assert_eq!(
             profile.meta.description,
             Some("A full test profile".to_string())

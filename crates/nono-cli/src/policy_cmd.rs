@@ -401,7 +401,7 @@ fn print_profile_line(name: &str, result: &Result<Profile>, t: &theme::Theme) {
         Ok(p) => {
             let desc = p.meta.description.as_deref().unwrap_or("").to_string();
             let extends = profile::load_profile_extends(name)
-                .map(|e| format!("extends {}", e))
+                .map(|v| format!("extends {}", v.join(", ")))
                 .unwrap_or_default();
             println!(
                 "    {:<16} {:<42} {}",
@@ -454,7 +454,7 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
         println!(
             "  {}      {}",
             theme::fg("Extends:", t.subtext),
-            theme::fg(extends, t.text)
+            theme::fg(&extends.join(", "), t.text)
         );
     }
 
@@ -675,12 +675,12 @@ fn print_fs_paths(label: &str, paths: &[String], t: &theme::Theme, raw: bool) {
 fn profile_to_json(
     name: &str,
     profile: &Profile,
-    raw_extends: &Option<String>,
+    raw_extends: &Option<Vec<String>>,
 ) -> serde_json::Value {
     let mut val = serde_json::json!({
         "name": name,
         "description": profile.meta.description.as_deref().unwrap_or(""),
-        "extends": raw_extends.as_deref().unwrap_or(""),
+        "extends": raw_extends.as_ref().map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
     });
 
     // Security

@@ -104,6 +104,16 @@ User profiles can extend built-in or other user profiles with the `extends` fiel
 }
 ```
 
+You can also extend multiple profiles at once. Bases are merged left-to-right, then the child overrides:
+
+```json
+{
+  "extends": ["claude-code", "node-dev"],
+  "meta": { "name": "my-fullstack" },
+  "filesystem": { "allow": ["/opt/extra"] }
+}
+```
+
 Save to `~/.config/nono/profiles/my-claude.json`, then:
 
 ```bash
@@ -118,9 +128,11 @@ nono run --profile my-claude -- claude
 - **Scalars** (`meta`): child overrides
 - **Nullable scalars** (`network_profile`): absent inherits, `null` clears, string overrides
 
+When extending multiple bases, they are merged left-to-right using the same rules. The child then overrides the accumulated base.
+
 ### Chaining
 
-Profiles can form chains (up to 10 levels deep). Circular dependencies are detected and rejected.
+Profiles can form chains (up to 10 levels deep). Circular dependencies are detected and rejected. Shared transitive bases are deduplicated.
 
 ```
 my-dev.json → team-base.json → claude-code (built-in)

@@ -11,8 +11,15 @@
       "description": "JSON Schema URI for editor validation and autocompletion."
     },
     "extends": {
-      "type": "string",
-      "description": "Name of a base profile to inherit from. All fields from the base profile are used as defaults, with this profile's values taking precedence."
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      ],
+      "description": "Name of a base profile (or array of base profiles) to inherit from. All fields from the base profile are used as defaults, with this profile's values taking precedence. When an array is given, bases are merged left-to-right before the child is applied. Shared transitive bases are deduplicated: each profile is resolved at most once."
     },
     "meta": {
       "$ref": "#/$defs/ProfileMeta",

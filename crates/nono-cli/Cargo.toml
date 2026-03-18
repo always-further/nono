@@ -82,3 +82,4 @@ toml = "1.0"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+jsonschema = "0.45"

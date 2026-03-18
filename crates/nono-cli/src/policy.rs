@@ -132,7 +132,7 @@ impl ProfileDef {
         policy.exclude_groups =
             profile::dedup_append(&self.exclude_groups, &self.policy.exclude_groups);
         profile::Profile {
-            extends: self.extends.clone(),
+            extends: self.extends.as_ref().map(|s| vec![s.clone()]),
             meta: self.meta.clone(),
             security: profile::SecurityConfig {
                 groups: self.security.groups.clone(),
