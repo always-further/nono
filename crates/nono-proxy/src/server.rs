@@ -219,25 +219,11 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     } else {
         RouteStore::load(&config.routes)?
     };
-
-    // Load credentials for reverse proxy routes (only routes with credential_key)
-    let credential_store = if config.routes.is_empty() {
-        CredentialStore::empty()
-    } else {
-        CredentialStore::load(&config.routes)?
-    };
-    let loaded_routes = credential_store.loaded_prefixes();
-
-    // Build filter
-    let filter = if config.allowed_hosts.is_empty() {
-        ProxyFilter::allow_all()
-    } else {
-        ProxyFilter::new(&config.allowed_hosts)
-    };
-
     // Build shared TLS connector (root cert store is expensive to construct).
     // Use the ring provider explicitly to avoid ambiguity when multiple
     // crypto providers are in the dependency tree.
+    // Must be created before CredentialStore::load() because OAuth2 token
+    // exchange needs TLS.
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -248,6 +234,21 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     .with_root_certificates(root_store)
     .with_no_client_auth();
     let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+
+    // Load credentials for reverse proxy routes (static keystore + OAuth2)
+    let credential_store = if config.routes.is_empty() {
+        CredentialStore::empty()
+    } else {
+        CredentialStore::load(&config.routes, &tls_connector)?
+    };
+    let loaded_routes = credential_store.loaded_prefixes();
+
+    // Build filter
+    let filter = if config.allowed_hosts.is_empty() {
+        ProxyFilter::allow_all()
+    } else {
+        ProxyFilter::new(&config.allowed_hosts)
+    };
 
     // Build bypass matcher from external proxy config (once, not per-request)
     let bypass_matcher = config

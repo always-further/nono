@@ -81,18 +81,17 @@ pub async fn handle_reverse_proxy(
 
     // Extract service prefix from path (e.g., "/openai/v1/chat" -> ("openai", "/v1/chat"))
     let (service, upstream_path) = parse_service_prefix(&path)?;
-
-    // Look up route for service (required — provides upstream URL and L7 filtering)
     let route = ctx
         .route_store
         .get(&service)
         .ok_or_else(|| ProxyError::UnknownService {
             prefix: service.clone(),
         })?;
+    let static_cred = ctx.credential_store.get(&service);
+    let oauth2_route = ctx.credential_store.get_oauth2(&service);
 
-    // L7 endpoint filtering: check method+path against rules before any
-    // credential operations. Denied endpoints get 403 immediately.
-    // This check runs regardless of whether a credential is configured.
+    // L7 endpoint filtering runs for all reverse-proxy routes, whether or not
+    // they inject a credential.
     if !route.endpoint_rules.is_allowed(&method, &upstream_path) {
         let reason = format!(
             "endpoint denied: {} {} on service '{}'",
@@ -110,15 +109,28 @@ pub async fn handle_reverse_proxy(
         return Ok(());
     }
 
-    // Look up credential for service (optional — not all routes inject credentials)
-    let cred = ctx.credential_store.get(&service);
+    if let Some(oauth2_route) = oauth2_route {
+        return handle_oauth2_credential(
+            oauth2_route,
+            route,
+            &service,
+            &upstream_path,
+            &method,
+            &version,
+            stream,
+            remaining_header,
+            buffered_body,
+            ctx,
+        )
+        .await;
+    }
+
+    let cred = static_cred;
 
     // Authenticate the request. Every reverse proxy request must prove
     // possession of the session token, regardless of whether a credential
     // is configured — this is the localhost auth boundary.
     if let Some(cred) = cred {
-        // Credential route: validate phantom token from the service's auth
-        // header (mode-dependent: header, url_path, query_param, basic_auth).
         if let Err(e) = validate_phantom_token_for_mode(
             &cred.proxy_inject_mode,
             remaining_header,
@@ -138,30 +150,18 @@ pub async fn handle_reverse_proxy(
             send_error(stream, 401, "Unauthorized").await?;
             return Ok(());
         }
-    } else {
-        // No-credential route (L7 filtering only): validate session token
-        // via Proxy-Authorization header. This is the same auth path that
-        // CONNECT tunnels use — the token arrives via HTTPS_PROXY userinfo.
-        if let Err(e) = token::validate_proxy_auth(remaining_header, ctx.session_token) {
-            audit::log_denied(
-                ctx.audit_log,
-                audit::ProxyMode::Reverse,
-                &service,
-                0,
-                &e.to_string(),
-            );
-            send_error(stream, 407, "Proxy Authentication Required").await?;
-            return Ok(());
-        }
+    } else if let Err(e) = token::validate_proxy_auth(remaining_header, ctx.session_token) {
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            &service,
+            0,
+            &e.to_string(),
+        );
+        send_error(stream, 407, "Proxy Authentication Required").await?;
+        return Ok(());
     }
 
-    // Transform the path based on injection mode (url_path and query_param modes).
-    // When no credential is configured, the path is forwarded unchanged.
-    //
-    // When the proxy-side injection mode differs from the upstream mode,
-    // strip proxy-side artifacts (path segment or query param containing the
-    // phantom token) before applying the upstream transform. Without this,
-    // the phantom token would leak to the upstream in the URL.
     let transformed_path = if let Some(cred) = cred {
         let cleaned_path = strip_proxy_artifacts(
             &upstream_path,
@@ -182,8 +182,6 @@ pub async fn handle_reverse_proxy(
         upstream_path.clone()
     };
 
-    // Parse upstream URL with potentially transformed path.
-    // Upstream URL comes from the route, not the credential.
     let upstream_url = format!(
         "{}{}",
         route.upstream.trim_end_matches('/'),
@@ -192,8 +190,6 @@ pub async fn handle_reverse_proxy(
     debug!("Forwarding to upstream: {} {}", method, upstream_url);
 
     let (upstream_host, upstream_port, upstream_path_full) = parse_upstream_url(&upstream_url)?;
-
-    // DNS resolve + host check via the filter
     let check = ctx.filter.check_host(&upstream_host, upstream_port).await?;
     if !check.result.is_allowed() {
         let reason = check.result.reason();
@@ -209,50 +205,20 @@ pub async fn handle_reverse_proxy(
         return Ok(());
     }
 
-    // Collect remaining request headers (excluding Host, Content-Length,
-    // and Proxy-Authorization which is proxy-hop-only).
-    // When a credential is present, also strip the credential's auth header
-    // (it contains the phantom token, not a real credential).
-    // When no credential is present, pass all other headers through —
-    // the caller may have a real Authorization header for the upstream.
     let strip_header = cred.map(|c| c.proxy_header_name.as_str()).unwrap_or("");
     let filtered_headers = filter_headers(remaining_header, strip_header);
     let content_length = extract_content_length(remaining_header);
+    let body = read_request_body(stream, content_length, buffered_body).await?;
 
-    // Read request body if present, with size limit.
-    // `buffered_body` may contain bytes the BufReader read ahead beyond
-    // headers; we prepend those to avoid data loss.
-    let body = if let Some(len) = content_length {
-        if len > MAX_REQUEST_BODY {
-            send_error(stream, 413, "Payload Too Large").await?;
-            return Ok(());
-        }
-        let mut buf = Vec::with_capacity(len);
-        let pre = buffered_body.len().min(len);
-        buf.extend_from_slice(&buffered_body[..pre]);
-        let remaining = len - pre;
-        if remaining > 0 {
-            let mut rest = vec![0u8; remaining];
-            stream.read_exact(&mut rest).await?;
-            buf.extend_from_slice(&rest);
-        }
-        buf
-    } else {
-        Vec::new()
-    };
-
-    // Connect to upstream over TLS using pre-resolved addresses.
-    // Use the per-route TLS connector (with custom CA) if configured,
-    // otherwise fall back to the shared default connector.
     let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
-    let upstream_result = connect_upstream_tls(
+    let mut tls_stream = match connect_upstream_tls(
         &upstream_host,
         upstream_port,
         &check.resolved_addrs,
         connector,
     )
-    .await;
-    let mut tls_stream = match upstream_result {
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             warn!("Upstream connection failed: {}", e);
@@ -268,34 +234,28 @@ pub async fn handle_reverse_proxy(
         }
     };
 
-    // Build the upstream request into a Zeroizing buffer since it may contain
-    // credential values. This ensures credentials are zeroed from heap memory
-    // when the buffer is dropped.
     let mut request = Zeroizing::new(format!(
         "{} {} {}\r\nHost: {}\r\n",
         method, upstream_path_full, version, upstream_host
     ));
 
-    // Inject credential based on mode (only if credential is configured)
     if let Some(cred) = cred {
         inject_credential_for_mode(cred, &mut request);
     }
 
-    // Forward filtered headers. The credential's auth header was already
-    // stripped by filter_headers() when a credential is present, so no
-    // additional skipping is needed here.
+    let auth_header_lower = cred.map(|c| c.header_name.to_lowercase());
     for (name, value) in &filtered_headers {
+        if let (Some(cred), Some(header_lower)) = (cred, auth_header_lower.as_ref()) {
+            if matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
+                && name.to_lowercase() == *header_lower
+            {
+                continue;
+            }
+        }
         request.push_str(&format!("{}: {}\r\n", name, value));
     }
 
-    // Force Connection: close so the upstream closes after responding.
-    // nono opens a fresh TCP+TLS connection per request and never reuses
-    // them, so keep-alive only wastes resources and — critically — causes
-    // the read-until-EOF response loop below to block indefinitely when
-    // the server holds the connection open.
     request.push_str("Connection: close\r\n");
-
-    // Content-Length for body
     if !body.is_empty() {
         request.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
@@ -307,8 +267,173 @@ pub async fn handle_reverse_proxy(
     }
     tls_stream.flush().await?;
 
-    // Stream the response back to the client without buffering.
-    // This handles SSE (text/event-stream), chunked transfer, and regular responses.
+    let status_code = stream_response(&mut tls_stream, stream).await?;
+    audit::log_reverse_proxy(ctx.audit_log, &service, &method, &upstream_path, status_code);
+    Ok(())
+}
+
+/// Handle a reverse proxy request using an OAuth2 token cache.
+///
+/// Retrieves a (possibly refreshed) access token from the cache and injects
+/// it as `Authorization: Bearer <token>`. The agent authenticates with the
+/// session token via the `Authorization: Bearer <phantom>` header, which is
+/// validated and then replaced with the real OAuth2 access token.
+#[allow(clippy::too_many_arguments)]
+async fn handle_oauth2_credential(
+    oauth2_route: &crate::credential::OAuth2Route,
+    route: &crate::route::LoadedRoute,
+    service: &str,
+    upstream_path: &str,
+    method: &str,
+    version: &str,
+    stream: &mut TcpStream,
+    remaining_header: &[u8],
+    buffered_body: &[u8],
+    ctx: &ReverseProxyCtx<'_>,
+) -> Result<()> {
+    // Get (possibly refreshed) OAuth2 access token
+    let access_token = oauth2_route.cache.get_or_refresh().await;
+
+    // Validate session token from Authorization header (phantom token pattern).
+    // OAuth2 routes still require the agent to authenticate with the session
+    // token — this prevents unauthorized access to the token-exchanged credential.
+    if let Err(e) = validate_phantom_token(remaining_header, "Authorization", ctx.session_token) {
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            service,
+            0,
+            &e.to_string(),
+        );
+        send_error(stream, 401, "Unauthorized").await?;
+        return Ok(());
+    }
+
+    let upstream_url = format!(
+        "{}{}",
+        oauth2_route.upstream.trim_end_matches('/'),
+        upstream_path
+    );
+    debug!("OAuth2 forwarding to upstream: {} {}", method, upstream_url);
+
+    let (upstream_host, upstream_port, upstream_path_full) = parse_upstream_url(&upstream_url)?;
+
+    // DNS resolve + host check via the filter
+    let check = ctx.filter.check_host(&upstream_host, upstream_port).await?;
+    if !check.result.is_allowed() {
+        let reason = check.result.reason();
+        warn!("Upstream host denied by filter: {}", reason);
+        send_error(stream, 403, "Forbidden").await?;
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            service,
+            0,
+            &reason,
+        );
+        return Ok(());
+    }
+
+    // Collect remaining request headers, stripping the client-supplied
+    // Authorization header that carries the phantom token.
+    let filtered_headers = filter_headers(remaining_header, "Authorization");
+    let content_length = extract_content_length(remaining_header);
+
+    // Read request body
+    let body = read_request_body(stream, content_length, buffered_body).await?;
+
+    // Connect to upstream over TLS, honoring any per-route custom CA / mTLS.
+    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
+    let mut tls_stream = match connect_upstream_tls(
+        &upstream_host,
+        upstream_port,
+        &check.resolved_addrs,
+        connector,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Upstream connection failed: {}", e);
+            send_error(stream, 502, "Bad Gateway").await?;
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                service,
+                0,
+                &e.to_string(),
+            );
+            return Ok(());
+        }
+    };
+
+    // Build upstream request with Bearer token injection
+    let mut request = Zeroizing::new(format!(
+        "{} {} {}\r\nHost: {}\r\n",
+        method, upstream_path_full, version, upstream_host
+    ));
+
+    // Inject OAuth2 access token as Authorization: Bearer
+    request.push_str(&format!("Authorization: Bearer {}\r\n", access_token.as_str()));
+
+    // Forward filtered headers (auth headers already stripped by filter_headers)
+    for (name, value) in &filtered_headers {
+        request.push_str(&format!("{}: {}\r\n", name, value));
+    }
+
+    if !body.is_empty() {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+
+    tls_stream.write_all(request.as_bytes()).await?;
+    if !body.is_empty() {
+        tls_stream.write_all(&body).await?;
+    }
+    tls_stream.flush().await?;
+
+    // Stream the response back
+    let status_code = stream_response(&mut tls_stream, stream).await?;
+
+    audit::log_reverse_proxy(ctx.audit_log, service, method, upstream_path, status_code);
+    Ok(())
+}
+
+/// Read request body from the client stream with size limit.
+///
+/// `buffered_body` contains bytes the BufReader read ahead beyond headers.
+async fn read_request_body(
+    stream: &mut TcpStream,
+    content_length: Option<usize>,
+    buffered_body: &[u8],
+) -> Result<Vec<u8>> {
+    if let Some(len) = content_length {
+        if len > MAX_REQUEST_BODY {
+            send_error(stream, 413, "Payload Too Large").await?;
+            return Ok(Vec::new());
+        }
+        let mut buf = Vec::with_capacity(len);
+        let pre = buffered_body.len().min(len);
+        buf.extend_from_slice(&buffered_body[..pre]);
+        let remaining = len - pre;
+        if remaining > 0 {
+            let mut rest = vec![0u8; remaining];
+            stream.read_exact(&mut rest).await?;
+            buf.extend_from_slice(&rest);
+        }
+        Ok(buf)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Stream the upstream TLS response back to the client.
+///
+/// Returns the HTTP status code parsed from the first chunk.
+async fn stream_response(
+    tls_stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
+    stream: &mut TcpStream,
+) -> Result<u16> {
     let mut response_buf = [0u8; 8192];
     let mut status_code: u16 = 502;
     let mut first_chunk = true;
@@ -323,9 +448,6 @@ pub async fn handle_reverse_proxy(
             }
         };
 
-        // Parse status from first chunk. The HTTP status line format is:
-        // "HTTP/1.1 200 OK\r\n..." — we need the 3-digit code after the
-        // first space. We scan up to 32 bytes (enough for any valid status line).
         if first_chunk {
             status_code = parse_response_status(&response_buf[..n]);
             first_chunk = false;
@@ -335,14 +457,7 @@ pub async fn handle_reverse_proxy(
         stream.flush().await?;
     }
 
-    audit::log_reverse_proxy(
-        ctx.audit_log,
-        &service,
-        &method,
-        &upstream_path,
-        status_code,
-    );
-    Ok(())
+    Ok(status_code)
 }
 
 /// Parse an HTTP request line into (method, path, version).

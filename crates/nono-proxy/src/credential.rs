@@ -11,8 +11,10 @@
 
 use crate::config::{InjectMode, RouteConfig};
 use crate::error::{ProxyError, Result};
+use crate::oauth2::{OAuth2ExchangeConfig, TokenCache};
 use base64::Engine;
 use std::collections::HashMap;
+use tokio_rustls::TlsConnector;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -72,32 +74,48 @@ impl std::fmt::Debug for LoadedCredential {
     }
 }
 
+/// An OAuth2 route entry: token cache + upstream URL.
+#[derive(Debug)]
+pub struct OAuth2Route {
+    /// Token cache for automatic refresh
+    pub cache: TokenCache,
+    /// Upstream URL (e.g., "https://api.example.com")
+    pub upstream: String,
+}
+
 /// Credential store for all configured routes.
 #[derive(Debug)]
 pub struct CredentialStore {
     /// Map from route prefix to loaded credential
     credentials: HashMap<String, LoadedCredential>,
+    /// Map from route prefix to OAuth2 route (token cache + upstream)
+    oauth2_routes: HashMap<String, OAuth2Route>,
 }
 
 impl CredentialStore {
     /// Load credentials for all configured routes from the system keystore.
     ///
-    /// Routes without a `credential_key` are skipped (no credential injection).
-    /// Routes whose credential is not found (e.g. unset env var) are skipped
-    /// with a warning — this allows profiles to declare optional credentials
-    /// without failing when they are unavailable.
+    /// Routes without a `credential_key` or `oauth2` block are skipped (no
+    /// credential injection). Routes whose credential is not found (e.g.
+    /// unset env var) are skipped with a warning — this allows profiles to
+    /// declare optional credentials without failing when they are unavailable.
+    ///
+    /// OAuth2 routes perform an initial token exchange at startup. If the
+    /// exchange fails, the route is skipped (graceful degradation).
+    ///
+    /// The `tls_connector` is required for OAuth2 token exchange HTTPS calls.
     ///
     /// Returns an error only for hard failures (keystore access errors,
     /// config parse errors, non-UTF-8 values).
-    pub fn load(routes: &[RouteConfig]) -> Result<Self> {
+    pub fn load(routes: &[RouteConfig], tls_connector: &TlsConnector) -> Result<Self> {
         let mut credentials = HashMap::new();
+        let mut oauth2_routes = HashMap::new();
 
         for route in routes {
             // Normalize prefix: strip leading/trailing slashes so it matches
             // the bare service name returned by parse_service_prefix() in
             // the reverse proxy path (e.g., "/anthropic" -> "anthropic").
             let normalized_prefix = route.prefix.trim_matches('/').to_string();
-
             if let Some(ref key) = route.credential_key {
                 debug!(
                     "Loading credential for route prefix: {} (mode: {:?})",
@@ -181,10 +199,76 @@ impl CredentialStore {
                             .or_else(|| route.query_param_name.clone()),
                     },
                 );
+                continue;
+            }
+
+            // OAuth2 client_credentials path
+            if let Some(ref oauth2) = route.oauth2 {
+                debug!(
+                    "Loading OAuth2 credential for route prefix: {}",
+                    route.prefix
+                );
+
+                let client_id =
+                    match nono::keystore::load_secret_by_ref(KEYRING_SERVICE, &oauth2.client_id) {
+                        Ok(s) => s,
+                        Err(nono::NonoError::SecretNotFound(msg)) => {
+                            debug!(
+                                "OAuth2 client_id not available for route '{}': {}",
+                                route.prefix, msg
+                            );
+                            continue;
+                        }
+                        Err(e) => return Err(ProxyError::Credential(e.to_string())),
+                    };
+
+                let client_secret = match nono::keystore::load_secret_by_ref(
+                    KEYRING_SERVICE,
+                    &oauth2.client_secret,
+                ) {
+                    Ok(s) => s,
+                    Err(nono::NonoError::SecretNotFound(msg)) => {
+                        debug!(
+                            "OAuth2 client_secret not available for route '{}': {}",
+                            route.prefix, msg
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(ProxyError::Credential(e.to_string())),
+                };
+
+                let config = OAuth2ExchangeConfig {
+                    token_url: oauth2.token_url.clone(),
+                    client_id,
+                    client_secret,
+                    scope: oauth2.scope.clone(),
+                };
+
+                match TokenCache::new(config, tls_connector.clone()) {
+                    Ok(cache) => {
+                        oauth2_routes.insert(
+                            route.prefix.clone(),
+                            OAuth2Route {
+                                cache,
+                                upstream: route.upstream.clone(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        debug!(
+                            "OAuth2 token exchange failed for route '{}': {}, skipping",
+                            route.prefix, e
+                        );
+                        continue;
+                    }
+                }
             }
         }
 
-        Ok(Self { credentials })
+        Ok(Self {
+            credentials,
+            oauth2_routes,
+        })
     }
 
     /// Create an empty credential store (no credential injection).
@@ -192,31 +276,43 @@ impl CredentialStore {
     pub fn empty() -> Self {
         Self {
             credentials: HashMap::new(),
+            oauth2_routes: HashMap::new(),
         }
     }
 
-    /// Get a credential for a route prefix, if configured.
+    /// Get a static credential for a route prefix, if configured.
     #[must_use]
     pub fn get(&self, prefix: &str) -> Option<&LoadedCredential> {
         self.credentials.get(prefix)
     }
 
-    /// Check if any credentials are loaded.
+    /// Get an OAuth2 route (token cache + upstream) for a route prefix, if configured.
+    #[must_use]
+    pub fn get_oauth2(&self, prefix: &str) -> Option<&OAuth2Route> {
+        self.oauth2_routes.get(prefix)
+    }
+
+    /// Check if any credentials (static or OAuth2) are loaded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.credentials.is_empty()
+        self.credentials.is_empty() && self.oauth2_routes.is_empty()
     }
 
-    /// Number of loaded credentials.
+    /// Number of loaded credentials (static + OAuth2).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.credentials.len()
+        self.credentials.len() + self.oauth2_routes.len()
     }
 
-    /// Returns the set of route prefixes that have loaded credentials.
+    /// Returns the set of route prefixes that have loaded credentials
+    /// (both static keystore and OAuth2 routes).
     #[must_use]
     pub fn loaded_prefixes(&self) -> std::collections::HashSet<String> {
-        self.credentials.keys().cloned().collect()
+        self.credentials
+            .keys()
+            .chain(self.oauth2_routes.keys())
+            .cloned()
+            .collect()
     }
 }
 
@@ -228,6 +324,21 @@ const KEYRING_SERVICE: &str = nono::keystore::DEFAULT_SERVICE;
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    /// Build a TLS connector for tests (never used for real connections).
+    fn test_tls_connector() -> TlsConnector {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+        TlsConnector::from(Arc::new(tls_config))
+    }
 
     #[test]
     fn test_empty_credential_store() {
@@ -235,6 +346,8 @@ mod tests {
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
         assert!(store.get("openai").is_none());
+        assert!(store.get("/openai").is_none());
+        assert!(store.get_oauth2("/openai").is_none());
     }
 
     #[test]
@@ -279,6 +392,7 @@ mod tests {
 
     #[test]
     fn test_load_no_credential_routes() {
+        let tls = test_tls_connector();
         let routes = vec![RouteConfig {
             prefix: "/test".to_string(),
             upstream: "https://example.com".to_string(),
@@ -297,9 +411,126 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
         }];
-        let store = CredentialStore::load(&routes);
+        let store = CredentialStore::load(&routes, &tls);
         assert!(store.is_ok());
         let store = store.unwrap_or_else(|_| CredentialStore::empty());
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn test_get_oauth2_returns_none_for_non_oauth2_routes() {
+        let store = CredentialStore::empty();
+        assert!(store.get_oauth2("openai").is_none());
+        assert!(store.get_oauth2("my-api").is_none());
+    }
+
+    #[test]
+    fn test_is_empty_false_with_only_oauth2_routes() {
+        // Simulate a store with only OAuth2 routes by constructing directly.
+        // We can't call load() with a real OAuth2 config (no token server),
+        // so we build the struct manually to test the is_empty/len logic.
+        use std::time::Duration;
+
+        let cache = make_test_token_cache("test-token", Duration::from_secs(3600));
+        let mut oauth2_routes = HashMap::new();
+        oauth2_routes.insert(
+            "my-api".to_string(),
+            OAuth2Route {
+                cache,
+                upstream: "https://api.example.com".to_string(),
+            },
+        );
+
+        let store = CredentialStore {
+            credentials: HashMap::new(),
+            oauth2_routes,
+        };
+
+        assert!(!store.is_empty(), "store with OAuth2 routes should not be empty");
+        assert_eq!(store.len(), 1);
+        assert!(store.get_oauth2("my-api").is_some());
+        assert!(store.get("my-api").is_none());
+    }
+
+    #[test]
+    fn test_loaded_prefixes_includes_oauth2() {
+        use std::time::Duration;
+
+        let cache = make_test_token_cache("test-token", Duration::from_secs(3600));
+        let mut oauth2_routes = HashMap::new();
+        oauth2_routes.insert(
+            "my-api".to_string(),
+            OAuth2Route {
+                cache,
+                upstream: "https://api.example.com".to_string(),
+            },
+        );
+
+        let store = CredentialStore {
+            credentials: HashMap::new(),
+            oauth2_routes,
+        };
+
+        let prefixes = store.loaded_prefixes();
+        assert!(prefixes.contains("my-api"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_load_oauth2_unreachable_endpoint_skips_route() {
+        use crate::config::OAuth2Config;
+
+        let tls = test_tls_connector();
+        let routes = vec![RouteConfig {
+            prefix: "my-api".to_string(),
+            upstream: "https://api.example.com".to_string(),
+            credential_key: None,
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            env_var: Some("MY_API_KEY".to_string()),
+            oauth2: Some(OAuth2Config {
+                // Non-routable address: exchange will fail at TCP connect
+                token_url: "https://127.0.0.1:1/oauth/token".to_string(),
+                // Use env:// refs that point at test env vars
+                client_id: "env://TEST_OAUTH2_CLIENT_ID".to_string(),
+                client_secret: "env://TEST_OAUTH2_CLIENT_SECRET".to_string(),
+                scope: String::new(),
+            }),
+        }];
+
+        // Set env vars so credential loading succeeds (exchange will fail)
+        std::env::set_var("TEST_OAUTH2_CLIENT_ID", "test-client");
+        std::env::set_var("TEST_OAUTH2_CLIENT_SECRET", "test-secret");
+
+        let store = CredentialStore::load(&routes, &tls);
+
+        // Clean up env vars
+        std::env::remove_var("TEST_OAUTH2_CLIENT_ID");
+        std::env::remove_var("TEST_OAUTH2_CLIENT_SECRET");
+
+        // load() should succeed (route skipped, not hard error)
+        assert!(store.is_ok(), "load should not fail on unreachable OAuth2 endpoint");
+        let store = store.unwrap();
+
+        // The route should have been skipped (token exchange failed)
+        assert!(store.is_empty(), "unreachable OAuth2 endpoint should result in skipped route");
+        assert!(store.get_oauth2("my-api").is_none());
+    }
+
+    /// Build a test `TokenCache` with a pre-populated token.
+    fn make_test_token_cache(token: &str, ttl: std::time::Duration) -> TokenCache {
+        use crate::oauth2::OAuth2ExchangeConfig;
+
+        let config = OAuth2ExchangeConfig {
+            token_url: "https://127.0.0.1:1/oauth/token".to_string(),
+            client_id: Zeroizing::new("test-client".to_string()),
+            client_secret: Zeroizing::new("test-secret".to_string()),
+            scope: String::new(),
+        };
+
+        TokenCache::new_from_parts(config, test_tls_connector(), token, ttl)
     }
 }

@@ -1313,15 +1313,17 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
                 );
             }
             if old.credential_key != new.credential_key {
+                let old_key = old.credential_key.as_deref().unwrap_or("<none>");
+                let new_key = new.credential_key.as_deref().unwrap_or("<none>");
                 println!(
                     "      {} credential_key: {}",
                     theme::fg("-", t.red),
-                    theme::fg(&old.credential_key, t.red)
+                    theme::fg(old_key, t.red)
                 );
                 println!(
                     "      {} credential_key: {}",
                     theme::fg("+", t.green),
-                    theme::fg(&new.credential_key, t.green)
+                    theme::fg(new_key, t.green)
                 );
             }
             if old.inject_mode != new.inject_mode {
@@ -2176,6 +2178,17 @@ fn resolve_to_manifest(
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let source = if let Some(source) = cred.credential_key.as_ref() {
+            source.parse().map_err(|e| {
+                NonoError::ConfigParse(format!("invalid credential source: {e}"))
+            })?
+        } else {
+            return Err(NonoError::ConfigParse(format!(
+                "custom credential '{}' uses auth, which cannot be exported to a capability manifest",
+                name
+            )));
+        };
+
         credentials.push(manifest::Credential {
             name: name
                 .parse()
@@ -2184,10 +2197,7 @@ fn resolve_to_manifest(
                 .upstream
                 .parse()
                 .map_err(|e| NonoError::ConfigParse(format!("invalid credential upstream: {e}")))?,
-            source: cred
-                .credential_key
-                .parse()
-                .map_err(|e| NonoError::ConfigParse(format!("invalid credential source: {e}")))?,
+            source,
             inject: Some(manifest::CredentialInject {
                 mode: inject_mode,
                 header: cred.inject_header.clone(),

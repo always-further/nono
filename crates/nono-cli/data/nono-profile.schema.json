@@ -381,9 +381,9 @@
     },
     "CustomCredentialDef": {
       "type": "object",
-      "description": "Custom credential route definition for the reverse proxy. Defines how to route requests and inject credentials for a service.",
+      "description": "Custom credential route definition for the reverse proxy. Defines how to route requests and inject credentials for a service. Must have either credential_key or auth (mutually exclusive).",
       "additionalProperties": false,
-      "required": ["upstream", "credential_key"],
+      "required": ["upstream"],
       "properties": {
         "upstream": {
           "type": "string",
@@ -391,7 +391,11 @@
         },
         "credential_key": {
           "type": "string",
-          "description": "Keystore account name for the credential (e.g., \"telegram_bot_token\"), or a 1Password op:// URI, or an apple-password:// URI."
+          "description": "Keystore account name for the credential (e.g., \"telegram_bot_token\"), or a 1Password op:// URI, or an apple-password:// URI. Mutually exclusive with auth."
+        },
+        "auth": {
+          "$ref": "#/$defs/OAuth2Config",
+          "description": "OAuth2 client_credentials configuration. When present, the proxy handles token exchange automatically. Mutually exclusive with credential_key."
         },
         "inject_mode": {
           "$ref": "#/$defs/InjectMode",
@@ -542,6 +546,34 @@
             { "type": "null" }
           ],
           "description": "Override query parameter name for proxy-side query_param mode. Falls back to parent query_param_name when omitted."
+        }
+      }
+    },
+    "OAuth2Config": {
+      "type": "object",
+      "description": "OAuth2 client_credentials configuration for automatic token exchange. The proxy exchanges client_id + client_secret for an access_token, caches it, and refreshes automatically before expiry.",
+      "additionalProperties": false,
+      "required": ["token_url", "client_id", "client_secret"],
+      "properties": {
+        "token_url": {
+          "type": "string",
+          "description": "Token endpoint URL (e.g., \"https://auth.example.com/oauth/token\"). Must use HTTPS, or HTTP only for loopback addresses."
+        },
+        "client_id": {
+          "type": "string",
+          "description": "Client ID — plain value or credential reference (env://, file://, op://)."
+        },
+        "client_secret": {
+          "type": "string",
+          "description": "Client secret — credential reference (env://, file://, op://)."
+        },
+        "scope": {
+          "type": "string",
+          "description": "OAuth2 scopes (space-separated). Empty or omitted means no scope parameter is sent.",
+          "default": ""
+        }
+      }
+    },
         }
       }
     },

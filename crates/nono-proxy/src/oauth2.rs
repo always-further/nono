@@ -106,8 +106,12 @@ impl TokenCache {
     /// (DNS, TCP, TLS, non-200, malformed JSON). The calling code skips the
     /// route so the proxy can still start for other routes.
     pub fn new(config: OAuth2ExchangeConfig, tls_connector: TlsConnector) -> Result<Self> {
-        let (access_token, expires_in) =
-            tokio::runtime::Handle::current().block_on(exchange_token(&config, &tls_connector))?;
+        // Use block_in_place to avoid panicking when called from within an
+        // async context (e.g., server::start() which is async). This moves
+        // the blocking work off the async worker thread.
+        let (access_token, expires_in) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(exchange_token(&config, &tls_connector))
+        })?;
 
         let expires_at = Instant::now() + expires_in;
         debug!(
@@ -123,6 +127,27 @@ impl TokenCache {
             config,
             tls_connector,
         })
+    }
+
+    /// Create a `TokenCache` with a pre-populated token (for testing).
+    ///
+    /// Skips the initial token exchange. Used by tests that need a cache
+    /// without a real OAuth2 server.
+    #[cfg(test)]
+    pub(crate) fn new_from_parts(
+        config: OAuth2ExchangeConfig,
+        tls_connector: TlsConnector,
+        token: &str,
+        ttl: Duration,
+    ) -> Self {
+        Self {
+            token: Arc::new(RwLock::new(CachedToken {
+                access_token: Zeroizing::new(token.to_string()),
+                expires_at: Instant::now() + ttl,
+            })),
+            config,
+            tls_connector,
+        }
     }
 
     /// Return a valid access token, refreshing if needed.
@@ -540,13 +565,6 @@ mod tests {
         .with_no_client_auth();
         let tls_connector = TlsConnector::from(Arc::new(tls_config));
 
-        TokenCache {
-            token: Arc::new(RwLock::new(CachedToken {
-                access_token: Zeroizing::new(token.to_string()),
-                expires_at: Instant::now() + ttl,
-            })),
-            config,
-            tls_connector,
-        }
+        TokenCache::new_from_parts(config, tls_connector, token, ttl)
     }
 }
