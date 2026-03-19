@@ -249,8 +249,9 @@ Claude Code reads git configuration for repository operations. The built-in prof
 
 If you use [Secretive](https://github.com/maxgoedjen/secretive) to store SSH keys in the macOS Secure Enclave, git commit signing (`git commit -S`) needs access to the Secretive agent socket. Create a custom profile that extends the built-in Claude Code profile:
 
+Save as `~/.config/nono/profiles/claude-code-secretive.json`:
+
 ```json
-// ~/.config/nono/profiles/claude-code-secretive.json
 {
   "meta": {
     "name": "claude-code-secretive",

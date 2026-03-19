@@ -3,8 +3,8 @@
 //! Implements `nono trust sign|verify|list|keygen` subcommands.
 
 use crate::cli::{
-    TrustArgs, TrustCommands, TrustExportKeyArgs, TrustKeygenArgs, TrustListArgs, TrustSignArgs,
-    TrustSignPolicyArgs, TrustVerifyArgs,
+    TrustArgs, TrustCommands, TrustExportKeyArgs, TrustInitArgs, TrustKeygenArgs, TrustListArgs,
+    TrustSignArgs, TrustSignPolicyArgs, TrustVerifyArgs,
 };
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
@@ -23,6 +23,7 @@ const TRUST_PUB_SERVICE: &str = "nono-trust-pub";
 /// Run a trust subcommand.
 pub fn run_trust(args: TrustArgs) -> Result<()> {
     match args.command {
+        TrustCommands::Init(init_args) => run_init(init_args),
         TrustCommands::Sign(sign_args) => run_sign(sign_args),
         TrustCommands::SignPolicy(sign_policy_args) => run_sign_policy(sign_policy_args),
         TrustCommands::Verify(verify_args) => run_verify(verify_args),
@@ -30,6 +31,205 @@ pub fn run_trust(args: TrustArgs) -> Result<()> {
         TrustCommands::Keygen(keygen_args) => run_keygen(keygen_args),
         TrustCommands::ExportKey(export_args) => run_export_key(export_args),
     }
+}
+
+// ---------------------------------------------------------------------------
+// init
+// ---------------------------------------------------------------------------
+
+/// Directories to always skip when scanning for file patterns, even if not
+/// covered by `.gitignore`. These are common build artifacts, caches, and
+/// tool directories that are never interesting as trust policy targets.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".env",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".output",
+    ".cache",
+    ".turbo",
+    "vendor",
+    ".terraform",
+    ".bundle",
+    "coverage",
+    ".idea",
+    ".vscode",
+];
+
+fn run_init(args: TrustInitArgs) -> Result<()> {
+    let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
+    let policy_path = cwd.join("trust-policy.json");
+
+    if policy_path.exists() && !args.force {
+        return Err(nono::NonoError::TrustPolicy(
+            "trust-policy.json already exists (use --force to overwrite)".to_string(),
+        ));
+    }
+
+    let patterns = collect_file_patterns(&cwd, args.recursive, &args.exclude_dirs)?;
+
+    if patterns.is_empty() {
+        eprintln!(
+            "  {} no files found in {}",
+            "Warning:".yellow(),
+            cwd.display()
+        );
+        eprintln!(
+            "  {}",
+            "Add patterns manually to trust-policy.json after creation.".yellow()
+        );
+    }
+
+    // Try to include the public key if a signing key exists
+    let key_id = args.key.as_deref().unwrap_or("default");
+    let publisher = match load_public_key_bytes(key_id) {
+        Ok(pub_bytes) => {
+            let b64 = base64_encode(&pub_bytes);
+            Some(serde_json::json!({
+                "name": key_id,
+                "key_id": key_id,
+                "public_key": b64
+            }))
+        }
+        Err(_) => {
+            eprintln!(
+                "  {} signing key '{}' not found in keystore, skipping publisher entry.",
+                "Note:".cyan(),
+                key_id
+            );
+            eprintln!(
+                "  {}",
+                "Run 'nono trust keygen' to generate a key, then re-run 'nono trust init'.".cyan()
+            );
+            None
+        }
+    };
+
+    let publishers = match publisher {
+        Some(p) => vec![p],
+        None => Vec::new(),
+    };
+
+    let policy = serde_json::json!({
+        "version": 1,
+        "instruction_patterns": patterns,
+        "publishers": publishers,
+        "blocklist": {
+            "digests": [],
+            "publishers": []
+        },
+        "enforcement": "deny"
+    });
+
+    let json = serde_json::to_string_pretty(&policy).map_err(|e| {
+        nono::NonoError::TrustPolicy(format!("failed to serialize trust policy: {e}"))
+    })?;
+
+    std::fs::write(&policy_path, format!("{json}\n")).map_err(nono::NonoError::Io)?;
+
+    eprintln!("  {} {}", "Created".green(), policy_path.display());
+
+    if !patterns.is_empty() {
+        eprintln!("  Patterns ({}):", patterns.len());
+        for p in &patterns {
+            eprintln!("    {p}");
+        }
+    }
+
+    if publishers.is_empty() {
+        eprintln!("\n  {}", "Next steps:".bold());
+        eprintln!("  1. nono trust keygen");
+        eprintln!("  2. nono trust init --force");
+        eprintln!("  3. nono trust sign --all");
+        eprintln!("  4. nono trust sign-policy");
+    } else {
+        eprintln!("\n  {}", "Next steps:".bold());
+        eprintln!("  1. Review the patterns in trust-policy.json");
+        eprintln!("  2. nono trust sign --all");
+        eprintln!("  3. nono trust sign-policy");
+    }
+
+    Ok(())
+}
+
+/// Walk the directory using the `ignore` crate (respects `.gitignore`),
+/// skip built-in noise directories and user-specified `--exclude-dirs`,
+/// and collect relative file paths as patterns.
+fn collect_file_patterns(
+    root: &Path,
+    recursive: bool,
+    extra_exclude: &[String],
+) -> Result<Vec<String>> {
+    use ignore::WalkBuilder;
+
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(true) // skip hidden files/dirs
+        .git_ignore(true) // respect .gitignore
+        .git_global(true) // respect global gitignore
+        .git_exclude(true); // respect .git/info/exclude
+
+    if !recursive {
+        builder.max_depth(Some(1));
+    }
+
+    // Combine built-in skip dirs with user-specified ones (owned for 'static closure)
+    let all_skip: std::collections::HashSet<String> = SKIP_DIRS
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(extra_exclude.iter().cloned())
+        .collect();
+
+    builder.filter_entry(move |entry| {
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+            let name = entry.file_name().to_string_lossy();
+            return !all_skip.contains(name.as_ref() as &str);
+        }
+        true
+    });
+
+    let mut patterns = std::collections::BTreeSet::new();
+
+    for result in builder.build() {
+        let entry = result
+            .map_err(|e| nono::NonoError::TrustPolicy(format!("failed to walk directory: {e}")))?;
+
+        // Skip directories and the root itself
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+            continue;
+        }
+
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy();
+
+        // Skip bundle files, lockfiles, and the policy file itself
+        if name.ends_with(".bundle")
+            || name.ends_with(".lock")
+            || name.ends_with(".sum")
+            || name == "trust-policy.json"
+        {
+            continue;
+        }
+
+        if let Ok(rel) = path.strip_prefix(root) {
+            patterns.insert(rel.to_string_lossy().to_string());
+        }
+    }
+
+    Ok(patterns.into_iter().collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +682,9 @@ fn run_sign_policy(args: TrustSignPolicyArgs) -> Result<()> {
             default_path
         }
     };
+
+    // Validate the policy file is well-formed before signing.
+    trust::load_policy_from_file(&policy_path)?;
 
     let bundle_json = trust::sign_policy_file(&policy_path, &key_pair, key_id)?;
     trust::write_bundle(&policy_path, &bundle_json)?;
@@ -1009,7 +1212,9 @@ fn verify_policy_if_exists(policy_path: &Path) -> Result<()> {
 }
 
 fn user_trust_policy_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("nono").join("trust-policy.json"))
+    crate::profile::resolve_user_config_dir()
+        .ok()
+        .map(|d| d.join("nono").join("trust-policy.json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,8 +1344,13 @@ mod tests {
     #[test]
     fn load_trust_policy_returns_default_when_no_file() {
         // CWD mutation with catch_unwind to guarantee cleanup even on panic.
+        // Isolate from real user config dir to avoid picking up invalid files.
         let dir = tempfile::tempdir().unwrap();
         let original = std::env::current_dir().unwrap();
+        let orig_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let xdg_dir = dir.path().join("xdg");
+        std::fs::create_dir_all(&xdg_dir).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_dir);
 
         let result = std::panic::catch_unwind(|| {
             std::env::set_current_dir(dir.path()).unwrap();
@@ -1149,6 +1359,10 @@ mod tests {
         });
 
         std::env::set_current_dir(original).unwrap();
+        match orig_xdg {
+            Some(val) => std::env::set_var("XDG_CONFIG_HOME", val),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
         result.unwrap();
     }
 }

@@ -122,7 +122,7 @@ For keyed bundles, the public key is loaded from the system keystore and the ECD
 
 ### Pre-exec Scan
 
-Before fork/exec, nono scans the working directory for files matching `instruction_patterns`. This is the baseline -- it catches instruction files present at session start. If any file fails verification and enforcement is `deny`, the process never starts.
+Before fork/exec, nono scans the working directory for files matching `instruction_patterns`. File discovery uses the `ignore` crate, which respects `.gitignore`, global gitignore, and `.git/info/exclude` — files excluded by gitignore are not scanned. This is the baseline -- it catches files present at session start. If any file fails verification and enforcement is `deny`, the process never starts.
 
 The pre-exec scan also verifies the trust policy's own signature before trusting it.
 
@@ -139,24 +139,17 @@ The interceptor:
 
 A TOCTOU re-verification step ensures the digest of the opened file descriptor matches the digest verified during the trust check. This prevents a race where the file is swapped between verification and the fd injection.
 
-### Seatbelt Deny Rules (macOS Runtime)
+### Seatbelt Write-Protection (macOS)
 
-On macOS, instruction file patterns are enforced at the kernel level using Seatbelt rule specificity. During sandbox profile generation:
+On macOS, verified files are write-protected at the kernel level using literal Seatbelt deny rules. During sandbox profile generation:
 
-1. Each instruction pattern is converted to a Seatbelt regex (e.g., `SKILLS*` becomes `#"/SKILLS[^/]*$"`)
-2. A `(deny file-read-data (regex ...))` rule is emitted for each pattern
-3. For each file that passed the pre-exec trust scan, a `(allow file-read-data (literal "/full/path"))` rule is emitted
+1. The pre-exec trust scan verifies all files matching `instruction_patterns` in the trust policy
+2. For each file that passed verification, a `(deny file-write-data (literal "/full/path"))` rule is emitted
+3. If the path involves a symlink (e.g., `/tmp` → `/private/tmp`), rules are emitted for both the original and canonical paths
 
-Seatbelt literal-allow rules override regex-deny rules (more specific wins). Files that were not present or did not pass the pre-exec scan have no literal-allow rule and remain blocked by the deny-regex.
+This makes verified files structurally immutable — the sandboxed process cannot modify them even though the parent directory may have write access granted. The pre-exec scan gates execution (aborting if any file fails verification), and the supervisor's `TrustInterceptor` handles runtime verification of files opened mid-session.
 
-Glob-to-regex conversion:
-
-| Glob | Seatbelt Regex |
-|------|---------------|
-| `SKILLS*` | `/SKILLS[^/]*$` |
-| `CLAUDE*` | `/CLAUDE[^/]*$` |
-| `AGENT*` | `/AGENT[^/]*$` |
-| `.claude/**/*.md` | `/\.claude/.*/[^/]*\.md$` |
+Note: filename-pattern-based read blocking (e.g., denying reads of `SKILLS*`) is intentionally not used. An attacker can trivially vary filenames to bypass pattern matching. The security boundary is the trust policy's cryptographic verification, not filename conventions.
 
 ## Verification Cache
 
@@ -224,7 +217,7 @@ Attestation primitives reusable by all language bindings.
 | `trust_cmd.rs` | `nono trust` subcommand handlers |
 | `trust_scan.rs` | Pre-exec scan, policy signature verification |
 | `trust_intercept.rs` | Runtime trust interceptor (cache, verification dispatch) |
-| `instruction_deny.rs` | macOS Seatbelt deny rule generation (glob-to-regex) |
+| `instruction_deny.rs` | macOS Seatbelt write-protection for verified files |
 
 ## Security Properties
 

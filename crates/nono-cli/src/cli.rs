@@ -1244,6 +1244,8 @@ pub struct TrustArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum TrustCommands {
+    /// Create a trust-policy.json in the current directory
+    Init(TrustInitArgs),
     /// Sign an instruction file, producing a .bundle alongside it
     Sign(TrustSignArgs),
     /// Sign a trust policy file, producing a .bundle alongside it
@@ -1304,6 +1306,25 @@ pub struct TrustVerifyArgs {
     /// Trust policy file (default: auto-discover)
     #[arg(long, value_name = "FILE")]
     pub policy: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustInitArgs {
+    /// Scan subdirectories recursively for files to include as patterns
+    #[arg(long, short = 'r')]
+    pub recursive: bool,
+
+    /// Additional directories to exclude from scanning (on top of .gitignore and built-in list)
+    #[arg(long, value_name = "DIR", num_args = 1..)]
+    pub exclude_dirs: Vec<String>,
+
+    /// Key ID to include as a publisher (default: "default")
+    #[arg(long, value_name = "KEY_ID")]
+    pub key: Option<String>,
+
+    /// Overwrite existing trust-policy.json
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1650,6 +1671,48 @@ mod tests {
                 _ => panic!("Expected Cleanup subcommand"),
             },
             _ => panic!("Expected Rollback command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_init_defaults() {
+        let cli = Cli::parse_from(["nono", "trust", "init"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Init(init_args) => {
+                    assert!(!init_args.recursive);
+                    assert!(!init_args.force);
+                    assert!(init_args.key.is_none());
+                    assert!(init_args.exclude_dirs.is_empty());
+                }
+                _ => panic!("Expected Init subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_init_recursive_with_excludes() {
+        let cli = Cli::parse_from([
+            "nono",
+            "trust",
+            "init",
+            "-r",
+            "--exclude-dirs",
+            "tmp",
+            "logs",
+            "--force",
+        ]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Init(init_args) => {
+                    assert!(init_args.recursive);
+                    assert!(init_args.force);
+                    assert_eq!(init_args.exclude_dirs, vec!["tmp", "logs"]);
+                }
+                _ => panic!("Expected Init subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
         }
     }
 

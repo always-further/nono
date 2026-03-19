@@ -247,118 +247,50 @@ pub fn find_instruction_files<P: AsRef<Path>>(
     policy: &TrustPolicy,
     root: P,
 ) -> Result<Vec<PathBuf>> {
+    use ignore::WalkBuilder;
+
     let root = root.as_ref();
     let matcher = policy.instruction_matcher()?;
+
+    let walker = WalkBuilder::new(root)
+        .hidden(false) // don't skip hidden — .claude/ contains instruction files
+        .git_ignore(true) // respect .gitignore
+        .git_global(true) // respect global gitignore
+        .git_exclude(true) // respect .git/info/exclude
+        .follow_links(true) // follow symlinks (symlinked SKILLS.md must not be skipped)
+        .max_depth(Some(16)) // guard against very deep trees
+        .build();
+
     let mut results = Vec::new();
-    let mut visited = std::collections::HashSet::new();
 
-    find_files_recursive(root, root, &matcher, &mut results, &mut visited, 0)?;
-
-    results.sort();
-    Ok(results)
-}
-
-/// Well-known directory names that never contain instruction files and are
-/// typically very large. Skipping these prevents multi-second walks through
-/// dependency trees and build artifacts. Sorted for binary search.
-const SKIP_DIRS: &[&str] = &[
-    ".cache",
-    ".gradle",
-    ".mypy_cache",
-    ".next",
-    ".nuxt",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".terraform",
-    ".tox",
-    ".venv",
-    "__pycache__",
-    "build",
-    "dist",
-    "node_modules",
-    "target",
-    "vendor",
-    "venv",
-];
-
-/// Recursively walk a directory, collecting files matching instruction patterns.
-///
-/// Tracks visited directory inodes to prevent symlink cycle DoS, and enforces
-/// a maximum recursion depth of 16 levels. Skips well-known heavy directories
-/// (node_modules, target, etc.) that never contain instruction files.
-fn find_files_recursive(
-    root: &Path,
-    dir: &Path,
-    matcher: &super::types::InstructionPatterns,
-    results: &mut Vec<PathBuf>,
-    visited: &mut std::collections::HashSet<u64>,
-    depth: u32,
-) -> Result<()> {
-    // Guard against deep recursion (legitimate instruction files live near the root)
-    const MAX_DEPTH: u32 = 16;
-    if depth > MAX_DEPTH {
-        return Ok(());
-    }
-
-    let entries = std::fs::read_dir(dir).map_err(NonoError::Io)?;
-
-    for entry in entries {
-        let entry = entry.map_err(NonoError::Io)?;
-        let path = entry.path();
-
-        // Use std::fs::metadata (stat) instead of entry.file_type (lstat)
-        // to follow symlinks. A symlinked SKILLS.md must not be silently skipped.
-        let meta = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue, // dangling symlink or permission error
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue, // permission error, dangling symlink, etc.
         };
 
-        if meta.is_dir() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            // Skip hidden directories except .claude
-            if name_str.starts_with('.') && name_str != ".claude" {
-                continue;
-            }
-            // Skip well-known heavy directories that never contain instruction files
-            if SKIP_DIRS.binary_search(&name_str.as_ref()).is_ok() {
-                continue;
-            }
+        // Skip directories and the root itself
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+            continue;
+        }
 
-            // Track visited directory inodes to break symlink cycles.
-            // If we have already visited this inode, skip it entirely.
-            #[cfg(unix)]
-            let inode = {
-                use std::os::unix::fs::MetadataExt;
-                meta.ino()
-            };
-            #[cfg(not(unix))]
-            let inode = {
-                // On non-Unix, use depth limit as the sole cycle guard
-                0u64
-            };
+        let path = entry.path();
 
-            if inode != 0 && !visited.insert(inode) {
-                continue;
-            }
+        // Skip Sigstore sidecar bundles
+        if path.to_string_lossy().ends_with(".bundle") {
+            continue;
+        }
 
-            find_files_recursive(root, &path, matcher, results, visited, depth + 1)?;
-        } else if meta.is_file() {
-            // Skip Sigstore sidecar bundles; only source instruction files should be scanned.
-            if path.to_string_lossy().ends_with(".bundle") {
-                continue;
-            }
-
-            // Match against relative path from root
-            if let Ok(relative) = path.strip_prefix(root) {
-                if matcher.is_match(relative) {
-                    results.push(path);
-                }
+        // Match against relative path from root
+        if let Ok(relative) = path.strip_prefix(root) {
+            if matcher.is_match(relative) {
+                results.push(path.to_path_buf());
             }
         }
     }
 
-    Ok(())
+    results.sort();
+    Ok(results)
 }
 
 #[cfg(test)]

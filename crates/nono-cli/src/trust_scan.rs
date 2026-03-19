@@ -39,7 +39,9 @@ pub fn load_scan_policy(root: &Path, trust_override: bool) -> Result<TrustPolicy
         None
     };
 
-    let user_path = dirs::config_dir().map(|d| d.join("nono").join("trust-policy.json"));
+    let user_path = crate::profile::resolve_user_config_dir()
+        .ok()
+        .map(|d| d.join("nono").join("trust-policy.json"));
 
     let user = if let Some(ref path) = user_path {
         if path.exists() {
@@ -952,6 +954,13 @@ mod tests {
     #[test]
     fn load_scan_policy_with_trust_override_skips_verification() {
         let dir = tempfile::tempdir().unwrap();
+        // Isolate from the real user config dir so a stale trust-policy.json
+        // on the developer's machine doesn't interfere with the test.
+        let orig_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let xdg_dir = dir.path().join("xdg");
+        std::fs::create_dir_all(&xdg_dir).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_dir);
+
         // Create a policy file with no .bundle — should still load with trust_override=true
         std::fs::write(
             dir.path().join("trust-policy.json"),
@@ -961,6 +970,11 @@ mod tests {
 
         let policy = load_scan_policy(dir.path(), true).unwrap();
         assert_eq!(policy.enforcement, Enforcement::Warn);
+
+        match orig_xdg {
+            Some(val) => std::env::set_var("XDG_CONFIG_HOME", val),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
     }
 
     #[test]

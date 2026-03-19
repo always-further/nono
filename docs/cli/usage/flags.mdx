@@ -126,17 +126,18 @@ See [Policy Introspection](/cli/features/policy-introspection) for full document
 
 ### `nono trust`
 
-Manage instruction file attestation. Sign, verify, and manage trust for AI agent instruction files.
+Manage file attestation. Sign, verify, and manage trust for files consumed by AI agents.
 
 ```bash
 nono trust <SUBCOMMAND>
 ```
 
 Subcommands:
-- `sign` - Sign instruction files
+- `init` - Create a trust-policy.json in the current directory
+- `sign` - Sign files
 - `sign-policy` - Sign a trust policy file
-- `verify` - Verify instruction files against the trust policy
-- `list` - List instruction files and their verification status
+- `verify` - Verify files against the trust policy
+- `list` - List files and their verification status
 - `keygen` - Generate a new signing key pair
 - `export-key` - Export the public key for a signing key
 
@@ -871,9 +872,31 @@ Available context flags:
 
 ## `nono trust` Options
 
+### `nono trust init`
+
+Create a `trust-policy.json` in the current directory. Scans for files and auto-populates patterns and publisher.
+
+```bash
+nono trust init                            # Scan root directory only
+nono trust init -r                         # Scan recursively
+nono trust init -r --exclude-dirs tmp logs # Exclude extra directories
+nono trust init --key my-key --force       # Specific key, overwrite existing
+```
+
+| Option | Description |
+|--------|-------------|
+| `-r`, `--recursive` | Scan subdirectories recursively |
+| `--exclude-dirs <DIR...>` | Additional directories to exclude (on top of `.gitignore` and built-in list) |
+| `--key <KEY_ID>` | Key ID to include as publisher (default: "default") |
+| `--force` | Overwrite existing `trust-policy.json` |
+
+<Note>
+  File discovery respects `.gitignore`, global gitignore, and `.git/info/exclude`. Common build artifact directories (`node_modules`, `target`, `.venv`, etc.) are skipped by default.
+</Note>
+
 ### `nono trust sign`
 
-Sign instruction files, producing bundles for verification.
+Sign files, producing bundles for verification.
 
 ```bash
 nono trust sign <FILES...>                 # Sign specific files

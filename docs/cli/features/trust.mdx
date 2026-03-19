@@ -1,17 +1,15 @@
 ---
-title: Agent Instruction Attestation
-description: Cryptographic verification of AI agent instruction files
+title: SKILLS Security
+description: Cryptographic verification of files consumed by AI agents
 ---
 
-AI agent instruction files (`SKILLS.md`, `CLAUDE.md`, `AGENTS.md`, `AGENT.MD`) are natural language files, formatted in markdown - that an LLM will use as a context source for orientation on the project, its structure, and how to execute commands. Because they are natural language based, they are vulnerable to prompt injection attacks - an attacker could modify an instruction file to trick the agent into executing harmful commands.
+AI agents consume various files as context - instruction files (`SKILLS.md`, `CLAUDE.md`, `AGENT.MD`), configuration, helper scripts, and other project artifacts. Because agents treat natural language content as executable instructions, any file an agent reads is a potential prompt injection vector. An attacker who can modify a file the agent trusts can inject malicious instructions that execute with the agent's full privileges.
 
-One of the areas where Large Language Models (LLMs) are most vulnerable to prompt injection is in reading their own instruction files. Unlike traditional software, LLM's do not differentiate a control plane vs data plane - instruction and data are loaded into the same channel: the prompt. This means that if an attacker can modify an instruction file, they can inject malicious instructions that the LLM will execute with the same privileges as the original file.
-
-Nono's sandbox neutralizes the *effects* of prompt injection - dangerous actions are blocked at the kernel. Instruction file trust adds a second layer: verifying the *provenance* and *integrity* of instruction files before the agent can read them. Unsigned or tampered files are hard-denied.
+Nono's sandbox neutralizes the *effects* of prompt injection via malicious skills — dangerous actions are blocked at the kernel. File attestation adds a second layer: verifying the *provenance* and *integrity* of files before the agent can read them. Unsigned or tampered files are hard-denied.
 
 ## What Signing Proves (and What It Does Not)
 
-As with any Sigstore-based attestation, signing an instruction file proves two things:
+As with any Sigstore-based attestation, signing a file proves two things:
 
 1. **Provenance** -- The file was signed by a specific identity (a key you control, or a CI/CD pipeline you trust). You can verify *who* produced the file.
 2. **Integrity** -- The file has not been modified since it was signed. Any tampering -- even a single byte -- breaks the cryptographic digest and the signature is rejected.
@@ -62,9 +60,29 @@ When signing multiple files, nono creates a single `.nono-trust.bundle` file con
 
 ### 3. Create a trust policy
 
-Signing files is only half the equation - you must also define a trust policy that declares which keys are trusted to sign instruction files.
+Signing files is only half the equation - you must also define a trust policy that declares which keys are trusted to sign files.
 
-Create `trust-policy.json` in the project root:
+The quickest way to create a policy is with `nono trust init`:
+
+```bash
+nono trust init
+```
+
+This scans the current directory for files, auto-populates `instruction_patterns`, and includes your signing key's public key as a publisher. The resulting `trust-policy.json` is ready to sign.
+
+To include files from subdirectories:
+
+```bash
+nono trust init --recursive
+```
+
+To exclude specific directories on top of `.gitignore` and the built-in skip list:
+
+```bash
+nono trust init --recursive --exclude-dirs tmp logs
+```
+
+Review the generated `trust-policy.json` and remove any patterns you don't want verified. You can also create the policy manually:
 
 ```json
 {
@@ -90,7 +108,7 @@ Create `trust-policy.json` in the project root:
 }
 ```
 
-To get the public key in base64 format for the policy:
+To get the public key in base64 format for a manual policy:
 
 ```bash
 nono trust export-key --id default
@@ -237,8 +255,9 @@ For stronger guarantees, create a user-level policy that defines your trusted pu
 mkdir -p ~/.config/nono
 ```
 
+Create `~/.config/nono/trust-policy.json`:
+
 ```json
-// ~/.config/nono/trust-policy.json
 {
   "version": 1,
   "instruction_patterns": ["SKILLS*", "CLAUDE*", "AGENT*"],
@@ -260,6 +279,20 @@ nono trust sign-policy ~/.config/nono/trust-policy.json
 With a user-level policy in place, project policies merge additively on top. A project can declare additional publishers (e.g., its CI signing identity), but your user-level enforcement of `deny` cannot be downgraded to `warn` by the project, and your blocklist entries cannot be removed.
 
 ## CLI Commands
+
+### nono trust init
+
+Create a `trust-policy.json` in the current directory. Scans for files, auto-populates `instruction_patterns`, and includes the signing key's public key as a publisher if one exists in the keystore.
+
+```bash
+nono trust init                            # scan root directory only
+nono trust init -r                         # scan recursively
+nono trust init -r --exclude-dirs tmp logs # exclude extra directories
+nono trust init --key my-key               # use a specific signing key
+nono trust init --force                    # overwrite existing policy
+```
+
+File discovery respects `.gitignore`, global gitignore, and `.git/info/exclude`. Common build artifact directories (`node_modules`, `target`, `.venv`, etc.) are skipped by default. Use `--exclude-dirs` for project-specific directories not covered by `.gitignore` or the built-in list.
 
 ### nono trust sign
 
@@ -340,7 +373,7 @@ Every time you modify `trust-policy.json`, you must re-sign it.
 
 ## Pre-exec Scanning
 
-When `nono run` launches a command, it scans the working directory for instruction files before applying the sandbox:
+When `nono run` launches a command, it scans the working directory for files matching the trust policy's `instruction_patterns` before applying the sandbox. File discovery respects `.gitignore`, so files excluded by your project's `.gitignore` are not scanned:
 
 ```
 nono run --profile claude-code -- claude
@@ -375,13 +408,9 @@ The verification result is cached by (path, inode, mtime, size) to avoid re-veri
 
 ### macOS (Seatbelt)
 
-On macOS, instruction file patterns are enforced at the kernel level using Seatbelt deny/allow rule specificity:
+On macOS, verified files are write-protected at the kernel level. For each file that passes the pre-exec trust scan, a literal `(deny file-write-data ...)` rule is emitted in the Seatbelt profile, making the file structurally immutable for the duration of the session.
 
-1. Deny-regex rules block reads of all files matching instruction patterns
-2. Literal-allow rules re-enable reading for files that passed the pre-exec trust scan
-3. Files created at runtime have no literal-allow rule and are blocked by the deny-regex
-
-This means a new instruction file introduced after sandbox application (e.g., by `curl` or `git pull`) cannot be read by the agent.
+The pre-exec scan gates execution — if any file matching the trust policy's `instruction_patterns` fails verification, the sandbox refuses to start. The supervisor's `TrustInterceptor` handles runtime verification of files opened mid-session.
 
 ## GitHub Actions Integration
 
@@ -495,12 +524,8 @@ Bundles are checked into version control. A missing bundle for a file that match
 
 ## Why File Name Patterns?
 
-Nono identifies instruction files by matching against configurable file name patterns (e.g., `SKILLS*`, `CLAUDE*`, `AGENT*`, `.claude/**/*.md`). This is a deliberate design choice rooted in how agent frameworks work in practice.
+Nono identifies files for verification by matching against configurable glob patterns (e.g., `SKILLS*`, `CLAUDE*`, `AGENT*`, `.claude/**/*.md`). The default patterns cover well-known conventions used by agent frameworks, but organizations can extend `instruction_patterns` to cover any files their agents consume — helper scripts, configuration, prompt templates, or custom conventions.
 
-Agent clients are purpose-built to discover and ingest files with these naming conventions. Claude Code reads `CLAUDE.md` and files under `.claude/`. Other frameworks look for `SKILLS.md`, `AGENT.MD`, `AGENTS.md`, or similar well-known names. The agent's system prompt or client code directs it to seek out these specific files and treat their contents as trusted instructions. An attacker exploiting this vector will name their payload to match the conventions the agent is already looking for -- there is no advantage to using an arbitrary filename, because the agent would not ingest it as instructions.
+Agent frameworks are purpose-built to discover and ingest files with specific naming conventions. Claude Code reads `CLAUDE.md` and files under `.claude/`. Other frameworks look for `SKILLS.md`, `AGENT.MD`, or similar well-known names. An attacker exploiting prompt injection through these files will use the exact names the agent is already looking for — a file named `SK1LLS.md` or `SKILLZ.md` would not be ingested by the agent as instructions, so there is no value in an attacker using those names.
 
-Pattern matching is also what makes the system practical. It avoids requiring every file in the working directory to be signed, and it aligns the verification boundary with the actual attack surface: the files the agent will treat as authoritative.
-
-The default patterns cover the major agent frameworks. They are configurable via the `instruction_patterns` field in the trust policy, so organizations can extend them to match custom instruction file conventions.
-
-This of course means that any file not matching the patterns is outside the scope of trust verification. If an attacker can get the agent to read from a file with an unprotected name, that is a separate attack vector. However, by defaulting to well-known patterns, we cover the most common and high-value targets for prompt injection in agent contexts. Over time, we may explore additional controls for non-pattern files (e.g., monitoring file access patterns, sandboxing all file reads with a more permissive fallback policy, classification, intent analysis, etc.) but pattern-based verification is the most effective and user-friendly approach for the initial release. Perfect should not be the enemy of good.
+Pattern matching keeps the system practical: it avoids requiring every file in the working directory to be signed, and it aligns the verification boundary with the actual attack surface. Files matching the patterns must have a valid signature from a trusted publisher, and verified files are write-protected at the kernel level so they cannot be tampered with mid-session.
