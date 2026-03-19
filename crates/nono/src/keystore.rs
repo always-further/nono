@@ -506,6 +506,47 @@ fn load_from_env(uri: &str) -> Result<Zeroizing<String>> {
     }
 }
 
+/// Load a secret from a local file via `file://` URI.
+///
+/// Reads the file contents at startup (before sandbox activation), trims
+/// whitespace, and wraps the result in `Zeroizing<String>`. The file is
+/// read once — subsequent access is from the in-memory zeroized copy.
+///
+/// # Errors
+///
+/// Returns `SecretNotFound` if the file does not exist or is empty/whitespace-only.
+/// Returns `KeystoreAccess` for other I/O errors (permissions, etc.).
+#[allow(dead_code)] // Wired into load_secret_by_ref in a follow-up task
+fn load_from_file(uri: &str) -> Result<Zeroizing<String>> {
+    validate_file_uri(uri)?;
+
+    let path_str = uri
+        .strip_prefix(FILE_URI_PREFIX)
+        .ok_or_else(|| NonoError::ConfigParse(format!("invalid file:// URI: {}", uri)))?;
+
+    let content = std::fs::read_to_string(path_str).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            NonoError::SecretNotFound(format!("credential file not found: {}", path_str))
+        } else {
+            NonoError::KeystoreAccess(format!(
+                "failed to read credential file '{}': {}",
+                path_str, e
+            ))
+        }
+    })?;
+
+    let trimmed = content.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(NonoError::SecretNotFound(format!(
+            "credential file '{}' is empty or contains only whitespace",
+            path_str
+        )));
+    }
+
+    tracing::debug!("Loaded secret from file '{}'", path_str);
+    Ok(Zeroizing::new(trimmed))
+}
+
 /// Load a single secret from the keystore.
 ///
 /// The returned value is immediately wrapped in `Zeroizing` so the heap
@@ -1980,5 +2021,56 @@ mod tests {
         // "file://relative" starts with "file://" so it matches the scheme.
         // Validation (absolute path check) happens in validate_file_uri.
         assert!(is_file_uri("file://relative"));
+    }
+
+    // =========================================================================
+    // load_from_file tests
+    // =========================================================================
+
+    #[test]
+    fn test_load_from_file_reads_and_trims() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, "my-api-key\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "my-api-key");
+    }
+
+    #[test]
+    fn test_load_from_file_empty_file_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_file_whitespace_only_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("whitespace.txt");
+        std::fs::write(&path, "  \n  \n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_file_not_found() {
+        let result = load_from_file("file:///nonexistent/path/secret.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_file_multiline_reads_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.txt");
+        std::fs::write(&path, "glpat-xxxxxxxxxxxx\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri).unwrap();
+        assert_eq!(result.as_str(), "glpat-xxxxxxxxxxxx");
     }
 }
