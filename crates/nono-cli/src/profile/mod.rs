@@ -1930,8 +1930,8 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         }
     }
 
@@ -2089,8 +2089,8 @@ mod tests {
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: None,
             query_param_name: None,
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -2106,8 +2106,8 @@ mod tests {
             path_pattern: None, // Missing required field
             path_replacement: None,
             query_param_name: None,
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("missing path_pattern should be rejected");
@@ -2125,8 +2125,8 @@ mod tests {
             path_pattern: Some("/bot/token/".to_string()), // No {} placeholder
             path_replacement: None,
             query_param_name: None,
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("pattern without {} should be rejected");
@@ -2144,8 +2144,8 @@ mod tests {
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: Some("/v2/bot{}/".to_string()),
             query_param_name: None,
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -2161,8 +2161,8 @@ mod tests {
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: Some("/v2/bot/fixed/".to_string()), // No {} placeholder
             query_param_name: None,
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("replacement without {} should be rejected");
@@ -2180,8 +2180,8 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: Some("key".to_string()),
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         assert!(validate_custom_credential("google_maps", &cred).is_ok());
     }
@@ -2197,8 +2197,8 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None, // Missing required field
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("missing query_param_name should be rejected");
@@ -2216,8 +2216,8 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: Some("".to_string()), // Empty
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("empty query_param_name should be rejected");
@@ -2235,8 +2235,8 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
-            env_var: None,
             endpoint_rules: vec![],
+            env_var: None,
         };
         // BasicAuth mode doesn't require additional fields
         // Credential value is expected to be "username:password" format
@@ -2555,8 +2555,8 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
-                env_var: None,
                 endpoint_rules: vec![],
+                env_var: None,
             },
         );
 
@@ -2572,8 +2572,8 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
-                env_var: None,
                 endpoint_rules: vec![],
+                env_var: None,
             },
         );
 
@@ -2707,8 +2707,8 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
-                env_var: None,
                 endpoint_rules: vec![],
+                env_var: None,
             },
         );
 
@@ -2724,8 +2724,8 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
-                env_var: None,
                 endpoint_rules: vec![],
+                env_var: None,
             },
         );
 
@@ -3765,13 +3765,14 @@ mod tests {
     fn test_validate_custom_credential_file_uri_accepted() {
         let cred = CustomCredentialDef {
             upstream: "https://api.example.com".to_string(),
-            credential_key: "file:///vault/secrets/token".to_string(),
+            credential_key: "file:///run/secrets/api-token".to_string(),
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
         };
         assert!(
@@ -3784,13 +3785,14 @@ mod tests {
     fn test_validate_custom_credential_file_uri_requires_env_var() {
         let cred = CustomCredentialDef {
             upstream: "https://api.example.com".to_string(),
-            credential_key: "file:///vault/secrets/token".to_string(),
+            credential_key: "file:///run/secrets/api-token".to_string(),
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            endpoint_rules: vec![],
             env_var: None,
         };
         let result = validate_custom_credential("example", &cred);
@@ -3813,6 +3815,7 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
         };
         let result = validate_custom_credential("example", &cred);
@@ -3828,13 +3831,14 @@ mod tests {
     fn test_validate_custom_credential_file_uri_traversal_rejected() {
         let cred = CustomCredentialDef {
             upstream: "https://api.example.com".to_string(),
-            credential_key: "file:///vault/secrets/../../../etc/shadow".to_string(),
+            credential_key: "file:///run/secrets/../../../etc/shadow".to_string(),
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
+            endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
         };
         let result = validate_custom_credential("example", &cred);
@@ -3849,7 +3853,7 @@ mod tests {
         let json_str = r#"{
             "meta": { "name": "test-profile" },
             "env_credentials": {
-                "file:///vault/secrets/api_token": "API_TOKEN"
+                "file:///run/secrets/api-token": "API_TOKEN"
             }
         }"#;
 
@@ -3889,10 +3893,10 @@ mod tests {
                 "meta": { "name": "file-cred-test" },
                 "network": {
                     "custom_credentials": {
-                        "vault_service": {
-                            "upstream": "https://api.vault-service.com",
-                            "credential_key": "file:///vault/secrets/token",
-                            "env_var": "VAULT_API_KEY"
+                        "my_service": {
+                            "upstream": "https://api.example.com",
+                            "credential_key": "file:///run/secrets/api-token",
+                            "env_var": "MY_API_KEY"
                         }
                     }
                 }
@@ -3904,9 +3908,9 @@ mod tests {
         let cred = profile
             .network
             .custom_credentials
-            .get("vault_service")
-            .expect("vault_service credential should exist");
-        assert_eq!(cred.credential_key, "file:///vault/secrets/token");
-        assert_eq!(cred.env_var, Some("VAULT_API_KEY".to_string()));
+            .get("my_service")
+            .expect("my_service credential should exist");
+        assert_eq!(cred.credential_key, "file:///run/secrets/api-token");
+        assert_eq!(cred.env_var, Some("MY_API_KEY".to_string()));
     }
 }
