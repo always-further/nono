@@ -142,8 +142,8 @@ pub struct CustomCredentialDef {
     ///
     /// When set, the proxy uses this as the SDK API key env var instead of
     /// deriving it from `credential_key.to_uppercase()`. Required when
-    /// `credential_key` is a URI manager reference (`op://` or
-    /// `apple-password://`).
+    /// `credential_key` is a URI manager reference (`op://`,
+    /// `apple-password://`, or `file://`).
     #[serde(default)]
     pub env_var: Option<String>,
 
@@ -189,6 +189,7 @@ fn is_http_token_char(c: char) -> bool {
 /// - A bare keyring account name (alphanumeric + underscores only)
 /// - A 1Password `op://` URI (validated by `nono::keystore::validate_op_uri`)
 /// - An Apple Passwords `apple-password://` URI
+/// - A `file://` URI pointing to an absolute path (validated by `nono::keystore::validate_file_uri`)
 fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(NonoError::ProfileParse(format!(
@@ -212,12 +213,19 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
                 context_name, e
             ))
         })
+    } else if nono::keystore::is_file_uri(key) {
+        nono::keystore::validate_file_uri(key).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "invalid file:// URI for custom credential '{}': {}",
+                context_name, e
+            ))
+        })
     } else {
         // Validate as keyring account name (alphanumeric + underscore)
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(NonoError::ProfileParse(format!(
                 "credential_key '{}' for custom credential '{}' must contain only \
-                 alphanumeric characters and underscores (or use op:// / apple-password:// URI)",
+                 alphanumeric characters and underscores (or use op:// / apple-password:// / file:// URI)",
                 key, context_name
             )));
         }
@@ -229,7 +237,7 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
 ///
 /// Checks:
 /// - `credential_key` must be alphanumeric + underscores only, or a valid
-///   `op://` / `apple-password://` URI
+///   `op://` / `apple-password://` / `file://` URI
 /// - `upstream` must be HTTPS (or HTTP for loopback only)
 /// - Mode-specific validation:
 ///   - `header`: inject_header must be valid HTTP token, credential_format no CRLF
@@ -244,12 +252,13 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
     // cannot be meaningfully uppercased into an env var name (e.g.,
     // "op://vault/item/field" -> "OP://VAULT/ITEM/FIELD" is nonsensical).
     if (nono::keystore::is_op_uri(&cred.credential_key)
-        || nono::keystore::is_apple_password_uri(&cred.credential_key))
+        || nono::keystore::is_apple_password_uri(&cred.credential_key)
+        || nono::keystore::is_file_uri(&cred.credential_key))
         && cred.env_var.is_none()
     {
         return Err(NonoError::ProfileParse(format!(
             "env_var is required for custom credential '{}' when credential_key is a URI \
-             manager reference (op:// or apple-password://); \
+             manager reference (op://, apple-password://, or file://); \
              set it to the SDK API key env var name (e.g., \"OPENAI_API_KEY\")",
             name
         )));
@@ -456,7 +465,7 @@ fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
 /// Validate env_credentials keys in a profile.
 ///
 /// Keys can be keyring account names, `op://` URIs, `apple-password://` URIs,
-/// or `env://` URIs.
+/// `env://` URIs, or `file://` URIs.
 /// Keyring account names are validated at load time by the keyring crate itself,
 /// but URI entries need structural validation upfront.
 fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
@@ -475,6 +484,10 @@ fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
         } else if nono::keystore::is_env_uri(key) {
             nono::keystore::validate_env_uri(key).map_err(|e| {
                 NonoError::ProfileParse(format!("invalid env:// URI in env_credentials: {}", e))
+            })?;
+        } else if nono::keystore::is_file_uri(key) {
+            nono::keystore::validate_file_uri(key).map_err(|e| {
+                NonoError::ProfileParse(format!("invalid file:// URI in env_credentials: {}", e))
             })?;
         }
         // Validate destination env var name against dangerous blocklist
@@ -3896,5 +3909,158 @@ mod tests {
                 result.expect_err("already checked is_ok")
             );
         }
+    }
+
+    // ============================================================================
+    // file:// credential key validation tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_custom_credential_file_uri_accepted() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "file:///vault/secrets/token".to_string(),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            env_var: Some("EXAMPLE_API_KEY".to_string()),
+        };
+        assert!(
+            validate_custom_credential("example", &cred).is_ok(),
+            "file:// URI with env_var should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_credential_file_uri_requires_env_var() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "file:///vault/secrets/token".to_string(),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            env_var: None,
+        };
+        let result = validate_custom_credential("example", &cred);
+        let err = result.expect_err("file:// URI without env_var should be rejected");
+        assert!(
+            err.to_string().contains("env_var is required"),
+            "error should mention env_var is required, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_credential_file_uri_invalid_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "file://relative/path".to_string(),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            env_var: Some("EXAMPLE_API_KEY".to_string()),
+        };
+        let result = validate_custom_credential("example", &cred);
+        let err = result.expect_err("file:// URI with relative path should be rejected");
+        assert!(
+            err.to_string().contains("file://"),
+            "error should mention file://, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_credential_file_uri_traversal_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "file:///vault/secrets/../../../etc/shadow".to_string(),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            env_var: Some("EXAMPLE_API_KEY".to_string()),
+        };
+        let result = validate_custom_credential("example", &cred);
+        assert!(
+            result.is_err(),
+            "file:// URI with path traversal should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_env_credentials_accepts_file_uri() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "file:///vault/secrets/api_token": "API_TOKEN"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        assert!(
+            validate_env_credential_keys(&profile).is_ok(),
+            "valid file:// URI in env_credentials should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_env_credentials_rejects_invalid_file_uri() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "file://relative/path": "API_TOKEN"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        let err = validate_env_credential_keys(&profile).expect_err("should reject");
+        assert!(
+            err.to_string().contains("file://"),
+            "error should mention file://, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_profile_json_with_file_uri_custom_credential_parses() {
+        // End-to-end: parse a profile JSON with a file:// custom credential
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("file-cred.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "file-cred-test" },
+                "network": {
+                    "custom_credentials": {
+                        "vault_service": {
+                            "upstream": "https://api.vault-service.com",
+                            "credential_key": "file:///vault/secrets/token",
+                            "env_var": "VAULT_API_KEY"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write profile");
+
+        let profile = parse_profile_file(&profile_path).expect("profile should parse");
+        let cred = profile
+            .network
+            .custom_credentials
+            .get("vault_service")
+            .expect("vault_service credential should exist");
+        assert_eq!(cred.credential_key, "file:///vault/secrets/token");
+        assert_eq!(cred.env_var, Some("VAULT_API_KEY".to_string()));
     }
 }
