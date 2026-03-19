@@ -146,15 +146,16 @@ pub fn load_secrets(
 /// Load a single secret, dispatching to the appropriate backend.
 ///
 /// Dispatch order:
-/// 1. `env://VAR` — reads from the process environment
-/// 2. `op://vault/item/field` — delegates to the 1Password CLI
-/// 3. `apple-password://server/account` — delegates to macOS `security`
-/// 4. Everything else — loads from the system keyring
+/// 1. `file:///path` — reads from a local file (before sandbox activation)
+/// 2. `env://VAR` — reads from the process environment
+/// 3. `op://vault/item/field` — delegates to the 1Password CLI
+/// 4. `apple-password://server/account` — delegates to macOS `security`
+/// 5. Everything else — loads from the system keyring
 ///
 /// # Arguments
 /// * `service` - Keyring service name (only used for keyring backend)
-/// * `credential_ref` - A keyring account name, `op://` URI, Apple Passwords URI,
-///   or `env://` URI
+/// * `credential_ref` - A keyring account name, `file://` URI, `op://` URI,
+///   Apple Passwords URI, or `env://` URI
 ///
 /// # Security
 /// The returned value is wrapped in `Zeroizing<String>`. For URI-based managers
@@ -164,7 +165,9 @@ pub fn load_secrets(
 /// internal buffers.
 #[must_use = "loaded secret should be used or explicitly dropped"]
 pub fn load_secret_by_ref(service: &str, credential_ref: &str) -> Result<Zeroizing<String>> {
-    if credential_ref.starts_with(ENV_URI_PREFIX) {
+    if credential_ref.starts_with(FILE_URI_PREFIX) {
+        load_from_file(credential_ref)
+    } else if credential_ref.starts_with(ENV_URI_PREFIX) {
         load_from_env(credential_ref)
     } else if credential_ref.starts_with(OP_URI_PREFIX) {
         load_from_op(credential_ref)
@@ -516,7 +519,6 @@ fn load_from_env(uri: &str) -> Result<Zeroizing<String>> {
 ///
 /// Returns `SecretNotFound` if the file does not exist or is empty/whitespace-only.
 /// Returns `KeystoreAccess` for other I/O errors (permissions, etc.).
-#[allow(dead_code)] // Wired into load_secret_by_ref in a follow-up task
 fn load_from_file(uri: &str) -> Result<Zeroizing<String>> {
     validate_file_uri(uri)?;
 
@@ -926,6 +928,32 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
                     }
                 };
                 mappings.insert(entry.to_string(), source_var.to_string());
+            }
+        } else if entry.starts_with(FILE_URI_PREFIX) {
+            // file:// URI: must have explicit =VAR_NAME suffix because
+            // you can't derive a meaningful env var name from a file path.
+            // Format: file:///path/to/secret=MY_VAR
+            if let Some(eq_pos) = entry.rfind('=') {
+                let uri = &entry[..eq_pos];
+                let var_name = &entry[eq_pos + 1..];
+
+                if var_name.is_empty() {
+                    return Err(NonoError::ConfigParse(format!(
+                        "file:// credential '{}' has '=' but no variable name. \
+                         Use format: file:///path/to/secret=MY_VAR",
+                        uri
+                    )));
+                }
+
+                validate_file_uri(uri)?;
+                validate_destination_env_var(var_name)?;
+                mappings.insert(uri.to_string(), var_name.to_string());
+            } else {
+                return Err(NonoError::ConfigParse(format!(
+                    "file:// credential '{}' requires an explicit target variable. \
+                     Use format: file:///path/to/secret=MY_VAR",
+                    entry
+                )));
             }
         } else if entry.starts_with(OP_URI_PREFIX) {
             // 1Password URI: must have =VAR_NAME suffix
@@ -2072,5 +2100,37 @@ mod tests {
         let uri = format!("file://{}", path.display());
         let result = load_from_file(&uri).unwrap();
         assert_eq!(result.as_str(), "glpat-xxxxxxxxxxxx");
+    }
+
+    // =========================================================================
+    // file:// dispatch and CLI mapping tests
+    // =========================================================================
+
+    #[test]
+    fn test_load_secret_by_ref_dispatches_file_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.txt");
+        std::fs::write(&path, "secret-value\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_secret_by_ref("nono", &uri);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "secret-value");
+    }
+
+    #[test]
+    fn test_build_mappings_file_uri_requires_explicit_var() {
+        let result = build_mappings_from_list("file:///vault/secrets/gitlab=GITLAB_TOKEN");
+        assert!(result.is_ok());
+        let mappings = result.unwrap();
+        assert_eq!(
+            mappings.get("file:///vault/secrets/gitlab"),
+            Some(&"GITLAB_TOKEN".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_mappings_file_uri_without_var_name_is_error() {
+        let result = build_mappings_from_list("file:///vault/secrets/gitlab");
+        assert!(result.is_err());
     }
 }
