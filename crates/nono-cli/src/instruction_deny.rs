@@ -1,153 +1,33 @@
-//! Instruction file deny rules for macOS Seatbelt profiles
+//! Write-protection rules for verified instruction files (macOS Seatbelt)
 //!
-//! Converts glob patterns from the trust policy's `instruction_patterns` into
-//! Seatbelt regex deny rules, and adds literal allow overrides for verified files.
+//! After the pre-exec trust scan verifies instruction files, this module
+//! injects literal `(deny file-write-data ...)` rules into the Seatbelt
+//! profile for each verified file. This makes verified instruction files
+//! structurally immutable at the kernel level — the agent cannot tamper
+//! with them even though the parent directory has write access granted.
 //!
-//! # Approach
+//! # Design
 //!
-//! On macOS, Seatbelt `(deny file-read-data (regex ...))` blocks reads even
-//! within `(allow file-read* (subpath ...))` directories. More specific
-//! `(allow file-read-data (literal ...))` rules override deny-regex rules.
+//! The trust policy's `instruction_patterns` define which files are scanned
+//! and verified. The pre-exec scan resolves every matching file to an
+//! absolute path with a concrete verification outcome. Only files that
+//! pass verification reach this module, and they receive literal write-deny
+//! rules keyed to their exact paths.
 //!
-//! This provides kernel-level instruction file protection:
-//! - Deny regex rules prevent reading ANY file matching instruction patterns
-//! - Literal allows re-enable reading for files that passed trust verification
-//! - Files created at runtime (e.g., by curl) are blocked by deny regex
+//! No regex deny-read rules are used. The pre-exec scan gates execution
+//! (aborting if any file fails verification), and the supervisor's
+//! `TrustInterceptor` handles runtime verification of files opened
+//! mid-session.
 
-use nono::trust::TrustPolicy;
 use nono::CapabilitySet;
 use nono::Result;
 #[cfg(target_os = "macos")]
 use std::path::Path;
 
-/// Convert a glob pattern to a Seatbelt regex string.
+/// Write-protect verified instruction files in the Seatbelt profile.
 ///
-/// Handles common glob constructs:
-/// - `*` matches any characters within a single path segment (not `/`)
-/// - `**` matches any number of path segments (including zero)
-/// - Literal characters are regex-escaped
-///
-/// The resulting regex is anchored to match at the end of path components,
-/// prefixed with `/` to ensure it matches complete filename components.
-///
-/// # Examples
-///
-/// - `SKILLS*` -> `#"/SKILLS[^/]*$"`
-/// - `CLAUDE*` -> `#"/CLAUDE[^/]*$"`
-/// - `.claude/**/*.md` -> `#"/\\.claude/.*/[^/]*\\.md$"`
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn glob_to_seatbelt_regex(pattern: &str) -> Result<String> {
-    if pattern.is_empty() {
-        return Err(nono::NonoError::ConfigParse(
-            "empty instruction pattern".to_string(),
-        ));
-    }
-
-    let mut regex = String::with_capacity(pattern.len().saturating_mul(2));
-    if !pattern.starts_with('/') {
-        regex.push('/');
-    }
-
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        match chars[i] {
-            '*' => {
-                if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    // `**` — match any path segments
-                    regex.push_str(".*");
-                    i += 2;
-                    // Skip trailing `/` after `**/`
-                    if i < chars.len() && chars[i] == '/' {
-                        regex.push('/');
-                        i += 1;
-                    }
-                } else {
-                    // Single `*` — match within one segment
-                    regex.push_str("[^/]*");
-                    i += 1;
-                }
-            }
-            '.' => {
-                regex.push_str("\\.");
-                i += 1;
-            }
-            '[' => {
-                regex.push_str("\\[");
-                i += 1;
-            }
-            ']' => {
-                regex.push_str("\\]");
-                i += 1;
-            }
-            '(' => {
-                regex.push_str("\\(");
-                i += 1;
-            }
-            ')' => {
-                regex.push_str("\\)");
-                i += 1;
-            }
-            '{' => {
-                regex.push_str("\\{");
-                i += 1;
-            }
-            '}' => {
-                regex.push_str("\\}");
-                i += 1;
-            }
-            '+' => {
-                regex.push_str("\\+");
-                i += 1;
-            }
-            '?' => {
-                regex.push_str("\\?");
-                i += 1;
-            }
-            '^' => {
-                regex.push_str("\\^");
-                i += 1;
-            }
-            '$' => {
-                regex.push_str("\\$");
-                i += 1;
-            }
-            '|' => {
-                regex.push_str("\\|");
-                i += 1;
-            }
-            '\\' => {
-                regex.push_str("\\\\");
-                i += 1;
-            }
-            '"' => {
-                regex.push_str("\\\"");
-                i += 1;
-            }
-            '/' => {
-                regex.push('/');
-                i += 1;
-            }
-            c => {
-                regex.push(c);
-                i += 1;
-            }
-        }
-    }
-
-    regex.push('$');
-
-    Ok(format!("(deny file-read-data (regex #\"{regex}\"))"))
-}
-
-/// Inject instruction file deny rules into a `CapabilitySet`.
-///
-/// For each pattern in the trust policy's `instruction_patterns`, adds a
-/// Seatbelt `(deny file-read-data (regex ...))` rule. For each verified
-/// file path, adds:
-/// - `(allow file-read-data (literal ...))` to permit reading
-/// - `(deny file-write-data (literal ...))` to prevent modification
+/// For each verified file path, adds a
+/// `(deny file-write-data (literal ...))` rule to prevent modification.
 ///
 /// On macOS, handles symlinks by emitting rules for both the original
 /// path and the canonical path when they differ (e.g., `/tmp/` vs
@@ -157,23 +37,13 @@ pub fn glob_to_seatbelt_regex(pattern: &str) -> Result<String> {
 ///
 /// # Errors
 ///
-/// Returns an error if pattern conversion fails or if `add_platform_rule`
-/// rejects a generated rule.
+/// Returns an error if `add_platform_rule` rejects a generated rule.
 #[cfg(target_os = "macos")]
-pub fn inject_instruction_deny_rules(
+pub fn write_protect_verified_files(
     caps: &mut CapabilitySet,
-    policy: &TrustPolicy,
     verified_paths: &[std::path::PathBuf],
 ) -> Result<()> {
-    // Add deny rules for each instruction pattern
-    for pattern in &policy.instruction_patterns {
-        let deny_rule = glob_to_seatbelt_regex(pattern)?;
-        caps.add_platform_rule(deny_rule)?;
-    }
-
-    // Add literal allows (read) and denies (write) for verified files
     for path in verified_paths {
-        add_literal_allow(caps, path)?;
         add_literal_write_deny(caps, path)?;
     }
 
@@ -182,40 +52,10 @@ pub fn inject_instruction_deny_rules(
 
 /// No-op on non-macOS platforms.
 #[cfg(not(target_os = "macos"))]
-pub fn inject_instruction_deny_rules(
+pub fn write_protect_verified_files(
     _caps: &mut CapabilitySet,
-    _policy: &TrustPolicy,
     _verified_paths: &[std::path::PathBuf],
 ) -> Result<()> {
-    Ok(())
-}
-
-/// Add a `(allow file-read-data (literal ...))` rule for a verified file.
-///
-/// On macOS, if the path contains symlinks (e.g., `/tmp` -> `/private/tmp`),
-/// emits rules for both the original and resolved paths.
-///
-/// Rejects paths containing characters that would break Seatbelt literal syntax
-/// (`"` and `\`), since these are not legitimate instruction file path characters
-/// and could allow sandbox rule injection.
-#[cfg(target_os = "macos")]
-fn add_literal_allow(caps: &mut CapabilitySet, path: &Path) -> Result<()> {
-    let path_str = path.display().to_string();
-    validate_seatbelt_path(&path_str)?;
-
-    let allow_rule = format!("(allow file-read-data (literal \"{path_str}\"))");
-    caps.add_platform_rule(allow_rule)?;
-
-    // Handle macOS symlinks: emit rule for canonical path too
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        if canonical != path {
-            let canonical_str = canonical.display().to_string();
-            validate_seatbelt_path(&canonical_str)?;
-            let canonical_rule = format!("(allow file-read-data (literal \"{canonical_str}\"))");
-            caps.add_platform_rule(canonical_rule)?;
-        }
-    }
-
     Ok(())
 }
 
@@ -268,140 +108,52 @@ fn validate_seatbelt_path(path_str: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    // -----------------------------------------------------------------------
-    // glob_to_seatbelt_regex
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn glob_skills_star_md() {
-        let rule = glob_to_seatbelt_regex("SKILLS*.md").unwrap();
-        assert_eq!(
-            rule,
-            "(deny file-read-data (regex #\"/SKILLS[^/]*\\.md$\"))"
-        );
-    }
-
-    #[test]
-    fn glob_claude_star_md() {
-        let rule = glob_to_seatbelt_regex("CLAUDE*.md").unwrap();
-        assert_eq!(
-            rule,
-            "(deny file-read-data (regex #\"/CLAUDE[^/]*\\.md$\"))"
-        );
-    }
-
-    #[test]
-    fn glob_agent_star_md() {
-        let rule = glob_to_seatbelt_regex("AGENT*.md").unwrap();
-        assert_eq!(rule, "(deny file-read-data (regex #\"/AGENT[^/]*\\.md$\"))");
-    }
-
-    #[test]
-    fn glob_dot_claude_recursive() {
-        let rule = glob_to_seatbelt_regex(".claude/**/*.md").unwrap();
-        assert_eq!(
-            rule,
-            "(deny file-read-data (regex #\"/\\.claude/.*/[^/]*\\.md$\"))"
-        );
-    }
-
-    #[test]
-    fn glob_copilot_instructions() {
-        let rule = glob_to_seatbelt_regex(".github/copilot-instructions.md").unwrap();
-        assert_eq!(
-            rule,
-            "(deny file-read-data (regex #\"/\\.github/copilot-instructions\\.md$\"))"
-        );
-    }
-
-    #[test]
-    fn glob_empty_returns_error() {
-        assert!(glob_to_seatbelt_regex("").is_err());
-    }
-
-    #[test]
-    fn glob_pattern_with_leading_slash_no_double_slash() {
-        // A pattern that already starts with '/' must not produce a double slash
-        let rule = glob_to_seatbelt_regex("/SKILLS*").unwrap();
-        assert_eq!(rule, "(deny file-read-data (regex #\"/SKILLS[^/]*$\"))");
-        assert!(!rule.contains("//"));
-    }
-
-    #[test]
-    fn glob_special_chars_escaped() {
-        let rule = glob_to_seatbelt_regex("test[1].md").unwrap();
-        assert_eq!(
-            rule,
-            "(deny file-read-data (regex #\"/test\\[1\\]\\.md$\"))"
-        );
-    }
-
-    #[test]
-    fn glob_double_star_at_start() {
-        let rule = glob_to_seatbelt_regex("**/*.md").unwrap();
-        assert_eq!(rule, "(deny file-read-data (regex #\"/.*/[^/]*\\.md$\"))");
-    }
-
-    #[test]
-    fn glob_quote_escaped_in_regex() {
-        let rule = glob_to_seatbelt_regex("test\"file.md").unwrap();
-        assert!(rule.contains("\\\""));
-        assert!(!rule.contains("\"test"));
+    fn write_protect_with_no_paths_is_noop() {
+        let mut caps = CapabilitySet::new();
+        write_protect_verified_files(&mut caps, &[]).unwrap();
+        assert!(caps.platform_rules().is_empty());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn literal_allow_rejects_path_with_quote() {
+    fn write_protect_adds_deny_write_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("SKILLS.md");
+        std::fs::write(&file, "content").unwrap();
+
         let mut caps = CapabilitySet::new();
-        let bad_path = Path::new("/tmp/SKILLS\") (allow file-write* (subpath \"/\")) ;.md");
-        let result = add_literal_allow(&mut caps, bad_path);
+        write_protect_verified_files(&mut caps, std::slice::from_ref(&file)).unwrap();
+
+        let rules = caps.platform_rules();
+        assert!(!rules.is_empty());
+        // Should have a write-deny rule for the file
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.contains("deny file-write-data")
+                    && r.contains(&file.display().to_string()))
+        );
+        // Should NOT have any read-deny rules
+        assert!(!rules.iter().any(|r| r.contains("deny file-read-data")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_protect_rejects_path_with_quote() {
+        let mut caps = CapabilitySet::new();
+        let bad_path =
+            std::path::PathBuf::from("/tmp/SKILLS\") (allow file-write* (subpath \"/\")) ;.md");
+        let result = write_protect_verified_files(&mut caps, &[bad_path]);
         assert!(result.is_err());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn literal_allow_rejects_path_with_backslash() {
+    fn write_protect_rejects_path_with_backslash() {
         let mut caps = CapabilitySet::new();
-        let bad_path = Path::new("/tmp/SKILLS\\.md");
-        let result = add_literal_allow(&mut caps, bad_path);
+        let bad_path = std::path::PathBuf::from("/tmp/SKILLS\\.md");
+        let result = write_protect_verified_files(&mut caps, &[bad_path]);
         assert!(result.is_err());
-    }
-
-    // -----------------------------------------------------------------------
-    // inject_instruction_deny_rules
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn inject_with_no_patterns_is_noop() {
-        let mut caps = CapabilitySet::new();
-        let policy = TrustPolicy {
-            instruction_patterns: Vec::new(),
-            ..TrustPolicy::default()
-        };
-
-        inject_instruction_deny_rules(&mut caps, &policy, &[]).unwrap();
-        assert!(caps.platform_rules().is_empty());
-    }
-
-    #[test]
-    fn inject_adds_deny_and_allow_rules() {
-        let mut caps = CapabilitySet::new();
-        let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS*".to_string()],
-            ..TrustPolicy::default()
-        };
-
-        // On macOS, we'd have actual deny rules. On other platforms, it's a no-op.
-        // Test the glob conversion at least.
-        let deny = glob_to_seatbelt_regex("SKILLS*").unwrap();
-        assert!(deny.starts_with("(deny"));
-
-        inject_instruction_deny_rules(&mut caps, &policy, &[]).unwrap();
-
-        #[cfg(target_os = "macos")]
-        assert_eq!(caps.platform_rules().len(), 1);
-
-        #[cfg(not(target_os = "macos"))]
-        assert!(caps.platform_rules().is_empty());
     }
 }

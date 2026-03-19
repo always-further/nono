@@ -665,15 +665,11 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             });
         }
 
-        // Inject instruction file deny rules into the Seatbelt profile (macOS only).
-        // Deny-regex rules block reading any file matching instruction patterns.
-        // Literal allows re-enable reading for files that passed verification.
+        // Write-protect verified instruction files in the Seatbelt profile (macOS).
+        // Literal deny-write rules make verified files structurally immutable at the
+        // kernel level, preventing the agent from tampering with them mid-session.
         let verified = result.verified_paths();
-        instruction_deny::inject_instruction_deny_rules(
-            &mut prepared.caps,
-            &trust_policy,
-            &verified,
-        )?;
+        instruction_deny::write_protect_verified_files(&mut prepared.caps, &verified)?;
 
         // Add verified multi-subject files as read-only capabilities.
         // This makes the files structurally immutable post-sandbox on both

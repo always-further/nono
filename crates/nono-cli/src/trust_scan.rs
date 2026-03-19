@@ -233,8 +233,9 @@ impl ScanResult {
 
     /// Collect the absolute paths of all verified instruction files.
     ///
-    /// These paths are used on macOS to inject literal `(allow file-read-data ...)`
-    /// rules that override the deny-regex for instruction file patterns.
+    /// These paths are used to write-protect verified files (literal
+    /// `(deny file-write-data ...)` rules on macOS) and to add read-only
+    /// capabilities so both platforms treat them as immutable.
     #[must_use]
     pub fn verified_paths(&self) -> Vec<PathBuf> {
         self.results
