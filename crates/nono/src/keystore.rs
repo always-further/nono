@@ -48,6 +48,10 @@ const APPLE_PASSWORDS_URI_PREFIX: &str = "apple-passwords://";
 /// The `env://` URI scheme prefix, indicating environment variable backend.
 const ENV_URI_PREFIX: &str = "env://";
 
+/// The `file://` URI scheme prefix, indicating a local file credential source.
+/// Read once at startup before sandbox activation; contents zeroed on drop.
+const FILE_URI_PREFIX: &str = "file://";
+
 /// Environment variable names that must never be loaded via `env://`.
 ///
 /// These control linker, interpreter, or shell behavior. Allowing them as
@@ -322,6 +326,12 @@ pub fn is_env_uri(credential_ref: &str) -> bool {
     credential_ref.starts_with(ENV_URI_PREFIX)
 }
 
+/// Check if a credential reference uses the `file://` scheme.
+#[must_use]
+pub fn is_file_uri(credential_ref: &str) -> bool {
+    credential_ref.starts_with(FILE_URI_PREFIX)
+}
+
 /// Validate an `env://VAR_NAME` URI.
 ///
 /// Accepts variable names containing only ASCII alphanumeric characters and
@@ -364,6 +374,58 @@ pub fn validate_env_uri(uri: &str) -> Result<()> {
         return Err(NonoError::ConfigParse(format!(
             "env:// cannot read dangerous environment variable: {}",
             var_name
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a `file://` URI for local file credential sources.
+///
+/// Expected format: `file:///absolute/path` (triple slash for absolute paths).
+///
+/// Rejects:
+/// - Non-absolute paths (must start with `/` after `file://`)
+/// - Empty or root-only paths
+/// - Path traversal (`..` components)
+/// - Dangerous characters (null, newline, semicolons, backticks, pipes, shell expansion)
+pub fn validate_file_uri(uri: &str) -> Result<()> {
+    let path_str = uri.strip_prefix(FILE_URI_PREFIX).ok_or_else(|| {
+        NonoError::ConfigParse(format!(
+            "credential reference '{}' does not start with '{}'",
+            uri, FILE_URI_PREFIX
+        ))
+    })?;
+
+    if !path_str.starts_with('/') {
+        return Err(NonoError::ConfigParse(format!(
+            "file:// URI must use an absolute path (file:///path), got: {}",
+            uri
+        )));
+    }
+
+    let meaningful = path_str.trim_end_matches('/');
+    if meaningful.is_empty() || meaningful == "/" {
+        return Err(NonoError::ConfigParse(format!(
+            "file:// URI path is empty: {}",
+            uri
+        )));
+    }
+
+    for component in std::path::Path::new(path_str).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(NonoError::ConfigParse(format!(
+                "file:// URI must not contain path traversal (..): {}",
+                uri
+            )));
+        }
+    }
+
+    const FORBIDDEN_FILE_CHARS: &[char] = &['\0', '\n', '\r', ';', '`', '|', '$', '&', '>', '<'];
+    if let Some(bad) = path_str.chars().find(|c| FORBIDDEN_FILE_CHARS.contains(c)) {
+        return Err(NonoError::ConfigParse(format!(
+            "file:// URI contains forbidden character {:?}: {}",
+            bad, uri
         )));
     }
 
@@ -1870,5 +1932,53 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged.get("openai_api_key"), Some(&"FROM_MAP".to_string()));
+    }
+
+    // =========================================================================
+    // file:// URI tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_file_uri_valid_absolute_path() {
+        assert!(validate_file_uri("file:///vault/secrets/gitlab").is_ok());
+        assert!(validate_file_uri("file:///tmp/secret.txt").is_ok());
+        assert!(validate_file_uri("file:///etc/ssl/certs/ca.pem").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_uri_rejects_empty_path() {
+        assert!(validate_file_uri("file://").is_err());
+        assert!(validate_file_uri("file:///").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_uri_rejects_relative_path() {
+        assert!(validate_file_uri("file://relative/path").is_err());
+        assert!(validate_file_uri("file://./secret").is_err());
+        assert!(validate_file_uri("file://../escape").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_uri_rejects_traversal() {
+        assert!(validate_file_uri("file:///vault/secrets/../../../etc/shadow").is_err());
+        assert!(validate_file_uri("file:///tmp/../../root/.ssh/id_rsa").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_uri_rejects_forbidden_characters() {
+        assert!(validate_file_uri("file:///tmp/secret;rm -rf /").is_err());
+        assert!(validate_file_uri("file:///tmp/secret\nnewline").is_err());
+        assert!(validate_file_uri("file:///tmp/secret\x00null").is_err());
+    }
+
+    #[test]
+    fn test_is_file_uri() {
+        assert!(is_file_uri("file:///vault/secrets/gitlab"));
+        assert!(!is_file_uri("env://MY_VAR"));
+        assert!(!is_file_uri("/vault/secrets/gitlab"));
+        // Note: is_file_uri is a scheme detector, not a validator.
+        // "file://relative" starts with "file://" so it matches the scheme.
+        // Validation (absolute path check) happens in validate_file_uri.
+        assert!(is_file_uri("file://relative"));
     }
 }
