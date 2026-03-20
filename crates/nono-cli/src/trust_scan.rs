@@ -39,9 +39,7 @@ pub fn load_scan_policy(root: &Path, trust_override: bool) -> Result<TrustPolicy
         None
     };
 
-    let user_path = crate::profile::resolve_user_config_dir()
-        .ok()
-        .map(|d| d.join("nono").join("trust-policy.json"));
+    let user_path = crate::trust_cmd::user_trust_policy_path();
 
     let user = if let Some(ref path) = user_path {
         if path.exists() {
@@ -270,7 +268,7 @@ pub fn run_pre_exec_scan(
     policy: &TrustPolicy,
     silent: bool,
 ) -> Result<ScanResult> {
-    let files = trust::find_instruction_files(policy, scan_root)?;
+    let files = trust::find_included_files(policy, scan_root)?;
     let multi_bundle = trust::multi_subject_bundle_path(scan_root);
     let has_multi_bundle = multi_bundle.exists();
 
@@ -398,7 +396,7 @@ fn check_missing_literal_patterns(
 
     let mut missing = Vec::new();
 
-    for pattern in &policy.instruction_patterns {
+    for pattern in &policy.includes {
         if is_glob_pattern(pattern) {
             continue;
         }
@@ -423,7 +421,7 @@ fn check_missing_literal_patterns(
                 "literal pattern(s) in trust policy have no matching file. \
                  On macOS, missing files could be created mid-session with untrusted content \
                  (no runtime interception). \
-                 Remove the pattern from instruction_patterns or create and sign the file(s): {}",
+                 Remove the pattern from includes or create and sign the file(s): {}",
                 missing.join(", ")
             ),
         }),
@@ -919,7 +917,7 @@ mod tests {
         std::fs::write(dir.path().join("SKILLS.md"), "# Skills").unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             enforcement: Enforcement::Warn,
             ..TrustPolicy::default()
         };
@@ -936,7 +934,7 @@ mod tests {
         std::fs::write(dir.path().join("CLAUDE.md"), "# Claude").unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["CLAUDE.md".to_string()],
+            includes: vec!["CLAUDE.md".to_string()],
             enforcement: Enforcement::Deny,
             ..TrustPolicy::default()
         };
@@ -955,7 +953,7 @@ mod tests {
         let digest = trust::bytes_digest(content);
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             enforcement: Enforcement::Audit, // Even audit blocks blocklisted files
             blocklist: trust::Blocklist {
                 digests: vec![trust::BlocklistEntry {
@@ -980,7 +978,7 @@ mod tests {
         std::fs::write(dir.path().join("CLAUDE.md"), "# Claude").unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string(), "CLAUDE.md".to_string()],
+            includes: vec!["SKILLS.md".to_string(), "CLAUDE.md".to_string()],
             enforcement: Enforcement::Audit,
             ..TrustPolicy::default()
         };
@@ -1055,7 +1053,7 @@ mod tests {
         // Create a policy file with no .bundle — should still load with trust_override=true
         std::fs::write(
             dir.path().join("trust-policy.json"),
-            r#"{"version":1,"instruction_patterns":["SKILLS*","CLAUDE*"],"publishers":[],"blocklist":{"digests":[],"publishers":[]},"enforcement":"warn"}"#,
+            r#"{"version":1,"includes":["SKILLS*","CLAUDE*"],"publishers":[],"blocklist":{"digests":[],"publishers":[]},"enforcement":"warn"}"#,
         )
         .unwrap();
 
@@ -1108,7 +1106,7 @@ mod tests {
         std::fs::write(&bundle_path, &bundle_json).unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: Vec::new(), // no instruction patterns — multi-subject only
+            includes: Vec::new(), // no instruction patterns — multi-subject only
             enforcement: Enforcement::Deny,
             publishers: vec![trust::Publisher {
                 name: "test".to_string(),
@@ -1156,7 +1154,7 @@ mod tests {
         std::fs::write(dir.path().join("b.py"), b"TAMPERED").unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: Vec::new(),
+            includes: Vec::new(),
             enforcement: Enforcement::Deny,
             publishers: vec![trust::Publisher {
                 name: "test".to_string(),
@@ -1200,7 +1198,7 @@ mod tests {
         std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: Vec::new(),
+            includes: Vec::new(),
             enforcement: Enforcement::Deny,
             publishers: vec![trust::Publisher {
                 name: "test".to_string(),
@@ -1237,7 +1235,7 @@ mod tests {
         std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: Vec::new(),
+            includes: Vec::new(),
             enforcement: Enforcement::Deny,
             publishers: vec![trust::Publisher {
                 name: "test".to_string(),
@@ -1279,7 +1277,7 @@ mod tests {
         let other_pub_b64 = nono::trust::base64::base64_encode(other_pub_bytes.as_bytes());
 
         let policy = TrustPolicy {
-            instruction_patterns: Vec::new(),
+            includes: Vec::new(),
             enforcement: Enforcement::Deny,
             publishers: vec![trust::Publisher {
                 name: "other".to_string(),
@@ -1316,7 +1314,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // SKILLS.md is listed in the policy but does not exist on disk
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             enforcement: Enforcement::Deny,
             ..TrustPolicy::default()
         };
@@ -1332,7 +1330,7 @@ mod tests {
     fn missing_literal_pattern_warns_with_warn_enforcement() {
         let dir = tempfile::tempdir().unwrap();
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             enforcement: Enforcement::Warn,
             ..TrustPolicy::default()
         };
@@ -1346,7 +1344,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Glob pattern — absence just means "no current matches"
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS*".to_string()],
+            includes: vec!["SKILLS*".to_string()],
             enforcement: Enforcement::Deny,
             ..TrustPolicy::default()
         };
@@ -1361,7 +1359,7 @@ mod tests {
         std::fs::write(dir.path().join("SKILLS.md"), "# Skills").unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             enforcement: Enforcement::Deny,
             ..TrustPolicy::default()
         };

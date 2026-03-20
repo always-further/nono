@@ -28,6 +28,7 @@ mod terminal_approval;
 mod theme;
 mod trust_cmd;
 mod trust_intercept;
+mod trust_keystore;
 mod trust_scan;
 mod update_check;
 
@@ -1084,7 +1085,7 @@ impl ExecutionFlags {
 }
 
 fn trust_interception_active(policy: Option<&nono::trust::TrustPolicy>) -> bool {
-    policy.is_some_and(|policy| !policy.instruction_patterns.is_empty())
+    policy.is_some_and(|policy| !policy.includes.is_empty())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2580,9 +2581,9 @@ mod tests {
     }
 
     #[test]
-    fn test_trust_interception_active_when_instruction_patterns_exist() {
+    fn test_trust_interception_active_when_includes_exist() {
         let policy = nono::trust::TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             ..nono::trust::TrustPolicy::default()
         };
 

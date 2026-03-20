@@ -52,8 +52,8 @@ pub struct TrustVerified {
 pub struct TrustInterceptor {
     /// Trust policy for evaluation
     policy: TrustPolicy,
-    /// Compiled instruction file pattern matcher
-    matcher: trust::InstructionPatterns,
+    /// Compiled include pattern matcher
+    matcher: trust::IncludePatterns,
     /// Verification result cache keyed by canonical path
     cache: HashMap<PathBuf, CacheEntry>,
     /// Project root for computing relative paths in pattern matching
@@ -64,13 +64,13 @@ impl TrustInterceptor {
     /// Create a new trust interceptor from a trust policy and project root.
     ///
     /// The `project_root` is used to compute relative paths from absolute paths
-    /// for instruction file pattern matching (e.g., `.claude/**/*.md`).
+    /// for include pattern matching (e.g., `.claude/**/*.md`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the instruction patterns cannot be compiled.
+    /// Returns an error if the include patterns cannot be compiled.
     pub fn new(policy: TrustPolicy, project_root: PathBuf) -> nono::Result<Self> {
-        let matcher = policy.instruction_matcher()?;
+        let matcher = policy.include_matcher()?;
         Ok(Self {
             policy,
             matcher,
@@ -434,7 +434,7 @@ mod tests {
         std::fs::write(&skills, "# Skills").unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             ..TrustPolicy::default()
         };
         let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
@@ -451,7 +451,7 @@ mod tests {
         std::fs::write(&skills, "# Skills").unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             enforcement: trust::Enforcement::Warn,
             ..TrustPolicy::default()
         };
@@ -472,7 +472,7 @@ mod tests {
         std::fs::write(&skills, "# Skills v1").unwrap();
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             enforcement: trust::Enforcement::Warn,
             ..TrustPolicy::default()
         };
@@ -500,7 +500,7 @@ mod tests {
         let digest = trust::bytes_digest(content);
 
         let policy = TrustPolicy {
-            instruction_patterns: vec!["SKILLS.md".to_string()],
+            includes: vec!["SKILLS.md".to_string()],
             enforcement: trust::Enforcement::Audit,
             blocklist: trust::Blocklist {
                 digests: vec![trust::BlocklistEntry {

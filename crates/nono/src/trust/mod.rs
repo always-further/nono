@@ -1,13 +1,12 @@
-//! Instruction file attestation and integrity verification
+//! File attestation and integrity verification
 //!
 //! This module provides types, digest computation, and trust policy primitives
-//! for verifying the provenance of instruction files (SKILLS.md, CLAUDE.md,
-//! AGENT.MD, etc.) before an AI agent ingests them.
+//! for verifying the provenance and integrity of files before they are consumed.
 //!
 //! # Architecture
 //!
 //! ```text
-//! instruction file --> digest --> blocklist check --> bundle verify --> publisher match --> allow/deny
+//! file --> digest --> blocklist check --> bundle verify --> publisher match --> allow/deny
 //! ```
 //!
 //! The library provides attestation primitives reusable by all language bindings.
@@ -53,8 +52,7 @@ pub use dsse::{
     NONO_POLICY_PREDICATE_TYPE, NONO_PREDICATE_TYPE,
 };
 pub use policy::{
-    evaluate_file, find_instruction_files, load_policy_from_file, load_policy_from_str,
-    merge_policies,
+    evaluate_file, find_included_files, load_policy_from_file, load_policy_from_str, merge_policies,
 };
 pub use signing::{
     export_public_key, generate_signing_key, key_id_hex, sign_bytes, sign_files,
@@ -62,6 +60,6 @@ pub use signing::{
     SigningScheme, MAX_MULTI_SUBJECT_FILES,
 };
 pub use types::{
-    BlockedPublisher, Blocklist, BlocklistEntry, Enforcement, InstructionPatterns, Publisher,
+    BlockedPublisher, Blocklist, BlocklistEntry, Enforcement, IncludePatterns, Publisher,
     SignerIdentity, TrustPolicy, VerificationOutcome, VerificationResult, TRUST_POLICY_VERSION,
 };

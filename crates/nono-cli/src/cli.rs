@@ -38,7 +38,7 @@ const STYLES: Styles = Styles::plain().header(Style::new().bold());
 \x1b[1mSESSION MANAGEMENT\x1b[0m
   rollback   Manage rollback sessions (browse, restore, cleanup)
   audit      View audit trail of sandboxed commands
-  trust      Manage instruction file trust and attestation
+  trust      Manage file trust and attestation
 
 \x1b[1mPOLICY & PROFILES\x1b[0m
   policy     Inspect policy groups, profiles, and security rules
@@ -227,7 +227,7 @@ pub enum Commands {
 ")]
     Audit(AuditArgs),
 
-    /// Manage instruction file trust and attestation
+    /// Manage file trust and attestation
     #[command(subcommand_help_heading = "COMMANDS", disable_help_subcommand = true)]
     #[command(help_template = "\
 {about}
@@ -240,8 +240,8 @@ pub enum Commands {
     #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
   nono trust sign SKILLS.md                    # Sign with default keystore key
   nono trust sign SKILLS.md --key my-key       # Sign with a specific key ID
-  nono trust verify SKILLS.md                  # Verify an instruction file
-  nono trust verify --all                      # Verify all instruction files
+  nono trust verify SKILLS.md                  # Verify a file
+  nono trust verify --all                      # Verify all files matching policy
   nono trust list                              # List files and verification status
   nono trust keygen                            # Generate a new signing key pair
 ")]
@@ -866,7 +866,7 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "rollback", help_heading = "OPTIONS")]
     pub no_audit: bool,
 
-    /// Disable trust verification for instruction files (not recommended for production)
+    /// Disable trust verification (not recommended for production)
     #[arg(long, help_heading = "OPTIONS")]
     pub trust_override: bool,
 
@@ -1084,6 +1084,7 @@ pub enum RollbackCommands {
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct RollbackListArgs {
     /// Show only the N most recent sessions
     #[arg(long, value_name = "N")]
@@ -1100,9 +1101,14 @@ pub struct RollbackListArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct RollbackShowArgs {
     /// Session ID (e.g., 20260214-143022-12345)
     pub session_id: String,
@@ -1122,9 +1128,14 @@ pub struct RollbackShowArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct RollbackRestoreArgs {
     /// Session ID (e.g., 20260214-143022-12345)
     pub session_id: String,
@@ -1136,15 +1147,25 @@ pub struct RollbackRestoreArgs {
     /// Show what would change without modifying files
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct RollbackVerifyArgs {
     /// Session ID (e.g., 20260214-143022-12345)
     pub session_id: String,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct RollbackCleanupArgs {
     /// Retain N newest sessions (default: from config, usually 10)
     #[arg(long, value_name = "N")]
@@ -1161,6 +1182,10 @@ pub struct RollbackCleanupArgs {
     /// Remove all sessions (requires confirmation)
     #[arg(long)]
     pub all: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1187,6 +1212,7 @@ pub enum AuditCommands {
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct AuditListArgs {
     /// Show only sessions from today
     #[arg(long)]
@@ -1215,9 +1241,14 @@ pub struct AuditListArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct AuditShowArgs {
     /// Session ID (e.g., 20260214-143022-12345)
     pub session_id: String,
@@ -1225,6 +1256,10 @@ pub struct AuditShowArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,13 +1281,13 @@ pub struct TrustArgs {
 pub enum TrustCommands {
     /// Create a trust-policy.json in the current directory
     Init(TrustInitArgs),
-    /// Sign an instruction file, producing a .bundle alongside it
+    /// Sign a file, producing a .bundle alongside it
     Sign(TrustSignArgs),
     /// Sign a trust policy file, producing a .bundle alongside it
     SignPolicy(TrustSignPolicyArgs),
-    /// Verify an instruction file's bundle against the trust policy
+    /// Verify a file's bundle against the trust policy
     Verify(TrustVerifyArgs),
-    /// List instruction files and their verification status
+    /// List files and their verification status
     List(TrustListArgs),
     /// Generate a new ECDSA P-256 signing key pair
     Keygen(TrustKeygenArgs),
@@ -1261,12 +1296,13 @@ pub enum TrustCommands {
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct TrustSignArgs {
     /// Instruction file(s) to sign
     #[arg(required_unless_present = "all")]
     pub files: Vec<PathBuf>,
 
-    /// Sign all instruction files matching trust policy patterns in CWD
+    /// Sign all files matching trust policy patterns in CWD
     #[arg(long)]
     pub all: bool,
 
@@ -1278,12 +1314,21 @@ pub struct TrustSignArgs {
     #[arg(long)]
     pub keyless: bool,
 
+    /// Produce a single .nono-trust.bundle containing all subjects instead of per-file bundles
+    #[arg(long)]
+    pub multi_subject: bool,
+
     /// Trust policy file (default: auto-discover)
     #[arg(long, value_name = "FILE")]
     pub policy: Option<PathBuf>,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct TrustSignPolicyArgs {
     /// Trust policy file to sign (default: trust-policy.json in CWD)
     pub file: Option<PathBuf>,
@@ -1291,43 +1336,58 @@ pub struct TrustSignPolicyArgs {
     /// Key ID to use from the system keystore (default: "default")
     #[arg(long, value_name = "KEY_ID")]
     pub key: Option<String>,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct TrustVerifyArgs {
     /// Instruction file(s) to verify
     #[arg(required_unless_present = "all")]
     pub files: Vec<PathBuf>,
 
-    /// Verify all instruction files matching trust policy patterns in CWD
+    /// Verify all files matching trust policy patterns in CWD
     #[arg(long)]
     pub all: bool,
 
     /// Trust policy file (default: auto-discover)
     #[arg(long, value_name = "FILE")]
     pub policy: Option<PathBuf>,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct TrustInitArgs {
-    /// Scan subdirectories recursively for files to include as patterns
-    #[arg(long, short = 'r')]
-    pub recursive: bool,
-
-    /// Additional directories to exclude from scanning (on top of .gitignore and built-in list)
-    #[arg(long, value_name = "DIR", num_args = 1..)]
-    pub exclude_dirs: Vec<String>,
+    /// Glob patterns for files to include in the trust policy (e.g., "*.md", "*.py", "SKILLS.md")
+    #[arg(long, value_name = "PATTERN", num_args = 1..)]
+    pub include: Vec<String>,
 
     /// Key ID to include as a publisher (default: "default")
     #[arg(long, value_name = "KEY_ID")]
     pub key: Option<String>,
 
+    /// Create a user-level policy at ~/.config/nono/ instead of the current directory
+    #[arg(long)]
+    pub user: bool,
+
     /// Overwrite existing trust-policy.json
     #[arg(long)]
     pub force: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct TrustListArgs {
     /// Trust policy file (default: auto-discover)
     #[arg(long, value_name = "FILE")]
@@ -1336,9 +1396,14 @@ pub struct TrustListArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct TrustKeygenArgs {
     /// Key identifier (stored in system keystore under this name)
     #[arg(long, value_name = "NAME", default_value = "default")]
@@ -1347,9 +1412,14 @@ pub struct TrustKeygenArgs {
     /// Overwrite existing key with the same ID
     #[arg(long)]
     pub force: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[derive(Parser, Debug)]
+#[command(disable_help_flag = true)]
 pub struct TrustExportKeyArgs {
     /// Key identifier to export (default: "default")
     #[arg(long, value_name = "NAME", default_value = "default")]
@@ -1358,6 +1428,10 @@ pub struct TrustExportKeyArgs {
     /// Output as PEM instead of base64 DER
     #[arg(long)]
     pub pem: bool,
+
+    /// Print help
+    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
+    pub help: Option<bool>,
 }
 
 #[cfg(test)]
@@ -1680,10 +1754,9 @@ mod tests {
         match cli.command {
             Commands::Trust(args) => match args.command {
                 TrustCommands::Init(init_args) => {
-                    assert!(!init_args.recursive);
                     assert!(!init_args.force);
                     assert!(init_args.key.is_none());
-                    assert!(init_args.exclude_dirs.is_empty());
+                    assert!(init_args.include.is_empty());
                 }
                 _ => panic!("Expected Init subcommand"),
             },
@@ -1692,23 +1765,21 @@ mod tests {
     }
 
     #[test]
-    fn test_trust_init_recursive_with_excludes() {
+    fn test_trust_init_with_includes() {
         let cli = Cli::parse_from([
             "nono",
             "trust",
             "init",
-            "-r",
-            "--exclude-dirs",
-            "tmp",
-            "logs",
+            "--include",
+            "*.md",
+            "*.py",
             "--force",
         ]);
         match cli.command {
             Commands::Trust(args) => match args.command {
                 TrustCommands::Init(init_args) => {
-                    assert!(init_args.recursive);
                     assert!(init_args.force);
-                    assert_eq!(init_args.exclude_dirs, vec!["tmp", "logs"]);
+                    assert_eq!(init_args.include, vec!["*.md", "*.py"]);
                 }
                 _ => panic!("Expected Init subcommand"),
             },
@@ -1754,6 +1825,22 @@ mod tests {
                 TrustCommands::Sign(sign_args) => {
                     assert!(sign_args.all);
                     assert!(sign_args.files.is_empty());
+                    assert!(!sign_args.multi_subject);
+                }
+                _ => panic!("Expected Sign subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_sign_multi_subject() {
+        let cli = Cli::parse_from(["nono", "trust", "sign", "--all", "--multi-subject"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::Sign(sign_args) => {
+                    assert!(sign_args.all);
+                    assert!(sign_args.multi_subject);
                 }
                 _ => panic!("Expected Sign subcommand"),
             },

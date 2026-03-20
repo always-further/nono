@@ -1,4 +1,4 @@
-//! Core types for instruction file attestation
+//! Core types for file attestation
 //!
 //! Defines the trust policy structure, publisher identities, blocklist entries,
 //! and verification results used throughout the attestation pipeline.
@@ -11,7 +11,7 @@ use std::path::Path;
 /// Current supported trust policy format version.
 pub const TRUST_POLICY_VERSION: u32 = 1;
 
-/// Trust policy for instruction file verification.
+/// Trust policy for file verification.
 ///
 /// Loaded from `trust-policy.json` files at embedded, user, and project levels.
 /// Multiple policies are merged: publishers and blocklist entries are unioned,
@@ -20,8 +20,9 @@ pub const TRUST_POLICY_VERSION: u32 = 1;
 pub struct TrustPolicy {
     /// Policy format version
     pub version: u32,
-    /// Glob patterns identifying instruction files
-    pub instruction_patterns: Vec<String>,
+    /// Glob patterns identifying files under attestation
+    #[serde(alias = "instruction_patterns")]
+    pub includes: Vec<String>,
     /// Trusted publisher identities
     pub publishers: Vec<Publisher>,
     /// Known-malicious file digests
@@ -34,7 +35,7 @@ impl Default for TrustPolicy {
     fn default() -> Self {
         Self {
             version: 1,
-            instruction_patterns: Vec::new(),
+            includes: Vec::new(),
             publishers: Vec::new(),
             blocklist: Blocklist::default(),
             enforcement: Enforcement::default(),
@@ -45,8 +46,8 @@ impl Default for TrustPolicy {
 impl TrustPolicy {
     /// Maximum number of blocklist entries to prevent resource exhaustion.
     const MAX_BLOCKLIST_ENTRIES: usize = 10_000;
-    /// Maximum number of instruction patterns to prevent regex compilation exhaustion.
-    const MAX_INSTRUCTION_PATTERNS: usize = 100;
+    /// Maximum number of include patterns to prevent regex compilation exhaustion.
+    const MAX_INCLUDES: usize = 100;
     /// Maximum number of publishers.
     const MAX_PUBLISHERS: usize = 1_000;
 
@@ -70,11 +71,11 @@ impl TrustPolicy {
                 Self::MAX_BLOCKLIST_ENTRIES
             )));
         }
-        if self.instruction_patterns.len() > Self::MAX_INSTRUCTION_PATTERNS {
+        if self.includes.len() > Self::MAX_INCLUDES {
             return Err(NonoError::TrustPolicy(format!(
-                "instruction_patterns has {} entries (max {})",
-                self.instruction_patterns.len(),
-                Self::MAX_INSTRUCTION_PATTERNS
+                "includes has {} entries (max {})",
+                self.includes.len(),
+                Self::MAX_INCLUDES
             )));
         }
         if self.publishers.len() > Self::MAX_PUBLISHERS {
@@ -87,13 +88,13 @@ impl TrustPolicy {
         Ok(())
     }
 
-    /// Build an [`InstructionPatterns`] matcher from this policy's patterns.
+    /// Build an [`IncludePatterns`] matcher from this policy's `includes` patterns.
     ///
     /// # Errors
     ///
     /// Returns `NonoError::TrustPolicy` if any glob pattern is invalid.
-    pub fn instruction_matcher(&self) -> Result<InstructionPatterns> {
-        InstructionPatterns::new(&self.instruction_patterns)
+    pub fn include_matcher(&self) -> Result<IncludePatterns> {
+        IncludePatterns::new(&self.includes)
     }
 
     /// Check if a file digest is on the blocklist.
@@ -338,16 +339,16 @@ impl Enforcement {
     }
 }
 
-/// Compiled glob matcher for instruction file patterns.
+/// Compiled glob matcher for trust policy include patterns.
 ///
-/// Wraps a [`GlobSet`] built from the trust policy's `instruction_patterns`.
+/// Wraps a [`GlobSet`] built from the trust policy's `includes` field.
 #[derive(Debug, Clone)]
-pub struct InstructionPatterns {
+pub struct IncludePatterns {
     glob_set: GlobSet,
     patterns: Vec<String>,
 }
 
-impl InstructionPatterns {
+impl IncludePatterns {
     /// Compile a set of glob patterns into a matcher.
     ///
     /// # Errors
@@ -357,12 +358,12 @@ impl InstructionPatterns {
         let mut builder = GlobSetBuilder::new();
         for pattern in patterns {
             let glob = Glob::new(pattern).map_err(|e| {
-                NonoError::TrustPolicy(format!("invalid instruction pattern '{pattern}': {e}"))
+                NonoError::TrustPolicy(format!("invalid include pattern '{pattern}': {e}"))
             })?;
             builder.add(glob);
         }
         let glob_set = builder.build().map_err(|e| {
-            NonoError::TrustPolicy(format!("failed to build instruction pattern matcher: {e}"))
+            NonoError::TrustPolicy(format!("failed to build include pattern matcher: {e}"))
         })?;
         Ok(Self {
             glob_set,
@@ -370,7 +371,7 @@ impl InstructionPatterns {
         })
     }
 
-    /// Check if a path matches any instruction file pattern.
+    /// Check if a path matches any include pattern.
     #[must_use]
     pub fn is_match<P: AsRef<Path>>(&self, path: P) -> bool {
         self.glob_set.is_match(path)
@@ -407,7 +408,7 @@ pub enum SignerIdentity {
     },
 }
 
-/// Outcome of verifying an instruction file.
+/// Outcome of verifying a file against the trust policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VerificationOutcome {
     /// File verified successfully against a trusted publisher
@@ -462,7 +463,7 @@ impl VerificationOutcome {
     }
 }
 
-/// Complete verification result for an instruction file.
+/// Complete verification result for a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationResult {
     /// Path to the verified file
@@ -481,7 +482,7 @@ mod tests {
     fn sample_policy() -> TrustPolicy {
         TrustPolicy {
             version: 1,
-            instruction_patterns: vec![
+            includes: vec![
                 "SKILLS*.md".to_string(),
                 "CLAUDE*.md".to_string(),
                 "AGENT*.md".to_string(),
@@ -522,9 +523,9 @@ mod tests {
     }
 
     #[test]
-    fn instruction_patterns_match() {
+    fn includes_match() {
         let policy = sample_policy();
-        let matcher = policy.instruction_matcher().unwrap();
+        let matcher = policy.include_matcher().unwrap();
         assert!(matcher.is_match("SKILLS.md"));
         assert!(matcher.is_match("SKILLS-custom.md"));
         assert!(matcher.is_match("CLAUDE.md"));
@@ -539,16 +540,16 @@ mod tests {
     }
 
     #[test]
-    fn instruction_patterns_returns_originals() {
+    fn includes_returns_originals() {
         let policy = sample_policy();
-        let matcher = policy.instruction_matcher().unwrap();
+        let matcher = policy.include_matcher().unwrap();
         assert_eq!(matcher.patterns().len(), 5);
         assert_eq!(matcher.patterns()[0], "SKILLS*.md");
     }
 
     #[test]
-    fn instruction_patterns_invalid_glob() {
-        let result = InstructionPatterns::new(&["[invalid".to_string()]);
+    fn includes_invalid_glob() {
+        let result = IncludePatterns::new(&["[invalid".to_string()]);
         assert!(result.is_err());
     }
 

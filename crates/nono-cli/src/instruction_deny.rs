@@ -1,14 +1,14 @@
-//! Write-protection rules for verified instruction files (macOS Seatbelt)
+//! Write-protection rules for verified files (macOS Seatbelt)
 //!
-//! After the pre-exec trust scan verifies instruction files, this module
-//! injects literal `(deny file-write-data ...)` rules into the Seatbelt
-//! profile for each verified file. This makes verified instruction files
-//! structurally immutable at the kernel level — the agent cannot tamper
-//! with them even though the parent directory has write access granted.
+//! After the pre-exec trust scan verifies files, this module injects
+//! literal `(deny file-write-data ...)` rules into the Seatbelt profile
+//! for each verified file. This makes verified files structurally immutable
+//! at the kernel level — the agent cannot tamper with them even though the
+//! parent directory has write access granted.
 //!
 //! # Design
 //!
-//! The trust policy's `instruction_patterns` define which files are scanned
+//! The trust policy's `includes` patterns define which files are scanned
 //! and verified. The pre-exec scan resolves every matching file to an
 //! absolute path with a concrete verification outcome. Only files that
 //! pass verification reach this module, and they receive literal write-deny
@@ -24,7 +24,7 @@ use nono::Result;
 #[cfg(target_os = "macos")]
 use std::path::Path;
 
-/// Write-protect verified instruction files in the Seatbelt profile.
+/// Write-protect verified files in the Seatbelt profile.
 ///
 /// For each verified file path, adds a
 /// `(deny file-write-data (literal ...))` rule to prevent modification.
@@ -59,9 +59,9 @@ pub fn write_protect_verified_files(
     Ok(())
 }
 
-/// Add a `(deny file-write-data (literal ...))` rule for a verified instruction file.
+/// Add a `(deny file-write-data (literal ...))` rule for a verified file.
 ///
-/// This prevents modification of signed instruction files even when the parent
+/// This prevents modification of signed files even when the parent
 /// directory has write access granted. The deny rule takes precedence over
 /// directory-level `(allow file-write* (subpath ...))` rules.
 ///

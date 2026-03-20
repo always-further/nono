@@ -1,6 +1,6 @@
 #!/bin/bash
 # Trust CLI Tests
-# Tests the trust command lifecycle: key generation, signing, verification, listing
+# Tests trust policy scaffolding, signing, verification, listing, and startup checks
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/test_helpers.sh"
@@ -9,20 +9,172 @@ echo ""
 echo -e "${BLUE}=== Trust CLI Tests ===${NC}"
 
 verify_nono_binary
+NONO_BIN="$(cd "$(dirname "$NONO_BIN")" && pwd)/$(basename "$NONO_BIN")"
 
-# Trust CLI does not require a working sandbox (it's a CLI-only feature)
+# Trust CLI is mostly CLI-only, but a small startup section below exercises
+# sandboxed execution when the host supports it.
 
-# Create test fixtures
 TMPDIR=$(setup_test_dir)
 trap 'cleanup_test_dir "$TMPDIR"' EXIT
 
 # Generate a unique key ID for this test run to avoid collisions
 KEY_ID="nono-inttest-$$"
+TEST_XDG="$TMPDIR/xdg"
+TRUST_KEYSTORE_DIR="$TMPDIR/trust-keystore"
+
+INIT_DIR="$TMPDIR/init"
+INIT_NO_KEY_DIR="$TMPDIR/init-no-key"
+SINGLE_DIR="$TMPDIR/single"
+MULTI_DIR="$TMPDIR/multi"
+MISSING_DIR="$TMPDIR/missing"
+STARTUP_DIR="$TMPDIR/startup"
+
+mkdir -p \
+    "$TEST_XDG" \
+    "$TRUST_KEYSTORE_DIR" \
+    "$INIT_DIR" \
+    "$INIT_NO_KEY_DIR" \
+    "$SINGLE_DIR" \
+    "$MULTI_DIR" \
+    "$MISSING_DIR" \
+    "$STARTUP_DIR"
 
 echo ""
 echo "Test directory: $TMPDIR"
 echo "Key ID: $KEY_ID"
 echo ""
+
+CAPTURED_OUTPUT=""
+CAPTURED_EXIT=0
+
+strip_ansi() {
+    sed 's/\x1b\[[0-9;]*m//g'
+}
+
+with_test_env() {
+    env \
+        XDG_CONFIG_HOME="$TEST_XDG" \
+        NONO_TRUST_TEST_USER_POLICY_PATH="$TEST_XDG/nono/trust-policy.json" \
+        NONO_TRUST_TEST_KEYSTORE_DIR="$TRUST_KEYSTORE_DIR" \
+        NONO_NO_UPDATE_CHECK=1 \
+        "$@"
+}
+
+capture_in_dir() {
+    local dir="$1"
+    shift
+
+    local raw_output=""
+
+    set +e
+    raw_output=$(cd "$dir" && "$@" </dev/null 2>&1)
+    CAPTURED_EXIT=$?
+    set -e
+
+    CAPTURED_OUTPUT=$(printf '%s' "$raw_output" | strip_ansi)
+}
+
+expect_in_dir_success() {
+    local name="$1"
+    local dir="$2"
+    shift 2
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    capture_in_dir "$dir" "$@"
+
+    if [[ "$CAPTURED_EXIT" -eq 0 ]]; then
+        echo -e "  ${GREEN}PASS${NC}: $name"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    fi
+
+    echo -e "  ${RED}FAIL${NC}: $name"
+    echo "       Expected exit code: 0, got: $CAPTURED_EXIT"
+    echo "       Output: ${CAPTURED_OUTPUT:0:2000}"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    return 1
+}
+
+expect_in_dir_failure() {
+    local name="$1"
+    local dir="$2"
+    shift 2
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    capture_in_dir "$dir" "$@"
+
+    if [[ "$CAPTURED_EXIT" -ne 0 ]]; then
+        echo -e "  ${GREEN}PASS${NC}: $name (exit $CAPTURED_EXIT)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    fi
+
+    echo -e "  ${RED}FAIL${NC}: $name"
+    echo "       Expected failure, but got success (exit 0)"
+    echo "       Output: ${CAPTURED_OUTPUT:0:2000}"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    return 1
+}
+
+expect_in_dir_success_contains() {
+    local name="$1"
+    local dir="$2"
+    local expected_str="$3"
+    shift 3
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    capture_in_dir "$dir" "$@"
+
+    if [[ "$CAPTURED_EXIT" -eq 0 ]] && printf '%s' "$CAPTURED_OUTPUT" | grep -Fq "$expected_str"; then
+        echo -e "  ${GREEN}PASS${NC}: $name"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    fi
+
+    echo -e "  ${RED}FAIL${NC}: $name"
+    echo "       Expected exit code: 0 and output containing: $expected_str"
+    echo "       Exit code: $CAPTURED_EXIT"
+    echo "       Output: ${CAPTURED_OUTPUT:0:2000}"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    return 1
+}
+
+expect_in_dir_failure_contains() {
+    local name="$1"
+    local dir="$2"
+    local expected_str="$3"
+    shift 3
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    capture_in_dir "$dir" "$@"
+
+    if [[ "$CAPTURED_EXIT" -ne 0 ]] && printf '%s' "$CAPTURED_OUTPUT" | grep -Fq "$expected_str"; then
+        echo -e "  ${GREEN}PASS${NC}: $name (exit $CAPTURED_EXIT)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    fi
+
+    echo -e "  ${RED}FAIL${NC}: $name"
+    echo "       Expected failure and output containing: $expected_str"
+    echo "       Exit code: $CAPTURED_EXIT"
+    echo "       Output: ${CAPTURED_OUTPUT:0:2000}"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    return 1
+}
+
+expect_file_contains() {
+    local name="$1"
+    local file="$2"
+    local expected_str="$3"
+    run_test "$name" 0 grep -Fq "$expected_str" "$file" || true
+}
+
+expect_file_not_contains() {
+    local name="$1"
+    local file="$2"
+    local unexpected_str="$3"
+    run_test "$name" 1 grep -Fq "$unexpected_str" "$file" || true
+}
 
 # =============================================================================
 # Key Generation
@@ -31,107 +183,219 @@ echo ""
 echo "--- Key Generation ---"
 
 expect_success "trust keygen creates key" \
-    "$NONO_BIN" trust keygen --id "$KEY_ID"
+    with_test_env "$NONO_BIN" trust keygen --id "$KEY_ID"
 
 expect_output_contains "trust keygen shows key ID" "$KEY_ID" \
-    "$NONO_BIN" trust keygen --id "${KEY_ID}-show"
+    with_test_env "$NONO_BIN" trust keygen --id "${KEY_ID}-show"
 
 # Duplicate key ID should fail
 expect_failure "trust keygen duplicate ID fails" \
-    "$NONO_BIN" trust keygen --id "$KEY_ID"
+    with_test_env "$NONO_BIN" trust keygen --id "$KEY_ID"
 
 # =============================================================================
-# Signing
+# trust init
 # =============================================================================
 
 echo ""
-echo "--- Signing ---"
+echo "--- trust init ---"
 
-# Create instruction files
-echo "# Test SKILLS file" > "$TMPDIR/SKILLS.md"
-echo "# Test CLAUDE file" > "$TMPDIR/CLAUDE.md"
+mkdir -p "$INIT_DIR/nested" "$INIT_DIR/vendor"
+printf '# Test SKILLS file\n' > "$INIT_DIR/SKILLS.md"
+printf '# Nested AGENT file\n' > "$INIT_DIR/nested/AGENT.md"
+printf '# Ignored vendor file\n' > "$INIT_DIR/vendor/CLAUDE.md"
+
+expect_in_dir_success "trust init creates trust-policy.json" "$INIT_DIR" \
+    with_test_env "$NONO_BIN" trust init --include SKILLS.md --key "$KEY_ID"
+
+run_test "trust init writes policy file" 0 test -f "$INIT_DIR/trust-policy.json"
+expect_file_contains "trust init writes includes field" "$INIT_DIR/trust-policy.json" '"includes"'
+expect_file_contains "trust init includes requested project file" "$INIT_DIR/trust-policy.json" '"SKILLS.md"'
+expect_file_not_contains "trust init omits files not explicitly included" "$INIT_DIR/trust-policy.json" '"nested/AGENT.md"'
+expect_file_not_contains "trust init omits unrelated files" "$INIT_DIR/trust-policy.json" '"vendor/CLAUDE.md"'
+expect_file_contains "trust init embeds publisher name when key exists" "$INIT_DIR/trust-policy.json" "\"name\": \"$KEY_ID\""
+expect_file_contains "trust init embeds publisher public key" "$INIT_DIR/trust-policy.json" '"public_key"'
+
+expect_in_dir_failure "trust init refuses to overwrite existing policy without --force" "$INIT_DIR" \
+    with_test_env "$NONO_BIN" trust init --include SKILLS.md --key "$KEY_ID"
+
+expect_in_dir_success "trust init --force updates explicit include patterns" "$INIT_DIR" \
+    with_test_env "$NONO_BIN" trust init --force --include SKILLS.md nested/AGENT.md --key "$KEY_ID"
+
+expect_file_contains "trust init force update includes nested paths when requested" "$INIT_DIR/trust-policy.json" '"nested/AGENT.md"'
+expect_file_not_contains "trust init force update still omits unrelated files" "$INIT_DIR/trust-policy.json" '"vendor/CLAUDE.md"'
+
+expect_in_dir_success "trust init --user creates a user policy in XDG config" "$INIT_DIR" \
+    with_test_env "$NONO_BIN" trust init --user --force --key "$KEY_ID"
+
+run_test "trust init --user writes user policy file" 0 test -f "$TEST_XDG/nono/trust-policy.json"
+expect_file_contains "trust init --user creates empty includes by default" "$TEST_XDG/nono/trust-policy.json" '"includes": []'
+
+expect_success "trust sign-policy signs user policy" \
+    with_test_env "$NONO_BIN" trust sign-policy "$TEST_XDG/nono/trust-policy.json" --key "$KEY_ID"
+
+run_test "trust init --user writes signed user policy bundle" 0 test -f "$TEST_XDG/nono/trust-policy.json.bundle"
+
+printf '# Test AGENT file\n' > "$INIT_NO_KEY_DIR/AGENT.md"
+
+expect_in_dir_success_contains "trust init notes missing signing key" "$INIT_NO_KEY_DIR" "skipping publisher entry" \
+    with_test_env "$NONO_BIN" trust init --include AGENT.md --key "${KEY_ID}-missing"
+
+expect_file_contains "trust init without key creates empty publisher list" "$INIT_NO_KEY_DIR/trust-policy.json" '"publishers": []'
+
+# =============================================================================
+# Single-file signing, verification, and listing
+# =============================================================================
+
+echo ""
+echo "--- Single-file Signing ---"
+
+printf '# Test SKILLS file\n' > "$SINGLE_DIR/SKILLS.md"
+printf '# Test CLAUDE file\n' > "$SINGLE_DIR/CLAUDE.md"
+printf '# Unsigned AGENT file\n' > "$SINGLE_DIR/AGENT.md"
+
+expect_in_dir_success "single-file project trust init succeeds" "$SINGLE_DIR" \
+    with_test_env "$NONO_BIN" trust init --include SKILLS.md CLAUDE.md AGENT.md --key "$KEY_ID"
 
 expect_success "trust sign creates bundle" \
-    "$NONO_BIN" trust sign "$TMPDIR/SKILLS.md" --key "$KEY_ID"
+    with_test_env "$NONO_BIN" trust sign "$SINGLE_DIR/SKILLS.md" --key "$KEY_ID"
 
-# Verify bundle file was created
-run_test "bundle file exists" 0 test -f "$TMPDIR/SKILLS.md.bundle"
+run_test "bundle file exists" 0 test -f "$SINGLE_DIR/SKILLS.md.bundle"
 
-# Sign another file
 expect_success "trust sign second file" \
-    "$NONO_BIN" trust sign "$TMPDIR/CLAUDE.md" --key "$KEY_ID"
+    with_test_env "$NONO_BIN" trust sign "$SINGLE_DIR/CLAUDE.md" --key "$KEY_ID"
 
-run_test "second bundle file exists" 0 test -f "$TMPDIR/CLAUDE.md.bundle"
+run_test "second bundle file exists" 0 test -f "$SINGLE_DIR/CLAUDE.md.bundle"
 
-# Sign nonexistent file
 expect_failure "trust sign nonexistent file fails" \
-    "$NONO_BIN" trust sign "$TMPDIR/NONEXISTENT.md" --key "$KEY_ID"
+    with_test_env "$NONO_BIN" trust sign "$SINGLE_DIR/NONEXISTENT.md" --key "$KEY_ID"
+
+expect_in_dir_success "trust sign-policy succeeds" "$SINGLE_DIR" \
+    with_test_env "$NONO_BIN" trust sign-policy --key "$KEY_ID"
+
+run_test "trust policy bundle exists" 0 test -f "$SINGLE_DIR/trust-policy.json.bundle"
+
+expect_in_dir_success_contains "trust verify signed file succeeds with trust policy" "$SINGLE_DIR" "VERIFIED" \
+    with_test_env "$NONO_BIN" trust verify SKILLS.md
+
+expect_in_dir_failure_contains "trust verify unsigned file fails (no bundle)" "$SINGLE_DIR" "no .bundle file found" \
+    with_test_env "$NONO_BIN" trust verify AGENT.md
+
+printf '\n# TAMPERED CONTENT\n' >> "$SINGLE_DIR/CLAUDE.md"
+
+expect_in_dir_failure_contains "trust verify tampered file fails" "$SINGLE_DIR" "bundle digest does not match file content" \
+    with_test_env "$NONO_BIN" trust verify CLAUDE.md
+
+expect_in_dir_success_contains "trust list --json reports verified files" "$SINGLE_DIR" '"status": "verified"' \
+    with_test_env "$NONO_BIN" trust list --json
+
+expect_in_dir_success_contains "trust list --json reports unsigned files" "$SINGLE_DIR" '"status": "unsigned"' \
+    with_test_env "$NONO_BIN" trust list --json
+
+expect_in_dir_success_contains "trust list --json reports failed files" "$SINGLE_DIR" '"status": "failed"' \
+    with_test_env "$NONO_BIN" trust list --json
 
 # =============================================================================
-# Verification (without trust policy — expects failure since no trusted publishers)
+# Multi-subject signing
 # =============================================================================
 
 echo ""
-echo "--- Verification ---"
+echo "--- Multi-subject Signing ---"
 
-# Without a trust policy, verify should fail because the signer is not trusted
-expect_failure "trust verify without trust policy fails" \
-    "$NONO_BIN" trust verify "$TMPDIR/SKILLS.md"
+printf '# Multi SKILLS file\n' > "$MULTI_DIR/SKILLS.md"
+printf '# Multi CLAUDE file\n' > "$MULTI_DIR/CLAUDE.md"
 
-# Verify unsigned file fails
-echo "# Unsigned file" > "$TMPDIR/AGENT.md"
-expect_failure "trust verify unsigned file fails (no bundle)" \
-    "$NONO_BIN" trust verify "$TMPDIR/AGENT.md"
+expect_in_dir_success "multi-subject project trust init succeeds" "$MULTI_DIR" \
+    with_test_env "$NONO_BIN" trust init --include SKILLS.md CLAUDE.md --key "$KEY_ID"
 
-# Tamper with signed file and verify
-echo "# TAMPERED CONTENT" >> "$TMPDIR/CLAUDE.md"
-expect_failure "trust verify tampered file fails" \
-    "$NONO_BIN" trust verify "$TMPDIR/CLAUDE.md"
+expect_in_dir_success "trust sign --all creates a multi-subject bundle" "$MULTI_DIR" \
+    with_test_env "$NONO_BIN" trust sign --all --multi-subject --key "$KEY_ID"
+
+run_test "multi-subject bundle exists" 0 test -f "$MULTI_DIR/.nono-trust.bundle"
+run_test "sign --all does not create per-file sidecars" 1 test -f "$MULTI_DIR/SKILLS.md.bundle"
+
+expect_in_dir_success "multi-subject trust sign-policy succeeds" "$MULTI_DIR" \
+    with_test_env "$NONO_BIN" trust sign-policy --key "$KEY_ID"
+
+expect_in_dir_success_contains "trust verify --all accepts multi-subject bundle" "$MULTI_DIR" "Verified 2 file(s) successfully." \
+    with_test_env "$NONO_BIN" trust verify --all
+
+expect_in_dir_success_contains "trust verify .nono-trust.bundle reports first subject" "$MULTI_DIR" "SKILLS.md" \
+    with_test_env "$NONO_BIN" trust verify .nono-trust.bundle
+
+expect_in_dir_success_contains "trust verify .nono-trust.bundle reports second subject" "$MULTI_DIR" "CLAUDE.md" \
+    with_test_env "$NONO_BIN" trust verify .nono-trust.bundle
+
+printf '\n# TAMPERED CONTENT\n' >> "$MULTI_DIR/CLAUDE.md"
+
+expect_in_dir_failure_contains "trust verify --all rejects tampered multi-subject bundle" "$MULTI_DIR" "digest mismatch" \
+    with_test_env "$NONO_BIN" trust verify --all
 
 # =============================================================================
-# Listing
+# Missing literal patterns
 # =============================================================================
 
 echo ""
-echo "--- Listing ---"
+echo "--- Missing Literal Patterns ---"
 
-# List from a directory with instruction files (run from TMPDIR)
-TESTS_RUN=$((TESTS_RUN + 1))
-set +e
-list_output=$(cd "$TMPDIR" && "$NONO_BIN" trust list </dev/null 2>&1)
-list_exit=$?
-set -e
+cat > "$MISSING_DIR/trust-policy.json" <<'EOF'
+{
+  "version": 1,
+  "includes": ["SKILLS.md"],
+  "publishers": [],
+  "blocklist": {
+    "digests": [],
+    "publishers": []
+  },
+  "enforcement": "deny"
+}
+EOF
 
-# List should exit 0 (it lists files regardless of verification status)
-if [[ "$list_exit" -eq 0 ]]; then
-    echo -e "  ${GREEN}PASS${NC}: trust list exits 0"
-    TESTS_PASSED=$((TESTS_PASSED + 1))
+if is_macos; then
+    expect_in_dir_failure_contains "trust verify --all blocks missing literal patterns on macOS" "$MISSING_DIR" "no matching file" \
+        with_test_env "$NONO_BIN" trust verify --all
+
+    expect_in_dir_failure_contains "trust list blocks missing literal patterns on macOS" "$MISSING_DIR" "no matching file" \
+        with_test_env "$NONO_BIN" trust list
 else
-    # list might exit non-zero if it reports failures — that's also valid
-    echo -e "  ${GREEN}PASS${NC}: trust list exits $list_exit (reports verification status)"
-    TESTS_PASSED=$((TESTS_PASSED + 1))
+    expect_in_dir_success_contains "trust verify --all allows missing literal patterns on Linux" "$MISSING_DIR" "No files or multi-subject bundles found to verify." \
+        with_test_env "$NONO_BIN" trust verify --all
+
+    expect_in_dir_success_contains "trust list allows missing literal patterns on Linux" "$MISSING_DIR" "No files found matching policy includes in current directory." \
+        with_test_env "$NONO_BIN" trust list
 fi
 
-# List with --json flag
-TESTS_RUN=$((TESTS_RUN + 1))
-set +e
-json_output=$(cd "$TMPDIR" && "$NONO_BIN" trust list --json </dev/null 2>&1)
-json_exit=$?
-set -e
+# =============================================================================
+# Startup enforcement
+# =============================================================================
 
-# Check if output contains JSON structure
-if echo "$json_output" | grep -q "{"; then
-    echo -e "  ${GREEN}PASS${NC}: trust list --json produces JSON-like output"
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-else
-    # If no instruction files found, that's also valid output
-    if echo "$json_output" | grep -qi "no instruction files"; then
-        echo -e "  ${GREEN}PASS${NC}: trust list --json reports no files (expected for non-standard dir)"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
+echo ""
+echo "--- Startup Enforcement ---"
+
+cat > "$STARTUP_DIR/trust-policy.json" <<'EOF'
+{
+  "version": 1,
+  "includes": ["SKILLS.md"],
+  "publishers": [],
+  "blocklist": {
+    "digests": [],
+    "publishers": []
+  },
+  "enforcement": "deny"
+}
+EOF
+
+expect_in_dir_success "trust sign-policy signs startup policy" "$STARTUP_DIR" \
+    with_test_env "$NONO_BIN" trust sign-policy --key "$KEY_ID"
+
+run_test "startup trust policy bundle exists" 0 test -f "$STARTUP_DIR/trust-policy.json.bundle"
+
+if require_working_sandbox "trust startup enforcement"; then
+    if is_macos; then
+        expect_in_dir_failure_contains "nono run blocks missing literal instruction files on macOS startup" "$STARTUP_DIR" "no matching file" \
+            with_test_env "$NONO_BIN" run --allow-cwd -- sh -c "printf STARTED"
     else
-        echo -e "  ${RED}FAIL${NC}: trust list --json produces JSON-like output"
-        echo "       Output: ${json_output:0:500}"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
+        expect_in_dir_success_contains "nono run allows missing literal instruction files on Linux startup" "$STARTUP_DIR" "STARTED" \
+            with_test_env "$NONO_BIN" run --allow-cwd -- sh -c "printf STARTED"
     fi
 fi
 
@@ -143,10 +407,10 @@ echo ""
 echo "--- Export Key ---"
 
 expect_success "trust export-key succeeds" \
-    "$NONO_BIN" trust export-key --id "$KEY_ID"
+    with_test_env "$NONO_BIN" trust export-key --id "$KEY_ID"
 
 expect_output_contains "export-key shows base64 public key" "MF" \
-    "$NONO_BIN" trust export-key --id "$KEY_ID"
+    with_test_env "$NONO_BIN" trust export-key --id "$KEY_ID"
 
 # =============================================================================
 # Summary
