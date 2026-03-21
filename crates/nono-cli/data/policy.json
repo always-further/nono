@@ -278,6 +278,11 @@
           "/dev/zero",
           "/dev/full",
           "/dev/tty",
+          "/dev/stdout",
+          "/dev/stderr",
+          "/dev/fd",
+          "/dev/pts",
+          "/proc/self/fd",
           "$TMPDIR"
         ]
       }
