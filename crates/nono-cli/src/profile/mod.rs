@@ -1330,7 +1330,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             open_port: dedup_append(&base.network.open_port, &child.network.open_port),
             listen_port: dedup_append(&base.network.listen_port, &child.network.listen_port),
             // Child `Some([])` overrides parent credentials to empty (disables proxy).
-            // Child `None` inherits parent credentials. Child `Some([...])` replaces parent.
+            // Child `None` inherits parent credentials. Child `Some([...])` merges with parent.
             credentials: match child.network.credentials {
                 Some(ref child_creds) => {
                     if child_creds.is_empty() {

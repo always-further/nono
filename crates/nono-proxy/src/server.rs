@@ -46,6 +46,9 @@ pub struct ProxyHandle {
     /// Routes whose credentials were unavailable are excluded so we
     /// don't inject phantom tokens that shadow valid external credentials.
     loaded_routes: std::collections::HashSet<String>,
+    /// Non-credential allowed hosts that should bypass the proxy (NO_PROXY).
+    /// Computed at startup: `allowed_hosts` minus credential upstream hosts.
+    no_proxy_hosts: Vec<String>,
 }
 
 impl ProxyHandle {
@@ -71,17 +74,40 @@ impl ProxyHandle {
     pub fn env_vars(&self) -> Vec<(String, String)> {
         let proxy_url = format!("http://nono:{}@127.0.0.1:{}", &*self.token, self.port);
 
+        // Build NO_PROXY: always include loopback, plus non-credential
+        // allowed hosts. Credential upstreams are excluded so their traffic
+        // goes through the reverse proxy for L7 filtering + injection.
+        let mut no_proxy_parts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+        for host in &self.no_proxy_hosts {
+            // Strip port for NO_PROXY (most HTTP clients match on hostname).
+            // Handle IPv6 brackets: "[::1]:443" → "[::1]", "host:443" → "host"
+            let hostname = if host.contains("]:") {
+                // IPv6 with port: split at "]:port"
+                host.rsplit_once("]:")
+                    .map(|(h, _)| format!("{}]", h))
+                    .unwrap_or_else(|| host.clone())
+            } else {
+                host.rsplit_once(':')
+                    .and_then(|(h, p)| p.parse::<u16>().ok().map(|_| h.to_string()))
+                    .unwrap_or_else(|| host.clone())
+            };
+            if !no_proxy_parts.contains(&hostname.to_string()) {
+                no_proxy_parts.push(hostname.to_string());
+            }
+        }
+        let no_proxy = no_proxy_parts.join(",");
+
         let mut vars = vec![
             ("HTTP_PROXY".to_string(), proxy_url.clone()),
             ("HTTPS_PROXY".to_string(), proxy_url.clone()),
-            ("NO_PROXY".to_string(), "localhost,127.0.0.1".to_string()),
+            ("NO_PROXY".to_string(), no_proxy.clone()),
             ("NONO_PROXY_TOKEN".to_string(), self.token.to_string()),
         ];
 
         // Lowercase variants for compatibility
         vars.push(("http_proxy".to_string(), proxy_url.clone()));
         vars.push(("https_proxy".to_string(), proxy_url));
-        vars.push(("no_proxy".to_string(), "localhost,127.0.0.1".to_string()));
+        vars.push(("no_proxy".to_string(), no_proxy));
 
         // Node.js v22.21.0+ / v24.0.0+ requires this flag for native fetch() to use HTTP_PROXY
         vars.push(("NODE_USE_ENV_PROXY".to_string(), "1".to_string()));
@@ -214,6 +240,32 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let audit_log = audit::new_audit_log();
 
+    // Compute NO_PROXY hosts: allowed_hosts minus credential upstreams.
+    // Non-credential hosts bypass the proxy (direct connection, still
+    // Landlock-enforced). Credential upstreams must go through the proxy
+    // for L7 path filtering and credential injection.
+    let credential_hosts = credential_store.credential_upstream_hosts();
+    let no_proxy_hosts: Vec<String> = config
+        .allowed_hosts
+        .iter()
+        .filter(|host| {
+            let normalised = {
+                let h = host.to_lowercase();
+                if h.contains(':') {
+                    h
+                } else {
+                    format!("{}:443", h)
+                }
+            };
+            !credential_hosts.contains(&normalised)
+        })
+        .cloned()
+        .collect();
+
+    if !no_proxy_hosts.is_empty() {
+        debug!("Smart NO_PROXY bypass hosts: {:?}", no_proxy_hosts);
+    }
+
     let state = Arc::new(ProxyState {
         filter,
         session_token: session_token.clone(),
@@ -236,6 +288,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         audit_log,
         shutdown_tx,
         loaded_routes,
+        no_proxy_hosts,
     })
 }
 
@@ -332,6 +385,49 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
 
     // Dispatch by method
     if first_line.starts_with("CONNECT ") {
+        // Block CONNECT tunnels to credential upstreams. These must go
+        // through the reverse proxy path so L7 path filtering and
+        // credential injection are enforced. A CONNECT tunnel would
+        // bypass both (raw TLS pipe, proxy never sees HTTP method/path).
+        if !state.credential_store.is_empty() {
+            if let Some(authority) = first_line.split_whitespace().nth(1) {
+                // Normalise authority to host:port. Handle IPv6 brackets:
+                // "[::1]:443" already has port, "[::1]" needs default, "host:443" has port.
+                let host_port = if authority.starts_with('[') {
+                    // IPv6 literal
+                    if authority.contains("]:") {
+                        authority.to_lowercase()
+                    } else {
+                        format!("{}:443", authority.to_lowercase())
+                    }
+                } else if authority.contains(':') {
+                    authority.to_lowercase()
+                } else {
+                    format!("{}:443", authority.to_lowercase())
+                };
+                if state.credential_store.is_credential_upstream(&host_port) {
+                    let (host, port) = host_port
+                        .rsplit_once(':')
+                        .map(|(h, p)| (h, p.parse::<u16>().unwrap_or(443)))
+                        .unwrap_or((&host_port, 443));
+                    warn!(
+                        "Blocked CONNECT to credential upstream {} — use reverse proxy path instead",
+                        authority
+                    );
+                    audit::log_denied(
+                        Some(&state.audit_log),
+                        audit::ProxyMode::Connect,
+                        host,
+                        port,
+                        "credential upstream: CONNECT bypasses L7 filtering",
+                    );
+                    let response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+                    stream.write_all(response.as_bytes()).await?;
+                    return Ok(());
+                }
+            }
+        }
+
         // Check if external proxy is configured and host is not bypassed
         let use_external = if let Some(ref ext_config) = state.config.external_proxy {
             if state.bypass_matcher.is_empty() {
@@ -490,6 +586,7 @@ mod tests {
             audit_log: audit::new_audit_log(),
             shutdown_tx,
             loaded_routes: ["openai".to_string()].into_iter().collect(),
+            no_proxy_hosts: Vec::new(),
         };
         let config = ProxyConfig {
             routes: vec![crate::config::RouteConfig {
@@ -538,6 +635,7 @@ mod tests {
             audit_log: audit::new_audit_log(),
             shutdown_tx,
             loaded_routes: ["openai".to_string()].into_iter().collect(),
+            no_proxy_hosts: Vec::new(),
         };
         let config = ProxyConfig {
             routes: vec![crate::config::RouteConfig {
@@ -591,6 +689,7 @@ mod tests {
             shutdown_tx,
             // Only "openai" was loaded; "github" credential was unavailable
             loaded_routes: ["openai".to_string()].into_iter().collect(),
+            no_proxy_hosts: Vec::new(),
         };
         let config = ProxyConfig {
             routes: vec![
@@ -643,6 +742,57 @@ mod tests {
         assert!(
             github_token.is_none(),
             "unloaded route must not inject phantom GITHUB_TOKEN"
+        );
+    }
+
+    #[test]
+    fn test_no_proxy_excludes_credential_upstreams() {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let handle = ProxyHandle {
+            port: 12345,
+            token: Zeroizing::new("test_token".to_string()),
+            audit_log: audit::new_audit_log(),
+            shutdown_tx,
+            loaded_routes: std::collections::HashSet::new(),
+            no_proxy_hosts: vec![
+                "nats.internal:4222".to_string(),
+                "opencode.internal:4096".to_string(),
+            ],
+        };
+
+        let vars = handle.env_vars();
+        let no_proxy = vars.iter().find(|(k, _)| k == "NO_PROXY").unwrap();
+        assert!(
+            no_proxy.1.contains("nats.internal"),
+            "non-credential host should be in NO_PROXY"
+        );
+        assert!(
+            no_proxy.1.contains("opencode.internal"),
+            "non-credential host should be in NO_PROXY"
+        );
+        assert!(
+            no_proxy.1.contains("localhost"),
+            "localhost should always be in NO_PROXY"
+        );
+    }
+
+    #[test]
+    fn test_no_proxy_empty_when_no_non_credential_hosts() {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let handle = ProxyHandle {
+            port: 12345,
+            token: Zeroizing::new("test_token".to_string()),
+            audit_log: audit::new_audit_log(),
+            shutdown_tx,
+            loaded_routes: std::collections::HashSet::new(),
+            no_proxy_hosts: Vec::new(),
+        };
+
+        let vars = handle.env_vars();
+        let no_proxy = vars.iter().find(|(k, _)| k == "NO_PROXY").unwrap();
+        assert_eq!(
+            no_proxy.1, "localhost,127.0.0.1",
+            "NO_PROXY should only contain loopback when no bypass hosts"
         );
     }
 }

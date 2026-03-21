@@ -169,6 +169,46 @@ impl CredentialStore {
     pub fn loaded_prefixes(&self) -> std::collections::HashSet<String> {
         self.credentials.keys().cloned().collect()
     }
+
+    /// Check whether `host_port` (e.g. `"gitlab.example.com:443"`) matches
+    /// any credential upstream. Used to block CONNECT tunnels that would
+    /// bypass L7 path filtering.
+    #[must_use]
+    pub fn is_credential_upstream(&self, host_port: &str) -> bool {
+        let normalised = host_port.to_lowercase();
+        self.credentials.values().any(|cred| {
+            extract_host_port(&cred.upstream)
+                .map(|hp| hp == normalised)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Return the set of normalised `host:port` strings for all credential
+    /// upstreams. Used to compute smart `NO_PROXY` — hosts in this set must
+    /// NOT be bypassed because they need reverse proxy credential injection.
+    #[must_use]
+    pub fn credential_upstream_hosts(&self) -> std::collections::HashSet<String> {
+        self.credentials
+            .values()
+            .filter_map(|cred| extract_host_port(&cred.upstream))
+            .collect()
+    }
+}
+
+/// Extract and normalise `host:port` from a URL string.
+///
+/// Defaults to port 443 for `https://` and 80 for `http://` when no
+/// explicit port is present. Returns `None` if the URL cannot be parsed.
+fn extract_host_port(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let default_port = match parsed.scheme() {
+        "https" => 443,
+        "http" => 80,
+        _ => return None,
+    };
+    let port = parsed.port().unwrap_or(default_port);
+    Some(format!("{}:{}", host.to_lowercase(), port))
 }
 
 /// The keyring service name used by nono for all credentials.
@@ -225,6 +265,112 @@ mod tests {
         // Non-secret fields should still be visible
         assert!(debug_output.contains("api.openai.com"));
         assert!(debug_output.contains("Authorization"));
+    }
+
+    #[test]
+    fn test_extract_host_port_https_no_port() {
+        assert_eq!(
+            extract_host_port("https://api.openai.com"),
+            Some("api.openai.com:443".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_https_with_port() {
+        assert_eq!(
+            extract_host_port("https://api.openai.com:8443"),
+            Some("api.openai.com:8443".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_http_no_port() {
+        assert_eq!(
+            extract_host_port("http://internal:4096"),
+            Some("internal:4096".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_http_default_port() {
+        assert_eq!(
+            extract_host_port("http://internal-service"),
+            Some("internal-service:80".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_normalises_case() {
+        assert_eq!(
+            extract_host_port("https://GitLab-PRD.Home.Example.COM"),
+            Some("gitlab-prd.home.example.com:443".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_with_path() {
+        assert_eq!(
+            extract_host_port("https://api.example.com/v1/endpoint"),
+            Some("api.example.com:443".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_no_scheme() {
+        assert_eq!(extract_host_port("api.openai.com"), None);
+    }
+
+    #[test]
+    fn test_is_credential_upstream() {
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "gitlab".to_string(),
+            LoadedCredential {
+                inject_mode: InjectMode::Header,
+                upstream: "https://gitlab.example.com".to_string(),
+                raw_credential: Zeroizing::new("token".to_string()),
+                header_name: "PRIVATE-TOKEN".to_string(),
+                header_value: Zeroizing::new("token".to_string()),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
+            },
+        );
+        let store = CredentialStore { credentials };
+
+        assert!(store.is_credential_upstream("gitlab.example.com:443"));
+        assert!(!store.is_credential_upstream("unrelated.example.com:443"));
+    }
+
+    #[test]
+    fn test_is_credential_upstream_empty_store() {
+        let store = CredentialStore::empty();
+        assert!(!store.is_credential_upstream("anything:443"));
+    }
+
+    #[test]
+    fn test_credential_upstream_hosts() {
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "gitlab".to_string(),
+            LoadedCredential {
+                inject_mode: InjectMode::Header,
+                upstream: "https://gitlab.example.com".to_string(),
+                raw_credential: Zeroizing::new("token".to_string()),
+                header_name: "PRIVATE-TOKEN".to_string(),
+                header_value: Zeroizing::new("token".to_string()),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
+            },
+        );
+        let store = CredentialStore { credentials };
+
+        let hosts = store.credential_upstream_hosts();
+        assert!(hosts.contains("gitlab.example.com:443"));
+        assert_eq!(hosts.len(), 1);
     }
 
     #[test]
