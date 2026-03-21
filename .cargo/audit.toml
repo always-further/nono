@@ -1,0 +1,17 @@
+# Workspace cargo-audit configuration.
+#
+# These ignores are limited to AWS-LC X.509 validation advisories which do not
+# affect the code paths used in this workspace:
+# - `nono-proxy` uses the `ring` rustls provider for TLS, not AWS-LC.
+# - Sigstore certificate parsing/chain validation goes through `x509-cert` and
+#   `rustls-webpki`, not AWS-LC X.509 validation APIs.
+# - We do not enable CRL checking in the rustls or sigstore paths we use.
+#
+# Revisit these ignores if we add any direct use of AWS-LC X.509 hostname
+# validation, name constraints, or CRL-based revocation checks.
+
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0044", # AWS-LC X.509 CN/name-constraints bypass
+    "RUSTSEC-2026-0048", # AWS-LC CRL distribution point scope check bypass
+]
