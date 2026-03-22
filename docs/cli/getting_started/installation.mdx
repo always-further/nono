@@ -17,8 +17,9 @@ Download the `.deb` package from [GitHub Releases](https://github.com/always-fur
 
 ```bash
 VERSION=$(curl -sI https://github.com/always-further/nono/releases/latest | grep -i location | grep -oP 'v\K[0-9.]+')
-wget https://github.com/always-further/nono/releases/download/v${VERSION}/nono-cli_${VERSION}_amd64.deb
-sudo dpkg -i nono-cli_${VERSION}_amd64.deb
+ARCH=$(dpkg --print-architecture)
+wget https://github.com/always-further/nono/releases/download/v${VERSION}/nono-cli_${VERSION}_${ARCH}.deb
+sudo dpkg -i nono-cli_${VERSION}_${ARCH}.deb
 ```
 
 Other distributions are in the process of being packaged. In the meantime, you can use the prebuilt binaries or build from source.
