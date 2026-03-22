@@ -788,6 +788,41 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let mut merged_globs = prepared.rollback_exclude_globs;
     merged_globs.extend(cli_exclude_globs);
 
+    // Precheck: if --rollback-dest was given, verify the destination (or a
+    // parent) is covered by a writable sandbox capability. Fail before the
+    // sandbox is locked in so the user gets a clear, actionable error.
+    //
+    // When the dest doesn't exist yet (will be created by create_dir_all),
+    // walk up to the nearest existing ancestor for canonicalization so that
+    // symlinks are resolved consistently with capability resolved paths.
+    if let Some(ref dest) = run_args.rollback_dest {
+        let dest_abs = {
+            let mut p = dest.clone();
+            loop {
+                match p.canonicalize() {
+                    Ok(canonical) => break canonical,
+                    Err(_) => match p.parent() {
+                        Some(parent) => p = parent.to_path_buf(),
+                        None => break dest.clone(),
+                    },
+                }
+            }
+        };
+        let covered = prepared.caps.fs_capabilities().iter().any(|cap| {
+            matches!(cap.access, AccessMode::Write | AccessMode::ReadWrite)
+                && dest_abs.starts_with(&cap.resolved)
+        });
+        if !covered {
+            eprintln!(
+                "nono: --rollback-dest '{}' is not covered by sandbox write permissions.\n\
+                 Add --allow {} to grant access, or omit --rollback-dest to use the default path (~/.nono/rollbacks/).",
+                dest.display(),
+                dest.display()
+            );
+            std::process::exit(1);
+        }
+    }
+
     // Select execution strategy. Supervised mode is needed when any feature
     // requires a parent process: rollback snapshots, network proxy, capability
     // elevation (seccomp + PTY), or trust interception. Direct mode (exec,
@@ -820,6 +855,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             silent,
             rollback_all: run_args.rollback_all,
             rollback_include: run_args.rollback_include,
+            rollback_dest: run_args.rollback_dest,
             scan_root,
             trust_policy,
             trust_interception_active,
@@ -999,6 +1035,8 @@ struct ExecutionFlags {
     rollback_all: bool,
     /// Force-include specific directories that would otherwise be auto-excluded
     rollback_include: Vec<String>,
+    /// Custom destination directory for rollback snapshots (overrides ~/.nono/rollbacks/)
+    rollback_dest: Option<std::path::PathBuf>,
     /// Root directory for trust policy discovery and scanning
     scan_root: std::path::PathBuf,
     /// Loaded trust policy from the pre-exec scan path.
@@ -1059,6 +1097,7 @@ impl ExecutionFlags {
             silent,
             rollback_all: false,
             rollback_include: Vec::new(),
+            rollback_dest: None,
             scan_root: std::env::current_dir()
                 .map_err(|e| NonoError::SandboxInit(format!("Failed to get cwd: {e}")))?,
             trust_policy: None,
@@ -1453,8 +1492,9 @@ fn execute_sandboxed(
                     std::process::id()
                 );
 
-                let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
-                let session_dir = home.join(".nono").join("rollbacks").join(&session_id);
+                let session_dir =
+                    rollback_session::rollback_root_with_override(flags.rollback_dest.as_ref())?
+                        .join(&session_id);
                 std::fs::create_dir_all(&session_dir).map_err(|e| {
                     NonoError::Snapshot(format!(
                         "Failed to create session directory {}: {}",

@@ -104,6 +104,39 @@ else
 fi
 
 # =============================================================================
+# Rollback Custom Destination (--rollback-dest)
+# =============================================================================
+
+echo ""
+echo "--- Rollback Custom Destination ---"
+
+CUSTOM_DEST="$TMPDIR/custom_rollbacks"
+mkdir -p "$CUSTOM_DEST"
+
+# --rollback-dest should store the session under the custom directory
+expect_success "rollback-dest creates session in custom dir" \
+    "$NONO_BIN" run --rollback --no-rollback-prompt \
+    --allow "$TMPDIR/workdir" --allow "$CUSTOM_DEST" \
+    --rollback-dest "$CUSTOM_DEST" -- \
+    sh -c "echo 'custom dest test' > '$TMPDIR/workdir/file.txt'"
+
+# Verify a session directory was created under the custom destination
+run_test "session directory created under --rollback-dest" 0 \
+    bash -c "ls '$CUSTOM_DEST' | grep -qE '[0-9]{8}-[0-9]{6}-[0-9]+'"
+
+# --rollback-dest without write permission should fail.
+# We use a path under $HOME that is not covered by any system write group.
+RESTRICTED_DEST="$HOME/nono_rollback_restricted_test_$$"
+mkdir -p "$RESTRICTED_DEST"
+trap 'cleanup_test_dir "$TMPDIR"; rm -rf "$RESTRICTED_DEST"' EXIT
+expect_failure "rollback-dest without sandbox write permission fails" \
+    "$NONO_BIN" run --rollback --no-rollback-prompt \
+    --allow "$TMPDIR/workdir" \
+    --rollback-dest "$RESTRICTED_DEST" -- \
+    sh -c "echo 'should fail' > '$TMPDIR/workdir/file.txt'"
+rm -rf "$RESTRICTED_DEST"
+
+# =============================================================================
 # Summary
 # =============================================================================
 

@@ -31,6 +31,18 @@ pub fn rollback_root() -> Result<PathBuf> {
     Ok(home.join(".nono").join("rollbacks"))
 }
 
+/// Get the rollback root, using a user-supplied override path if provided.
+///
+/// When `override_path` is `Some`, it is returned directly, allowing the user
+/// to redirect snapshot storage (e.g., to a Docker volume mount). When `None`,
+/// falls back to the default `~/.nono/rollbacks/`.
+pub fn rollback_root_with_override(override_path: Option<&PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.clone());
+    }
+    rollback_root()
+}
+
 /// Discover all rollback sessions in `~/.nono/rollbacks/`.
 ///
 /// Scans the rollback root directory, loads session metadata from each

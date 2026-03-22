@@ -859,6 +859,19 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "rollback_include", help_heading = "ROLLBACK")]
     pub rollback_all: bool,
 
+    /// Override the rollback snapshot destination directory.
+    /// By default, snapshots are stored in ~/.nono/rollbacks/.
+    /// The destination must be within a path already granted write access
+    /// by --allow (or profile); nono will fail with a clear error if not.
+    /// Useful for Docker volume mounts or shared storage paths.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "rollback",
+        help_heading = "ROLLBACK"
+    )]
+    pub rollback_dest: Option<std::path::PathBuf>,
+
     // ── Options ────────────────────────────────────────────────────────
     /// Suppress diagnostic footer on command failure
     #[arg(long, help_heading = "OPTIONS")]
