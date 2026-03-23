@@ -348,7 +348,7 @@ We encourage using AI tools to contribute to nono. However, you must understand 
 
 ## Security
 
-If you discover a security vulnerability, please **do not open a public issue**. Instead, follow the responsible disclosure process outlined in our [Security Policy](https://github.com/always-further/nono/blob/main/SECURITY.md).
+If you discover a security vulnerability, please **do not open a public issue**. Instead, follow the responsible disclosure process outlined in our [Security Policy](https://github.com/always-further/nono/security).
 
 ## License
 
