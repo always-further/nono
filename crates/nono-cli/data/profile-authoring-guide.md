@@ -100,6 +100,7 @@ Provides subtractive and additive composition on top of inherited groups and fil
 | `add_allow_write`    | array of string | Additional write-only path grants. |
 | `add_allow_readwrite`| array of string | Additional read+write path grants. |
 | `add_deny_access`    | array of string | Additional deny paths. |
+| `add_deny_globs`     | array of string | Additional deny glob patterns rooted under `$WORKDIR`. Expanded once at sandbox startup into concrete deny paths. |
 | `override_deny`      | array of string | Paths to exempt from deny groups. Each path must also be granted via `filesystem` or `add_allow_*`. Does not implicitly grant access; only removes the deny rule. |
 
 ### network
@@ -323,6 +324,31 @@ Block access to a file in the working directory while keeping the rest accessibl
 ```
 
 With `capability_elevation` enabled, nono runs in supervised mode where every file access outside the initial grant set is trapped and evaluated. The deny list is checked before the supervisor prompts for approval, so denied paths are blocked regardless of platform.
+
+### Denying matching files across a monorepo
+
+Use `add_deny_globs` when you need to deny a class of files under the working tree, such as `appsettings.json` variants spread across multiple projects:
+
+```json
+{
+  "extends": "claude-code",
+  "meta": {
+    "name": "deny-appsettings",
+    "description": "Block appsettings files across the repo"
+  },
+  "security": {
+    "capability_elevation": true
+  },
+  "policy": {
+    "add_deny_globs": [
+      "$WORKDIR/**/appsettings.json",
+      "$WORKDIR/**/appsettings.*.json"
+    ]
+  }
+}
+```
+
+`add_deny_globs` is intentionally scoped to `$WORKDIR`. Patterns are expanded once when the sandbox starts; if new matching files are created later, restart the sandbox to pick them up. A glob that matches nothing is rejected to avoid a silent no-op security policy.
 
 ### Profile with group exclusion
 

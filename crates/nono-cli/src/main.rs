@@ -32,7 +32,6 @@ mod trust_keystore;
 mod trust_scan;
 mod update_check;
 
-use capability_ext::CapabilitySetExt;
 use clap::Parser;
 use cli::{
     Cli, Commands, LearnArgs, OpenUrlHelperArgs, RunArgs, SandboxArgs, SetupArgs, ShellArgs,
@@ -474,12 +473,17 @@ fn run_why(args: WhyArgs) -> Result<()> {
     // Build capability set from args or load from sandbox state.
     // Also collect overridden paths so the query can skip sensitive-path checks
     // for paths that have been exempted via override_deny.
-    let (caps, overridden_paths): (CapabilitySet, Vec<std::path::PathBuf>) = if args.self_query {
+    let (caps, overridden_paths, deny_paths): (
+        CapabilitySet,
+        Vec<std::path::PathBuf>,
+        Vec<std::path::PathBuf>,
+    ) = if args.self_query {
         // Inside sandbox - load from state file
         match load_sandbox_state() {
             Some(state) => {
-                let paths = state.override_deny_as_paths();
-                (state.to_caps()?, paths)
+                let override_paths = state.override_deny_as_paths();
+                let deny_paths = state.deny_as_paths();
+                (state.to_caps()?, override_paths, deny_paths)
             }
             None => {
                 let result = QueryResult::NotSandboxed {
@@ -530,11 +534,12 @@ fn run_why(args: WhyArgs) -> Result<()> {
             }
         }
 
-        let (mut caps, needs_unlink) = CapabilitySet::from_profile(&prof, &workdir, &sandbox_args)?;
-        if needs_unlink {
-            crate::policy::apply_unlink_overrides(&mut caps);
+        let mut built =
+            crate::capability_ext::build_caps_from_profile(&prof, &workdir, &sandbox_args)?;
+        if built.needs_unlink_overrides {
+            crate::policy::apply_unlink_overrides(&mut built.caps);
         }
-        (caps, override_paths)
+        (built.caps, override_paths, built.deny_paths)
     } else {
         let sandbox_args = SandboxArgs {
             allow: args.allow.clone(),
@@ -548,11 +553,11 @@ fn run_why(args: WhyArgs) -> Result<()> {
             ..SandboxArgs::default()
         };
 
-        let (mut caps, needs_unlink) = CapabilitySet::from_args(&sandbox_args)?;
-        if needs_unlink {
-            crate::policy::apply_unlink_overrides(&mut caps);
+        let mut built = crate::capability_ext::build_caps_from_args(&sandbox_args)?;
+        if built.needs_unlink_overrides {
+            crate::policy::apply_unlink_overrides(&mut built.caps);
         }
-        (caps, vec![])
+        (built.caps, vec![], built.deny_paths)
     };
 
     // Execute the query
@@ -563,7 +568,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             Some(WhyOp::ReadWrite) => AccessMode::ReadWrite,
             None => AccessMode::Read, // Default to read
         };
-        query_path(path, op, &caps, &overridden_paths)?
+        query_path(path, op, &caps, &overridden_paths, &deny_paths)?
     } else if let Some(ref host) = args.host {
         query_network(host, args.port, &caps)
     } else {
@@ -876,6 +881,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             open_url_allow_localhost: prepared.open_url_allow_localhost,
             allow_launch_services_active: prepared.allow_launch_services_active,
             override_deny_paths: prepared.override_deny_paths,
+            deny_paths: prepared.deny_paths,
         },
     )
 }
@@ -947,6 +953,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             no_diagnostics: true,
             capability_elevation: prepared.capability_elevation,
             override_deny_paths: prepared.override_deny_paths,
+            deny_paths: prepared.deny_paths,
             ..ExecutionFlags::defaults(silent)?
         },
     )
@@ -1015,6 +1022,7 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
                 .unwrap_or_else(|| std::path::PathBuf::from(".")),
             no_diagnostics,
             override_deny_paths: prepared.override_deny_paths,
+            deny_paths: prepared.deny_paths,
             ..ExecutionFlags::defaults(silent)?
         },
     )
@@ -1078,6 +1086,8 @@ struct ExecutionFlags {
     allow_launch_services_active: bool,
     /// Canonicalized paths exempted from deny groups via override_deny
     override_deny_paths: Vec<std::path::PathBuf>,
+    /// Canonicalized deny paths enforced for this session after overrides
+    deny_paths: Vec<std::path::PathBuf>,
 }
 
 impl ExecutionFlags {
@@ -1119,6 +1129,7 @@ impl ExecutionFlags {
             open_url_allow_localhost: false,
             allow_launch_services_active: false,
             override_deny_paths: Vec::new(),
+            deny_paths: Vec::new(),
         })
     }
 }
@@ -1335,7 +1346,12 @@ fn execute_sandboxed(
     let resolved_program = exec_strategy::resolve_program(&command[0])?;
 
     // Write capability state file BEFORE applying sandbox
-    let cap_file = write_capability_state_file(&caps, &flags.override_deny_paths, flags.silent);
+    let cap_file = write_capability_state_file(
+        &caps,
+        &flags.override_deny_paths,
+        &flags.deny_paths,
+        flags.silent,
+    );
     let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
     // Validate that secret env var names are not dangerous (e.g. LD_PRELOAD).
@@ -1672,6 +1688,7 @@ fn execute_sandboxed(
                 });
             let supervisor_cfg = exec_strategy::SupervisorConfig {
                 protected_roots: protected_roots.as_paths(),
+                deny_paths: &flags.deny_paths,
                 approval_backend: &approval_backend,
                 session_id: &supervisor_session_id,
                 open_url_origins: &flags.open_url_origins,
@@ -1854,6 +1871,8 @@ struct PreparedSandbox {
     open_url_allow_localhost: bool,
     /// Canonicalized paths exempted from deny groups via override_deny
     override_deny_paths: Vec<std::path::PathBuf>,
+    /// Canonicalized deny paths enforced for this session after overrides
+    deny_paths: Vec<std::path::PathBuf>,
 }
 
 fn parse_env_credential_map_args(values: &[String]) -> Result<Vec<(String, String)>> {
@@ -2141,11 +2160,14 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
 
     // Build capabilities from profile or arguments.
     // Unlink overrides are deferred so they can cover the CWD path added below.
-    let (mut caps, needs_unlink_overrides) = if let Some(ref prof) = loaded_profile {
-        CapabilitySet::from_profile(prof, &workdir, args)?
+    let built = if let Some(ref prof) = loaded_profile {
+        crate::capability_ext::build_caps_from_profile(prof, &workdir, args)?
     } else {
-        CapabilitySet::from_args(args)?
+        crate::capability_ext::build_caps_from_args(args)?
     };
+    let mut caps = built.caps;
+    let needs_unlink_overrides = built.needs_unlink_overrides;
+    let deny_paths = built.deny_paths;
 
     let allow_launch_services_active = maybe_enable_macos_launch_services(
         &mut caps,
@@ -2205,16 +2227,6 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     // Final deny/allow overlap validation after ALL path grants are finalized,
     // including auto-included CWD. This closes the Linux Landlock blind spot
     // where deny-within-allow cannot be enforced.
-    let active_groups = if let Some(prof) = loaded_profile
-        .as_ref()
-        .filter(|p| !p.security.groups.is_empty())
-    {
-        prof.security.groups.clone()
-    } else {
-        crate::capability_ext::default_profile_groups()?
-    };
-    let loaded_policy = policy::load_embedded_policy()?;
-    let deny_paths = policy::resolve_deny_paths_for_groups(&loaded_policy, &active_groups)?;
     policy::validate_deny_overlaps(&deny_paths, &caps)?;
     let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
     protected_paths::validate_caps_against_protected_roots(&caps, protected_roots.as_paths())?;
@@ -2333,6 +2345,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         open_url_origins,
         open_url_allow_localhost,
         override_deny_paths,
+        deny_paths,
     })
 }
 
@@ -2430,11 +2443,12 @@ fn enforce_rollback_limits(silent: bool) {
 fn write_capability_state_file(
     caps: &CapabilitySet,
     override_deny_paths: &[std::path::PathBuf],
+    deny_paths: &[std::path::PathBuf],
     silent: bool,
 ) -> Option<std::path::PathBuf> {
     // Write sandbox state for `nono why --self`.
     let cap_file = std::env::temp_dir().join(format!(".nono-{}.json", std::process::id()));
-    let state = sandbox_state::SandboxState::from_caps(caps, override_deny_paths);
+    let state = sandbox_state::SandboxState::from_caps(caps, override_deny_paths, deny_paths);
     if let Err(e) = state.write_to_file(&cap_file) {
         error!(
             "Failed to write capability state file: {}. \
@@ -2560,6 +2574,7 @@ mod tests {
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             override_deny_paths: Vec::new(),
+            deny_paths: Vec::new(),
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -2599,6 +2614,7 @@ mod tests {
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             override_deny_paths: Vec::new(),
+            deny_paths: Vec::new(),
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);

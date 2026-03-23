@@ -64,6 +64,7 @@ pub fn query_path(
     requested: AccessMode,
     caps: &CapabilitySet,
     overridden_paths: &[std::path::PathBuf],
+    deny_paths: &[std::path::PathBuf],
 ) -> Result<QueryResult> {
     // Canonicalize the path for proper comparison
     let canonical = if path.exists() {
@@ -96,6 +97,21 @@ pub fn query_path(
     let is_overridden = overridden_paths
         .iter()
         .any(|op| canonical == *op || canonical.starts_with(op));
+
+    if !is_overridden {
+        if let Some(matched) = crate::policy::matching_deny_path(&canonical, deny_paths) {
+            return Ok(QueryResult::Denied {
+                reason: "deny_path".to_string(),
+                details: Some(format!(
+                    "Path is denied by active sandbox policy: {}",
+                    matched.display()
+                )),
+                policy_source: Some(matched.display().to_string()),
+                matching_capability: None,
+                suggested_flag: None,
+            });
+        }
+    }
 
     // Check if this is a sensitive path (CLI security policy), but skip
     // the check for paths that have been explicitly overridden.
@@ -325,7 +341,8 @@ mod tests {
             .canonicalize()
             .expect("Failed to canonicalize dir");
 
-        let result = query_path(&test_file, AccessMode::Read, &caps, &[]).expect("Query failed");
+        let result =
+            query_path(&test_file, AccessMode::Read, &caps, &[], &[]).expect("Query failed");
         match result {
             QueryResult::Allowed {
                 source,
@@ -349,7 +366,7 @@ mod tests {
         let caps = CapabilitySet::new();
         let path = PathBuf::from("/some/random/path");
 
-        let result = query_path(&path, AccessMode::Read, &caps, &[]).expect("Query failed");
+        let result = query_path(&path, AccessMode::Read, &caps, &[], &[]).expect("Query failed");
         match result {
             QueryResult::Denied {
                 reason,
@@ -397,7 +414,8 @@ mod tests {
         let test_file = dir_canon.join("test.txt");
         std::fs::write(&test_file, "test").expect("Failed to write test file");
 
-        let result = query_path(&test_file, AccessMode::Write, &caps, &[]).expect("Query failed");
+        let result =
+            query_path(&test_file, AccessMode::Write, &caps, &[], &[]).expect("Query failed");
         assert!(matches!(result, QueryResult::Allowed { .. }));
     }
 
@@ -420,7 +438,8 @@ mod tests {
             source: CapabilitySource::Group("dev".to_string()),
         });
 
-        let result = query_path(&test_file, AccessMode::Write, &caps, &[]).expect("Query failed");
+        let result =
+            query_path(&test_file, AccessMode::Write, &caps, &[], &[]).expect("Query failed");
         match result {
             QueryResult::Denied {
                 reason,
@@ -451,7 +470,8 @@ mod tests {
         ));
         let caps = CapabilitySet::new();
 
-        let result = query_path(&ssh_path, AccessMode::Read, &caps, &[]).expect("Query failed");
+        let result =
+            query_path(&ssh_path, AccessMode::Read, &caps, &[], &[]).expect("Query failed");
         match result {
             QueryResult::Denied {
                 reason,
@@ -472,6 +492,28 @@ mod tests {
         let caps = CapabilitySet::new(); // Network allowed by default
         let result = query_network("example.com", 443, &caps);
         assert!(matches!(result, QueryResult::Allowed { .. }));
+    }
+
+    #[test]
+    fn test_query_path_denied_by_active_deny_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let denied = dir.path().join("appsettings.json");
+        std::fs::write(&denied, "{}").expect("write denied");
+        let denied_canonical = denied.canonicalize().expect("canonicalize denied");
+        let caps = CapabilitySet::new();
+
+        let result = query_path(
+            &denied,
+            AccessMode::Read,
+            &caps,
+            &[],
+            std::slice::from_ref(&denied_canonical),
+        )
+        .expect("query");
+        match result {
+            QueryResult::Denied { reason, .. } => assert_eq!(reason, "deny_path"),
+            other => panic!("expected deny_path result, got {other:?}"),
+        }
     }
 
     #[test]

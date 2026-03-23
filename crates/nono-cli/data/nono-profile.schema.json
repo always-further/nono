@@ -242,6 +242,11 @@
           "items": { "type": "string" },
           "description": "Additional deny.access paths to apply."
         },
+        "add_deny_globs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional deny glob patterns rooted under $WORKDIR. Expanded once at sandbox startup into concrete deny paths."
+        },
         "override_deny": {
           "type": "array",
           "items": { "type": "string" },

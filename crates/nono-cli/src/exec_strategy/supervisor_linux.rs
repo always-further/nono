@@ -219,6 +219,26 @@ pub(super) fn handle_seccomp_notification(
         return Ok(());
     }
 
+    let deny_path = crate::policy::matching_deny_path(&canonicalized, config.deny_paths)
+        .or_else(|| crate::policy::matching_deny_path(&resolved_path, config.deny_paths));
+    if let Some(deny_path) = deny_path {
+        debug!(
+            "Seccomp: path {} blocked by deny path {}",
+            canonicalized.display(),
+            deny_path.display()
+        );
+        record_denial(
+            denials,
+            DenialRecord {
+                path: canonicalized.clone(),
+                access,
+                reason: DenialReason::PolicyBlocked,
+            },
+        );
+        let _ = deny_notif(notify_fd, notif.id);
+        return Ok(());
+    }
+
     // 5. Fast-path: check if path is in the initial capability set.
     // File capabilities require exact match; directory capabilities allow subpaths.
     let in_initial_set = initial_caps.iter().any(|(cap_path, is_file)| {

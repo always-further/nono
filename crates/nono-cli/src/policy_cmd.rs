@@ -522,6 +522,7 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
         || !pp.add_allow_write.is_empty()
         || !pp.add_allow_readwrite.is_empty()
         || !pp.add_deny_access.is_empty()
+        || !pp.add_deny_globs.is_empty()
         || !pp.override_deny.is_empty();
 
     if has_policy {
@@ -538,6 +539,7 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
         print_fs_paths("add_allow_write", &pp.add_allow_write, t, args.raw);
         print_fs_paths("add_allow_readwrite", &pp.add_allow_readwrite, t, args.raw);
         print_fs_paths("add_deny_access", &pp.add_deny_access, t, args.raw);
+        print_fs_paths("add_deny_globs", &pp.add_deny_globs, t, args.raw);
         if !pp.override_deny.is_empty() {
             println!(
                 "    {}: {}",
@@ -727,6 +729,7 @@ fn profile_to_json(
         "add_allow_write": profile.policy.add_allow_write,
         "add_allow_readwrite": profile.policy.add_allow_readwrite,
         "add_deny_access": profile.policy.add_deny_access,
+        "add_deny_globs": profile.policy.add_deny_globs,
         "override_deny": profile.policy.override_deny,
     });
 
@@ -899,6 +902,11 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
             "add_deny_access",
             &p1.policy.add_deny_access,
             &p2.policy.add_deny_access,
+        ),
+        (
+            "add_deny_globs",
+            &p1.policy.add_deny_globs,
+            &p2.policy.add_deny_globs,
         ),
         (
             "override_deny",

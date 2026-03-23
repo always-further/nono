@@ -72,6 +72,12 @@ pub struct PolicyPatchConfig {
     /// Additional deny.access paths to apply.
     #[serde(default)]
     pub add_deny_access: Vec<String>,
+    /// Additional deny glob patterns rooted under $WORKDIR.
+    ///
+    /// Patterns are expanded once at sandbox startup into concrete deny paths.
+    /// They do not match files created later in the session.
+    #[serde(default)]
+    pub add_deny_globs: Vec<String>,
     /// Paths to exempt from deny groups.
     /// Each path must also be explicitly granted via `filesystem` or `policy.add_allow_*`.
     /// Does not implicitly grant access; only removes the deny rule.
@@ -1228,6 +1234,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &base.policy.add_deny_access,
                 &child.policy.add_deny_access,
             ),
+            add_deny_globs: dedup_append(&base.policy.add_deny_globs, &child.policy.add_deny_globs),
             override_deny: dedup_append(&base.policy.override_deny, &child.policy.override_deny),
         },
         network: NetworkConfig {
@@ -2302,6 +2309,7 @@ mod tests {
                 add_allow_write: vec![],
                 add_allow_readwrite: vec![],
                 add_deny_access: vec!["/base/policy-deny".to_string()],
+                add_deny_globs: vec!["**/base-secret.json".to_string()],
                 override_deny: vec!["/base/override-deny".to_string()],
             },
             network: NetworkConfig {
@@ -2368,6 +2376,7 @@ mod tests {
                 add_allow_write: vec!["/child/policy-write".to_string()],
                 add_allow_readwrite: vec!["/child/policy-rw".to_string()],
                 add_deny_access: vec!["/child/policy-deny".to_string()],
+                add_deny_globs: vec!["**/child-secret.json".to_string()],
                 override_deny: vec!["/child/override-deny".to_string()],
             },
             network: NetworkConfig {
@@ -3312,6 +3321,7 @@ mod tests {
                     "add_allow_write": ["/tmp/write"],
                     "add_allow_readwrite": ["/tmp/rw"],
                     "add_deny_access": ["/tmp/deny"],
+                    "add_deny_globs": ["**/appsettings*.json"],
                     "override_deny": ["~/.docker"]
                 }
             }"#,
@@ -3323,6 +3333,7 @@ mod tests {
         assert_eq!(profile.policy.add_allow_write, vec!["/tmp/write"]);
         assert_eq!(profile.policy.add_allow_readwrite, vec!["/tmp/rw"]);
         assert_eq!(profile.policy.add_deny_access, vec!["/tmp/deny"]);
+        assert_eq!(profile.policy.add_deny_globs, vec!["**/appsettings*.json"]);
         assert_eq!(profile.policy.override_deny, vec!["~/.docker"]);
     }
 

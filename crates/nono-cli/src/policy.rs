@@ -745,6 +745,7 @@ pub fn apply_unlink_overrides(caps: &mut CapabilitySet) {
 }
 
 /// Resolve deny.access paths for a group list without mutating caller capabilities.
+#[cfg(test)]
 pub fn resolve_deny_paths_for_groups(
     policy: &Policy,
     group_names: &[String],
@@ -821,6 +822,18 @@ pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> R
          Conflicts:\n{}{}",
         preview, more
     )))
+}
+
+/// Return the deny path that blocks `path`, if any.
+#[must_use]
+pub fn matching_deny_path(path: &Path, deny_paths: &[PathBuf]) -> Option<PathBuf> {
+    for deny_path in deny_paths {
+        if path == deny_path || path.starts_with(deny_path) {
+            return Some(deny_path.clone());
+        }
+    }
+
+    None
 }
 
 /// Get the list of all group names defined in the policy

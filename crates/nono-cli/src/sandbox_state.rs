@@ -28,6 +28,9 @@ pub struct SandboxState {
     /// Paths exempted from deny groups via override_deny (canonicalized)
     #[serde(default)]
     pub override_deny_paths: Vec<String>,
+    /// Active deny paths after overrides are applied (canonicalized)
+    #[serde(default)]
+    pub deny_paths: Vec<String>,
 }
 
 /// Serializable filesystem capability state
@@ -45,7 +48,11 @@ pub struct FsCapState {
 
 impl SandboxState {
     /// Create sandbox state from a CapabilitySet and override_deny paths
-    pub fn from_caps(caps: &CapabilitySet, override_deny_paths: &[PathBuf]) -> Self {
+    pub fn from_caps(
+        caps: &CapabilitySet,
+        override_deny_paths: &[PathBuf],
+        deny_paths: &[PathBuf],
+    ) -> Self {
         Self {
             fs: caps
                 .fs_capabilities()
@@ -68,12 +75,18 @@ impl SandboxState {
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
+            deny_paths: deny_paths.iter().map(|p| p.display().to_string()).collect(),
         }
     }
 
     /// Get override_deny paths as PathBufs for query use
     pub fn override_deny_as_paths(&self) -> Vec<PathBuf> {
         self.override_deny_paths.iter().map(PathBuf::from).collect()
+    }
+
+    /// Get deny paths as PathBufs for query use
+    pub fn deny_as_paths(&self) -> Vec<PathBuf> {
+        self.deny_paths.iter().map(PathBuf::from).collect()
     }
 
     /// Convert back to a CapabilitySet
@@ -358,7 +371,7 @@ mod tests {
         let mut caps = CapabilitySet::new().block_network();
         caps.add_allowed_command("pip".to_string());
 
-        let state = SandboxState::from_caps(&caps, &[]);
+        let state = SandboxState::from_caps(&caps, &[], &[]);
         assert!(state.net_blocked);
         assert_eq!(state.allowed_commands, vec!["pip"]);
 
@@ -376,7 +389,7 @@ mod tests {
 
         let caps = CapabilitySet::new().block_network();
 
-        let state = SandboxState::from_caps(&caps, &[]);
+        let state = SandboxState::from_caps(&caps, &[], &[]);
         state
             .write_to_file(&file_path)
             .expect("Failed to write state");
@@ -385,5 +398,6 @@ mod tests {
         let loaded: SandboxState = serde_json::from_str(&content).expect("Failed to parse state");
 
         assert!(loaded.net_blocked);
+        assert!(loaded.deny_paths.is_empty());
     }
 }

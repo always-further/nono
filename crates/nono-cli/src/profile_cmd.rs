@@ -207,6 +207,10 @@ fn build_skeleton(args: &ProfileInitArgs) -> serde_json::Value {
             serde_json::Value::Array(vec![]),
         );
         pol.insert(
+            "add_deny_globs".to_string(),
+            serde_json::Value::Array(vec![]),
+        );
+        pol.insert(
             "override_deny".to_string(),
             serde_json::Value::Array(vec![]),
         );
@@ -553,6 +557,7 @@ mod tests {
         // Full policy has add_deny_access
         let full_pol = full_obj["policy"].as_object().expect("policy object");
         assert!(full_pol.contains_key("add_deny_access"));
+        assert!(full_pol.contains_key("add_deny_globs"));
 
         // Full network has all fields
         let full_net = full_obj["network"].as_object().expect("network object");

@@ -7,9 +7,12 @@ use crate::cli::SandboxArgs;
 use crate::policy;
 use crate::profile::{expand_vars, Profile};
 use crate::protected_paths::{self, ProtectedRoots};
+use globset::Glob;
 use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
+use walkdir::WalkDir;
 
 /// Try to create a directory capability, warning and skipping on PathNotFound.
 /// Propagates all other errors.
@@ -35,6 +38,99 @@ fn try_new_file(path: &Path, access: AccessMode, label: &str) -> Result<Option<F
         }
         Err(e) => Err(e),
     }
+}
+
+fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[') || pattern.contains('{')
+}
+
+fn normalize_profile_deny_glob(pattern: &str) -> Result<String> {
+    let candidate = if let Some(rest) = pattern.strip_prefix("$WORKDIR/") {
+        rest
+    } else {
+        pattern
+    };
+    let candidate = candidate.strip_prefix("./").unwrap_or(candidate);
+
+    if pattern.starts_with('~')
+        || (pattern.starts_with('$') && !pattern.starts_with("$WORKDIR"))
+        || Path::new(pattern).is_absolute()
+    {
+        return Err(NonoError::ConfigParse(format!(
+            "Profile deny glob '{}' must be relative to $WORKDIR.",
+            pattern
+        )));
+    }
+
+    if !is_glob_pattern(candidate) {
+        return Err(NonoError::ConfigParse(format!(
+            "Profile deny glob '{}' must contain glob metacharacters. Use add_deny_access for exact paths.",
+            pattern
+        )));
+    }
+
+    if candidate.split('/').any(|segment| segment == "..") {
+        return Err(NonoError::ConfigParse(format!(
+            "Profile deny glob '{}' must not traverse outside $WORKDIR.",
+            pattern
+        )));
+    }
+
+    Ok(candidate.to_string())
+}
+
+fn expand_profile_deny_globs(patterns: &[String], workdir: &Path) -> Result<Vec<PathBuf>> {
+    let mut matches = BTreeSet::new();
+
+    for pattern in patterns {
+        let normalized = normalize_profile_deny_glob(pattern)?;
+        let matcher = Glob::new(&normalized)
+            .map_err(|e| {
+                NonoError::ConfigParse(format!("Invalid profile deny glob '{}': {}", pattern, e))
+            })?
+            .compile_matcher();
+
+        let mut matched_this_pattern = false;
+        for entry in WalkDir::new(workdir).follow_links(false) {
+            let entry = entry.map_err(|e| {
+                NonoError::ConfigParse(format!(
+                    "Failed to walk $WORKDIR '{}' while expanding deny glob '{}': {}",
+                    workdir.display(),
+                    pattern,
+                    e
+                ))
+            })?;
+
+            let relative = entry.path().strip_prefix(workdir).map_err(|e| {
+                NonoError::ConfigParse(format!(
+                    "Failed to relativize '{}' against $WORKDIR '{}': {}",
+                    entry.path().display(),
+                    workdir.display(),
+                    e
+                ))
+            })?;
+            let relative = if relative.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                relative
+            };
+
+            if matcher.is_match(relative) {
+                matches.insert(entry.path().to_path_buf());
+                matched_this_pattern = true;
+            }
+        }
+
+        if !matched_this_pattern {
+            return Err(NonoError::ConfigParse(format!(
+                "Profile deny glob '{}' matched no paths under $WORKDIR '{}'. Refusing to continue because a no-op deny glob is a security footgun.",
+                pattern,
+                workdir.display()
+            )));
+        }
+    }
+
+    Ok(matches.into_iter().collect())
 }
 
 fn apply_profile_dir_allows(
@@ -97,6 +193,13 @@ pub(crate) fn default_profile_groups() -> Result<Vec<String>> {
 /// Both methods return `(CapabilitySet, bool)` where the bool indicates whether
 /// `policy::apply_unlink_overrides()` must be called after all writable paths
 /// are finalized (including CWD). The caller is responsible for calling it.
+pub struct BuiltCapabilities {
+    pub caps: CapabilitySet,
+    pub needs_unlink_overrides: bool,
+    pub deny_paths: Vec<PathBuf>,
+}
+
+#[cfg(test)]
 pub trait CapabilitySetExt {
     /// Create a capability set from CLI sandbox arguments.
     /// Returns `(caps, needs_unlink_overrides)`.
@@ -111,84 +214,11 @@ pub trait CapabilitySetExt {
     ) -> Result<(CapabilitySet, bool)>;
 }
 
+#[cfg(test)]
 impl CapabilitySetExt for CapabilitySet {
     fn from_args(args: &SandboxArgs) -> Result<(CapabilitySet, bool)> {
-        let mut caps = CapabilitySet::new();
-        let protected_roots = ProtectedRoots::from_defaults()?;
-
-        // Resolve base policy groups (system paths, deny rules, dangerous commands)
-        let loaded_policy = policy::load_embedded_policy()?;
-        let default_groups = default_profile_groups()?;
-        let mut resolved = policy::resolve_groups(&loaded_policy, &default_groups, &mut caps)?;
-
-        // Directory permissions (canonicalize handles existence check atomically)
-        for path in &args.allow {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
-            if let Some(cap) =
-                try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")?
-            {
-                caps.add_fs(cap);
-            }
-        }
-
-        for path in &args.read {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
-            if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
-                caps.add_fs(cap);
-            }
-        }
-
-        for path in &args.write {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
-            if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
-                caps.add_fs(cap);
-            }
-        }
-
-        // Single file permissions
-        for path in &args.allow_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
-            if let Some(cap) =
-                try_new_file(path, AccessMode::ReadWrite, "Skipping non-existent file")?
-            {
-                caps.add_fs(cap);
-            }
-        }
-
-        for path in &args.read_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
-            if let Some(cap) = try_new_file(path, AccessMode::Read, "Skipping non-existent file")? {
-                caps.add_fs(cap);
-            }
-        }
-
-        for path in &args.write_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
-            if let Some(cap) = try_new_file(path, AccessMode::Write, "Skipping non-existent file")?
-            {
-                caps.add_fs(cap);
-            }
-        }
-
-        apply_cli_network_mode(&mut caps, args);
-
-        // Localhost IPC ports
-        for port in &args.allow_port {
-            caps.add_localhost_port(*port);
-        }
-
-        // Command allow/block lists
-        for cmd in &args.allow_command {
-            caps.add_allowed_command(cmd.clone());
-        }
-
-        for cmd in &args.block_command {
-            caps.add_blocked_command(cmd.clone());
-        }
-
-        finalize_caps(&mut caps, &mut resolved, &loaded_policy, args, &[])?;
-
-        Ok((caps, resolved.needs_unlink_overrides))
+        let built = build_caps_from_args(args)?;
+        Ok((built.caps, built.needs_unlink_overrides))
     }
 
     fn from_profile(
@@ -196,192 +226,261 @@ impl CapabilitySetExt for CapabilitySet {
         workdir: &Path,
         args: &SandboxArgs,
     ) -> Result<(CapabilitySet, bool)> {
-        let mut caps = CapabilitySet::new();
-        let protected_roots = ProtectedRoots::from_defaults()?;
-
-        // Resolve policy groups from the already-finalized profile.
-        let loaded_policy = policy::load_embedded_policy()?;
-        let groups = profile.security.groups.clone();
-        let mut resolved = policy::resolve_groups(&loaded_policy, &groups, &mut caps)?;
-        debug!("Resolved {} policy groups", resolved.names.len());
-
-        // Process profile filesystem config (profile-specific paths on top of groups).
-        // These are marked as CapabilitySource::Profile so they are displayed in
-        // the banner but NOT tracked for rollback snapshots (only User-sourced paths
-        // representing the project workspace are tracked).
-        let fs = &profile.filesystem;
-
-        // Directories with read+write access
-        for path_template in &fs.allow {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
-            let label = format!("Profile path '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
-
-        // Directories with read-only access
-        for path_template in &fs.read {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
-            let label = format!("Profile path '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_dir(&path, AccessMode::Read, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
-
-        // Directories with write-only access
-        for path_template in &fs.write {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
-            let label = format!("Profile path '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_dir(&path, AccessMode::Write, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
-
-        // Single files with read+write access
-        for path_template in &fs.allow_file {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_file(&path, "Profile", &protected_roots)?;
-            let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_file(&path, AccessMode::ReadWrite, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
-
-        // Single files with read-only access
-        for path_template in &fs.read_file {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_file(&path, "Profile", &protected_roots)?;
-            let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_file(&path, AccessMode::Read, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
-
-        // Single files with write-only access
-        for path_template in &fs.write_file {
-            let path = expand_vars(path_template, workdir)?;
-            validate_requested_file(&path, "Profile", &protected_roots)?;
-            let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) = try_new_file(&path, AccessMode::Write, &label)? {
-                cap.source = CapabilitySource::Profile;
-                caps.add_fs(cap);
-            }
-        }
-
-        // Policy patch additions
-        apply_profile_dir_allows(
-            &profile.policy.add_allow_readwrite,
-            AccessMode::ReadWrite,
-            workdir,
-            &protected_roots,
-            &mut caps,
-            "Profile policy path",
-        )?;
-        apply_profile_dir_allows(
-            &profile.policy.add_allow_read,
-            AccessMode::Read,
-            workdir,
-            &protected_roots,
-            &mut caps,
-            "Profile policy path",
-        )?;
-        apply_profile_dir_allows(
-            &profile.policy.add_allow_write,
-            AccessMode::Write,
-            workdir,
-            &protected_roots,
-            &mut caps,
-            "Profile policy path",
-        )?;
-
-        for path_template in &profile.policy.add_deny_access {
-            let path = expand_vars(path_template, workdir)?;
-            let path_str = path.to_str().ok_or_else(|| {
-                NonoError::ConfigParse(format!(
-                    "Profile policy deny path contains non-UTF-8 bytes: {}",
-                    path.display()
-                ))
-            })?;
-            policy::add_deny_access_rules(path_str, &mut caps, &mut resolved.deny_paths)?;
-        }
-
-        // Network blocking or proxy mode from profile
-        if profile.network.block {
-            caps.set_network_blocked(true);
-        } else if profile.network.has_proxy_flags() {
-            let bind_ports =
-                crate::merge_dedup_ports(&profile.network.listen_port, &args.allow_bind);
-            // Profile requests proxy mode; port 0 is a placeholder.
-            // bind_ports come from profile listen_port plus CLI --listen-port.
-            caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
-                port: 0,
-                bind_ports,
-            });
-        }
-
-        // Localhost IPC ports from profile
-        for port in &profile.network.open_port {
-            caps.add_localhost_port(*port);
-        }
-
-        // Apply allowed commands from profile
-        for cmd in &profile.security.allowed_commands {
-            caps.add_allowed_command(cmd.as_str());
-        }
-
-        // Apply signal mode from profile (None defaults to Isolated)
-        let mode = profile
-            .security
-            .signal_mode
-            .map(nono::SignalMode::from)
-            .unwrap_or_default();
-        caps = caps.set_signal_mode(mode);
-
-        // Apply process inspection mode from profile (None defaults to Isolated)
-        let process_info_mode = profile
-            .security
-            .process_info_mode
-            .map(nono::ProcessInfoMode::from)
-            .unwrap_or_default();
-        caps.set_process_info_mode_mut(process_info_mode);
-
-        // Apply IPC mode from profile (None defaults to SharedMemoryOnly)
-        let ipc_mode = profile
-            .security
-            .ipc_mode
-            .map(nono::IpcMode::from)
-            .unwrap_or_default();
-        caps.set_ipc_mode_mut(ipc_mode);
-
-        // Apply CLI overrides (CLI args take precedence)
-        add_cli_overrides(&mut caps, args)?;
-
-        // Expand profile-level override_deny paths for finalize_caps
-        let mut profile_overrides = Vec::with_capacity(profile.policy.override_deny.len());
-        for path_template in &profile.policy.override_deny {
-            let path = expand_vars(path_template, workdir)?;
-            profile_overrides.push(path);
-        }
-
-        finalize_caps(
-            &mut caps,
-            &mut resolved,
-            &loaded_policy,
-            args,
-            &profile_overrides,
-        )?;
-
-        Ok((caps, resolved.needs_unlink_overrides))
+        let built = build_caps_from_profile(profile, workdir, args)?;
+        Ok((built.caps, built.needs_unlink_overrides))
     }
+}
+
+pub fn build_caps_from_args(args: &SandboxArgs) -> Result<BuiltCapabilities> {
+    let mut caps = CapabilitySet::new();
+    let protected_roots = ProtectedRoots::from_defaults()?;
+
+    let loaded_policy = policy::load_embedded_policy()?;
+    let default_groups = default_profile_groups()?;
+    let mut resolved = policy::resolve_groups(&loaded_policy, &default_groups, &mut caps)?;
+
+    for path in &args.allow {
+        validate_requested_dir(path, "CLI", &protected_roots)?;
+        if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")? {
+            caps.add_fs(cap);
+        }
+    }
+
+    for path in &args.read {
+        validate_requested_dir(path, "CLI", &protected_roots)?;
+        if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
+            caps.add_fs(cap);
+        }
+    }
+
+    for path in &args.write {
+        validate_requested_dir(path, "CLI", &protected_roots)?;
+        if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
+            caps.add_fs(cap);
+        }
+    }
+
+    for path in &args.allow_file {
+        validate_requested_file(path, "CLI", &protected_roots)?;
+        if let Some(cap) = try_new_file(path, AccessMode::ReadWrite, "Skipping non-existent file")?
+        {
+            caps.add_fs(cap);
+        }
+    }
+
+    for path in &args.read_file {
+        validate_requested_file(path, "CLI", &protected_roots)?;
+        if let Some(cap) = try_new_file(path, AccessMode::Read, "Skipping non-existent file")? {
+            caps.add_fs(cap);
+        }
+    }
+
+    for path in &args.write_file {
+        validate_requested_file(path, "CLI", &protected_roots)?;
+        if let Some(cap) = try_new_file(path, AccessMode::Write, "Skipping non-existent file")? {
+            caps.add_fs(cap);
+        }
+    }
+
+    apply_cli_network_mode(&mut caps, args);
+    for port in &args.allow_port {
+        caps.add_localhost_port(*port);
+    }
+    for cmd in &args.allow_command {
+        caps.add_allowed_command(cmd.clone());
+    }
+    for cmd in &args.block_command {
+        caps.add_blocked_command(cmd.clone());
+    }
+
+    finalize_caps(&mut caps, &mut resolved, &loaded_policy, args, &[])?;
+
+    Ok(BuiltCapabilities {
+        caps,
+        needs_unlink_overrides: resolved.needs_unlink_overrides,
+        deny_paths: resolved.deny_paths,
+    })
+}
+
+pub fn build_caps_from_profile(
+    profile: &Profile,
+    workdir: &Path,
+    args: &SandboxArgs,
+) -> Result<BuiltCapabilities> {
+    let mut caps = CapabilitySet::new();
+    let protected_roots = ProtectedRoots::from_defaults()?;
+
+    let loaded_policy = policy::load_embedded_policy()?;
+    let groups = profile.security.groups.clone();
+    let mut resolved = policy::resolve_groups(&loaded_policy, &groups, &mut caps)?;
+    debug!("Resolved {} policy groups", resolved.names.len());
+
+    let fs = &profile.filesystem;
+
+    for path_template in &fs.allow {
+        let path = expand_vars(path_template, workdir)?;
+        validate_requested_dir(&path, "Profile", &protected_roots)?;
+        let label = format!("Profile path '{}' does not exist, skipping", path_template);
+        if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
+            cap.source = CapabilitySource::Profile;
+            caps.add_fs(cap);
+        }
+    }
+
+    for path_template in &fs.read {
+        let path = expand_vars(path_template, workdir)?;
+        validate_requested_dir(&path, "Profile", &protected_roots)?;
+        let label = format!("Profile path '{}' does not exist, skipping", path_template);
+        if let Some(mut cap) = try_new_dir(&path, AccessMode::Read, &label)? {
+            cap.source = CapabilitySource::Profile;
+            caps.add_fs(cap);
+        }
+    }
+
+    for path_template in &fs.write {
+        let path = expand_vars(path_template, workdir)?;
+        validate_requested_dir(&path, "Profile", &protected_roots)?;
+        let label = format!("Profile path '{}' does not exist, skipping", path_template);
+        if let Some(mut cap) = try_new_dir(&path, AccessMode::Write, &label)? {
+            cap.source = CapabilitySource::Profile;
+            caps.add_fs(cap);
+        }
+    }
+
+    for path_template in &fs.allow_file {
+        let path = expand_vars(path_template, workdir)?;
+        validate_requested_file(&path, "Profile", &protected_roots)?;
+        let label = format!("Profile file '{}' does not exist, skipping", path_template);
+        if let Some(mut cap) = try_new_file(&path, AccessMode::ReadWrite, &label)? {
+            cap.source = CapabilitySource::Profile;
+            caps.add_fs(cap);
+        }
+    }
+
+    for path_template in &fs.read_file {
+        let path = expand_vars(path_template, workdir)?;
+        validate_requested_file(&path, "Profile", &protected_roots)?;
+        let label = format!("Profile file '{}' does not exist, skipping", path_template);
+        if let Some(mut cap) = try_new_file(&path, AccessMode::Read, &label)? {
+            cap.source = CapabilitySource::Profile;
+            caps.add_fs(cap);
+        }
+    }
+
+    for path_template in &fs.write_file {
+        let path = expand_vars(path_template, workdir)?;
+        validate_requested_file(&path, "Profile", &protected_roots)?;
+        let label = format!("Profile file '{}' does not exist, skipping", path_template);
+        if let Some(mut cap) = try_new_file(&path, AccessMode::Write, &label)? {
+            cap.source = CapabilitySource::Profile;
+            caps.add_fs(cap);
+        }
+    }
+
+    apply_profile_dir_allows(
+        &profile.policy.add_allow_readwrite,
+        AccessMode::ReadWrite,
+        workdir,
+        &protected_roots,
+        &mut caps,
+        "Profile policy path",
+    )?;
+    apply_profile_dir_allows(
+        &profile.policy.add_allow_read,
+        AccessMode::Read,
+        workdir,
+        &protected_roots,
+        &mut caps,
+        "Profile policy path",
+    )?;
+    apply_profile_dir_allows(
+        &profile.policy.add_allow_write,
+        AccessMode::Write,
+        workdir,
+        &protected_roots,
+        &mut caps,
+        "Profile policy path",
+    )?;
+
+    for path_template in &profile.policy.add_deny_access {
+        let path = expand_vars(path_template, workdir)?;
+        let path_str = path.to_str().ok_or_else(|| {
+            NonoError::ConfigParse(format!(
+                "Profile policy deny path contains non-UTF-8 bytes: {}",
+                path.display()
+            ))
+        })?;
+        policy::add_deny_access_rules(path_str, &mut caps, &mut resolved.deny_paths)?;
+    }
+    for path in expand_profile_deny_globs(&profile.policy.add_deny_globs, workdir)? {
+        let path_str = path.to_str().ok_or_else(|| {
+            NonoError::ConfigParse(format!(
+                "Profile deny glob matched non-UTF-8 path: {}",
+                path.display()
+            ))
+        })?;
+        policy::add_deny_access_rules(path_str, &mut caps, &mut resolved.deny_paths)?;
+    }
+
+    if profile.network.block {
+        caps.set_network_blocked(true);
+    } else if profile.network.has_proxy_flags() {
+        let bind_ports = crate::merge_dedup_ports(&profile.network.listen_port, &args.allow_bind);
+        caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
+            port: 0,
+            bind_ports,
+        });
+    }
+
+    for port in &profile.network.open_port {
+        caps.add_localhost_port(*port);
+    }
+    for cmd in &profile.security.allowed_commands {
+        caps.add_allowed_command(cmd.as_str());
+    }
+
+    let mode = profile
+        .security
+        .signal_mode
+        .map(nono::SignalMode::from)
+        .unwrap_or_default();
+    caps = caps.set_signal_mode(mode);
+
+    let process_info_mode = profile
+        .security
+        .process_info_mode
+        .map(nono::ProcessInfoMode::from)
+        .unwrap_or_default();
+    caps.set_process_info_mode_mut(process_info_mode);
+
+    let ipc_mode = profile
+        .security
+        .ipc_mode
+        .map(nono::IpcMode::from)
+        .unwrap_or_default();
+    caps.set_ipc_mode_mut(ipc_mode);
+
+    add_cli_overrides(&mut caps, args)?;
+
+    let mut profile_overrides = Vec::with_capacity(profile.policy.override_deny.len());
+    for path_template in &profile.policy.override_deny {
+        let path = expand_vars(path_template, workdir)?;
+        profile_overrides.push(path);
+    }
+
+    finalize_caps(
+        &mut caps,
+        &mut resolved,
+        &loaded_policy,
+        args,
+        &profile_overrides,
+    )?;
+
+    Ok(BuiltCapabilities {
+        caps,
+        needs_unlink_overrides: resolved.needs_unlink_overrides,
+        deny_paths: resolved.deny_paths,
+    })
 }
 
 /// Shared finalization: deny overrides, overlap validation, keychain exception, dedup.
@@ -780,6 +879,142 @@ mod tests {
 
         let err = CapabilitySet::from_profile(&profile, workdir.path(), &args)
             .expect_err("profile deny overlap should fail on linux");
+        assert!(
+            err.to_string().contains("Landlock deny-overlap"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_add_deny_globs_removes_matching_file_grants() {
+        let workdir = tempdir().expect("workdir");
+        let cfg_dir = workdir.path().join("service");
+        std::fs::create_dir_all(&cfg_dir).expect("mkdir cfg dir");
+        let denied = cfg_dir.join("appsettings.production.json");
+        let allowed = cfg_dir.join("notes.txt");
+        std::fs::write(&denied, "{}").expect("write denied file");
+        std::fs::write(&allowed, "notes").expect("write allowed file");
+        let denied_canonical = denied.canonicalize().expect("canonicalize denied");
+        let allowed_canonical = allowed.canonicalize().expect("canonicalize allowed");
+
+        let profile_path = workdir.path().join("deny-globs.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "deny-globs" }},
+                    "filesystem": {{
+                        "read_file": ["{}", "{}"]
+                    }},
+                    "policy": {{
+                        "add_deny_globs": ["**/appsettings*.json"]
+                    }}
+                }}"#,
+                denied.display(),
+                allowed.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let args = sandbox_args();
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        assert!(
+            !caps
+                .fs_capabilities()
+                .iter()
+                .any(|cap| cap.is_file && cap.resolved == denied_canonical),
+            "deny glob should remove matching file grant"
+        );
+        assert!(
+            caps.fs_capabilities()
+                .iter()
+                .any(|cap| cap.is_file && cap.resolved == allowed_canonical),
+            "deny glob must not remove non-matching file grant"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_add_deny_globs_rejects_non_workdir_patterns() {
+        let workdir = tempdir().expect("workdir");
+        let profile_path = workdir.path().join("deny-globs-bad.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "deny-globs-bad" },
+                "policy": {
+                    "add_deny_globs": ["$HOME/**/appsettings*.json"]
+                }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let args = sandbox_args();
+
+        let err = CapabilitySet::from_profile(&profile, workdir.path(), &args)
+            .expect_err("non-workdir deny glob should fail");
+        assert!(
+            err.to_string().contains("must be relative to $WORKDIR"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_add_deny_globs_rejects_zero_matches() {
+        let workdir = tempdir().expect("workdir");
+        let profile_path = workdir.path().join("deny-globs-empty.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "deny-globs-empty" },
+                "policy": {
+                    "add_deny_globs": ["**/appsettings*.json"]
+                }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let args = sandbox_args();
+
+        let err = CapabilitySet::from_profile(&profile, workdir.path(), &args)
+            .expect_err("zero-match deny glob should fail");
+        assert!(
+            err.to_string().contains("matched no paths under $WORKDIR"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_final_deny_validation_catches_post_cwd_overlap_for_deny_globs() {
+        let workdir = tempdir().expect("workdir");
+        let denied = workdir.path().join("appsettings.json");
+        std::fs::write(&denied, "{}").expect("write denied");
+
+        let profile_path = workdir.path().join("deny-globs-final.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "deny-globs-final" },
+                "policy": {
+                    "add_deny_globs": ["**/appsettings*.json"]
+                }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+        let args = sandbox_args();
+
+        let mut built = build_caps_from_profile(&profile, workdir.path(), &args).expect("build");
+        let cwd_cap =
+            FsCapability::new_dir(workdir.path(), AccessMode::ReadWrite).expect("cwd cap");
+        built.caps.add_fs(cwd_cap);
+        built.caps.deduplicate();
+
+        let err = crate::policy::validate_deny_overlaps(&built.deny_paths, &built.caps)
+            .expect_err("final validation should reject post-CWD overlap");
         assert!(
             err.to_string().contains("Landlock deny-overlap"),
             "unexpected error: {err}"

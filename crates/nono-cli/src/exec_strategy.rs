@@ -198,6 +198,8 @@ pub struct ExecConfig<'a> {
 pub struct SupervisorConfig<'a> {
     /// Protected nono state roots that must never be granted dynamically.
     pub protected_roots: &'a [std::path::PathBuf],
+    /// Deny paths that must be rejected before any approval prompt.
+    pub deny_paths: &'a [std::path::PathBuf],
     /// Backend for approval decisions (terminal prompt, webhook, policy engine)
     pub approval_backend: &'a dyn ApprovalBackend,
     /// Session identifier used for audit correlation.
@@ -210,6 +212,20 @@ pub struct SupervisorConfig<'a> {
     /// Whether direct LaunchServices opening is enabled for this session.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub allow_launch_services_active: bool,
+}
+
+fn canonicalize_for_deny_check(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Ok(parent_canonical) = parent.canonicalize() {
+            return parent_canonical.join(path.file_name().unwrap_or_default());
+        }
+    }
+
+    path.to_path_buf()
 }
 
 #[cfg(target_os = "macos")]
@@ -1519,6 +1535,8 @@ fn handle_supervisor_message(
             // Set by the trust interceptor branch when an instruction file is verified.
             let mut verified_digest: Option<String> = None;
 
+            let canonical_request_path = canonicalize_for_deny_check(&request.path);
+
             let decision = if let Some(protected_root) =
                 crate::protected_paths::overlapping_protected_root(
                     &request.path,
@@ -1542,6 +1560,29 @@ fn handle_supervisor_message(
                     reason: format!(
                         "Path overlaps protected nono state root '{}': {}",
                         protected_root.display(),
+                        request.path.display()
+                    ),
+                }
+            } else if let Some(deny_path) =
+                crate::policy::matching_deny_path(&canonical_request_path, config.deny_paths)
+            {
+                debug!(
+                    "Supervisor: path {} blocked by deny path {}",
+                    canonical_request_path.display(),
+                    deny_path.display()
+                );
+                record_denial(
+                    denials,
+                    DenialRecord {
+                        path: request.path.clone(),
+                        access: request.access,
+                        reason: DenialReason::PolicyBlocked,
+                    },
+                );
+                ApprovalDecision::Denied {
+                    reason: format!(
+                        "Path is denied by active sandbox policy '{}': {}",
+                        deny_path.display(),
                         request.path.display()
                     ),
                 }
@@ -2512,6 +2553,7 @@ mod tests {
         let backend = DenyAll;
         let sup_cfg = SupervisorConfig {
             protected_roots: &[],
+            deny_paths: &[],
             approval_backend: &backend,
             session_id: "test-session",
             open_url_origins: &[],
@@ -2565,6 +2607,88 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_handle_supervisor_message_denied_path_skips_prompt() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct CountingBackend {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl ApprovalBackend for CountingBackend {
+            fn request_capability(
+                &self,
+                _req: &nono::supervisor::CapabilityRequest,
+            ) -> nono::Result<ApprovalDecision> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ApprovalDecision::Granted)
+            }
+
+            fn backend_name(&self) -> &str {
+                "counting-backend"
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let denied = dir.path().join("appsettings.json");
+        std::fs::write(&denied, "{}").expect("write denied");
+        let denied_canonical = denied.canonicalize().expect("canonicalize denied");
+        let deny_paths = if denied_canonical == denied {
+            vec![denied.clone()]
+        } else {
+            vec![denied.clone(), denied_canonical]
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = CountingBackend {
+            calls: Arc::clone(&calls),
+        };
+        let config = SupervisorConfig {
+            protected_roots: &[],
+            deny_paths: &deny_paths,
+            approval_backend: &backend,
+            session_id: "test-session",
+            open_url_origins: &[],
+            open_url_allow_localhost: false,
+            allow_launch_services_active: false,
+        };
+        let (stream_a, _stream_b) = UnixStream::pair().expect("socketpair");
+        let mut sock = SupervisorSocket::from_stream(stream_a);
+        let mut denials = Vec::new();
+        let mut seen = HashSet::new();
+        let request = nono::CapabilityRequest {
+            request_id: "req-1".to_string(),
+            path: denied.clone(),
+            access: nono::AccessMode::Read,
+            reason: Some("test".to_string()),
+            child_pid: std::process::id(),
+            session_id: "sess-1".to_string(),
+        };
+
+        handle_supervisor_message(
+            &mut sock,
+            SupervisorMessage::Request(request),
+            Pid::from_raw(std::process::id() as i32),
+            &config,
+            &mut denials,
+            &mut seen,
+            None,
+        )
+        .expect("handle request");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "deny path should be rejected before approval backend is invoked"
+        );
+        assert!(denials
+            .iter()
+            .any(|d| d.reason == DenialReason::PolicyBlocked));
+    }
+
     struct TestDenyBackend;
     impl ApprovalBackend for TestDenyBackend {
         fn request_capability(
@@ -2586,6 +2710,7 @@ mod tests {
         let origins = vec!["https://claude.ai".to_string()];
         let config = SupervisorConfig {
             protected_roots: &[],
+            deny_paths: &[],
             approval_backend: &backend,
             session_id: "test",
             open_url_origins: &origins,
@@ -2612,6 +2737,7 @@ mod tests {
         let backend = TestDenyBackend;
         let config = SupervisorConfig {
             protected_roots: &[],
+            deny_paths: &[],
             approval_backend: &backend,
             session_id: "test",
             open_url_origins: &[],
@@ -2636,6 +2762,7 @@ mod tests {
         let backend = TestDenyBackend;
         let config_allow = SupervisorConfig {
             protected_roots: &[],
+            deny_paths: &[],
             approval_backend: &backend,
             session_id: "test",
             open_url_origins: &[],
@@ -2644,6 +2771,7 @@ mod tests {
         };
         let config_deny = SupervisorConfig {
             protected_roots: &[],
+            deny_paths: &[],
             approval_backend: &backend,
             session_id: "test",
             open_url_origins: &[],
@@ -2673,6 +2801,7 @@ mod tests {
         let backend = TestDenyBackend;
         let config = SupervisorConfig {
             protected_roots: &[],
+            deny_paths: &[],
             approval_backend: &backend,
             session_id: "test",
             open_url_origins: &[],
@@ -2779,6 +2908,7 @@ mod tests {
         let backend = TestBackend;
         let config = SupervisorConfig {
             protected_roots: &[],
+            deny_paths: &[],
             approval_backend: &backend,
             session_id: "test",
             open_url_origins: &[],
