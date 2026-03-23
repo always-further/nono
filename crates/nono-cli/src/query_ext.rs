@@ -103,10 +103,10 @@ pub fn query_path(
         if let Some(matched) = config::check_sensitive_path(&canonical.to_string_lossy())? {
             return Ok(QueryResult::Denied {
                 reason: "sensitive_path".to_string(),
-                details: Some(
-                    "Path is blocked by security policy and cannot be granted with path flags alone."
-                        .to_string(),
-                ),
+                details: Some(format!(
+                    "Path is blocked by security policy: {}. It cannot be granted with path flags alone.",
+                    matched
+                )),
                 policy_source: Some(matched),
                 matching_capability: None,
                 suggested_flag: None,
