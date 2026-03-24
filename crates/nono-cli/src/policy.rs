@@ -463,7 +463,7 @@ pub(crate) fn add_deny_access_rules(
 
     // Seatbelt deny rules only apply on macOS
     if cfg!(target_os = "macos") {
-        // Helper: emit metadata-allow + read-deny + write-deny for a single path
+        // Helper: emit metadata-allow + read-deny + write-deny + network-deny for a single path
         let emit_deny_rules = |p: &Path, caps: &mut CapabilitySet| -> Result<()> {
             let escaped = escape_seatbelt_path(path_to_utf8(p)?)?;
             let filter = if p.exists() && p.is_file() {
@@ -474,6 +474,20 @@ pub(crate) fn add_deny_access_rules(
             caps.add_platform_rule(format!("(allow file-read-metadata ({}))", filter))?;
             caps.add_platform_rule(format!("(deny file-read-data ({}))", filter))?;
             caps.add_platform_rule(format!("(deny file-write* ({}))", filter))?;
+            // SECURITY: connect(2) on a Unix domain socket is enforced by Seatbelt as
+            // network-outbound, not as a file operation. File deny rules above have no
+            // effect on socket connections. Emit an exact-path network-outbound deny so
+            // that connecting to this path (e.g. a Docker daemon socket) is blocked even
+            // if the socket is created after the sandbox is applied. This rule is
+            // evaluated at syscall time, not at sandbox_init time, so it covers sockets
+            // that do not yet exist. For non-socket paths the rule is a harmless no-op.
+            // Use (path ...) not (subpath ...) — socket connections match on the exact
+            // path, not a prefix. Both symlink and canonical paths are covered because
+            // emit_deny_rules is called for each form by the caller.
+            caps.add_platform_rule(format!(
+                "(deny network-outbound (path \"{}\"))",
+                escaped
+            ))?;
             Ok(())
         };
 
@@ -1323,10 +1337,11 @@ mod tests {
         if cfg!(target_os = "macos") {
             // On macOS, Seatbelt platform rules should be generated
             let rules = caps.platform_rules();
-            assert_eq!(rules.len(), 3);
+            assert_eq!(rules.len(), 4);
             assert!(rules[0].contains("allow file-read-metadata"));
             assert!(rules[1].contains("deny file-read-data"));
             assert!(rules[2].contains("deny file-write*"));
+            assert!(rules[3].contains("deny network-outbound"));
         } else {
             // On Linux, no platform rules generated (Landlock has no deny semantics)
             assert!(caps.platform_rules().is_empty());
@@ -1360,9 +1375,9 @@ mod tests {
         );
 
         if cfg!(target_os = "macos") {
-            // Should have 6 rules: 3 for symlink path + 3 for resolved target
+            // Should have 8 rules: 4 for symlink path + 4 for resolved target
             let rules = caps.platform_rules();
-            assert_eq!(rules.len(), 6, "expected 6 Seatbelt rules for symlink deny");
+            assert_eq!(rules.len(), 8, "expected 8 Seatbelt rules for symlink deny");
         }
     }
 

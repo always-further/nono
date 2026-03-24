@@ -522,6 +522,7 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
         || !pp.add_allow_write.is_empty()
         || !pp.add_allow_readwrite.is_empty()
         || !pp.add_deny_access.is_empty()
+        || !pp.add_deny_commands.is_empty()
         || !pp.override_deny.is_empty();
 
     if has_policy {
@@ -538,6 +539,13 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
         print_fs_paths("add_allow_write", &pp.add_allow_write, t, args.raw);
         print_fs_paths("add_allow_readwrite", &pp.add_allow_readwrite, t, args.raw);
         print_fs_paths("add_deny_access", &pp.add_deny_access, t, args.raw);
+        if !pp.add_deny_commands.is_empty() {
+            println!(
+                "    {}: {}",
+                theme::fg("add_deny_commands", t.yellow),
+                pp.add_deny_commands.join(", ")
+            );
+        }
         if !pp.override_deny.is_empty() {
             println!(
                 "    {}: {}",
@@ -727,6 +735,7 @@ fn profile_to_json(
         "add_allow_write": profile.policy.add_allow_write,
         "add_allow_readwrite": profile.policy.add_allow_readwrite,
         "add_deny_access": profile.policy.add_deny_access,
+        "add_deny_commands": profile.policy.add_deny_commands,
         "override_deny": profile.policy.override_deny,
     });
 
@@ -899,6 +908,11 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
             "add_deny_access",
             &p1.policy.add_deny_access,
             &p2.policy.add_deny_access,
+        ),
+        (
+            "add_deny_commands",
+            &p1.policy.add_deny_commands,
+            &p2.policy.add_deny_commands,
         ),
         (
             "override_deny",

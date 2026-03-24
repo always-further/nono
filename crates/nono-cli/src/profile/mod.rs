@@ -72,6 +72,11 @@ pub struct PolicyPatchConfig {
     /// Additional deny.access paths to apply.
     #[serde(default)]
     pub add_deny_access: Vec<String>,
+    /// Additional commands to block, extending deny.commands from groups.
+    /// Useful for blocking specific binaries (e.g. "docker", "kubectl") without
+    /// requiring changes to policy.json.
+    #[serde(default)]
+    pub add_deny_commands: Vec<String>,
     /// Paths to exempt from deny groups.
     /// Each path must also be explicitly granted via `filesystem` or `policy.add_allow_*`.
     /// Does not implicitly grant access; only removes the deny rule.
@@ -1227,6 +1232,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             add_deny_access: dedup_append(
                 &base.policy.add_deny_access,
                 &child.policy.add_deny_access,
+            ),
+            add_deny_commands: dedup_append(
+                &base.policy.add_deny_commands,
+                &child.policy.add_deny_commands,
             ),
             override_deny: dedup_append(&base.policy.override_deny, &child.policy.override_deny),
         },

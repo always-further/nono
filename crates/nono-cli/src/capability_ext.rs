@@ -314,6 +314,10 @@ impl CapabilitySetExt for CapabilitySet {
             policy::add_deny_access_rules(path_str, &mut caps, &mut resolved.deny_paths)?;
         }
 
+        for cmd in &profile.policy.add_deny_commands {
+            caps.add_blocked_command(cmd);
+        }
+
         // Network blocking or proxy mode from profile
         if profile.network.block {
             caps.set_network_blocked(true);

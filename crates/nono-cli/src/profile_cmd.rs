@@ -207,6 +207,10 @@ fn build_skeleton(args: &ProfileInitArgs) -> serde_json::Value {
             serde_json::Value::Array(vec![]),
         );
         pol.insert(
+            "add_deny_commands".to_string(),
+            serde_json::Value::Array(vec![]),
+        );
+        pol.insert(
             "override_deny".to_string(),
             serde_json::Value::Array(vec![]),
         );
