@@ -183,7 +183,7 @@ impl CapabilitySetExt for CapabilitySet {
         }
 
         for cmd in &args.block_command {
-            caps.add_blocked_command(cmd.clone());
+            caps.add_blocked_command(cmd);
         }
 
         finalize_caps(&mut caps, &mut resolved, &loaded_policy, args, &[])?;
@@ -507,7 +507,7 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
     }
 
     for cmd in &args.block_command {
-        caps.add_blocked_command(cmd.clone());
+        caps.add_blocked_command(cmd);
     }
 
     Ok(())

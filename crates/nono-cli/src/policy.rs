@@ -430,18 +430,71 @@ fn add_fs_capability(
     Ok(())
 }
 
+/// Resolve symlinks in parent directories when the leaf path does not exist.
+///
+/// `path.canonicalize()` fails when the leaf is absent (e.g. a socket that
+/// hasn't been created yet). This helper walks upward until it finds an
+/// existing ancestor, canonicalizes it, then re-appends the non-existent
+/// suffix components. Returns `Ok(None)` when no symlinks are found in
+/// parents (resolved path equals the original).
+///
+/// Example on macOS:
+/// - requested path: `/var/run/future.sock`
+/// - `/future.sock` doesn't exist, but `/var/run` does
+/// - `/var/run` canonicalizes to `/private/var/run`
+/// - result: `Some("/private/var/run/future.sock")`
+fn resolve_parent_symlinks(path: &Path) -> Result<Option<PathBuf>> {
+    let mut suffix = Vec::new();
+    let mut cur = path;
+
+    loop {
+        if cur.exists() {
+            break;
+        }
+        let name = cur.file_name().ok_or_else(|| {
+            NonoError::ConfigParse(format!(
+                "cannot resolve parent symlinks for {}",
+                path.display()
+            ))
+        })?;
+        suffix.push(name.to_os_string());
+        cur = cur.parent().ok_or_else(|| {
+            NonoError::ConfigParse(format!(
+                "cannot resolve parent symlinks for {}",
+                path.display()
+            ))
+        })?;
+    }
+
+    let mut resolved = cur
+        .canonicalize()
+        .map_err(|e| NonoError::ConfigParse(format!("canonicalize {}: {}", cur.display(), e)))?;
+    for part in suffix.iter().rev() {
+        resolved.push(part);
+    }
+
+    Ok((resolved != path).then_some(resolved))
+}
+
 /// Add deny.access rules, collecting the expanded path for validation.
 ///
 /// On macOS, generates Seatbelt platform rules:
 /// - `(allow file-read-metadata ...)` — programs can stat/check existence
 /// - `(deny file-read-data ...)` — deny reading content
 /// - `(deny file-write* ...)` — deny writing
+/// - `(deny network-outbound (path ...))` — blocks Unix socket connections
 ///
 /// On Linux, deny paths are collected for overlap validation only —
 /// Landlock has no deny semantics so platform rules would be ignored.
 ///
 /// Uses `subpath` for directories, `literal` for files.
 /// For non-existent paths, defaults to `subpath` (defensive).
+///
+/// Both the original and the kernel-resolved (canonical) path receive deny
+/// rules so Seatbelt matches regardless of which form the kernel sees.
+/// When the leaf does not yet exist (e.g. a future socket), parent symlinks
+/// are resolved via `resolve_parent_symlinks` so the derived canonical path
+/// is also covered.
 pub(crate) fn add_deny_access_rules(
     path_str: &str,
     caps: &mut CapabilitySet,
@@ -459,6 +512,28 @@ pub(crate) fn add_deny_access_rules(
         if *canonical != path {
             deny_paths.push(canonical.clone());
         }
+    }
+
+    // When the full path doesn't exist yet (canonicalize failed), resolve
+    // symlinks in parent directories so the derived canonical path is still
+    // covered — important for sockets that are created after sandbox_init.
+    let parent_resolved = if canonical.is_none() {
+        match resolve_parent_symlinks(&path) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                warn!(
+                    "Skipping parent-symlink resolution for {}: {}",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(ref resolved) = parent_resolved {
+        deny_paths.push(resolved.clone());
     }
 
     // Seatbelt deny rules only apply on macOS
@@ -494,7 +569,7 @@ pub(crate) fn add_deny_access_rules(
         // Emit deny rules for the original path
         emit_deny_rules(&path, caps)?;
 
-        // Emit deny rules for the canonical path too (covers parent symlinks)
+        // Emit deny rules for the canonical path too (covers parent symlinks on existing paths)
         if let Some(ref canonical) = canonical {
             if *canonical != path {
                 if let Err(e) = emit_deny_rules(canonical, caps) {
@@ -504,6 +579,18 @@ pub(crate) fn add_deny_access_rules(
                         e
                     );
                 }
+            }
+        }
+
+        // Emit deny rules for the parent-resolved path (covers non-existent paths
+        // whose parents contain symlinks, e.g. /var/run/future.sock -> /private/var/run/future.sock)
+        if let Some(ref resolved) = parent_resolved {
+            if let Err(e) = emit_deny_rules(resolved, caps) {
+                warn!(
+                    "Skipping parent-resolved deny rules for {}: {}",
+                    resolved.display(),
+                    e
+                );
             }
         }
     }
@@ -1410,6 +1497,107 @@ mod tests {
             parent_is_symlinked,
             deny_paths
         );
+    }
+
+    #[test]
+    fn test_resolve_parent_symlinks_nonexistent_leaf() {
+        // Create a dir with a symlinked parent, then ask for a non-existent
+        // child inside it. resolve_parent_symlinks should give back the
+        // canonical form with the leaf appended.
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        // Build: dir/real_dir/  and  dir/link_dir -> real_dir
+        let real_dir = dir.path().join("real_dir");
+        std::fs::create_dir(&real_dir).expect("create real_dir");
+        let link_dir = dir.path().join("link_dir");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create symlink");
+
+        // The leaf (future.sock) does not exist yet
+        let future = link_dir.join("future.sock");
+        assert!(!future.exists(), "test precondition: leaf must not exist");
+
+        let result = resolve_parent_symlinks(&future).expect("resolve_parent_symlinks");
+
+        // The real_dir canonical path must be used as the parent
+        let real_dir_canonical = real_dir.canonicalize().expect("canonicalize real_dir");
+        let expected = real_dir_canonical.join("future.sock");
+
+        // Only returns Some when the resolved path differs from the original
+        if link_dir.canonicalize().ok().as_deref() != Some(&*real_dir_canonical) || link_dir != real_dir {
+            assert_eq!(result, Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_resolve_parent_symlinks_existing_path() {
+        // When the full path already exists, resolve_parent_symlinks returns
+        // None if it equals the original (no parent symlinks), or Some if
+        // parent symlinks make it differ — consistent with canonicalize().
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let file = dir.path().join("existing.txt");
+        std::fs::write(&file, "content").expect("write file");
+
+        let result = resolve_parent_symlinks(&file).expect("resolve_parent_symlinks");
+        let canonical = file.canonicalize().expect("canonicalize");
+        if canonical == file {
+            assert_eq!(result, None, "no parent symlinks means None");
+        } else {
+            assert_eq!(result, Some(canonical), "parent symlinks means Some(canonical)");
+        }
+    }
+
+    #[test]
+    fn test_deny_access_nonexistent_under_symlinked_parent() {
+        // Simulate /var/run/future.sock on macOS: the leaf doesn't exist yet
+        // but the parent directory contains a symlink. Both the original and
+        // the parent-resolved path should appear in deny_paths, and on macOS
+        // both should get Seatbelt rules (4 rules each = 8 total).
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        let real_dir = dir.path().join("real_run");
+        std::fs::create_dir(&real_dir).expect("create real_run");
+        let link_dir = dir.path().join("run");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create symlink");
+
+        let socket_path = link_dir.join("daemon.sock");
+        assert!(!socket_path.exists(), "test precondition: socket must not exist");
+
+        let mut caps = CapabilitySet::new();
+        let mut deny_paths = Vec::new();
+        let path_str = socket_path.to_str().expect("valid utf8");
+        add_deny_access_rules(path_str, &mut caps, &mut deny_paths)
+            .expect("add deny rules for non-existent socket under symlinked parent");
+
+        let real_dir_canonical = real_dir.canonicalize().expect("canonicalize real_dir");
+        let resolved_socket = real_dir_canonical.join("daemon.sock");
+
+        let parent_is_symlinked = link_dir.canonicalize().ok().as_deref() != Some(&*real_dir_canonical)
+            || link_dir != real_dir;
+
+        if parent_is_symlinked && resolved_socket != socket_path {
+            assert!(
+                deny_paths.contains(&socket_path.to_path_buf()),
+                "deny_paths must contain the original path"
+            );
+            assert!(
+                deny_paths.contains(&resolved_socket),
+                "deny_paths must contain the parent-resolved path; got {:?}",
+                deny_paths
+            );
+
+            if cfg!(target_os = "macos") {
+                let rules = caps.platform_rules();
+                assert_eq!(
+                    rules.len(),
+                    8,
+                    "expected 8 Seatbelt rules (4 original + 4 resolved); got: {:?}",
+                    rules
+                );
+            }
+        } else {
+            // Parent was not actually a symlink (unlikely in this test but safe to handle)
+            assert!(deny_paths.contains(&socket_path.to_path_buf()));
+        }
     }
 
     #[test]
