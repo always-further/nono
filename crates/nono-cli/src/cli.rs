@@ -66,6 +66,16 @@ pub struct Cli {
     )]
     pub theme: Option<String>,
 
+    /// Write logs to a file instead of stderr
+    #[arg(
+        long,
+        global = true,
+        env = "NONO_LOG_FILE",
+        value_name = "PATH",
+        help_heading = "OPTIONS"
+    )]
+    pub log_file: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -2496,5 +2506,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_log_file_flag() {
+        let cli = Cli::parse_from(["nono", "--log-file", "/tmp/nono.log", "run", "--allow", ".", "echo", "hi"]);
+        assert_eq!(cli.log_file, Some(PathBuf::from("/tmp/nono.log")));
+    }
+
+    #[test]
+    fn test_log_file_flag_absent() {
+        let cli = Cli::parse_from(["nono", "run", "--allow", ".", "echo", "hi"]);
+        assert!(cli.log_file.is_none());
     }
 }
