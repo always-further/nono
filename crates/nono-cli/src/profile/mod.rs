@@ -2311,6 +2311,7 @@ mod tests {
                 add_allow_write: vec![],
                 add_allow_readwrite: vec![],
                 add_deny_access: vec!["/base/policy-deny".to_string()],
+                add_deny_commands: vec![],
                 override_deny: vec!["/base/override-deny".to_string()],
             },
             network: NetworkConfig {
@@ -2377,6 +2378,7 @@ mod tests {
                 add_allow_write: vec!["/child/policy-write".to_string()],
                 add_allow_readwrite: vec!["/child/policy-rw".to_string()],
                 add_deny_access: vec!["/child/policy-deny".to_string()],
+                add_deny_commands: vec![],
                 override_deny: vec!["/child/override-deny".to_string()],
             },
             network: NetworkConfig {
