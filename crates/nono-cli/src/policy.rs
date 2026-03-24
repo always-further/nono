@@ -152,6 +152,7 @@ impl ProfileDef {
             open_urls: self.open_urls.clone(),
             allow_launch_services: self.allow_launch_services,
             interactive: self.interactive,
+            skipdirs: Vec::new(),
         }
     }
 }

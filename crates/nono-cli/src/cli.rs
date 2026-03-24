@@ -859,6 +859,12 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "rollback_include", help_heading = "ROLLBACK")]
     pub rollback_all: bool,
 
+    /// Skip this directory name during scans and snapshots.
+    /// Treated like a built-in heavy directory (e.g. target, node_modules).
+    /// Matched as an exact path component name. Repeatable.
+    #[arg(long, value_name = "DIR_NAME", help_heading = "ROLLBACK")]
+    pub skip_dir: Vec<String>,
+
     /// Override the rollback snapshot destination directory.
     /// By default, snapshots are stored in ~/.nono/rollbacks/.
     /// The destination must be within a path already granted write access
