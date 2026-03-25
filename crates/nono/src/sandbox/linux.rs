@@ -977,6 +977,8 @@ pub fn install_seccomp_block_network() -> Result<()> {
         filter: filter.as_ptr(),
     };
 
+    // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS)` is process-local, takes only scalar
+    // arguments here, and does not dereference pointers.
     let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if ret != 0 {
         return Err(NonoError::SandboxInit(format!(
