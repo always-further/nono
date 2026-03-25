@@ -203,7 +203,16 @@ impl SetupRunner {
                 println!("  * TCP network filtering: probe failed despite ABI support");
             }
         } else {
-            println!("  * TCP network filtering: not supported by this ABI");
+            match nono::sandbox::probe_seccomp_block_network_support()? {
+                true => println!(
+                    "  * TCP network filtering: not supported by this ABI \
+                     (full --block-net seccomp fallback is available when no proxy or port exceptions are requested)"
+                ),
+                false => println!(
+                    "  * TCP network filtering: not supported by this ABI \
+                     (seccomp full --block-net fallback is not available on this system)"
+                ),
+            }
         }
 
         Ok(())

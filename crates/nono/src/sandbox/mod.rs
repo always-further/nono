@@ -26,9 +26,9 @@ pub use linux::{detect_abi, DetectedAbi};
 #[cfg(target_os = "linux")]
 pub use linux::{
     classify_access_from_flags, continue_notif, deny_notif, inject_fd, install_seccomp_notify,
-    notif_id_valid, read_notif_path, read_open_how, recv_notif, resolve_notif_path,
-    respond_notif_errno, validate_openat2_size, OpenHow, SeccompData, SeccompNotif, SYS_OPENAT,
-    SYS_OPENAT2,
+    notif_id_valid, probe_seccomp_block_network_support, read_notif_path, read_open_how,
+    recv_notif, resolve_notif_path, respond_notif_errno, validate_openat2_size, OpenHow,
+    SeccompData, SeccompNotif, SYS_OPENAT, SYS_OPENAT2,
 };
 
 /// Information about sandbox support on this platform

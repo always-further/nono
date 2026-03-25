@@ -251,6 +251,14 @@ fn access_to_landlock(access: AccessMode, abi: ABI) -> LandlockAccess {
     }
 }
 
+#[must_use]
+fn can_use_seccomp_network_block_fallback(caps: &CapabilitySet) -> bool {
+    matches!(caps.network_mode(), NetworkMode::Blocked)
+        && caps.tcp_connect_ports().is_empty()
+        && caps.tcp_bind_ports().is_empty()
+        && caps.localhost_ports().is_empty()
+}
+
 /// Check if a path is a character or block device file.
 ///
 /// Used to selectively grant `IoctlDev` only for actual device files
@@ -350,6 +358,8 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
         || !caps.tcp_connect_ports().is_empty()
         || !caps.tcp_bind_ports().is_empty();
 
+    let mut use_seccomp_block_network_fallback = false;
+
     let ruleset_builder = if needs_network_handling {
         let handled_net = AccessNet::from_all(target_abi);
         if !handled_net.is_empty() {
@@ -364,10 +374,18 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
                     ))
                 })?
                 .set_compatibility(CompatLevel::BestEffort)
+        } else if can_use_seccomp_network_block_fallback(caps) {
+            warn!(
+                "Landlock ABI {:?} lacks TCP network filtering; using seccomp full-network-block fallback",
+                target_abi
+            );
+            use_seccomp_block_network_fallback = true;
+            ruleset_builder
         } else {
             return Err(NonoError::SandboxInit(
                 "Network filtering requested but kernel Landlock ABI doesn't support it \
-                 (requires V4+). Refusing to start without network restrictions."
+                 (requires V4+). On this kernel, only a full --block-net fallback without \
+                 proxy or port exceptions is supported."
                     .to_string(),
             ));
         }
@@ -552,6 +570,16 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
         }
     }
 
+    if use_seccomp_block_network_fallback {
+        install_seccomp_block_network().map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to install seccomp network block fallback: {}",
+                e
+            ))
+        })?;
+        info!("Seccomp network block fallback enforced");
+    }
+
     Ok(())
 }
 
@@ -654,6 +682,7 @@ const BPF_JEQ: u16 = 0x10;
 const BPF_K: u16 = 0x00;
 const BPF_RET: u16 = 0x06;
 
+const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 
@@ -668,6 +697,13 @@ pub const SYS_OPENAT2: i32 = 437;
 pub const SYS_OPENAT: i32 = 56;
 #[cfg(target_arch = "aarch64")]
 pub const SYS_OPENAT2: i32 = 437;
+
+#[cfg(target_os = "linux")]
+const SYS_SOCKET: i32 = libc::SYS_socket as i32;
+#[cfg(target_os = "linux")]
+const SYS_SOCKETPAIR: i32 = libc::SYS_socketpair as i32;
+#[cfg(target_os = "linux")]
+const SYS_IO_URING_SETUP: i32 = libc::SYS_io_uring_setup as i32;
 
 /// struct open_how from <linux/openat2.h>
 ///
@@ -716,6 +752,7 @@ pub fn validate_openat2_size(how_size: usize) -> bool {
 
 // Offset of `nr` field in seccomp_data (used by BPF)
 const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+const SECCOMP_DATA_ARG0_OFFSET: u32 = 16;
 
 /// A single BPF instruction.
 #[repr(C)]
@@ -806,6 +843,8 @@ pub fn install_seccomp_notify() -> Result<std::os::fd::OwnedFd> {
     // setuid/setgid binaries. This is a one-way flag that cannot be unset, and
     // Landlock's restrict_self() sets it too, so this adds no new restriction.
     // SAFETY: prctl with PR_SET_NO_NEW_PRIVS is always safe to call.
+    // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS)` is process-local, takes only scalar
+    // arguments here, and does not dereference pointers.
     let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if ret != 0 {
         return Err(NonoError::SandboxInit(format!(
@@ -859,6 +898,153 @@ pub fn install_seccomp_notify() -> Result<std::os::fd::OwnedFd> {
     // SAFETY: The fd returned by seccomp() with NEW_LISTENER is a valid,
     // newly-created file descriptor that we now own.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(notify_fd) })
+}
+
+/// Install a seccomp filter that blocks non-Unix socket creation.
+///
+/// This is a compatibility fallback for kernels whose Landlock ABI lacks
+/// `AccessNet`. It enforces a fail-closed `--block-net` policy by allowing
+/// only Unix-domain sockets and denying `socket()`, `socketpair()`, and
+/// `io_uring_setup()` attempts that could drive network I/O.
+pub fn install_seccomp_block_network() -> Result<()> {
+    let errno_ret = SECCOMP_RET_ERRNO | (libc::EPERM as u32);
+
+    let filter = [
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_NR_OFFSET,
+        },
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 4,
+            jf: 0,
+            k: SYS_SOCKET as u32,
+        },
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 3,
+            jf: 0,
+            k: SYS_SOCKETPAIR as u32,
+        },
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: SYS_IO_URING_SETUP as u32,
+        },
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: errno_ret,
+        },
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_ARG0_OFFSET,
+        },
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: libc::AF_UNIX as u32,
+        },
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: errno_ret,
+        },
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+    ];
+
+    let prog = SockFprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+
+    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if ret != 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "prctl(PR_SET_NO_NEW_PRIVS) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // SAFETY: `seccomp(SECCOMP_SET_MODE_FILTER)` reads the provided BPF program
+    // during the syscall. `prog` points to a stack-allocated filter array that
+    // remains alive for the duration of the call.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            SECCOMP_SET_MODE_FILTER,
+            0,
+            &prog as *const SockFprog,
+        )
+    };
+
+    if ret < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "seccomp(SECCOMP_SET_MODE_FILTER) for network block failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Probe whether the seccomp full-network-block fallback can be installed.
+///
+/// This forks a short-lived child so the calling process is not permanently
+/// modified by seccomp state during the probe.
+pub fn probe_seccomp_block_network_support() -> Result<bool> {
+    // SAFETY: `fork()` is used only to isolate the irreversible seccomp probe.
+    // The child immediately attempts filter installation and exits.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "fork() failed during seccomp network fallback probe: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    if pid == 0 {
+        let exit_code = if install_seccomp_block_network().is_ok() {
+            0
+        } else {
+            1
+        };
+        // SAFETY: `_exit()` terminates the probe child without running parent
+        // process destructors after fork.
+        unsafe { libc::_exit(exit_code) };
+    }
+
+    let mut status = 0;
+    // SAFETY: `waitpid()` is called for the child PID returned by `fork()`
+    // above, and `status` points to valid writable memory.
+    let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+    if waited < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "waitpid() failed during seccomp network fallback probe: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0)
 }
 
 /// Receive the next seccomp notification (blocking).
@@ -1590,6 +1776,24 @@ mod tests {
     }
 
     #[test]
+    fn test_seccomp_network_block_fallback_requires_plain_blocked_mode() {
+        assert!(can_use_seccomp_network_block_fallback(
+            &CapabilitySet::new().block_network()
+        ));
+
+        let mut with_localhost = CapabilitySet::new().block_network();
+        with_localhost.add_localhost_port(3000);
+        assert!(!can_use_seccomp_network_block_fallback(&with_localhost));
+
+        let mut with_connect = CapabilitySet::new().block_network();
+        with_connect.add_tcp_connect_port(443);
+        assert!(!can_use_seccomp_network_block_fallback(&with_connect));
+
+        let with_proxy = CapabilitySet::new().proxy_only(8080);
+        assert!(!can_use_seccomp_network_block_fallback(&with_proxy));
+    }
+
+    #[test]
     fn test_detect_abi_returns_ok_on_supported_system() {
         // On a system with Landlock, this should succeed
         // On a system without it, it should return Err (not panic)
@@ -1647,6 +1851,73 @@ mod tests {
             },
         ];
         assert_eq!(filter.len(), 5);
+    }
+
+    #[test]
+    fn test_network_block_bpf_filter_instruction_count() {
+        let filter = [
+            SockFilterInsn {
+                code: BPF_LD | BPF_W | BPF_ABS,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_DATA_NR_OFFSET,
+            },
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 4,
+                jf: 0,
+                k: SYS_SOCKET as u32,
+            },
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 3,
+                jf: 0,
+                k: SYS_SOCKETPAIR as u32,
+            },
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 1,
+                jf: 0,
+                k: SYS_IO_URING_SETUP as u32,
+            },
+            SockFilterInsn {
+                code: BPF_RET | BPF_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ALLOW,
+            },
+            SockFilterInsn {
+                code: BPF_RET | BPF_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ERRNO | (libc::EPERM as u32),
+            },
+            SockFilterInsn {
+                code: BPF_LD | BPF_W | BPF_ABS,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_DATA_ARG0_OFFSET,
+            },
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 1,
+                jf: 0,
+                k: libc::AF_UNIX as u32,
+            },
+            SockFilterInsn {
+                code: BPF_RET | BPF_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ERRNO | (libc::EPERM as u32),
+            },
+            SockFilterInsn {
+                code: BPF_RET | BPF_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ALLOW,
+            },
+        ];
+        assert_eq!(filter.len(), 10);
     }
 
     #[test]
