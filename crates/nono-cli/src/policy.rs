@@ -559,10 +559,7 @@ pub(crate) fn add_deny_access_rules(
             // Use (path ...) not (subpath ...) — socket connections match on the exact
             // path, not a prefix. Both symlink and canonical paths are covered because
             // emit_deny_rules is called for each form by the caller.
-            caps.add_platform_rule(format!(
-                "(deny network-outbound (path \"{}\"))",
-                escaped
-            ))?;
+            caps.add_platform_rule(format!("(deny network-outbound (path \"{}\"))", escaped))?;
             Ok(())
         };
 
@@ -1523,7 +1520,9 @@ mod tests {
         let expected = real_dir_canonical.join("future.sock");
 
         // Only returns Some when the resolved path differs from the original
-        if link_dir.canonicalize().ok().as_deref() != Some(&*real_dir_canonical) || link_dir != real_dir {
+        if link_dir.canonicalize().ok().as_deref() != Some(&*real_dir_canonical)
+            || link_dir != real_dir
+        {
             assert_eq!(result, Some(expected));
         }
     }
@@ -1542,7 +1541,11 @@ mod tests {
         if canonical == file {
             assert_eq!(result, None, "no parent symlinks means None");
         } else {
-            assert_eq!(result, Some(canonical), "parent symlinks means Some(canonical)");
+            assert_eq!(
+                result,
+                Some(canonical),
+                "parent symlinks means Some(canonical)"
+            );
         }
     }
 
@@ -1560,7 +1563,10 @@ mod tests {
         std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create symlink");
 
         let socket_path = link_dir.join("daemon.sock");
-        assert!(!socket_path.exists(), "test precondition: socket must not exist");
+        assert!(
+            !socket_path.exists(),
+            "test precondition: socket must not exist"
+        );
 
         let mut caps = CapabilitySet::new();
         let mut deny_paths = Vec::new();
@@ -1571,7 +1577,8 @@ mod tests {
         let real_dir_canonical = real_dir.canonicalize().expect("canonicalize real_dir");
         let resolved_socket = real_dir_canonical.join("daemon.sock");
 
-        let parent_is_symlinked = link_dir.canonicalize().ok().as_deref() != Some(&*real_dir_canonical)
+        let parent_is_symlinked = link_dir.canonicalize().ok().as_deref()
+            != Some(&*real_dir_canonical)
             || link_dir != real_dir;
 
         if parent_is_symlinked && resolved_socket != socket_path {
