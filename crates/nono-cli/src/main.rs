@@ -151,15 +151,17 @@ fn init_theme(cli: &Cli) {
 }
 
 fn init_tracing(cli: &Cli) {
-    let filter = tracing_filter(cli);
+    let builder = || {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_filter(cli))
+            .with_target(false)
+    };
 
     if let Some(path) = &cli.log_file {
         match std::fs::File::create(path) {
             Ok(file) => {
                 let writer = Mutex::new(file);
-                tracing_subscriber::fmt()
-                    .with_env_filter(filter)
-                    .with_target(false)
+                builder()
                     .with_ansi(false)
                     .with_writer(writer)
                     .init();
@@ -170,10 +172,7 @@ fn init_tracing(cli: &Cli) {
             }
         }
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_target(false)
-            .init();
+        builder().init();
     }
 }
 
