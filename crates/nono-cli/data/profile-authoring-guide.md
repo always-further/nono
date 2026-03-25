@@ -100,6 +100,7 @@ Provides subtractive and additive composition on top of inherited groups and fil
 | `add_allow_write`    | array of string | Additional write-only path grants. |
 | `add_allow_readwrite`| array of string | Additional read+write path grants. |
 | `add_deny_access`    | array of string | Additional deny paths. |
+| `add_deny_commands`  | array of string | Command names (basename only) to block. Blocks execution of the named binaries regardless of where they are installed. Checked before the sandbox enforces filesystem rules. |
 | `override_deny`      | array of string | Paths to exempt from deny groups. Each path must also be granted via `filesystem` or `add_allow_*`. Does not implicitly grant access; only removes the deny rule. |
 
 ### network
@@ -324,6 +325,26 @@ Block access to a file in the working directory while keeping the rest accessibl
 
 With `capability_elevation` enabled, nono runs in supervised mode where every file access outside the initial grant set is trapped and evaluated. The deny list is checked before the supervisor prompts for approval, so denied paths are blocked regardless of platform.
 
+### Blocking container access (Docker, Podman, kubectl)
+
+Use `add_deny_access` together with `add_deny_commands` for defense-in-depth when you want to prevent an agent from reaching the Docker daemon or similar container runtimes:
+
+```json
+{
+  "extends": "claude-code",
+  "meta": {
+    "name": "no-docker",
+    "description": "Claude Code without Docker access"
+  },
+  "policy": {
+    "add_deny_access": ["/var/run/docker.sock"],
+    "add_deny_commands": ["docker", "docker-compose", "podman", "kubectl"]
+  }
+}
+```
+
+On macOS, `add_deny_access` on a socket path also emits a Seatbelt `network-outbound` deny — Seatbelt treats `connect(2)` as a network operation so a file deny alone won't block it. `add_deny_commands` blocks the CLI tools as defense-in-depth, catching cases where an agent reaches the daemon through a forwarded or alternate socket path. Both are visible in `nono policy show` under **Policy patches**.
+
 ### Profile with group exclusion
 
 Remove an inherited deny group that is too restrictive for your use case:
@@ -384,7 +405,7 @@ nono policy diff <a> <b>          # Compare two profiles
 
 ## 6. Variable Expansion
 
-The following variables are expanded in all path fields (`filesystem.*`, `policy.add_allow_*`, `policy.add_deny_access`, `policy.override_deny`):
+The following variables are expanded in all path fields (`filesystem.*`, `policy.add_allow_*`, `policy.add_deny_access`, `policy.override_deny`).
 
 | Variable           | Expands to |
 |--------------------|------------|

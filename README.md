@@ -240,7 +240,7 @@ Security policy defined as named groups in a single JSON file. Profiles referenc
 
 ### Destructive Command Blocking
 
-Dangerous commands (`rm`, `dd`, `chmod`, `sudo`, `scp`) are blocked before execution. Override per invocation with `--allow-command` or permanently via `allowed_commands` in a profile.
+Dangerous commands (`rm`, `dd`, `chmod`, `sudo`, `scp`) are blocked before execution. Override per invocation with `--allow-command` or permanently via `allowed_commands` in a profile. Block additional commands with `add_deny_commands`.
 
 ```bash
 $ nono run --allow-cwd -- rm -rf /
@@ -252,6 +252,10 @@ nono run --allow-cwd --allow-command rm -- rm ./temp-file.txt
 # Override via profile
 # { "security": { "allowed_commands": ["rm"] } }
 nono run --profile my-profile -- rm /tmp/old-file.txt
+
+# Block specific commands in a profile (add_deny_commands) — pairs with add_deny_access for sockets
+# { "policy": { "add_deny_access": ["/var/run/docker.sock"], "add_deny_commands": ["docker", "kubectl"] } }
+nono run --profile no-docker -- claude
 ```
 
 > [!WARNING]

@@ -70,6 +70,7 @@ Profiles use JSON format:
     "add_allow_write": [],
     "add_allow_readwrite": [],
     "add_deny_access": [],
+    "add_deny_commands": [],
     "override_deny": []
   },
   "network": {
@@ -101,7 +102,8 @@ The `policy` section provides fine-grained, additive and subtractive composition
 | `add_allow_read` | Additional read-only directories to allow |
 | `add_allow_write` | Additional write-only directories to allow |
 | `add_allow_readwrite` | Additional read+write directories to allow |
-| `add_deny_access` | Additional deny rules to apply (block read and write content) |
+| `add_deny_access` | Additional deny rules to apply (block read and write content). On macOS, Unix socket paths also emit a `network-outbound` deny so that `connect(2)` to the socket is blocked. |
+| `add_deny_commands` | Command names (basename only) to block execution of. Complements `add_deny_access` for defense-in-depth against tools like `docker`, `kubectl`, etc. |
 | `override_deny` | Paths to exempt from deny groups (must also have a matching grant) |
 
 #### Adding a Deny Rule to an Inherited Profile
@@ -124,6 +126,23 @@ Block a specific path that a base profile would otherwise allow:
 ```bash
 nono run --profile claude-deny-git -- claude
 ```
+
+#### Blocking Container Access (Docker, Podman, kubectl)
+
+Use `add_deny_access` and `add_deny_commands` together for defense-in-depth:
+
+```json
+{
+  "extends": "claude-code",
+  "meta": { "name": "no-docker", "version": "1.0.0" },
+  "policy": {
+    "add_deny_access": ["/var/run/docker.sock"],
+    "add_deny_commands": ["docker", "docker-compose", "podman", "kubectl"]
+  }
+}
+```
+
+On macOS, `add_deny_access` on a socket path also emits a `network-outbound` deny — Seatbelt classifies `connect(2)` as a network operation, so a file deny alone won't block it. `add_deny_commands` blocks the CLI tools directly as defense-in-depth.
 
 #### Adding Write-Only Access
 
@@ -374,7 +393,7 @@ Every profile's effective capability set is built through composition:
 1. **default_profile_groups** come from the built-in `default` profile
 2. **profile.security.groups** add additional groups on top
 3. **profile.policy.exclude_groups** removes groups from the composed set (exclusion wins)
-4. **profile.policy.add_allow_*** and **profile.policy.add_deny_access** apply additive overrides
+4. **profile.policy.add_allow_***, **profile.policy.add_deny_access**, and **profile.policy.add_deny_commands** apply additive overrides
 5. **profile.filesystem** entries are additive
 6. **profile.policy.override_deny** punches targeted holes through deny groups (requires matching grant)
 7. **CLI overrides** (`--allow`, `--read`, `--override-deny`, etc.) are applied last
