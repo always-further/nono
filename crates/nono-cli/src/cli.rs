@@ -2510,7 +2510,16 @@ mod tests {
 
     #[test]
     fn test_log_file_flag() {
-        let cli = Cli::parse_from(["nono", "--log-file", "/tmp/nono.log", "run", "--allow", ".", "echo", "hi"]);
+        let cli = Cli::parse_from([
+            "nono",
+            "--log-file",
+            "/tmp/nono.log",
+            "run",
+            "--allow",
+            ".",
+            "echo",
+            "hi",
+        ]);
         assert_eq!(cli.log_file, Some(PathBuf::from("/tmp/nono.log")));
     }
 
