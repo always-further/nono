@@ -161,10 +161,7 @@ fn init_tracing(cli: &Cli) {
         match std::fs::File::create(path) {
             Ok(file) => {
                 let writer = Mutex::new(file);
-                builder()
-                    .with_ansi(false)
-                    .with_writer(writer)
-                    .init();
+                builder().with_ansi(false).with_writer(writer).init();
             }
             Err(e) => {
                 eprintln!("nono: failed to open log file {}: {e}", path.display());
