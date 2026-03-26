@@ -50,11 +50,11 @@ impl Default for WalkBudget {
 pub struct SnapshotManager {
     session_dir: PathBuf,
     tracked_paths: Vec<PathBuf>,
-    /// Per-root exclusion filters. Each entry is (root_path, filter).
+    /// Per-root exclusion filters keyed by root path.
     /// When a file is walked under a tracked root, the filter for that
     /// root is used. This preserves `.gitignore` semantics: rules are
     /// interpreted relative to the directory they came from.
-    exclusions: Vec<(PathBuf, ExclusionFilter)>,
+    exclusions: HashMap<PathBuf, ExclusionFilter>,
     object_store: ObjectStore,
     snapshot_count: u32,
     budget: WalkBudget,
@@ -72,7 +72,7 @@ impl SnapshotManager {
         budget: WalkBudget,
     ) -> Result<Self> {
         // Pair every tracked path with a clone of the same filter
-        let exclusions: Vec<(PathBuf, ExclusionFilter)> = tracked_paths
+        let exclusions: HashMap<PathBuf, ExclusionFilter> = tracked_paths
             .iter()
             .map(|p| (p.clone(), exclusion.clone()))
             .collect();
@@ -92,14 +92,15 @@ impl SnapshotManager {
         budget: WalkBudget,
     ) -> Result<Self> {
         let tracked_paths: Vec<PathBuf> = roots.iter().map(|(p, _)| p.clone()).collect();
-        Self::init(session_dir, tracked_paths, roots, budget)
+        let exclusions: HashMap<PathBuf, ExclusionFilter> = roots.into_iter().collect();
+        Self::init(session_dir, tracked_paths, exclusions, budget)
     }
 
     /// Shared initialization for both constructors.
     fn init(
         session_dir: PathBuf,
         tracked_paths: Vec<PathBuf>,
-        exclusions: Vec<(PathBuf, ExclusionFilter)>,
+        exclusions: HashMap<PathBuf, ExclusionFilter>,
         budget: WalkBudget,
     ) -> Result<Self> {
         let snapshots_dir = session_dir.join("snapshots");
@@ -534,15 +535,10 @@ impl SnapshotManager {
     /// Enforces the walk budget to prevent runaway walks.
     /// Look up the exclusion filter for a given tracked root.
     fn filter_for_root(&self, tracked: &Path) -> &ExclusionFilter {
-        self.exclusions
-            .iter()
-            .find(|(root, _)| root == tracked)
-            .map(|(_, f)| f)
-            .unwrap_or_else(|| {
-                // Fallback: use the first filter. Should not happen if
-                // exclusions and tracked_paths are kept in sync.
-                &self.exclusions[0].1
-            })
+        self.exclusions.get(tracked).expect(
+            "Internal error: no exclusion filter found for tracked root. \
+             This indicates a bug where tracked_paths and exclusions are out of sync.",
+        )
     }
 
     fn walk_and_store(&self) -> Result<HashMap<PathBuf, FileState>> {
