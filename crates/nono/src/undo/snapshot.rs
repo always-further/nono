@@ -43,23 +43,64 @@ impl Default for WalkBudget {
 ///
 /// Coordinates the object store, exclusion filter, and Merkle tree to
 /// capture filesystem state, detect changes, and restore files.
+///
+/// When multiple tracked paths are used, each root can have its own
+/// exclusion filter (and thus its own `.gitignore` context). Use
+/// [`new_per_root`](Self::new_per_root) to supply per-root filters.
 pub struct SnapshotManager {
     session_dir: PathBuf,
     tracked_paths: Vec<PathBuf>,
-    exclusion: ExclusionFilter,
+    /// Per-root exclusion filters keyed by root path.
+    /// When a file is walked under a tracked root, the filter for that
+    /// root is used. This preserves `.gitignore` semantics: rules are
+    /// interpreted relative to the directory they came from.
+    exclusions: HashMap<PathBuf, ExclusionFilter>,
     object_store: ObjectStore,
     snapshot_count: u32,
     budget: WalkBudget,
 }
 
 impl SnapshotManager {
-    /// Create a new snapshot manager for the given session directory.
+    /// Create a new snapshot manager with a single exclusion filter for all roots.
     ///
-    /// Creates `snapshots/` and `changes/` subdirectories.
+    /// Creates `snapshots/` and `changes/` subdirectories. The provided
+    /// filter is used for all tracked paths.
     pub fn new(
         session_dir: PathBuf,
         tracked_paths: Vec<PathBuf>,
         exclusion: ExclusionFilter,
+        budget: WalkBudget,
+    ) -> Result<Self> {
+        // Pair every tracked path with a clone of the same filter
+        let exclusions: HashMap<PathBuf, ExclusionFilter> = tracked_paths
+            .iter()
+            .map(|p| (p.clone(), exclusion.clone()))
+            .collect();
+        Self::init(session_dir, tracked_paths, exclusions, budget)
+    }
+
+    /// Create a new snapshot manager with per-root exclusion filters.
+    ///
+    /// Each `(root, filter)` pair associates a tracked path with its own
+    /// exclusion filter. This preserves `.gitignore` semantics: rules from
+    /// each root's `.gitignore` are interpreted relative to that root.
+    ///
+    /// The `roots` parameter defines both the tracked paths and their filters.
+    pub fn new_per_root(
+        session_dir: PathBuf,
+        roots: Vec<(PathBuf, ExclusionFilter)>,
+        budget: WalkBudget,
+    ) -> Result<Self> {
+        let tracked_paths: Vec<PathBuf> = roots.iter().map(|(p, _)| p.clone()).collect();
+        let exclusions: HashMap<PathBuf, ExclusionFilter> = roots.into_iter().collect();
+        Self::init(session_dir, tracked_paths, exclusions, budget)
+    }
+
+    /// Shared initialization for both constructors.
+    fn init(
+        session_dir: PathBuf,
+        tracked_paths: Vec<PathBuf>,
+        exclusions: HashMap<PathBuf, ExclusionFilter>,
         budget: WalkBudget,
     ) -> Result<Self> {
         let snapshots_dir = session_dir.join("snapshots");
@@ -85,7 +126,7 @@ impl SnapshotManager {
         Ok(Self {
             session_dir,
             tracked_paths,
-            exclusion,
+            exclusions,
             object_store,
             snapshot_count: 0,
             budget,
@@ -296,6 +337,8 @@ impl SnapshotManager {
                 continue;
             }
 
+            let exclusion = self.filter_for_root(tracked);
+
             if tracked.is_file() {
                 if has_atomic_temp_suffix(tracked) {
                     files.insert(tracked.clone());
@@ -306,7 +349,7 @@ impl SnapshotManager {
             for entry in WalkDir::new(tracked)
                 .follow_links(false)
                 .into_iter()
-                .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
+                .filter_entry(|e| !exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
                 entries_visited = entries_visited.saturating_add(1);
@@ -490,6 +533,14 @@ impl SnapshotManager {
     /// Uses `filter_entry()` to prune entire excluded subtrees at directory-entry
     /// time, preventing descent into directories like `.git/` or `target/`.
     /// Enforces the walk budget to prevent runaway walks.
+    /// Look up the exclusion filter for a given tracked root.
+    fn filter_for_root(&self, tracked: &Path) -> &ExclusionFilter {
+        self.exclusions.get(tracked).expect(
+            "Internal error: no exclusion filter found for tracked root. \
+             This indicates a bug where tracked_paths and exclusions are out of sync.",
+        )
+    }
+
     fn walk_and_store(&self) -> Result<HashMap<PathBuf, FileState>> {
         let mut files = HashMap::new();
         let mut entries_visited: usize = 0;
@@ -500,8 +551,10 @@ impl SnapshotManager {
                 continue;
             }
 
+            let exclusion = self.filter_for_root(tracked);
+
             if tracked.is_file() {
-                if !self.exclusion.is_excluded(tracked) {
+                if !exclusion.is_excluded(tracked) {
                     // Pre-check file size against budget before expensive I/O
                     if let Ok(meta) = fs::metadata(tracked) {
                         let file_size = meta.len();
@@ -535,7 +588,7 @@ impl SnapshotManager {
             for entry in WalkDir::new(tracked)
                 .follow_links(false)
                 .into_iter()
-                .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
+                .filter_entry(|e| !exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
                 entries_visited = entries_visited.saturating_add(1);
@@ -590,8 +643,10 @@ impl SnapshotManager {
                 continue;
             }
 
+            let exclusion = self.filter_for_root(tracked);
+
             if tracked.is_file() {
-                if !self.exclusion.is_excluded(tracked) {
+                if !exclusion.is_excluded(tracked) {
                     if let Ok(state) = file_state_from_metadata(tracked) {
                         entries_visited = entries_visited.saturating_add(1);
                         total_bytes = total_bytes.saturating_add(state.size);
@@ -605,7 +660,7 @@ impl SnapshotManager {
             for entry in WalkDir::new(tracked)
                 .follow_links(false)
                 .into_iter()
-                .filter_entry(|e| !self.exclusion.is_excluded(e.path()))
+                .filter_entry(|e| !exclusion.is_excluded(e.path()))
                 .filter_map(|e| e.ok())
             {
                 entries_visited = entries_visited.saturating_add(1);

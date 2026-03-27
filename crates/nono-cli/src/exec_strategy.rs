@@ -186,6 +186,13 @@ pub struct ExecConfig<'a> {
     /// a PTY mux for terminal isolation during approval prompts.
     /// When false, the child runs with static capabilities only.
     pub capability_elevation: bool,
+    /// Whether the seccomp proxy-only network fallback is needed.
+    /// Set by the parent before fork when Landlock ABI lacks AccessNet
+    /// and ProxyOnly network mode is requested. Both child and parent
+    /// use this flag to coordinate: child installs the proxy filter and
+    /// sends the notify fd; parent expects to receive it.
+    #[cfg(target_os = "linux")]
+    pub seccomp_proxy_fallback: bool,
 }
 
 /// Configuration for supervisor IPC in supervised execution mode.
@@ -210,6 +217,12 @@ pub struct SupervisorConfig<'a> {
     /// Whether direct LaunchServices opening is enabled for this session.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub allow_launch_services_active: bool,
+    /// Proxy port allowed for seccomp proxy-only fallback (0 = not active).
+    #[cfg(target_os = "linux")]
+    pub proxy_port: u16,
+    /// Bind ports allowed for seccomp proxy-only fallback.
+    #[cfg(target_os = "linux")]
+    pub proxy_bind_ports: Vec<u16>,
 }
 
 #[cfg(target_os = "macos")]
@@ -563,16 +576,40 @@ pub fn execute_supervised(
             // for rule creation, so it must run before seccomp-notify is installed.
             // (seccomp-notify traps ALL openat/openat2 syscalls, which would
             // intercept Landlock's own path opens and deadlock.)
-            if let Err(e) = Sandbox::apply(effective_caps) {
-                let detail = format!("nono: failed to apply sandbox in supervised child: {}\n", e);
-                let msg = detail.as_bytes();
-                unsafe {
-                    libc::write(
-                        libc::STDERR_FILENO,
-                        msg.as_ptr().cast::<libc::c_void>(),
-                        msg.len(),
-                    );
-                    libc::_exit(126);
+            #[cfg(target_os = "linux")]
+            {
+                match Sandbox::apply(effective_caps) {
+                    Ok(_fallback) => {}
+                    Err(e) => {
+                        let detail =
+                            format!("nono: failed to apply sandbox in supervised child: {}\n", e);
+                        let msg = detail.as_bytes();
+                        unsafe {
+                            libc::write(
+                                libc::STDERR_FILENO,
+                                msg.as_ptr().cast::<libc::c_void>(),
+                                msg.len(),
+                            );
+                            libc::_exit(126);
+                        }
+                    }
+                }
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                if let Err(e) = Sandbox::apply(effective_caps) {
+                    let detail =
+                        format!("nono: failed to apply sandbox in supervised child: {}\n", e);
+                    let msg = detail.as_bytes();
+                    unsafe {
+                        libc::write(
+                            libc::STDERR_FILENO,
+                            msg.as_ptr().cast::<libc::c_void>(),
+                            msg.len(),
+                        );
+                        libc::_exit(126);
+                    }
                 }
             }
 
@@ -628,16 +665,65 @@ pub fn execute_supervised(
                         }
                     }
                 }
+
+                // If the parent determined that seccomp proxy fallback is needed
+                // (Landlock ABI lacks AccessNet + ProxyOnly mode), install the
+                // proxy filter and send its notify fd to the parent.
+                if config.seccomp_proxy_fallback {
+                    let has_bind = match effective_caps.network_mode() {
+                        nono::NetworkMode::ProxyOnly { bind_ports, .. } => !bind_ports.is_empty(),
+                        _ => false,
+                    };
+                    if let Some(fd) = child_sock_fd {
+                        match nono::sandbox::install_seccomp_proxy_filter(has_bind) {
+                            Ok(proxy_notify_fd) => {
+                                let child_sock =
+                                    unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                                let tmp_sock = SupervisorSocket::from_stream(child_sock);
+                                if let Err(e) = tmp_sock.send_fd(proxy_notify_fd.as_raw_fd()) {
+                                    let detail = format!(
+                                        "nono: failed to send proxy seccomp notify fd: {}\n",
+                                        e
+                                    );
+                                    let msg = detail.as_bytes();
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDERR_FILENO,
+                                            msg.as_ptr().cast::<libc::c_void>(),
+                                            msg.len(),
+                                        );
+                                        libc::_exit(126);
+                                    }
+                                }
+                                std::mem::forget(tmp_sock);
+                            }
+                            Err(e) => {
+                                let detail =
+                                    format!("nono: seccomp proxy filter not available: {}\n", e);
+                                let msg = detail.as_bytes();
+                                unsafe {
+                                    libc::write(
+                                        libc::STDERR_FILENO,
+                                        msg.as_ptr().cast::<libc::c_void>(),
+                                        msg.len(),
+                                    );
+                                    libc::_exit(126);
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
-            // When capability elevation is off, make the child non-dumpable
-            // to prevent ptrace attachment from same-UID processes. When
-            // elevation is active, the child must stay dumpable so the parent
-            // can read /proc/CHILD/mem for seccomp-notify path extraction.
+            // When capability elevation is off AND no seccomp proxy fallback
+            // is active, make the child non-dumpable to prevent ptrace
+            // attachment from same-UID processes. When either is active,
+            // the child must stay dumpable so the parent can read
+            // /proc/CHILD/mem for seccomp-notify path/sockaddr extraction.
             #[cfg(target_os = "linux")]
             {
-                if !config.capability_elevation {
-                    // No supervisor IPC — safe to drop dumpable
+                if !config.capability_elevation && !config.seccomp_proxy_fallback {
+                    // No supervisor needs /proc/CHILD/mem — safe to drop dumpable
                     unsafe {
                         libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
                     }
@@ -760,6 +846,29 @@ pub fn execute_supervised(
                 None
             };
 
+            // On Linux: if the parent determined seccomp proxy fallback is needed,
+            // receive the proxy notify fd from the child. Only attempt recv when
+            // we know the child will send it (both sides use the same flag).
+            #[cfg(target_os = "linux")]
+            let proxy_notify_fd: Option<OwnedFd> = if config.seccomp_proxy_fallback {
+                if let Some(ref sup_sock) = supervisor_sock {
+                    match sup_sock.recv_fd() {
+                        Ok(fd) => {
+                            debug!("Received proxy seccomp notify fd from child");
+                            Some(fd)
+                        }
+                        Err(e) => {
+                            warn!("Failed to receive proxy seccomp notify fd: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             // Set up signal forwarding.
             setup_signal_forwarding(child);
             let _signal_forwarding_guard = SignalForwardingGuard;
@@ -830,6 +939,7 @@ pub fn execute_supervised(
                             &mut sup_sock,
                             sup_cfg,
                             seccomp_notify_fd.as_ref(),
+                            proxy_notify_fd.as_ref(),
                             &initial_caps,
                             trust_interceptor,
                             relay.as_ref(),
@@ -1293,17 +1403,20 @@ fn run_supervisor_loop(
 ///
 /// Returns the child's wait status and any denial records collected.
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn run_supervisor_loop(
     child: Pid,
     sock: &mut SupervisorSocket,
     config: &SupervisorConfig<'_>,
     seccomp_fd: Option<&OwnedFd>,
+    proxy_seccomp_fd: Option<&OwnedFd>,
     initial_caps: &[(std::path::PathBuf, bool)],
     mut trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
     relay: Option<&PtyRelay<'_>>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
     let sock_fd = sock.as_raw_fd();
     let notify_raw_fd = seccomp_fd.map(|fd| fd.as_raw_fd());
+    let proxy_notify_raw_fd = proxy_seccomp_fd.map(|fd| fd.as_raw_fd());
     let mut rate_limiter = supervisor_linux::RateLimiter::new(10, 5);
     let mut denials = Vec::new();
     let mut seen_request_ids = HashSet::new();
@@ -1319,6 +1432,7 @@ fn run_supervisor_loop(
         // [1] seccomp notify fd (or -1 if absent)
         // [2] real_tty (user input for relay, or -1 if no relay)
         // [3] pty_master (child output for relay, or -1 if no relay)
+        // [4] proxy seccomp notify fd (or -1 if absent)
         let mut pfds = [
             libc::pollfd {
                 fd: if sock_fd_active { sock_fd } else { -1 },
@@ -1340,16 +1454,21 @@ fn run_supervisor_loop(
                 events: libc::POLLIN,
                 revents: 0,
             },
+            libc::pollfd {
+                fd: proxy_notify_raw_fd.unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
 
         // SAFETY: pfds is a valid array on the stack
-        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 4, 200) };
+        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 5, 200) };
 
         match ret.cmp(&0) {
             std::cmp::Ordering::Greater => {
                 // [0] Supervisor socket
                 if sock_fd_active && pfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                    if notify_raw_fd.is_some() {
+                    if notify_raw_fd.is_some() || proxy_notify_raw_fd.is_some() {
                         debug!("Supervisor socket closed, continuing for seccomp notifications");
                         sock_fd_active = false;
                     } else {
@@ -1425,6 +1544,19 @@ fn run_supervisor_loop(
                 // [3] PTY relay: child output -> user
                 if relay.is_some() && pfds[3].revents & libc::POLLIN != 0 {
                     pty_mux::relay_bytes(relay_master_fd, relay_tty_fd);
+                }
+
+                // [4] Proxy seccomp notify fd (connect/bind interception)
+                if pfds[4].revents & libc::POLLIN != 0 {
+                    if let Some(pfd) = proxy_notify_raw_fd {
+                        if let Err(e) = supervisor_linux::handle_network_notification(
+                            pfd,
+                            config,
+                            &mut rate_limiter,
+                        ) {
+                            debug!("Error handling proxy seccomp notification: {}", e);
+                        }
+                    }
                 }
             }
             std::cmp::Ordering::Less => {
@@ -2517,6 +2649,10 @@ mod tests {
             open_url_origins: &[],
             open_url_allow_localhost: false,
             allow_launch_services_active: false,
+            #[cfg(target_os = "linux")]
+            proxy_port: 0,
+            #[cfg(target_os = "linux")]
+            proxy_bind_ports: Vec::new(),
         };
 
         // Fork a child that closes its socket end and exits immediately.
@@ -2539,6 +2675,7 @@ mod tests {
                     &mut sock,
                     &sup_cfg,
                     None, // no seccomp
+                    None, // no proxy seccomp
                     &[],  // no initial caps
                     None, // no trust interceptor
                     None, // no PTY relay — this is what we're testing
@@ -2558,6 +2695,92 @@ mod tests {
                 // Child exited with code 42
                 match status {
                     WaitStatus::Exited(_, code) => assert_eq!(code, 42),
+                    other => panic!("unexpected wait status: {other:?}"),
+                }
+            }
+            Err(e) => panic!("fork failed: {e}"),
+        }
+    }
+
+    /// Verify that ProxyOnly mode on V4+ kernels does NOT deadlock.
+    ///
+    /// On Landlock V4+ kernels, ProxyOnly is handled by Landlock natively.
+    /// The seccomp_proxy_fallback flag should be false, so the parent must
+    /// NOT attempt to recv a proxy notify fd. This test verifies the
+    /// supervisor loop starts and exits cleanly with ProxyOnly caps but
+    /// no proxy seccomp filter.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_supervisor_loop_proxy_only_v4_no_deadlock() {
+        use std::os::unix::net::UnixStream;
+
+        struct DenyAll;
+        impl ApprovalBackend for DenyAll {
+            fn request_capability(
+                &self,
+                _req: &nono::supervisor::CapabilityRequest,
+            ) -> nono::Result<ApprovalDecision> {
+                Ok(ApprovalDecision::Denied {
+                    reason: "test".to_string(),
+                })
+            }
+            fn backend_name(&self) -> &str {
+                "deny-all-test"
+            }
+        }
+
+        let (parent_stream, child_stream) = UnixStream::pair()
+            .map_err(|e| format!("socketpair: {e}"))
+            .expect("socketpair failed in test");
+
+        let backend = DenyAll;
+        // ProxyOnly mode with proxy_port set, but seccomp_proxy_fallback is false
+        // (simulating V4+ where Landlock handles networking).
+        let sup_cfg = SupervisorConfig {
+            protected_roots: &[],
+            approval_backend: &backend,
+            session_id: "test-proxy-v4",
+            open_url_origins: &[],
+            open_url_allow_localhost: false,
+            allow_launch_services_active: false,
+            #[cfg(target_os = "linux")]
+            proxy_port: 8080,
+            #[cfg(target_os = "linux")]
+            proxy_bind_ports: Vec::new(),
+        };
+
+        match unsafe { fork() } {
+            Ok(ForkResult::Child) => {
+                // Child: close socket and exit. Does NOT send a proxy notify fd.
+                drop(child_stream);
+                drop(parent_stream);
+                unsafe { libc::_exit(0) };
+            }
+            Ok(ForkResult::Parent { child }) => {
+                drop(child_stream);
+                let mut sock = SupervisorSocket::from_stream(parent_stream);
+
+                // Run supervisor loop with NO proxy seccomp fd.
+                // If the bug from before were present (unconditional recv_fd),
+                // this would deadlock because the child never sends a second fd.
+                let result = run_supervisor_loop(
+                    child,
+                    &mut sock,
+                    &sup_cfg,
+                    None, // no openat seccomp
+                    None, // no proxy seccomp — V4+ Landlock handles it
+                    &[],  // no initial caps
+                    None, // no trust interceptor
+                    None, // no PTY relay
+                );
+
+                let (status, denials) = result
+                    .map_err(|e| format!("supervisor loop: {e}"))
+                    .expect("supervisor loop should not deadlock");
+                assert!(denials.is_empty());
+
+                match status {
+                    WaitStatus::Exited(_, code) => assert_eq!(code, 0),
                     other => panic!("unexpected wait status: {other:?}"),
                 }
             }
@@ -2591,6 +2814,10 @@ mod tests {
             open_url_origins: &origins,
             open_url_allow_localhost: false,
             allow_launch_services_active: false,
+            #[cfg(target_os = "linux")]
+            proxy_port: 0,
+            #[cfg(target_os = "linux")]
+            proxy_bind_ports: Vec::new(),
         };
 
         // Allowed origin: validation passes
@@ -2617,6 +2844,10 @@ mod tests {
             open_url_origins: &[],
             open_url_allow_localhost: false,
             allow_launch_services_active: false,
+            #[cfg(target_os = "linux")]
+            proxy_port: 0,
+            #[cfg(target_os = "linux")]
+            proxy_bind_ports: Vec::new(),
         };
 
         let result = validate_url("file:///etc/passwd", &config);
@@ -2641,6 +2872,10 @@ mod tests {
             open_url_origins: &[],
             open_url_allow_localhost: true,
             allow_launch_services_active: false,
+            #[cfg(target_os = "linux")]
+            proxy_port: 0,
+            #[cfg(target_os = "linux")]
+            proxy_bind_ports: Vec::new(),
         };
         let config_deny = SupervisorConfig {
             protected_roots: &[],
@@ -2649,6 +2884,10 @@ mod tests {
             open_url_origins: &[],
             open_url_allow_localhost: false,
             allow_launch_services_active: false,
+            #[cfg(target_os = "linux")]
+            proxy_port: 0,
+            #[cfg(target_os = "linux")]
+            proxy_bind_ports: Vec::new(),
         };
 
         // Localhost denied when not allowed
@@ -2678,6 +2917,10 @@ mod tests {
             open_url_origins: &[],
             open_url_allow_localhost: false,
             allow_launch_services_active: false,
+            #[cfg(target_os = "linux")]
+            proxy_port: 0,
+            #[cfg(target_os = "linux")]
+            proxy_bind_ports: Vec::new(),
         };
 
         let long_url = format!("https://example.com/{}", "a".repeat(MAX_URL_LENGTH));
@@ -2784,6 +3027,10 @@ mod tests {
             open_url_origins: &[],
             open_url_allow_localhost: false,
             allow_launch_services_active: true,
+            #[cfg(target_os = "linux")]
+            proxy_port: 0,
+            #[cfg(target_os = "linux")]
+            proxy_bind_ports: Vec::new(),
         };
 
         assert!(

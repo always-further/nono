@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.25.0] - 2026-03-26
+
+### Features
+
+- *(undo)* Support per-root exclusion filters in snapshot manager (#506) ([#506](https://github.com/always-further/nono/pull/506))
+
+- *(sandbox/linux)* Add seccomp proxy-only network fallback (#503) ([#503](https://github.com/always-further/nono/pull/503))
+
+- *(trust)* Add skip_dirs support to trust scanning and rollback preflight (#498) ([#498](https://github.com/always-further/nono/pull/498))
+
 ## [0.24.0] - 2026-03-25
 
 ### Documentation

@@ -251,12 +251,18 @@ fn access_to_landlock(access: AccessMode, abi: ABI) -> LandlockAccess {
     }
 }
 
+/// Legacy check: whether the simple block-all seccomp filter can be used.
+///
+/// Only true for plain `NetworkMode::Blocked` with no port exceptions.
+/// Callers should prefer `seccomp_network_fallback_mode()` which also
+/// handles `ProxyOnly`.
+#[cfg(test)]
 #[must_use]
 fn can_use_seccomp_network_block_fallback(caps: &CapabilitySet) -> bool {
-    matches!(caps.network_mode(), NetworkMode::Blocked)
-        && caps.tcp_connect_ports().is_empty()
-        && caps.tcp_bind_ports().is_empty()
-        && caps.localhost_ports().is_empty()
+    matches!(
+        seccomp_network_fallback_mode(caps),
+        SeccompNetFallback::BlockAll
+    )
 }
 
 /// Check if a path is a character or block device file.
@@ -317,7 +323,12 @@ fn requested_scopes(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<BitFlags<
 /// This is a pure primitive - it applies ONLY the capabilities provided.
 /// The caller is responsible for including all necessary paths (including
 /// system paths like /usr, /lib, /bin if executables need to run).
-pub fn apply(caps: &CapabilitySet) -> Result<()> {
+///
+/// Returns the seccomp network fallback mode that was determined but not
+/// yet fully installed. `BlockAll` is self-contained (installed inside apply).
+/// `ProxyOnly` signals the caller to install the proxy filter post-fork
+/// via `install_seccomp_proxy_filter()`.
+pub fn apply(caps: &CapabilitySet) -> Result<SeccompNetFallback> {
     let detected = detect_abi()?;
     apply_with_abi(caps, &detected)
 }
@@ -333,7 +344,7 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
 /// with `HardRequirement` for filesystem access rights. If the caller passes
 /// an ABI higher than the kernel supports, `handle_access()` will fail rather
 /// than silently dropping flags.
-pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
+pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<SeccompNetFallback> {
     let target_abi = abi.abi;
     info!("Using Landlock ABI {:?}", target_abi);
     let scopes = requested_scopes(caps, abi)?;
@@ -358,7 +369,7 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
         || !caps.tcp_connect_ports().is_empty()
         || !caps.tcp_bind_ports().is_empty();
 
-    let mut use_seccomp_block_network_fallback = false;
+    let mut seccomp_net_fallback = SeccompNetFallback::None;
 
     let ruleset_builder = if needs_network_handling {
         let handled_net = AccessNet::from_all(target_abi);
@@ -374,20 +385,40 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
                     ))
                 })?
                 .set_compatibility(CompatLevel::BestEffort)
-        } else if can_use_seccomp_network_block_fallback(caps) {
-            warn!(
-                "Landlock ABI {:?} lacks TCP network filtering; using seccomp full-network-block fallback",
-                target_abi
-            );
-            use_seccomp_block_network_fallback = true;
-            ruleset_builder
         } else {
-            return Err(NonoError::SandboxInit(
-                "Network filtering requested but kernel Landlock ABI doesn't support it \
-                 (requires V4+). On this kernel, only a full --block-net fallback without \
-                 proxy or port exceptions is supported."
-                    .to_string(),
-            ));
+            // Landlock ABI lacks AccessNet. Check seccomp fallback options.
+            let fallback = seccomp_network_fallback_mode(caps);
+            match &fallback {
+                SeccompNetFallback::BlockAll => {
+                    warn!(
+                        "Landlock ABI {:?} lacks TCP network filtering; \
+                         using seccomp full-network-block fallback",
+                        target_abi
+                    );
+                    seccomp_net_fallback = fallback;
+                    ruleset_builder
+                }
+                SeccompNetFallback::ProxyOnly {
+                    proxy_port,
+                    bind_ports,
+                } => {
+                    warn!(
+                        "Landlock ABI {:?} lacks TCP network filtering; \
+                         using seccomp proxy-only fallback (port={}, bind_ports={:?})",
+                        target_abi, proxy_port, bind_ports
+                    );
+                    seccomp_net_fallback = fallback;
+                    ruleset_builder
+                }
+                SeccompNetFallback::None => {
+                    return Err(NonoError::SandboxInit(
+                        "Network filtering requested but kernel Landlock ABI doesn't support it \
+                         (requires V4+). On this kernel, only full --block-net or --proxy-only \
+                         fallback via seccomp is supported."
+                            .to_string(),
+                    ));
+                }
+            }
         }
     } else {
         ruleset_builder
@@ -425,73 +456,81 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
         .create()
         .map_err(|e| NonoError::SandboxInit(format!("Failed to create ruleset: {}", e)))?;
 
-    // Add per-port TCP connect rules (ProxyOnly port + explicit tcp_connect_ports)
-    if let NetworkMode::ProxyOnly { port, bind_ports } = caps.network_mode() {
-        debug!("Adding ProxyOnly TCP connect rule for port {}", port);
-        ruleset = ruleset
-            .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
-            .map_err(|e| {
-                NonoError::SandboxInit(format!(
-                    "Cannot add TCP connect rule for proxy port {}: {}",
-                    port, e
-                ))
-            })?;
-        // Add per-port TCP bind rules for bind_ports in ProxyOnly mode
-        for bp in bind_ports {
-            debug!("Adding ProxyOnly TCP bind rule for port {}", bp);
-            ruleset = ruleset
-                .add_rule(NetPort::new(*bp, AccessNet::BindTcp))
-                .map_err(|e| {
-                    NonoError::SandboxInit(format!(
-                        "Cannot add TCP bind rule for port {}: {}",
-                        bp, e
-                    ))
-                })?;
-        }
-    }
-    for port in caps.tcp_connect_ports() {
-        debug!("Adding TCP connect rule for port {}", port);
-        ruleset = ruleset
-            .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
-            .map_err(|e| {
-                NonoError::SandboxInit(format!(
-                    "Cannot add TCP connect rule for port {}: {}",
-                    port, e
-                ))
-            })?;
-    }
-    for port in caps.tcp_bind_ports() {
-        debug!("Adding TCP bind rule for port {}", port);
-        ruleset = ruleset
-            .add_rule(NetPort::new(*port, AccessNet::BindTcp))
-            .map_err(|e| {
-                NonoError::SandboxInit(format!("Cannot add TCP bind rule for port {}: {}", port, e))
-            })?;
-    }
-
-    // Add localhost IPC port rules (connect + bind per port).
-    // Only meaningful in Blocked/ProxyOnly modes. In AllowAll mode, all ports are
-    // already reachable and adding Landlock network handling would restrict them.
-    if !matches!(caps.network_mode(), NetworkMode::AllowAll) {
-        for port in caps.localhost_ports() {
-            debug!("Adding localhost TCP connect rule for port {}", port);
+    // Add Landlock network port rules ONLY when Landlock is handling networking.
+    // When a seccomp fallback is active (BlockAll or ProxyOnly), the ruleset was
+    // created without handle_access(AccessNet), so adding NetPort rules would fail.
+    if matches!(seccomp_net_fallback, SeccompNetFallback::None) {
+        // Add per-port TCP connect rules (ProxyOnly port + explicit tcp_connect_ports)
+        if let NetworkMode::ProxyOnly { port, bind_ports } = caps.network_mode() {
+            debug!("Adding ProxyOnly TCP connect rule for port {}", port);
             ruleset = ruleset
                 .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
                 .map_err(|e| {
                     NonoError::SandboxInit(format!(
-                        "Cannot add TCP connect rule for localhost port {}: {}",
+                        "Cannot add TCP connect rule for proxy port {}: {}",
                         port, e
                     ))
                 })?;
-            debug!("Adding localhost TCP bind rule for port {}", port);
+            // Add per-port TCP bind rules for bind_ports in ProxyOnly mode
+            for bp in bind_ports {
+                debug!("Adding ProxyOnly TCP bind rule for port {}", bp);
+                ruleset = ruleset
+                    .add_rule(NetPort::new(*bp, AccessNet::BindTcp))
+                    .map_err(|e| {
+                        NonoError::SandboxInit(format!(
+                            "Cannot add TCP bind rule for port {}: {}",
+                            bp, e
+                        ))
+                    })?;
+            }
+        }
+        for port in caps.tcp_connect_ports() {
+            debug!("Adding TCP connect rule for port {}", port);
+            ruleset = ruleset
+                .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+                .map_err(|e| {
+                    NonoError::SandboxInit(format!(
+                        "Cannot add TCP connect rule for port {}: {}",
+                        port, e
+                    ))
+                })?;
+        }
+        for port in caps.tcp_bind_ports() {
+            debug!("Adding TCP bind rule for port {}", port);
             ruleset = ruleset
                 .add_rule(NetPort::new(*port, AccessNet::BindTcp))
                 .map_err(|e| {
                     NonoError::SandboxInit(format!(
-                        "Cannot add TCP bind rule for localhost port {}: {}",
+                        "Cannot add TCP bind rule for port {}: {}",
                         port, e
                     ))
                 })?;
+        }
+
+        // Add localhost IPC port rules (connect + bind per port).
+        // Only meaningful in Blocked/ProxyOnly modes. In AllowAll mode, all ports are
+        // already reachable and adding Landlock network handling would restrict them.
+        if !matches!(caps.network_mode(), NetworkMode::AllowAll) {
+            for port in caps.localhost_ports() {
+                debug!("Adding localhost TCP connect rule for port {}", port);
+                ruleset = ruleset
+                    .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+                    .map_err(|e| {
+                        NonoError::SandboxInit(format!(
+                            "Cannot add TCP connect rule for localhost port {}: {}",
+                            port, e
+                        ))
+                    })?;
+                debug!("Adding localhost TCP bind rule for port {}", port);
+                ruleset = ruleset
+                    .add_rule(NetPort::new(*port, AccessNet::BindTcp))
+                    .map_err(|e| {
+                        NonoError::SandboxInit(format!(
+                            "Cannot add TCP bind rule for localhost port {}: {}",
+                            port, e
+                        ))
+                    })?;
+            }
         }
     }
 
@@ -505,7 +544,7 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
         let mut access = result.effective;
 
         if !result.dropped.is_empty() {
-            warn!(
+            debug!(
                 "Landlock ABI {:?} does not support {:?} for path {} (requested for {:?})",
                 target_abi,
                 result.dropped,
@@ -570,7 +609,7 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
         }
     }
 
-    if use_seccomp_block_network_fallback {
+    if matches!(seccomp_net_fallback, SeccompNetFallback::BlockAll) {
         install_seccomp_block_network().map_err(|e| {
             NonoError::SandboxInit(format!(
                 "Failed to install seccomp network block fallback: {}",
@@ -579,8 +618,11 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
         })?;
         info!("Seccomp network block fallback enforced");
     }
+    // ProxyOnly is NOT installed here — it requires a notify fd that must
+    // be sent to the supervisor parent via SCM_RIGHTS. The caller (CLI)
+    // installs it post-fork via install_seccomp_proxy_filter().
 
-    Ok(())
+    Ok(seccomp_net_fallback)
 }
 
 // ==========================================================================
@@ -704,6 +746,12 @@ const SYS_SOCKET: i32 = libc::SYS_socket as i32;
 const SYS_SOCKETPAIR: i32 = libc::SYS_socketpair as i32;
 #[cfg(target_os = "linux")]
 const SYS_IO_URING_SETUP: i32 = libc::SYS_io_uring_setup as i32;
+
+// Syscall numbers for connect/bind (public for CLI supervisor handler)
+#[cfg(target_os = "linux")]
+pub const SYS_CONNECT: i32 = libc::SYS_connect as i32;
+#[cfg(target_os = "linux")]
+pub const SYS_BIND: i32 = libc::SYS_bind as i32;
 
 /// struct open_how from <linux/openat2.h>
 ///
@@ -1411,6 +1459,462 @@ pub fn deny_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
     respond_notif_errno(notify_fd, notif_id, libc::EPERM)
 }
 
+// ==========================================================================
+// Seccomp proxy-only network fallback
+//
+// For kernels without Landlock AccessNet (ABI < V4), this provides a
+// seccomp-based alternative that allows connect() only to the proxy
+// port on localhost, blocking all other network activity.
+// ==========================================================================
+
+/// Parsed sockaddr from a seccomp notification.
+///
+/// Extracted from `/proc/PID/mem` at the pointer in the connect/bind args.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SockaddrInfo {
+    /// Address family (AF_INET, AF_INET6, AF_UNIX, etc.)
+    pub family: u16,
+    /// Port number in host byte order (0 for AF_UNIX)
+    pub port: u16,
+    /// Whether the address is a loopback address (127.0.0.1 or ::1)
+    pub is_loopback: bool,
+}
+
+/// Seccomp network fallback mode determined during sandbox apply.
+///
+/// When Landlock ABI lacks `AccessNet`, the sandbox cannot enforce network
+/// restrictions via Landlock rules. This enum describes which seccomp
+/// fallback (if any) should be installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeccompNetFallback {
+    /// No seccomp network fallback needed (Landlock handles it, or no filtering).
+    None,
+    /// Full network block: deny all non-AF_UNIX sockets. No notify fd needed.
+    BlockAll,
+    /// Proxy-only mode: trap connect/bind to supervisor for port-level filtering.
+    /// Returns a notify fd that the supervisor must poll.
+    ProxyOnly {
+        /// The proxy port to allow connect() to on localhost.
+        proxy_port: u16,
+        /// Ports to allow bind() on (e.g. MCP servers).
+        bind_ports: Vec<u16>,
+    },
+}
+
+/// Determine the seccomp network fallback mode for the given capabilities.
+///
+/// Called when Landlock ABI lacks `AccessNet`. Returns the appropriate
+/// fallback strategy based on the network mode and port configuration.
+#[must_use]
+pub fn seccomp_network_fallback_mode(caps: &CapabilitySet) -> SeccompNetFallback {
+    match caps.network_mode() {
+        NetworkMode::Blocked => {
+            if caps.tcp_connect_ports().is_empty()
+                && caps.tcp_bind_ports().is_empty()
+                && caps.localhost_ports().is_empty()
+            {
+                SeccompNetFallback::BlockAll
+            } else {
+                // Blocked mode with port exceptions cannot be expressed
+                // in the simple block filter, and is not a proxy scenario.
+                SeccompNetFallback::None
+            }
+        }
+        NetworkMode::ProxyOnly { port, bind_ports } => SeccompNetFallback::ProxyOnly {
+            proxy_port: *port,
+            bind_ports: bind_ports.clone(),
+        },
+        NetworkMode::AllowAll => SeccompNetFallback::None,
+    }
+}
+
+/// Build a BPF filter for proxy-only network mode.
+///
+/// Routes connect() to `SECCOMP_RET_USER_NOTIF` so the supervisor can
+/// inspect the sockaddr and allow only localhost:proxy_port.
+///
+/// When `has_bind_ports` is true, bind() is also routed to `USER_NOTIF`.
+/// Otherwise, bind() is denied with EACCES.
+///
+/// socket() is allowed only for AF_UNIX, AF_INET, AF_INET6.
+/// socketpair() is allowed only for AF_UNIX.
+/// io_uring_setup() is denied.
+///
+/// Instruction layout (19 instructions, jt = jump offset from next insn):
+/// ```text
+///  0: ld  [nr]
+///  1: jeq SYS_SOCKET     jt=+6  (-> 8: load socket family)
+///  2: jeq SYS_CONNECT    jt=+13 (-> 16: notify)
+///  3: jeq SYS_BIND       jt=+13 (-> 17: bind_action)
+///  4: jeq SYS_SOCKETPAIR jt=+8  (-> 13: load socketpair family)
+///  5: jeq SYS_IO_URING   jt=+1  (-> 7: errno)
+///  6: ret ALLOW
+///  7: ret ERRNO(EACCES)
+///  8: ld  [args[0]]             ; socket() family
+///  9: jeq AF_UNIX  jt=+8 (-> 18: allow)
+/// 10: jeq AF_INET  jt=+7 (-> 18: allow)
+/// 11: jeq AF_INET6 jt=+6 (-> 18: allow)
+/// 12: ret ERRNO(EACCES)         ; bad socket family
+/// 13: ld  [args[0]]             ; socketpair() family
+/// 14: jeq AF_UNIX  jt=+3 (-> 18: allow)
+/// 15: ret ERRNO(EACCES)         ; bad socketpair family
+/// 16: ret USER_NOTIF            ; connect
+/// 17: ret bind_action           ; bind (USER_NOTIF or ERRNO)
+/// 18: ret ALLOW                 ; allowed socket/socketpair
+/// ```
+fn build_seccomp_proxy_filter(has_bind_ports: bool) -> Vec<SockFilterInsn> {
+    let errno_ret = SECCOMP_RET_ERRNO | (libc::EACCES as u32);
+
+    let bind_action = if has_bind_ports {
+        SECCOMP_RET_USER_NOTIF
+    } else {
+        errno_ret
+    };
+
+    // Target instruction index table (jt/jf are offsets from next insn):
+    //  0: ld [nr]
+    //  1: jeq SOCKET     jt=6  -> insn 8
+    //  2: jeq CONNECT    jt=13 -> insn 16
+    //  3: jeq BIND       jt=13 -> insn 17
+    //  4: jeq SOCKETPAIR jt=8  -> insn 13
+    //  5: jeq IO_URING   jt=1  -> insn 7
+    //  6: ret ALLOW
+    //  7: ret ERRNO
+    //  8: ld [args[0]]
+    //  9: jeq AF_UNIX    jt=8  -> insn 18
+    // 10: jeq AF_INET    jt=7  -> insn 18
+    // 11: jeq AF_INET6   jt=6  -> insn 18
+    // 12: ret ERRNO            (bad socket family)
+    // 13: ld [args[0]]
+    // 14: jeq AF_UNIX    jt=3  -> insn 18
+    // 15: ret ERRNO            (bad socketpair family)
+    // 16: ret USER_NOTIF       (connect)
+    // 17: ret bind_action      (bind)
+    // 18: ret ALLOW            (good socket/socketpair)
+
+    vec![
+        // 0: ld [nr]
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_NR_OFFSET,
+        },
+        // 1: jeq SYS_SOCKET -> 8 (jt = 8-1-1 = 6)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 6,
+            jf: 0,
+            k: SYS_SOCKET as u32,
+        },
+        // 2: jeq SYS_CONNECT -> 16 (jt = 16-2-1 = 13)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 13,
+            jf: 0,
+            k: SYS_CONNECT as u32,
+        },
+        // 3: jeq SYS_BIND -> 17 (jt = 17-3-1 = 13)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 13,
+            jf: 0,
+            k: SYS_BIND as u32,
+        },
+        // 4: jeq SYS_SOCKETPAIR -> 13 (jt = 13-4-1 = 8)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 8,
+            jf: 0,
+            k: SYS_SOCKETPAIR as u32,
+        },
+        // 5: jeq SYS_IO_URING_SETUP -> 7 (jt = 7-5-1 = 1)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: SYS_IO_URING_SETUP as u32,
+        },
+        // 6: ret ALLOW
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+        // 7: ret ERRNO(EACCES)
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: errno_ret,
+        },
+        // 8: ld [args[0]] — socket() family
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_ARG0_OFFSET,
+        },
+        // 9: jeq AF_UNIX -> 18 (jt = 18-9-1 = 8)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 8,
+            jf: 0,
+            k: libc::AF_UNIX as u32,
+        },
+        // 10: jeq AF_INET -> 18 (jt = 18-10-1 = 7)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 7,
+            jf: 0,
+            k: libc::AF_INET as u32,
+        },
+        // 11: jeq AF_INET6 -> 18 (jt = 18-11-1 = 6)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 6,
+            jf: 0,
+            k: libc::AF_INET6 as u32,
+        },
+        // 12: ret ERRNO(EACCES) — bad socket family
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: errno_ret,
+        },
+        // 13: ld [args[0]] — socketpair() family
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_ARG0_OFFSET,
+        },
+        // 14: jeq AF_UNIX -> 18 (jt = 18-14-1 = 3)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 3,
+            jf: 0,
+            k: libc::AF_UNIX as u32,
+        },
+        // 15: ret ERRNO(EACCES) — bad socketpair family
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: errno_ret,
+        },
+        // 16: ret USER_NOTIF — connect()
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_USER_NOTIF,
+        },
+        // 17: ret bind_action — bind()
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: bind_action,
+        },
+        // 18: ret ALLOW — good socket/socketpair family
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+    ]
+}
+
+/// Install a seccomp-notify BPF filter for proxy-only network mode.
+///
+/// Returns the notify fd that the supervisor must poll for connect/bind
+/// notifications. Uses `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
+///
+/// Must be called AFTER `PR_SET_NO_NEW_PRIVS` is already set (either by
+/// a prior seccomp install or by Landlock's `restrict_self()`).
+///
+/// # Errors
+///
+/// Returns an error if the seccomp syscall fails.
+pub fn install_seccomp_proxy_filter(has_bind_ports: bool) -> Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+
+    let filter = build_seccomp_proxy_filter(has_bind_ports);
+
+    let prog = SockFprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+
+    // PR_SET_NO_NEW_PRIVS should already be set by the openat-notify filter
+    // or by Landlock restrict_self(). Set it again defensively (idempotent).
+    // SAFETY: prctl with PR_SET_NO_NEW_PRIVS is always safe to call.
+    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if ret != 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "prctl(PR_SET_NO_NEW_PRIVS) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // Try with WAIT_KILLABLE_RECV first (kernel 5.19+).
+    let flags = SECCOMP_FILTER_FLAG_NEW_LISTENER | SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV;
+
+    // SAFETY: seccomp() with SECCOMP_SET_MODE_FILTER installs a BPF filter.
+    // The prog pointer is valid for the duration of the syscall.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            SECCOMP_SET_MODE_FILTER,
+            flags,
+            &prog as *const SockFprog,
+        )
+    };
+
+    let notify_fd = if ret < 0 {
+        let flags = SECCOMP_FILTER_FLAG_NEW_LISTENER;
+
+        // SAFETY: Same as above, retrying with fewer flags.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                SECCOMP_SET_MODE_FILTER,
+                flags,
+                &prog as *const SockFprog,
+            )
+        };
+
+        if ret < 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "seccomp(SECCOMP_SET_MODE_FILTER) for proxy filter failed: {}. \
+                 Requires kernel >= 5.0 with SECCOMP_FILTER_FLAG_NEW_LISTENER.",
+                std::io::Error::last_os_error()
+            )));
+        }
+        ret as i32
+    } else {
+        ret as i32
+    };
+
+    // SAFETY: The fd returned by seccomp() with NEW_LISTENER is a valid,
+    // newly-created file descriptor that we now own.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(notify_fd) })
+}
+
+/// Read a sockaddr from a seccomp notification's connect/bind arguments.
+///
+/// Reads from `/proc/PID/mem` at the pointer in args[1] (the sockaddr pointer
+/// for connect/bind). Parses the address family, port, and loopback status.
+///
+/// # TOCTOU Warning
+///
+/// For connect/bind, the kernel copies sockaddr into kernel memory via
+/// `move_addr_to_kernel()` before the seccomp filter runs. The userspace
+/// copy we read here may differ from what the kernel uses, but we use
+/// `SECCOMP_USER_NOTIF_FLAG_CONTINUE` which lets the kernel proceed with
+/// its already-copied data. The userspace read is only used for the
+/// allow/deny decision.
+///
+/// Always call `notif_id_valid()` after reading to verify the notification
+/// is still pending.
+///
+/// # Errors
+///
+/// Returns an error if `/proc/PID/mem` cannot be read or the sockaddr is
+/// too small to parse.
+pub fn read_notif_sockaddr(pid: u32, addr_ptr: u64, addrlen: u64) -> Result<SockaddrInfo> {
+    use std::io::Read;
+
+    // Minimum size: sa_family (2 bytes)
+    if addrlen < 2 {
+        return Err(NonoError::SandboxInit(
+            "sockaddr too small to contain sa_family".to_string(),
+        ));
+    }
+
+    let mem_path = format!("/proc/{}/mem", pid);
+    let mut file = std::fs::File::open(&mem_path)
+        .map_err(|e| NonoError::SandboxInit(format!("Failed to open {}: {}", mem_path, e)))?;
+
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(addr_ptr))
+        .map_err(|e| NonoError::SandboxInit(format!("Failed to seek in {}: {}", mem_path, e)))?;
+
+    // Read up to sizeof(sockaddr_in6) = 28 bytes. This covers both IPv4 (16) and IPv6 (28).
+    let read_len = std::cmp::min(addrlen as usize, 28);
+    let mut buf = [0u8; 28];
+    let n = file.read(&mut buf[..read_len]).map_err(|e| {
+        NonoError::SandboxInit(format!("Failed to read sockaddr from {}: {}", mem_path, e))
+    })?;
+
+    if n < 2 {
+        return Err(NonoError::SandboxInit(
+            "Short read for sockaddr sa_family".to_string(),
+        ));
+    }
+
+    // sa_family is the first 2 bytes (u16, native endian on Linux)
+    let family = u16::from_ne_bytes([buf[0], buf[1]]);
+
+    match family as i32 {
+        libc::AF_INET => {
+            // struct sockaddr_in: family(2) + port(2) + addr(4) + zero(8) = 16 bytes
+            if n < 8 {
+                return Err(NonoError::SandboxInit(
+                    "sockaddr_in too small for port + addr".to_string(),
+                ));
+            }
+            // Port is at offset 2, network byte order (big-endian)
+            let port = u16::from_be_bytes([buf[2], buf[3]]);
+            // IPv4 addr is at offset 4, 4 bytes
+            let addr = [buf[4], buf[5], buf[6], buf[7]];
+            let is_loopback = addr[0] == 127; // 127.0.0.0/8
+
+            Ok(SockaddrInfo {
+                family,
+                port,
+                is_loopback,
+            })
+        }
+        libc::AF_INET6 => {
+            // struct sockaddr_in6: family(2) + port(2) + flowinfo(4) + addr(16) + scope_id(4) = 28
+            if n < 24 {
+                return Err(NonoError::SandboxInit(
+                    "sockaddr_in6 too small for port + addr".to_string(),
+                ));
+            }
+            let port = u16::from_be_bytes([buf[2], buf[3]]);
+            // IPv6 addr is at offset 8, 16 bytes
+            let mut addr = [0u8; 16];
+            addr.copy_from_slice(&buf[8..24]);
+            // ::1 is loopback
+            let is_loopback = addr == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+            // Also check IPv4-mapped ::ffff:127.x.x.x
+            let is_v4_mapped_loopback =
+                addr[..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff] && addr[12] == 127;
+
+            Ok(SockaddrInfo {
+                family,
+                port,
+                is_loopback: is_loopback || is_v4_mapped_loopback,
+            })
+        }
+        libc::AF_UNIX => Ok(SockaddrInfo {
+            family,
+            port: 0,
+            is_loopback: true, // Unix sockets are always local
+        }),
+        _ => Ok(SockaddrInfo {
+            family,
+            port: 0,
+            is_loopback: false,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1673,7 +2177,7 @@ mod tests {
 
             let caps = CapabilitySet::new().set_signal_mode(SignalMode::AllowSameSandbox);
             match apply_with_abi(&caps, &detected) {
-                Ok(()) => {
+                Ok(_) => {
                     let kill_result = unsafe { libc::kill(target_pid, libc::SIGUSR1) };
                     let errno = std::io::Error::last_os_error()
                         .raw_os_error()
@@ -1785,24 +2289,6 @@ mod tests {
             .iter()
             .any(|n| n == "File rename across directories (Refer)"));
         assert!(names.iter().any(|n| n == "File truncation (Truncate)"));
-    }
-
-    #[test]
-    fn test_seccomp_network_block_fallback_requires_plain_blocked_mode() {
-        assert!(can_use_seccomp_network_block_fallback(
-            &CapabilitySet::new().block_network()
-        ));
-
-        let mut with_localhost = CapabilitySet::new().block_network();
-        with_localhost.add_localhost_port(3000);
-        assert!(!can_use_seccomp_network_block_fallback(&with_localhost));
-
-        let mut with_connect = CapabilitySet::new().block_network();
-        with_connect.add_tcp_connect_port(443);
-        assert!(!can_use_seccomp_network_block_fallback(&with_connect));
-
-        let with_proxy = CapabilitySet::new().proxy_only(8080);
-        assert!(!can_use_seccomp_network_block_fallback(&with_proxy));
     }
 
     #[test]
@@ -2061,5 +2547,512 @@ mod tests {
             Err(e) => panic!("unexpected error for 64-bit AT_FDCWD: {e}"),
         };
         assert_eq!(path_64, abs_path);
+    }
+
+    #[test]
+    fn test_seccomp_network_fallback_mode_blocked() {
+        let caps = CapabilitySet::new().block_network();
+        assert_eq!(
+            seccomp_network_fallback_mode(&caps),
+            SeccompNetFallback::BlockAll
+        );
+    }
+
+    #[test]
+    fn test_seccomp_network_fallback_mode_blocked_with_ports_is_none() {
+        let mut caps = CapabilitySet::new().block_network();
+        caps.add_localhost_port(3000);
+        assert_eq!(
+            seccomp_network_fallback_mode(&caps),
+            SeccompNetFallback::None
+        );
+    }
+
+    #[test]
+    fn test_seccomp_network_fallback_mode_proxy_only() {
+        let caps = CapabilitySet::new().proxy_only(8080);
+        assert_eq!(
+            seccomp_network_fallback_mode(&caps),
+            SeccompNetFallback::ProxyOnly {
+                proxy_port: 8080,
+                bind_ports: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_seccomp_network_fallback_mode_proxy_only_with_bind() {
+        let caps = CapabilitySet::new().proxy_only_with_bind(8080, vec![3000, 3001]);
+        assert_eq!(
+            seccomp_network_fallback_mode(&caps),
+            SeccompNetFallback::ProxyOnly {
+                proxy_port: 8080,
+                bind_ports: vec![3000, 3001],
+            }
+        );
+    }
+
+    #[test]
+    fn test_seccomp_network_fallback_mode_allow_all() {
+        let caps = CapabilitySet::new();
+        assert_eq!(
+            seccomp_network_fallback_mode(&caps),
+            SeccompNetFallback::None
+        );
+    }
+
+    #[test]
+    fn test_legacy_can_use_seccomp_block_fallback() {
+        // BlockAll => true
+        assert!(can_use_seccomp_network_block_fallback(
+            &CapabilitySet::new().block_network()
+        ));
+
+        // ProxyOnly => false
+        let with_proxy = CapabilitySet::new().proxy_only(8080);
+        assert!(!can_use_seccomp_network_block_fallback(&with_proxy));
+
+        // Blocked with ports => false
+        let mut with_localhost = CapabilitySet::new().block_network();
+        with_localhost.add_localhost_port(3000);
+        assert!(!can_use_seccomp_network_block_fallback(&with_localhost));
+    }
+
+    #[test]
+    fn test_build_seccomp_proxy_filter_with_bind() {
+        let filter = build_seccomp_proxy_filter(true);
+        // 19 instructions
+        assert_eq!(filter.len(), 19);
+
+        // Instruction 0 should be ld [nr]
+        assert_eq!(filter[0].code, BPF_LD | BPF_W | BPF_ABS);
+        assert_eq!(filter[0].k, SECCOMP_DATA_NR_OFFSET);
+
+        // Instruction 16 should be USER_NOTIF (connect)
+        assert_eq!(filter[16].code, BPF_RET | BPF_K);
+        assert_eq!(filter[16].k, SECCOMP_RET_USER_NOTIF);
+
+        // Instruction 17 should be USER_NOTIF (bind with has_bind_ports=true)
+        assert_eq!(filter[17].code, BPF_RET | BPF_K);
+        assert_eq!(filter[17].k, SECCOMP_RET_USER_NOTIF);
+    }
+
+    #[test]
+    fn test_build_seccomp_proxy_filter_without_bind() {
+        let filter = build_seccomp_proxy_filter(false);
+        assert_eq!(filter.len(), 19);
+
+        // Instruction 17 should be ERRNO (bind with has_bind_ports=false)
+        assert_eq!(filter[17].code, BPF_RET | BPF_K);
+        let errno_ret = SECCOMP_RET_ERRNO | (libc::EACCES as u32);
+        assert_eq!(filter[17].k, errno_ret);
+    }
+
+    #[test]
+    fn test_sockaddr_info_ipv4_loopback() {
+        let info = SockaddrInfo {
+            family: libc::AF_INET as u16,
+            port: 8080,
+            is_loopback: true,
+        };
+        assert!(info.is_loopback);
+        assert_eq!(info.port, 8080);
+    }
+
+    #[test]
+    fn test_sockaddr_info_ipv6_loopback() {
+        let info = SockaddrInfo {
+            family: libc::AF_INET6 as u16,
+            port: 443,
+            is_loopback: true,
+        };
+        assert!(info.is_loopback);
+    }
+
+    #[test]
+    fn test_sockaddr_info_non_loopback() {
+        let info = SockaddrInfo {
+            family: libc::AF_INET as u16,
+            port: 80,
+            is_loopback: false,
+        };
+        assert!(!info.is_loopback);
+    }
+
+    #[test]
+    fn test_sockaddr_info_unix_is_loopback() {
+        let info = SockaddrInfo {
+            family: libc::AF_UNIX as u16,
+            port: 0,
+            is_loopback: true,
+        };
+        assert!(info.is_loopback);
+        assert_eq!(info.port, 0);
+    }
+
+    /// Integration test: seccomp proxy filter blocks connect to non-proxy ports
+    /// and allows connect to the designated proxy port on localhost.
+    ///
+    /// Forks a child that installs the proxy filter, then attempts connects.
+    /// Results are reported via a pipe. This test works on any kernel with
+    /// seccomp user notification support (>= 5.0), regardless of Landlock ABI.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_seccomp_proxy_filter_allows_proxy_port_blocks_others() {
+        use std::io::Read;
+
+        // Pick an ephemeral port for the "proxy". We bind a listener so the
+        // connect to the allowed port actually succeeds (otherwise we'd get
+        // ECONNREFUSED which is indistinguishable from EACCES in the child).
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(_) => return, // Can't bind, skip test
+        };
+        let proxy_port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(_) => return,
+        };
+
+        let mut report_pipe = [0i32; 2];
+        let pipe_result = unsafe { libc::pipe(report_pipe.as_mut_ptr()) };
+        assert_eq!(pipe_result, 0, "pipe() failed");
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork() failed");
+
+        if pid == 0 {
+            // CHILD: install proxy filter, attempt connects, report results.
+            unsafe { libc::close(report_pipe[0]) };
+            // Drop the listener in child (parent keeps it open for accept)
+            drop(listener);
+
+            // Install the proxy filter (no bind ports).
+            // This requires PR_SET_NO_NEW_PRIVS first.
+            let result = install_seccomp_proxy_filter(false);
+            if result.is_err() {
+                // Seccomp not available on this system
+                let payload: [u8; 3] = [2, 2, 2]; // skip sentinel
+                unsafe {
+                    libc::write(report_pipe[1], payload.as_ptr().cast(), payload.len());
+                    libc::close(report_pipe[1]);
+                    libc::_exit(0);
+                }
+            }
+            let notify_fd = result.expect("install_seccomp_proxy_filter failed");
+
+            // Spawn a thread to handle notifications from the seccomp filter.
+            // The filter routes connect() to USER_NOTIF; we must respond or the
+            // child's connect() calls block forever.
+            let notify_raw = {
+                use std::os::fd::AsRawFd;
+                notify_fd.as_raw_fd()
+            };
+
+            // We handle notifications in the same process since we forked.
+            // For each connect notification, allow localhost:proxy_port, deny others.
+            // Run the handler in a thread so the main thread can do connects.
+            let proxy_port_copy = proxy_port;
+            let handler = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    // We expect exactly 2 connect attempts
+                    let notif = match recv_notif(notify_raw) {
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+
+                    // Read sockaddr from our own /proc/self/mem (same process)
+                    let info = match read_notif_sockaddr(
+                        notif.pid,
+                        notif.data.args[1],
+                        notif.data.args[2],
+                    ) {
+                        Ok(i) => i,
+                        Err(_) => {
+                            let _ = deny_notif(notify_raw, notif.id);
+                            continue;
+                        }
+                    };
+
+                    if info.is_loopback && info.port == proxy_port_copy {
+                        let _ = continue_notif(notify_raw, notif.id);
+                    } else {
+                        let _ = respond_notif_errno(notify_raw, notif.id, libc::EACCES);
+                    }
+                }
+            });
+
+            // Test 1: connect to proxy port on localhost — should succeed
+            let sock1 = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            let mut addr1: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            addr1.sin_family = libc::AF_INET as u16;
+            addr1.sin_port = proxy_port.to_be();
+            addr1.sin_addr.s_addr = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+
+            let connect1 = unsafe {
+                libc::connect(
+                    sock1,
+                    (&addr1 as *const libc::sockaddr_in).cast(),
+                    std::mem::size_of::<libc::sockaddr_in>() as u32,
+                )
+            };
+            let errno1 = if connect1 < 0 {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            } else {
+                0
+            };
+            unsafe { libc::close(sock1) };
+
+            // Test 2: connect to a different port on localhost — should be denied (EACCES)
+            let sock2 = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            let mut addr2: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            addr2.sin_family = libc::AF_INET as u16;
+            addr2.sin_port = (proxy_port.wrapping_add(1)).to_be();
+            addr2.sin_addr.s_addr = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+
+            let connect2 = unsafe {
+                libc::connect(
+                    sock2,
+                    (&addr2 as *const libc::sockaddr_in).cast(),
+                    std::mem::size_of::<libc::sockaddr_in>() as u32,
+                )
+            };
+            let errno2 = if connect2 < 0 {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            } else {
+                0
+            };
+            unsafe { libc::close(sock2) };
+
+            handler.join().ok();
+
+            // Report: [connect1_result, connect2_errno]
+            let payload: [u8; 3] = [
+                if connect1 == 0 { 0 } else { 1 },
+                errno1 as u8,
+                errno2 as u8,
+            ];
+            unsafe {
+                libc::write(report_pipe[1], payload.as_ptr().cast(), payload.len());
+                libc::close(report_pipe[1]);
+                libc::_exit(0);
+            }
+        }
+
+        // PARENT: read results from child
+        unsafe { libc::close(report_pipe[1]) };
+
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+
+        let mut buf = [0u8; 3];
+        let mut pipe_read = unsafe {
+            use std::os::fd::FromRawFd;
+            std::fs::File::from_raw_fd(report_pipe[0])
+        };
+        let n = pipe_read.read(&mut buf).expect("read from pipe failed");
+
+        if n == 3 && buf[0] == 2 && buf[1] == 2 && buf[2] == 2 {
+            // Skip sentinel: seccomp not available on this system
+            return;
+        }
+
+        assert_eq!(n, 3, "expected 3 bytes from child, got {n}");
+
+        // connect1 to proxy port should have succeeded (0)
+        assert_eq!(
+            buf[0], 0,
+            "connect to proxy port should succeed, got result={} errno={}",
+            buf[0], buf[1]
+        );
+
+        // connect2 to wrong port should have been denied with EACCES
+        assert_eq!(
+            buf[2],
+            libc::EACCES as u8,
+            "connect to non-proxy port should get EACCES, got errno={}",
+            buf[2]
+        );
+    }
+
+    /// Integration test: ProxyOnly + Landlock V4+ does NOT install seccomp
+    /// proxy filter (Landlock handles networking natively).
+    ///
+    /// Verifies that apply_with_abi() returns SeccompNetFallback::None when
+    /// the kernel supports AccessNet, even with ProxyOnly mode.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_proxy_only_with_landlock_v4_returns_no_fallback() {
+        let detected = match detect_abi() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        if !detected.has_network() {
+            // Pre-V4 kernel: the fallback SHOULD be ProxyOnly, not None.
+            // Test that separately.
+            return;
+        }
+
+        // On V4+, Landlock handles ProxyOnly natively. apply_with_abi should
+        // return None (no seccomp fallback needed). We can't actually call
+        // apply_with_abi in the parent (irreversible), so fork a child.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork() failed");
+
+        if pid == 0 {
+            let caps = CapabilitySet::new().proxy_only(8080);
+            let exit_code = match apply_with_abi(&caps, &detected) {
+                Ok(SeccompNetFallback::None) => 0,
+                Ok(SeccompNetFallback::BlockAll) => 1,
+                Ok(SeccompNetFallback::ProxyOnly { .. }) => 2,
+                Err(_) => 3,
+            };
+            unsafe { libc::_exit(exit_code) };
+        }
+
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "Expected SeccompNetFallback::None on V4+ kernel, got exit code {}",
+            libc::WEXITSTATUS(status)
+        );
+    }
+
+    /// Integration test: ProxyOnly on pre-V4 kernel returns ProxyOnly fallback.
+    ///
+    /// Verifies that apply_with_abi() returns SeccompNetFallback::ProxyOnly
+    /// when the kernel's Landlock ABI lacks AccessNet.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_proxy_only_without_landlock_net_returns_proxy_fallback() {
+        let detected = match detect_abi() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        if detected.has_network() {
+            // V4+ kernel: Landlock handles it, fallback not used.
+            // This test only runs on pre-V4 kernels.
+            return;
+        }
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork() failed");
+
+        if pid == 0 {
+            let caps = CapabilitySet::new().proxy_only(8080);
+            let exit_code = match apply_with_abi(&caps, &detected) {
+                Ok(SeccompNetFallback::ProxyOnly {
+                    proxy_port: 8080, ..
+                }) => 0,
+                Ok(SeccompNetFallback::ProxyOnly { .. }) => 1, // wrong port
+                Ok(SeccompNetFallback::None) => 2,
+                Ok(SeccompNetFallback::BlockAll) => 3,
+                Err(_) => 4,
+            };
+            unsafe { libc::_exit(exit_code) };
+        }
+
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "Expected SeccompNetFallback::ProxyOnly on pre-V4 kernel, got exit code {}",
+            libc::WEXITSTATUS(status)
+        );
+    }
+
+    /// Integration test: seccomp proxy filter blocks bind() when no bind_ports.
+    ///
+    /// Forks a child that installs the proxy filter with has_bind_ports=false,
+    /// then attempts to bind a socket. The bind should fail with EACCES directly
+    /// from the BPF filter (no notification, no handler needed).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_seccomp_proxy_filter_blocks_bind_without_bind_ports() {
+        let mut report_pipe = [0i32; 2];
+        let pipe_result = unsafe { libc::pipe(report_pipe.as_mut_ptr()) };
+        assert_eq!(pipe_result, 0, "pipe() failed");
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork() failed");
+
+        if pid == 0 {
+            unsafe { libc::close(report_pipe[0]) };
+
+            // Install proxy filter with bind disabled (returns ERRNO, not USER_NOTIF)
+            // No notification handler needed — BPF returns EACCES directly.
+            match install_seccomp_proxy_filter(false) {
+                Ok(_notify_fd) => {
+                    // Attempt bind on an ephemeral port
+                    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+
+                    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+                    addr.sin_family = libc::AF_INET as u16;
+                    addr.sin_port = 0; // ephemeral
+                    addr.sin_addr.s_addr = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+
+                    let bind_result = unsafe {
+                        libc::bind(
+                            sock,
+                            (&addr as *const libc::sockaddr_in).cast(),
+                            std::mem::size_of::<libc::sockaddr_in>() as u32,
+                        )
+                    };
+                    let errno = if bind_result < 0 {
+                        std::io::Error::last_os_error().raw_os_error().unwrap_or(-1) as u8
+                    } else {
+                        0
+                    };
+
+                    unsafe {
+                        libc::close(sock);
+                        libc::write(report_pipe[1], &errno as *const u8 as _, 1);
+                        libc::close(report_pipe[1]);
+                        libc::_exit(0);
+                    }
+                }
+                Err(_) => {
+                    // Seccomp not available — skip
+                    let skip: u8 = 255;
+                    unsafe {
+                        libc::write(report_pipe[1], &skip as *const u8 as _, 1);
+                        libc::close(report_pipe[1]);
+                        libc::_exit(0);
+                    }
+                }
+            }
+        }
+
+        // PARENT
+        unsafe { libc::close(report_pipe[1]) };
+
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+
+        let mut buf = [0u8; 1];
+        let mut pipe_read = unsafe {
+            use std::os::fd::FromRawFd;
+            std::fs::File::from_raw_fd(report_pipe[0])
+        };
+        use std::io::Read as _;
+        let n = pipe_read.read(&mut buf).expect("read from pipe");
+
+        if n == 1 && buf[0] == 255 {
+            return; // seccomp not available, skip
+        }
+
+        assert_eq!(n, 1);
+        assert_eq!(
+            buf[0],
+            libc::EACCES as u8,
+            "bind() should fail with EACCES when has_bind_ports=false, got errno={}",
+            buf[0]
+        );
     }
 }

@@ -451,6 +451,110 @@ pub(super) fn handle_seccomp_notification(
     Ok(())
 }
 
+/// Handle a seccomp notification for connect() or bind() syscalls.
+///
+/// This is the proxy-only fallback for kernels without Landlock AccessNet.
+/// The BPF filter routes connect/bind to USER_NOTIF; this function reads
+/// the sockaddr from the child's memory and allows or denies based on
+/// the configured proxy port and bind ports.
+///
+/// For connect: allow only loopback + proxy port. Deny everything else.
+/// For bind: allow only ports in the bind_ports list. Deny everything else.
+///
+/// Uses SECCOMP_USER_NOTIF_FLAG_CONTINUE on approval (safe for connect/bind
+/// because the kernel has already copied sockaddr into kernel memory).
+pub(super) fn handle_network_notification(
+    notify_fd: std::os::fd::RawFd,
+    config: &SupervisorConfig<'_>,
+    rate_limiter: &mut RateLimiter,
+) -> nono::error::Result<()> {
+    use nono::sandbox::{
+        continue_notif, deny_notif, notif_id_valid, read_notif_sockaddr, recv_notif,
+        respond_notif_errno, SYS_BIND, SYS_CONNECT,
+    };
+
+    let notif = recv_notif(notify_fd)?;
+
+    // Rate limit to prevent flooding
+    if !rate_limiter.try_acquire() {
+        debug!("Rate limited network seccomp notification, denying");
+        let _ = deny_notif(notify_fd, notif.id);
+        return Ok(());
+    }
+
+    // Read sockaddr from child's memory: args[1] = sockaddr*, args[2] = addrlen
+    let sockaddr = match read_notif_sockaddr(notif.pid, notif.data.args[1], notif.data.args[2]) {
+        Ok(info) => info,
+        Err(e) => {
+            debug!("Failed to read sockaddr from seccomp notification: {}", e);
+            let _ = deny_notif(notify_fd, notif.id);
+            return Ok(());
+        }
+    };
+
+    // TOCTOU check
+    if !notif_id_valid(notify_fd, notif.id)? {
+        debug!("Network seccomp notification expired (TOCTOU check)");
+        return Ok(());
+    }
+
+    let allowed = match notif.data.nr {
+        SYS_CONNECT => {
+            // Allow connect only to loopback + proxy port
+            let port_match = sockaddr.port == config.proxy_port;
+            if sockaddr.is_loopback && port_match {
+                debug!(
+                    "Proxy seccomp: allowing connect to loopback:{}",
+                    sockaddr.port
+                );
+                true
+            } else {
+                debug!(
+                    "Proxy seccomp: denying connect to family={} port={} loopback={}",
+                    sockaddr.family, sockaddr.port, sockaddr.is_loopback
+                );
+                false
+            }
+        }
+        SYS_BIND => {
+            // Allow bind only on configured bind ports
+            let port_allowed = config.proxy_bind_ports.contains(&sockaddr.port);
+            if port_allowed {
+                debug!("Proxy seccomp: allowing bind on port {}", sockaddr.port);
+                true
+            } else {
+                debug!(
+                    "Proxy seccomp: denying bind on port {} (allowed: {:?})",
+                    sockaddr.port, config.proxy_bind_ports
+                );
+                false
+            }
+        }
+        other => {
+            warn!(
+                "Unexpected syscall {} in proxy seccomp handler, denying",
+                other
+            );
+            false
+        }
+    };
+
+    if allowed {
+        // SECCOMP_USER_NOTIF_FLAG_CONTINUE: let the kernel proceed with its
+        // already-copied sockaddr. Safe for connect/bind (move_addr_to_kernel).
+        if let Err(e) = continue_notif(notify_fd, notif.id) {
+            debug!("continue_notif failed for network notification: {}", e);
+            // Must respond to avoid leaving the child blocked. Propagate if
+            // deny also fails — the notification is orphaned.
+            return deny_notif(notify_fd, notif.id);
+        }
+    } else {
+        respond_notif_errno(notify_fd, notif.id, libc::EACCES)?;
+    }
+
+    Ok(())
+}
+
 /// Check if a path matches any capability in the initial set.
 ///
 /// - File capabilities (is_file=true): require exact path match

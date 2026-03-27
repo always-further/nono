@@ -49,6 +49,7 @@ impl Default for ExclusionConfig {
 /// 2. Client-supplied exclusion patterns (component/substring match)
 /// 3. Client-supplied glob patterns (filename match)
 /// 4. `.gitignore` rules (if enabled)
+#[derive(Clone)]
 pub struct ExclusionFilter {
     gitignore: Option<Gitignore>,
     exclude_patterns: Vec<String>,

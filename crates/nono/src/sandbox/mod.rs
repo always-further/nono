@@ -26,9 +26,10 @@ pub use linux::{detect_abi, DetectedAbi};
 #[cfg(target_os = "linux")]
 pub use linux::{
     classify_access_from_flags, continue_notif, deny_notif, inject_fd, install_seccomp_notify,
-    notif_id_valid, probe_seccomp_block_network_support, read_notif_path, read_open_how,
-    recv_notif, resolve_notif_path, respond_notif_errno, validate_openat2_size, OpenHow,
-    SeccompData, SeccompNotif, SYS_OPENAT, SYS_OPENAT2,
+    install_seccomp_proxy_filter, notif_id_valid, probe_seccomp_block_network_support,
+    read_notif_path, read_notif_sockaddr, read_open_how, recv_notif, resolve_notif_path,
+    respond_notif_errno, validate_openat2_size, OpenHow, SeccompData, SeccompNetFallback,
+    SeccompNotif, SockaddrInfo, SYS_BIND, SYS_CONNECT, SYS_OPENAT, SYS_OPENAT2,
 };
 
 /// Information about sandbox support on this platform
@@ -86,27 +87,32 @@ impl Sandbox {
     /// After calling this, the current process (and all children) will
     /// only be able to access resources granted by the capabilities.
     ///
-    /// On Linux, this auto-detects the Landlock ABI. Use `apply_with_abi()`
-    /// to skip re-detection when the ABI is already known.
+    /// On Linux, returns the seccomp network fallback mode. `BlockAll` is
+    /// already enforced. `ProxyOnly` signals the caller to install the
+    /// proxy filter post-fork via `install_seccomp_proxy_filter()`.
+    /// On macOS, always returns `()` (no seccomp fallback concept).
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The platform is not supported
-    /// - Sandbox initialization fails
-    /// - Required paths cannot be opened
+    /// Returns an error if sandbox initialization fails.
+    #[cfg(target_os = "linux")]
+    #[must_use = "sandbox application result should be checked"]
+    pub fn apply(caps: &CapabilitySet) -> Result<linux::SeccompNetFallback> {
+        linux::apply(caps)
+    }
+
+    /// Apply the sandbox with the given capabilities (macOS).
+    #[cfg(target_os = "macos")]
     #[must_use = "sandbox application result should be checked"]
     pub fn apply(caps: &CapabilitySet) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            linux::apply(caps)
-        }
+        macos::apply(caps)
+    }
 
-        #[cfg(target_os = "macos")]
-        {
-            macos::apply(caps)
-        }
-
+    /// Apply the sandbox with the given capabilities (unsupported platforms).
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[must_use = "sandbox application result should be checked"]
+    pub fn apply(caps: &CapabilitySet) -> Result<()> {
+        let _ = caps;
         #[cfg(target_arch = "wasm32")]
         {
             Err(crate::error::NonoError::UnsupportedPlatform(
@@ -114,7 +120,7 @@ impl Sandbox {
             ))
         }
 
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_arch = "wasm32")))]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             Err(crate::error::NonoError::UnsupportedPlatform(
                 std::env::consts::OS.to_string(),
@@ -127,12 +133,17 @@ impl Sandbox {
     /// Avoids re-probing the kernel when the caller has already detected
     /// the ABI (e.g., probed once at startup).
     ///
+    /// Returns the seccomp network fallback mode (see `apply()` docs).
+    ///
     /// # Errors
     ///
     /// Returns an error if sandbox initialization fails.
     #[cfg(target_os = "linux")]
     #[must_use = "sandbox application result should be checked"]
-    pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<()> {
+    pub fn apply_with_abi(
+        caps: &CapabilitySet,
+        abi: &DetectedAbi,
+    ) -> Result<linux::SeccompNetFallback> {
         linux::apply_with_abi(caps, abi)
     }
 
