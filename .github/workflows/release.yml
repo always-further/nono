@@ -157,7 +157,7 @@ jobs:
     permissions:
       packages: write
       id-token: write
-    if: ${{ !contains(env.RELEASE_TAG, 'alpha') && !contains(env.RELEASE_TAG, 'beta') && !contains(env.RELEASE_TAG, 'rc') }}
+    if: ${{ !contains(inputs.tag || github.ref_name, 'alpha') && !contains(inputs.tag || github.ref_name, 'beta') && !contains(inputs.tag || github.ref_name, 'rc') }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
