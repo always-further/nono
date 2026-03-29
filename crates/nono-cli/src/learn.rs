@@ -5,13 +5,15 @@
 //! to be allowed in a nono profile.
 
 use crate::cli::LearnArgs;
-use nono::{NonoError, Result};
+use nono::{AccessMode, NonoError, Result};
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::profile::{self, Profile};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::collections::BTreeMap;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -32,10 +34,16 @@ use tracing::{debug, info, warn};
 pub struct LearnResult {
     /// Paths that need read access
     pub read_paths: BTreeSet<PathBuf>,
+    /// Files that need read access
+    pub read_files: BTreeSet<PathBuf>,
     /// Paths that need write access
     pub write_paths: BTreeSet<PathBuf>,
+    /// Files that need write access
+    pub write_files: BTreeSet<PathBuf>,
     /// Paths that need read+write access
     pub readwrite_paths: BTreeSet<PathBuf>,
+    /// Files that need read+write access
+    pub readwrite_files: BTreeSet<PathBuf>,
     /// Paths that were accessed but are already covered by system paths
     pub system_covered: BTreeSet<PathBuf>,
     /// Paths that were accessed but are already covered by profile
@@ -51,8 +59,11 @@ impl LearnResult {
     fn new() -> Self {
         Self {
             read_paths: BTreeSet::new(),
+            read_files: BTreeSet::new(),
             write_paths: BTreeSet::new(),
+            write_files: BTreeSet::new(),
             readwrite_paths: BTreeSet::new(),
+            readwrite_files: BTreeSet::new(),
             system_covered: BTreeSet::new(),
             profile_covered: BTreeSet::new(),
             outbound_connections: Vec::new(),
@@ -63,8 +74,11 @@ impl LearnResult {
     /// Check if any paths were discovered
     pub fn has_paths(&self) -> bool {
         !self.read_paths.is_empty()
+            || !self.read_files.is_empty()
             || !self.write_paths.is_empty()
+            || !self.write_files.is_empty()
             || !self.readwrite_paths.is_empty()
+            || !self.readwrite_files.is_empty()
     }
 
     /// Check if any network activity was observed
@@ -79,13 +93,28 @@ impl LearnResult {
             .iter()
             .map(|p| p.display().to_string())
             .collect();
+        let allow_file: Vec<String> = self
+            .readwrite_files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
         let read: Vec<String> = self
             .read_paths
             .iter()
             .map(|p| p.display().to_string())
             .collect();
+        let read_file: Vec<String> = self
+            .read_files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
         let write: Vec<String> = self
             .write_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        let write_file: Vec<String> = self
+            .write_files
             .iter()
             .map(|p| p.display().to_string())
             .collect();
@@ -126,7 +155,10 @@ impl LearnResult {
             "filesystem": {
                 "allow": allow,
                 "read": read,
-                "write": write
+                "write": write,
+                "allow_file": allow_file,
+                "read_file": read_file,
+                "write_file": write_file
             },
             "network": {
                 "outbound": outbound,
@@ -161,8 +193,11 @@ impl LearnResult {
         };
 
         let allow: Vec<String> = self.readwrite_paths.iter().map(|p| shorten(p)).collect();
+        let allow_file: Vec<String> = self.readwrite_files.iter().map(|p| shorten(p)).collect();
         let read: Vec<String> = self.read_paths.iter().map(|p| shorten(p)).collect();
+        let read_file: Vec<String> = self.read_files.iter().map(|p| shorten(p)).collect();
         let write: Vec<String> = self.write_paths.iter().map(|p| shorten(p)).collect();
+        let write_file: Vec<String> = self.write_files.iter().map(|p| shorten(p)).collect();
 
         let has_network = self.has_network_activity();
 
@@ -176,6 +211,9 @@ impl LearnResult {
                 "allow": allow,
                 "read": read,
                 "write": write,
+                "allow_file": allow_file,
+                "read_file": read_file,
+                "write_file": write_file,
             },
             "network": {
                 "block": !has_network,
@@ -208,44 +246,30 @@ impl LearnResult {
             return lines.join("\n");
         }
 
-        if !self.read_paths.is_empty() {
-            lines.push(String::new());
-            lines.push(format!(
-                " {} ({} paths)",
-                "READ".cyan().bold(),
-                self.read_paths.len()
-            ));
-            lines.push(format!(" {}", "-".repeat(40).dimmed()));
-            for path in &self.read_paths {
-                lines.push(format!("  {}", path.display()));
-            }
-        }
-
-        if !self.write_paths.is_empty() {
-            lines.push(String::new());
-            lines.push(format!(
-                " {} ({} paths)",
-                "WRITE".yellow().bold(),
-                self.write_paths.len()
-            ));
-            lines.push(format!(" {}", "-".repeat(40).dimmed()));
-            for path in &self.write_paths {
-                lines.push(format!("  {}", path.display()));
-            }
-        }
-
-        if !self.readwrite_paths.is_empty() {
-            lines.push(String::new());
-            lines.push(format!(
-                " {} ({} paths)",
-                "READ+WRITE".green().bold(),
-                self.readwrite_paths.len()
-            ));
-            lines.push(format!(" {}", "-".repeat(40).dimmed()));
-            for path in &self.readwrite_paths {
-                lines.push(format!("  {}", path.display()));
-            }
-        }
+        push_fs_summary_section(
+            &mut lines,
+            "READ".cyan().bold(),
+            "--read",
+            &self.read_paths,
+            "--read-file",
+            &self.read_files,
+        );
+        push_fs_summary_section(
+            &mut lines,
+            "WRITE".yellow().bold(),
+            "--write",
+            &self.write_paths,
+            "--write-file",
+            &self.write_files,
+        );
+        push_fs_summary_section(
+            &mut lines,
+            "READ+WRITE".green().bold(),
+            "--allow",
+            &self.readwrite_paths,
+            "--allow-file",
+            &self.readwrite_files,
+        );
 
         if !self.system_covered.is_empty() || !self.profile_covered.is_empty() {
             lines.push(String::new());
@@ -296,6 +320,32 @@ impl LearnResult {
         lines.push(format!("{}", separator.dimmed()));
 
         lines.join("\n")
+    }
+}
+
+fn push_fs_summary_section(
+    lines: &mut Vec<String>,
+    label: colored::ColoredString,
+    dir_flag: &str,
+    dir_paths: &BTreeSet<PathBuf>,
+    file_flag: &str,
+    file_paths: &BTreeSet<PathBuf>,
+) {
+    use colored::Colorize;
+
+    let count = dir_paths.len() + file_paths.len();
+    if count == 0 {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(format!(" {} ({} grants)", label, count));
+    lines.push(format!(" {}", "-".repeat(40).dimmed()));
+    for path in dir_paths {
+        lines.push(format!("  {} {}", dir_flag, path.display()));
+    }
+    for path in file_paths {
+        lines.push(format!("  {} {}", file_flag, path.display()));
     }
 }
 
@@ -1045,6 +1095,13 @@ struct FileAccess {
     is_write: bool,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LearnedPathEntry {
+    access: AccessMode,
+    is_file: bool,
+}
+
 /// Kind of network access observed via tracing
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Clone)]
@@ -1438,23 +1495,20 @@ fn process_accesses(
         paths.extend(prof.filesystem.allow.iter().cloned());
         paths.extend(prof.filesystem.read.iter().cloned());
         paths.extend(prof.filesystem.write.iter().cloned());
+        paths.extend(prof.filesystem.allow_file.iter().cloned());
+        paths.extend(prof.filesystem.read_file.iter().cloned());
+        paths.extend(prof.filesystem.write_file.iter().cloned());
         paths
     } else {
         HashSet::new()
     };
 
-    // Track unique paths (canonicalized where possible)
-    let mut seen_paths: HashSet<PathBuf> = HashSet::new();
+    // Track unique learned grants so overlapping reads and writes can be
+    // promoted to read+write and redundant descendants can be removed.
+    let mut learned_entries: BTreeMap<PathBuf, LearnedPathEntry> = BTreeMap::new();
 
     for access in accesses {
-        // Try to canonicalize, fall back to original
-        let canonical = access.path.canonicalize().unwrap_or(access.path.clone());
-
-        // Skip if we've seen this path
-        if seen_paths.contains(&canonical) {
-            continue;
-        }
-        seen_paths.insert(canonical.clone());
+        let canonical = canonicalize_existing_path(&access.path);
 
         // Check if covered by system paths
         if is_covered_by_set(&canonical, &system_read_set)? {
@@ -1472,30 +1526,116 @@ fn process_accesses(
             continue;
         }
 
-        // Categorize by access type
-        // Collapse to parent directories for cleaner output
-        let collapsed = collapse_to_parent(&canonical);
-
-        if access.is_write {
-            // Check if already in read, upgrade to readwrite
-            if result.read_paths.contains(&collapsed) {
-                result.read_paths.remove(&collapsed);
-                result.readwrite_paths.insert(collapsed);
-            } else if !result.readwrite_paths.contains(&collapsed) {
-                result.write_paths.insert(collapsed);
-            }
+        let access_mode = if access.is_write {
+            AccessMode::Write
         } else {
-            // Read access
-            if result.write_paths.contains(&collapsed) {
-                result.write_paths.remove(&collapsed);
-                result.readwrite_paths.insert(collapsed);
-            } else if !result.readwrite_paths.contains(&collapsed) {
-                result.read_paths.insert(collapsed);
+            AccessMode::Read
+        };
+        let (target_path, is_file) = learned_target_for_access(&access.path, access.is_write);
+        observe_learned_path(&mut learned_entries, target_path, is_file, access_mode);
+    }
+
+    minimize_learned_entries(&mut learned_entries);
+
+    for (path, entry) in learned_entries {
+        match (entry.access, entry.is_file) {
+            (AccessMode::Read, true) => {
+                result.read_files.insert(path);
+            }
+            (AccessMode::Read, false) => {
+                result.read_paths.insert(path);
+            }
+            (AccessMode::Write, true) => {
+                result.write_files.insert(path);
+            }
+            (AccessMode::Write, false) => {
+                result.write_paths.insert(path);
+            }
+            (AccessMode::ReadWrite, true) => {
+                result.readwrite_files.insert(path);
+            }
+            (AccessMode::ReadWrite, false) => {
+                result.readwrite_paths.insert(path);
             }
         }
     }
 
     Ok(result)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn canonicalize_existing_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn learned_target_for_access(path: &Path, is_write: bool) -> (PathBuf, bool) {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let canonical = canonicalize_existing_path(path);
+            (canonical, !metadata.is_dir())
+        }
+        Err(_) if is_write => match path.parent() {
+            Some(parent) => (canonicalize_existing_path(parent), false),
+            None => (path.to_path_buf(), false),
+        },
+        Err(_) => (path.to_path_buf(), true),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn merge_access_modes(existing: AccessMode, new: AccessMode) -> AccessMode {
+    if existing == new {
+        existing
+    } else {
+        AccessMode::ReadWrite
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observe_learned_path(
+    learned_entries: &mut BTreeMap<PathBuf, LearnedPathEntry>,
+    path: PathBuf,
+    is_file: bool,
+    access: AccessMode,
+) {
+    match learned_entries.get_mut(&path) {
+        Some(entry) => {
+            entry.access = merge_access_modes(entry.access, access);
+            if !is_file {
+                entry.is_file = false;
+            }
+        }
+        None => {
+            learned_entries.insert(path, LearnedPathEntry { access, is_file });
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn minimize_learned_entries(learned_entries: &mut BTreeMap<PathBuf, LearnedPathEntry>) {
+    let directory_entries: Vec<(PathBuf, AccessMode)> = learned_entries
+        .iter()
+        .filter_map(|(path, entry)| (!entry.is_file).then_some((path.clone(), entry.access)))
+        .collect();
+
+    let redundant_children: Vec<PathBuf> = learned_entries
+        .iter()
+        .filter_map(|(candidate_path, candidate_entry)| {
+            directory_entries
+                .iter()
+                .any(|(dir_path, dir_access)| {
+                    candidate_path != dir_path
+                        && candidate_path.starts_with(dir_path)
+                        && dir_access.contains(candidate_entry.access)
+                })
+                .then_some(candidate_path.clone())
+        })
+        .collect();
+
+    for child in redundant_children {
+        learned_entries.remove(&child);
+    }
 }
 
 /// Check if a path is covered by a set of allowed paths
@@ -1549,20 +1689,6 @@ fn expand_home(path: &str) -> Result<String> {
         return Ok(path.replacen("$HOME", &home, 1));
     }
     Ok(path.to_string())
-}
-
-/// Collapse a file path to its parent directory for cleaner output
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn collapse_to_parent(path: &Path) -> PathBuf {
-    // Don't collapse if it's already a directory
-    if path.is_dir() {
-        return path.to_path_buf();
-    }
-
-    // Collapse files to their parent directory
-    path.parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// Extract a substring between a prefix and suffix
@@ -1933,6 +2059,7 @@ fn resolve_reverse_dns(ips: &HashSet<IpAddr>) -> HashMap<IpAddr, String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use tempfile::Builder;
 
     /// Helper to extract FileAccess from TracedAccess
     fn expect_file_access(traced: Option<TracedAccess>) -> FileAccess {
@@ -2024,11 +2151,31 @@ mod tests {
     }
 
     #[test]
-    fn test_collapse_to_parent() {
-        // For a file that doesn't exist, collapse to parent
+    fn test_learned_target_for_missing_write_uses_parent_directory() {
         let path = PathBuf::from("/some/dir/file.txt");
-        let collapsed = collapse_to_parent(&path);
-        assert_eq!(collapsed, PathBuf::from("/some/dir"));
+        let (target, is_file) = learned_target_for_access(&path, true);
+        assert_eq!(target, PathBuf::from("/some/dir"));
+        assert!(!is_file);
+    }
+
+    #[test]
+    fn test_learned_target_for_existing_file_preserves_file_path() {
+        let cwd = std::env::current_dir().expect("cwd should be available");
+        let tempdir = Builder::new()
+            .prefix("learn-target-")
+            .tempdir_in(&cwd)
+            .expect("tempdir should be created");
+        let file_path = tempdir.path().join("config.json");
+        std::fs::write(&file_path, "{}").expect("file should be created");
+
+        let (target, is_file) = learned_target_for_access(&file_path, false);
+        assert_eq!(
+            target,
+            file_path
+                .canonicalize()
+                .expect("file should canonicalize successfully")
+        );
+        assert!(is_file);
     }
 
     #[test]
@@ -2036,11 +2183,27 @@ mod tests {
         let mut result = LearnResult::new();
         result.read_paths.insert(PathBuf::from("/some/read/path"));
         result.write_paths.insert(PathBuf::from("/some/write/path"));
+        result
+            .read_files
+            .insert(PathBuf::from("/some/read/file.txt"));
 
         let json = result.to_json()?;
         assert!(json.contains("filesystem"));
         assert!(json.contains("/some/read/path"));
         assert!(json.contains("/some/write/path"));
+        assert!(json.contains("read_file"));
+        assert!(json.contains("/some/read/file.txt"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_learn_result_to_profile_includes_file_permissions() -> Result<()> {
+        let mut result = LearnResult::new();
+        result.write_files.insert(PathBuf::from("/tmp/output.txt"));
+
+        let profile = result.to_profile("touch", "touch")?;
+        assert!(profile.contains("\"write_file\""));
+        assert!(profile.contains("/tmp/output.txt"));
         Ok(())
     }
 
@@ -2262,6 +2425,7 @@ mod tests {
     #[test]
     fn test_learn_result_network_summary() {
         let mut result = LearnResult::new();
+        result.read_files.insert(PathBuf::from("/etc/hostname"));
         result.outbound_connections.push(NetworkConnectionSummary {
             endpoint: NetworkEndpoint {
                 addr: "93.184.216.34".parse().unwrap(),
@@ -2280,6 +2444,7 @@ mod tests {
         });
 
         let summary = result.to_summary();
+        assert!(summary.contains("--read-file /etc/hostname"));
         assert!(summary.contains("OUTBOUND NETWORK"));
         assert!(summary.contains("example.com (93.184.216.34):443 (12x)"));
         assert!(summary.contains("LISTENING PORTS"));
@@ -2313,6 +2478,80 @@ mod tests {
             count: 1,
         });
         assert!(result2.has_network_activity());
+    }
+
+    #[test]
+    fn test_process_accesses_promotes_file_to_readwrite() {
+        let cwd = std::env::current_dir().expect("cwd should be available");
+        let tempdir = Builder::new()
+            .prefix("learn-process-")
+            .tempdir_in(&cwd)
+            .expect("tempdir should be created");
+        let file_path = tempdir.path().join("state.txt");
+        std::fs::write(&file_path, "state").expect("file should be created");
+        let canonical = file_path
+            .canonicalize()
+            .expect("file should canonicalize successfully");
+
+        let accesses = vec![
+            FileAccess {
+                path: file_path.clone(),
+                is_write: false,
+            },
+            FileAccess {
+                path: file_path,
+                is_write: true,
+            },
+        ];
+
+        let result = process_accesses(accesses, None, false).expect("accesses should process");
+        assert!(result.read_files.is_empty());
+        assert!(result.write_files.is_empty());
+        assert!(result.readwrite_files.contains(&canonical));
+    }
+
+    #[test]
+    fn test_process_accesses_drops_children_covered_by_directory() {
+        let cwd = std::env::current_dir().expect("cwd should be available");
+        let tempdir = Builder::new()
+            .prefix("learn-min-")
+            .tempdir_in(&cwd)
+            .expect("tempdir should be created");
+        let nested_dir = tempdir.path().join("nested");
+        std::fs::create_dir_all(&nested_dir).expect("nested dir should be created");
+        let nested_file = nested_dir.join("file.txt");
+        std::fs::write(&nested_file, "hello").expect("nested file should be created");
+
+        let root = tempdir
+            .path()
+            .canonicalize()
+            .expect("tempdir should canonicalize successfully");
+        let nested = nested_dir
+            .canonicalize()
+            .expect("nested dir should canonicalize successfully");
+        let file = nested_file
+            .canonicalize()
+            .expect("nested file should canonicalize successfully");
+
+        let accesses = vec![
+            FileAccess {
+                path: tempdir.path().to_path_buf(),
+                is_write: false,
+            },
+            FileAccess {
+                path: nested_dir,
+                is_write: false,
+            },
+            FileAccess {
+                path: nested_file,
+                is_write: false,
+            },
+        ];
+
+        let result = process_accesses(accesses, None, false).expect("accesses should process");
+        assert!(result.read_paths.contains(&root));
+        assert!(!result.read_paths.contains(&nested));
+        assert!(!result.read_files.contains(&file));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use colored::Colorize;
 use nono::trust;
 use nono::Result;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 use zeroize::Zeroizing;
 
 /// Keystore service name for signing keys (private key material)
@@ -20,6 +21,9 @@ const TRUST_SERVICE: &str = "nono-trust";
 
 /// Keystore service name for public keys (verification-only, no private key material)
 const TRUST_PUB_SERVICE: &str = "nono-trust-pub";
+
+/// On-disk cache extension for verification-only public keys.
+const TRUST_PUB_CACHE_EXT: &str = "b64";
 
 /// Test-only override for the user trust policy path.
 #[cfg(feature = "test-trust-overrides")]
@@ -188,6 +192,7 @@ fn run_keygen(args: TrustKeygenArgs) -> Result<()> {
     // Store public key separately so verification never needs the private key
     let pub_key_b64 = base64_encode(pub_key.as_bytes());
     trust_keystore::store_secret(TRUST_PUB_SERVICE, key_id, &pub_key_b64)?;
+    store_public_key_cache(key_id, &pub_key_b64)?;
 
     eprintln!("{}", "Signing key generated successfully.".green());
     eprintln!("  Key ID:      {key_id}");
@@ -1019,12 +1024,24 @@ fn run_list(args: TrustListArgs) -> Result<()> {
 /// Uses the `nono-trust-pub` service to avoid loading private key material
 /// into memory for verification-only operations.
 pub(crate) fn load_public_key_bytes(key_id: &str) -> Result<Vec<u8>> {
+    if let Some(b64) = load_public_key_cache(key_id)? {
+        return base64_decode(&b64)
+            .map_err(|e| nono::NonoError::KeystoreAccess(format!("corrupt public key data: {e}")));
+    }
+
     let b64 = trust_keystore::load_secret(TRUST_PUB_SERVICE, key_id).map_err(|e| match e {
         nono::NonoError::SecretNotFound(_) => nono::NonoError::SecretNotFound(format!(
             "public key '{key_id}' not found in keystore (run 'nono trust keygen' to regenerate)"
         )),
         other => other,
     })?;
+
+    if let Err(e) = store_public_key_cache(key_id, &b64) {
+        debug!(
+            "failed to cache trust public key '{}' to disk after keystore load: {}",
+            key_id, e
+        );
+    }
 
     base64_decode(b64.as_str())
         .map_err(|e| nono::NonoError::KeystoreAccess(format!("corrupt public key data: {e}")))
@@ -1240,6 +1257,66 @@ pub(crate) fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String>
     nono::trust::base64::base64_decode(input)
 }
 
+fn public_key_cache_path(key_id: &str) -> Result<PathBuf> {
+    let dir = crate::config::user::user_trusted_keys_dir()?;
+    Ok(dir.join(format!(
+        "{}.{}",
+        hex_component(key_id.as_bytes()),
+        TRUST_PUB_CACHE_EXT
+    )))
+}
+
+fn load_public_key_cache(key_id: &str) -> Result<Option<String>> {
+    let path = public_key_cache_path(key_id)?;
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(contents.trim().to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(nono::NonoError::KeystoreAccess(format!(
+            "failed to read cached public key '{}': {}",
+            path.display(),
+            e
+        ))),
+    }
+}
+
+fn store_public_key_cache(key_id: &str, public_key_b64: &str) -> Result<()> {
+    let path = public_key_cache_path(key_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| nono::NonoError::ConfigWrite {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+    }
+
+    std::fs::write(&path, format!("{public_key_b64}\n")).map_err(|e| {
+        nono::NonoError::ConfigWrite {
+            path: path.clone(),
+            source: e,
+        }
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            nono::NonoError::ConfigWrite {
+                path: path.clone(),
+                source: e,
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
+fn hex_component(value: &[u8]) -> String {
+    let mut encoded = String::with_capacity(value.len().saturating_mul(2));
+    for byte in value {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1292,6 +1369,46 @@ mod tests {
         // Just verify it returns Some on a normal system
         let path = user_trust_policy_path();
         assert!(path.is_some());
+    }
+
+    #[test]
+    fn public_key_cache_path_encodes_key_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+        let path = public_key_cache_path("../default").unwrap();
+
+        match original {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("b64"));
+        assert!(!path.to_string_lossy().contains("../"));
+        assert_eq!(
+            path.file_stem().and_then(|stem| stem.to_str()),
+            Some("2e2e2f64656661756c74")
+        );
+    }
+
+    #[test]
+    fn load_public_key_bytes_prefers_disk_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+        let expected = b"public key bytes";
+        let encoded = base64_encode(expected);
+        store_public_key_cache("default", &encoded).unwrap();
+        let loaded = load_public_key_bytes("default").unwrap();
+
+        match original {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+
+        assert_eq!(loaded, expected);
     }
 
     #[cfg(feature = "test-trust-overrides")]

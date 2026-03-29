@@ -38,6 +38,92 @@ pub struct UiSettings {
     /// Color theme name (mocha, latte, frappe, macchiato, tokyo-night, minimal)
     #[serde(default)]
     pub theme: Option<String>,
+    /// In-band PTY detach sequence, e.g. "ctrl-] d"
+    #[serde(default)]
+    pub detach_sequence: Option<DetachSequence>,
+}
+
+/// Parsed in-band PTY detach sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachSequence(Vec<u8>);
+
+impl DetachSequence {
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for DetachSequence {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        parse_detach_sequence(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+fn parse_detach_sequence(raw: &str) -> std::result::Result<DetachSequence, String> {
+    let mut bytes = Vec::new();
+    for token in raw.split_whitespace() {
+        let token_bytes = parse_detach_sequence_token(token)?;
+        bytes.extend(token_bytes);
+    }
+
+    if bytes.len() < 2 {
+        return Err(
+            "detach sequence must contain at least two key presses (for example: \"ctrl-] d\")"
+                .to_string(),
+        );
+    }
+
+    Ok(DetachSequence(bytes))
+}
+
+fn parse_detach_sequence_token(token: &str) -> std::result::Result<Vec<u8>, String> {
+    let normalized = token.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err("detach sequence contains an empty token".to_string());
+    }
+
+    if let Some(ctrl_suffix) = normalized.strip_prefix("ctrl-") {
+        let control = parse_control_token(ctrl_suffix)?;
+        return Ok(vec![control]);
+    }
+
+    match normalized.as_str() {
+        "esc" | "escape" => Ok(vec![0x1b]),
+        "tab" => Ok(vec![b'\t']),
+        "enter" | "return" => Ok(vec![b'\r']),
+        "space" => Ok(vec![b' ']),
+        _ => parse_literal_token(&normalized),
+    }
+}
+
+fn parse_control_token(token: &str) -> std::result::Result<u8, String> {
+    if token.len() != 1 {
+        return Err(format!(
+            "unsupported control key token \"ctrl-{token}\"; use ctrl-<single-char>"
+        ));
+    }
+
+    let byte = token.as_bytes()[0];
+    if !(0x40..=0x5f).contains(&byte.to_ascii_uppercase()) {
+        return Err(format!("unsupported control key token \"ctrl-{token}\""));
+    }
+
+    Ok(byte.to_ascii_uppercase() & 0x1f)
+}
+
+fn parse_literal_token(token: &str) -> std::result::Result<Vec<u8>, String> {
+    if token.len() == 1 {
+        return Ok(vec![token.as_bytes()[0]]);
+    }
+
+    Err(format!(
+        "unsupported detach key token \"{token}\"; use a single character or ctrl-<char>"
+    ))
 }
 
 /// Metadata for user config
@@ -270,6 +356,7 @@ alice = { name = "Alice", fingerprint = "abc123" }
 
         assert!(config.overrides.sensitive_paths.is_empty());
         assert!(config.overrides.commands.is_empty());
+        assert!(config.ui.detach_sequence.is_none());
     }
 
     #[test]
@@ -296,5 +383,36 @@ stale_grace_hours = 48
         assert!((config.rollback.max_storage_gb - 10.0).abs() < f64::EPSILON);
         assert_eq!(config.rollback.max_snapshots, 50);
         assert_eq!(config.rollback.stale_grace_hours, 48);
+    }
+
+    #[test]
+    fn test_ui_detach_sequence_parses_control_prefix() {
+        let toml = r#"
+[ui]
+detach_sequence = "ctrl-] d"
+"#;
+
+        let config: UserConfig = toml::from_str(toml).expect("Failed to parse");
+        let detach_sequence = config
+            .ui
+            .detach_sequence
+            .as_ref()
+            .map(DetachSequence::bytes)
+            .unwrap_or(&[]);
+        assert_eq!(detach_sequence, &[0x1d, b'd']);
+    }
+
+    #[test]
+    fn test_ui_detach_sequence_rejects_single_key() {
+        let toml = r#"
+[ui]
+detach_sequence = "ctrl-]"
+"#;
+
+        let err = toml::from_str::<UserConfig>(toml)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains("detach sequence must contain at least two key presses"));
     }
 }

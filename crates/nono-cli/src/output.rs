@@ -8,6 +8,7 @@ use nono::{AccessMode, CapabilitySet, NetworkMode, NonoError, Result};
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -15,6 +16,7 @@ use std::path::Path;
 
 /// Dark foreground for badge text (works on both light and dark bg colors)
 const BADGE_FG_DARK: Rgb = Rgb(30, 30, 46);
+static PENDING_STATUS_LINE: AtomicBool = AtomicBool::new(false);
 
 /// Print a thin horizontal rule using overlay color
 fn rule() {
@@ -308,8 +310,26 @@ pub fn print_applying_sandbox(silent: bool) {
     }
     let t = theme::current();
     eprint!("  {}", fg("Applying sandbox...", t.subtext));
+    PENDING_STATUS_LINE.store(true, Ordering::SeqCst);
     // Flush so it appears immediately (no newline yet)
     std::io::stderr().flush().ok();
+}
+
+/// Finish a pending inline status message before handing the terminal to a child UI.
+pub fn finish_status_line_for_handoff(silent: bool) {
+    if silent {
+        return;
+    }
+    if !take_pending_status_line() {
+        return;
+    }
+    let mut stderr = std::io::stderr();
+    if stderr.is_terminal() {
+        let _ = write!(stderr, "\r\n");
+    } else {
+        let _ = writeln!(stderr);
+    }
+    let _ = stderr.flush();
 }
 
 /// Print success message when sandbox is active
@@ -318,8 +338,11 @@ pub fn print_sandbox_active(silent: bool) {
         return;
     }
     let t = theme::current();
-    // Complete the "Applying sandbox..." line
-    eprintln!(" {}", fg("active", t.green).bold());
+    if take_pending_status_line() {
+        eprintln!(" {}", fg("active", t.green).bold());
+    } else {
+        eprintln!("  {}", fg("active", t.green).bold());
+    }
     eprintln!();
 }
 
@@ -327,6 +350,153 @@ pub fn print_sandbox_active(silent: bool) {
 pub fn print_warning(message: &str) {
     let t = theme::current();
     eprintln!("  {} {}", fg("warning:", t.red).bold(), fg(message, t.text),);
+}
+
+/// Print a styled diagnostic footer emitted by the core diagnostic formatter.
+pub fn print_diagnostic_footer(footer: &str) {
+    let rendered = render_diagnostic_footer(footer);
+    print_terminal_block(&rendered, true);
+}
+
+/// Print skipped CLI path grants in a user-facing format.
+pub fn print_skipped_requested_paths(paths: &[String], silent: bool) {
+    if silent || paths.is_empty() {
+        return;
+    }
+
+    let t = theme::current();
+    eprintln!(
+        "  {} {}",
+        fg("warning:", t.red).bold(),
+        fg(
+            "some requested sandbox grants were skipped because the path does not exist:",
+            t.text,
+        ),
+    );
+    for path in paths {
+        eprintln!("           {}", fg(path, t.subtext));
+    }
+    eprintln!();
+}
+
+fn render_diagnostic_footer(footer: &str) -> String {
+    let t = theme::current();
+    footer
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| render_diagnostic_line(idx, line, t))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn print_terminal_block(message: &str, leading_blank_line: bool) {
+    let mut stderr = std::io::stderr();
+    let had_pending_status = take_pending_status_line();
+    if stderr.is_terminal() {
+        let normalized = normalize_terminal_line_endings(message);
+        if had_pending_status {
+            let _ = write!(stderr, "\r\n");
+        } else if leading_blank_line {
+            let _ = write!(stderr, "\r\n");
+        }
+        let _ = write!(stderr, "\r{}\r\n", normalized);
+    } else {
+        if had_pending_status {
+            let _ = writeln!(stderr);
+        } else if leading_blank_line {
+            let _ = writeln!(stderr);
+        }
+        let _ = writeln!(stderr, "{}", message);
+    }
+}
+
+fn take_pending_status_line() -> bool {
+    PENDING_STATUS_LINE.swap(false, Ordering::SeqCst)
+}
+
+fn normalize_terminal_line_endings(message: &str) -> String {
+    message.replace('\n', "\r\n")
+}
+
+fn render_diagnostic_line(idx: usize, line: &str, t: &theme::Theme) -> String {
+    let line = sanitize_terminal_output(line);
+    if line.is_empty() {
+        return String::new();
+    }
+
+    if idx == 0 && line == "nono diagnostic" {
+        return format!("{}", fg("NONO DIAGNOSTIC", t.red).bold());
+    }
+
+    if idx == 1 && line.chars().all(|c| c == '\u{2500}') {
+        return format!("{}", fg(&"\u{2500}".repeat(24), t.red));
+    }
+
+    if line.starts_with("The command failed") {
+        return format!("{}", fg(&line, t.red).bold());
+    }
+
+    if line.starts_with("The command succeeded") {
+        return format!("{}", fg(&line, t.yellow).bold());
+    }
+
+    if !line.starts_with(' ') && line.ends_with(':') {
+        let color = match line.as_str() {
+            "Likely sandbox denial:" | "Missing path:" => t.red,
+            "Sandbox policy:" => t.brand,
+            _ => t.text,
+        };
+        return format!("{}", fg(&line, color).bold());
+    }
+
+    if let Some(rest) = line.strip_prefix("  Try: ") {
+        return format!(
+            "  {} {}",
+            fg("Try:", t.green).bold(),
+            fg(rest, t.text).bold()
+        );
+    }
+
+    if let Some(rest) = line.strip_prefix("  Why: ") {
+        return format!("  {} {}", fg("Why:", t.blue).bold(), fg(rest, t.text));
+    }
+
+    if let Some(rest) = line.strip_prefix("  Learn: ") {
+        return format!("  {} {}", fg("Learn:", t.teal).bold(), fg(rest, t.text));
+    }
+
+    if let Some(rest) = line.strip_prefix("  Re-use ") {
+        return format!("  {}", fg(&format!("Re-use {rest}"), t.subtext));
+    }
+
+    if line == "  Allowed paths:" {
+        return format!("  {}", fg("Allowed paths:", t.subtext).bold());
+    }
+
+    if let Some(rest) = line.strip_prefix("  Network: ") {
+        let color = if rest.contains("blocked") {
+            t.red
+        } else if rest.contains("allowed") {
+            t.green
+        } else {
+            t.blue
+        };
+        return format!("  {} {}", fg("Network:", t.subtext).bold(), fg(rest, color));
+    }
+
+    if line.starts_with("  /") || line.starts_with("  ~/") {
+        return format!("  {}", fg(line.trim_start(), t.text).bold());
+    }
+
+    if line.starts_with("    + ") {
+        return format!("    {}", fg(line.trim_start(), t.subtext));
+    }
+
+    if line.starts_with("    ") {
+        return format!("    {}", fg(line.trim_start(), t.text));
+    }
+
+    line
 }
 
 /// Print dry run message
@@ -560,4 +730,70 @@ pub fn prompt_cwd_sharing(cwd: &Path, access: &AccessMode) -> Result<bool> {
 
     let answer = input.trim().to_lowercase();
     Ok(answer == "y" || answer == "yes")
+}
+
+pub fn print_profile_hint(program: &str, profile: &str, silent: bool) {
+    if silent {
+        return;
+    }
+
+    let t = theme::current();
+    eprintln!(
+        "  {}",
+        fg(
+            &format!(
+                "Hint: `{program}` usually needs the built-in `{profile}` profile for its state and auth paths."
+            ),
+            t.yellow,
+        )
+    );
+    eprintln!(
+        "  {}",
+        fg(
+            &format!("Try: nono run --profile {profile} -- {program}"),
+            t.subtext,
+        )
+    );
+    eprintln!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        finish_status_line_for_handoff, normalize_terminal_line_endings, print_applying_sandbox,
+        print_profile_hint, render_diagnostic_footer, take_pending_status_line,
+    };
+
+    #[test]
+    fn normalize_terminal_line_endings_uses_crlf() {
+        assert_eq!(
+            normalize_terminal_line_endings("line one\nline two"),
+            "line one\r\nline two"
+        );
+    }
+
+    #[test]
+    fn render_diagnostic_footer_preserves_line_structure() {
+        let footer = "nono diagnostic\n────────\nThe command failed.\n  Learn: nono learn";
+        let rendered = render_diagnostic_footer(footer);
+        assert_eq!(rendered.lines().count(), 4);
+    }
+
+    #[test]
+    fn print_profile_hint_is_noop_when_silent() {
+        print_profile_hint("claude", "claude-code", true);
+    }
+
+    #[test]
+    fn finish_status_line_for_handoff_is_noop_when_silent() {
+        finish_status_line_for_handoff(true);
+    }
+
+    #[test]
+    fn applying_sandbox_marks_pending_status_line() {
+        let _ = take_pending_status_line();
+        print_applying_sandbox(false);
+        assert!(take_pending_status_line());
+        assert!(!take_pending_status_line());
+    }
 }

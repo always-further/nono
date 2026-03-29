@@ -1,0 +1,290 @@
+use crate::launch_runtime::{select_threading_context, LaunchPlan};
+use crate::proxy_runtime::start_proxy_runtime;
+use crate::supervised_runtime::{execute_supervised_runtime, SupervisedRuntimeContext};
+use crate::{config, exec_strategy, output, sandbox_state};
+use nono::{CapabilitySet, NonoError, Result, Sandbox};
+use std::path::Path;
+use tracing::{error, info};
+
+fn apply_pre_fork_sandbox(
+    strategy: exec_strategy::ExecStrategy,
+    caps: &CapabilitySet,
+    silent: bool,
+) -> Result<()> {
+    if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
+        output::print_applying_sandbox(silent);
+
+        #[cfg(target_os = "linux")]
+        {
+            let detected = Sandbox::detect_abi()?;
+            info!("Direct mode: detected {}", detected);
+            Sandbox::apply_with_abi(caps, &detected)?;
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Sandbox::apply(caps)?;
+        }
+
+        output::print_sandbox_active(silent);
+    }
+    Ok(())
+}
+
+fn cleanup_capability_state_file(cap_file_path: &std::path::Path) {
+    if cap_file_path.exists() {
+        let _ = std::fs::remove_file(cap_file_path);
+    }
+}
+
+pub(crate) fn execution_start_dir(
+    workdir: &std::path::Path,
+    caps: &CapabilitySet,
+) -> Result<std::path::PathBuf> {
+    let workdir_canonical =
+        workdir
+            .canonicalize()
+            .map_err(|e| NonoError::PathCanonicalization {
+                path: workdir.to_path_buf(),
+                source: e,
+            })?;
+
+    if caps.path_covered(&workdir_canonical) {
+        Ok(workdir_canonical)
+    } else {
+        Ok(std::path::PathBuf::from("/"))
+    }
+}
+
+fn recommended_builtin_profile(program: &Path) -> Option<&'static str> {
+    let name = program.file_name()?.to_str()?;
+    match name {
+        "claude" => Some("claude-code"),
+        "codex" => Some("codex"),
+        "opencode" => Some("opencode"),
+        "openclaw" => Some("openclaw"),
+        "swival" => Some("swival"),
+        _ => None,
+    }
+}
+
+pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
+    let LaunchPlan {
+        program,
+        cmd_args,
+        mut caps,
+        loaded_secrets,
+        flags,
+    } = plan;
+    let rollback = &flags.rollback;
+    let trust = &flags.trust;
+    let proxy = &flags.proxy;
+    let session = &flags.session;
+
+    if let Some(blocked) =
+        config::check_blocked_command(&program, caps.allowed_commands(), caps.blocked_commands())?
+    {
+        return Err(NonoError::BlockedCommand {
+            command: blocked,
+            reason: "This command is blocked by default due to destructive potential. \
+                     Use --allow-command to override if you understand the risks."
+                .to_string(),
+        });
+    }
+
+    let command: Vec<String> = std::iter::once(program.to_string_lossy().into_owned())
+        .chain(
+            cmd_args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        )
+        .collect();
+
+    if command.is_empty() {
+        return Err(NonoError::NoCommand);
+    }
+
+    let resolved_program = exec_strategy::resolve_program(&command[0])?;
+    if flags.session.profile_name.is_none() {
+        if let Some(profile) = recommended_builtin_profile(&resolved_program) {
+            let program_name = resolved_program
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&command[0]);
+            output::print_profile_hint(program_name, profile, flags.silent);
+        }
+    }
+    let cap_file = write_capability_state_file(&caps, &flags.override_deny_paths, flags.silent);
+    let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+
+    for secret in &loaded_secrets {
+        if exec_strategy::is_dangerous_env_var(&secret.env_var) {
+            return Err(NonoError::ConfigParse(format!(
+                "secret mapping targets dangerous environment variable: {}",
+                secret.env_var
+            )));
+        }
+    }
+
+    let strategy = flags.strategy;
+
+    if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
+        output::print_supervised_info(flags.silent, rollback.requested, proxy.active);
+    }
+
+    let active_proxy = start_proxy_runtime(proxy, &mut caps)?;
+    let proxy_env_vars = active_proxy.env_vars;
+    let proxy_handle = active_proxy.handle;
+
+    let current_dir = execution_start_dir(&flags.workdir, &caps)?;
+    apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
+
+    let mut env_vars: Vec<(&str, &str)> = loaded_secrets
+        .iter()
+        .map(|secret| (secret.env_var.as_str(), secret.value.as_str()))
+        .collect();
+    for (key, value) in &proxy_env_vars {
+        env_vars.push((key.as_str(), value.as_str()));
+    }
+
+    let threading = select_threading_context(
+        !loaded_secrets.is_empty(),
+        proxy.active,
+        trust.scan_performed,
+        trust.interception_active,
+    );
+
+    info!(
+        "Executing with strategy: {:?}, threading: {:?}",
+        strategy, threading
+    );
+
+    #[cfg(target_os = "linux")]
+    let seccomp_proxy_fallback = {
+        let needs_proxy = matches!(caps.network_mode(), nono::NetworkMode::ProxyOnly { .. });
+        if needs_proxy && nono::is_wsl2() {
+            let needs_seccomp_fallback = !Sandbox::detect_abi()
+                .ok()
+                .is_some_and(|abi| abi.has_network());
+            if needs_seccomp_fallback {
+                match flags.wsl2_proxy_policy {
+                    crate::profile::Wsl2ProxyPolicy::Error => {
+                        return Err(NonoError::SandboxInit(
+                            "WSL2: proxy-only network mode cannot be kernel-enforced. \
+                             seccomp user notification returns EBUSY on WSL2 and Landlock V4 \
+                             (per-port TCP filtering) is not available on this kernel.\n\n\
+                             The sandboxed process would be able to bypass the credential proxy \
+                             and open arbitrary outbound connections.\n\n\
+                             To allow degraded execution (credential proxy without network lockdown), \
+                             set wsl2_proxy_policy: \"insecure_proxy\" in your profile's security config.\n\n\
+                             See: https://nono.sh/docs/cli/internals/wsl2"
+                                .to_string(),
+                        ));
+                    }
+                    crate::profile::Wsl2ProxyPolicy::InsecureProxy => {
+                        eprintln!(
+                            "  [nono] WARNING: WSL2 insecure proxy mode — credential proxy active \
+                             but network is NOT kernel-enforced. The sandboxed process can bypass \
+                             the proxy and open arbitrary outbound connections."
+                        );
+                    }
+                }
+            }
+            false
+        } else if needs_proxy {
+            !Sandbox::detect_abi()
+                .ok()
+                .is_some_and(|abi| abi.has_network())
+        } else {
+            false
+        }
+    };
+
+    let config = exec_strategy::ExecConfig {
+        command: &command,
+        resolved_program: &resolved_program,
+        caps: &caps,
+        env_vars,
+        cap_file: &cap_file_path,
+        current_dir: &current_dir,
+        no_diagnostics: flags.no_diagnostics || flags.silent,
+        threading,
+        protected_paths: &trust.protected_paths,
+        capability_elevation: flags.capability_elevation,
+        #[cfg(target_os = "linux")]
+        seccomp_proxy_fallback,
+    };
+
+    match strategy {
+        exec_strategy::ExecStrategy::Direct => {
+            exec_strategy::execute_direct(&config)?;
+            unreachable!("execute_direct only returns on error");
+        }
+        exec_strategy::ExecStrategy::Supervised => {
+            let exit_code = execute_supervised_runtime(SupervisedRuntimeContext {
+                config: &config,
+                caps: &caps,
+                command: &command,
+                session,
+                rollback,
+                trust,
+                proxy,
+                proxy_handle: proxy_handle.as_ref(),
+                silent: flags.silent,
+            })?;
+
+            cleanup_capability_state_file(&cap_file_path);
+            drop(config);
+            drop(loaded_secrets);
+            std::process::exit(exit_code);
+        }
+    }
+}
+
+fn write_capability_state_file(
+    caps: &CapabilitySet,
+    override_deny_paths: &[std::path::PathBuf],
+    silent: bool,
+) -> Option<std::path::PathBuf> {
+    let cap_file = std::env::temp_dir().join(format!(".nono-{}.json", std::process::id()));
+    let state = sandbox_state::SandboxState::from_caps(caps, override_deny_paths);
+    if let Err(e) = state.write_to_file(&cap_file) {
+        error!(
+            "Failed to write capability state file: {}. \
+             Sandboxed processes will not be able to query their own capabilities using 'nono why --self'.",
+            e
+        );
+        if !silent {
+            eprintln!(
+                "  WARNING: Capability state file could not be written.\n  \
+                 The sandbox is active, but 'nono why --self' will not work inside this sandbox."
+            );
+        }
+        None
+    } else {
+        Some(cap_file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recommended_builtin_profile;
+    use std::path::Path;
+
+    #[test]
+    fn recommended_builtin_profile_matches_known_agent_commands() {
+        assert_eq!(
+            recommended_builtin_profile(Path::new("/usr/local/bin/claude")),
+            Some("claude-code")
+        );
+        assert_eq!(
+            recommended_builtin_profile(Path::new("/usr/local/bin/codex")),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn recommended_builtin_profile_ignores_unknown_commands() {
+        assert_eq!(recommended_builtin_profile(Path::new("/usr/bin/env")), None);
+    }
+}

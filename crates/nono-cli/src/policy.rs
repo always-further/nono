@@ -983,24 +983,32 @@ pub fn group_description<'a>(policy: &'a Policy, name: &str) -> Option<&'a str> 
 // Query helpers: extract flat lists from policy groups
 // ============================================================================
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SensitivePathRule {
+    pub expanded_path: String,
+    pub group_name: String,
+    pub description: String,
+}
+
 /// Get all sensitive (deny.access) paths from platform-matching policy groups.
 ///
-/// Returns a list of `(expanded_path, group_description)` tuples suitable for
-/// display in `nono why`. Paths are expanded (~ -> $HOME, $TMPDIR -> value).
-pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<(String, String)>> {
+/// Returns a list of expanded deny rules suitable for display in `nono why`.
+/// Paths are expanded (~ -> $HOME, $TMPDIR -> value).
+pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<SensitivePathRule>> {
     let mut result = Vec::new();
 
-    for group in policy.groups.values() {
+    for (group_name, group) in &policy.groups {
         if !group_matches_platform(group) {
             continue;
         }
         if let Some(deny) = &group.deny {
             for path_str in &deny.access {
                 let expanded = expand_path(path_str)?;
-                result.push((
-                    expanded.to_string_lossy().into_owned(),
-                    group.description.clone(),
-                ));
+                result.push(SensitivePathRule {
+                    expanded_path: expanded.to_string_lossy().into_owned(),
+                    group_name: group_name.clone(),
+                    description: group.description.clone(),
+                });
 
                 // If the deny path is a symlink, also mark the resolved target
                 // as sensitive. Without this, querying a symlinked path like
@@ -1008,10 +1016,11 @@ pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<(String, String)>> {
                 if expanded.is_symlink() {
                     if let Ok(resolved) = expanded.canonicalize() {
                         if resolved != expanded {
-                            result.push((
-                                resolved.to_string_lossy().into_owned(),
-                                group.description.clone(),
-                            ));
+                            result.push(SensitivePathRule {
+                                expanded_path: resolved.to_string_lossy().into_owned(),
+                                group_name: group_name.clone(),
+                                description: group.description.clone(),
+                            });
                         }
                     }
                 }
@@ -1694,7 +1703,10 @@ mod tests {
         let sensitive = get_sensitive_paths(&policy).expect("get sensitive paths");
 
         let link_canonical = link.canonicalize().expect("canonicalize");
-        let paths: Vec<&str> = sensitive.iter().map(|(p, _)| p.as_str()).collect();
+        let paths: Vec<&str> = sensitive
+            .iter()
+            .map(|rule| rule.expanded_path.as_str())
+            .collect();
         assert!(
             paths.contains(&link_str),
             "sensitive paths must contain symlink path"

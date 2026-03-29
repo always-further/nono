@@ -5,7 +5,7 @@
 
 use crate::error::{NonoError, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Source of a filesystem capability for diagnostics
 ///
@@ -855,6 +855,23 @@ impl CapabilitySet {
         &self.fs
     }
 
+    /// Rewrite self-referential procfs capabilities for a specific process.
+    ///
+    /// This is needed when capabilities are prepared in one process and then
+    /// applied in a different child after `fork()`. Paths such as `/proc/self`
+    /// and `/dev/fd` must resolve to the sandboxed child, not the parent that
+    /// originally canonicalized them.
+    pub fn remap_procfs_self_references(&mut self, process_pid: u32, thread_pid: Option<u32>) {
+        for cap in &mut self.fs {
+            if let Some(rewritten) =
+                rewrite_procfs_self_reference(&cap.original, process_pid, thread_pid)
+            {
+                cap.resolved = rewritten;
+            }
+        }
+        self.deduplicate();
+    }
+
     /// Check if network access is blocked
     ///
     /// Returns `true` for both `Blocked` and `ProxyOnly` modes, since both
@@ -1098,6 +1115,121 @@ impl CapabilitySet {
         }
 
         lines.join("\n")
+    }
+}
+
+fn rewrite_procfs_self_reference(
+    original: &Path,
+    process_pid: u32,
+    thread_pid: Option<u32>,
+) -> Option<PathBuf> {
+    let thread_pid = thread_pid.unwrap_or(process_pid);
+
+    match original {
+        path if path == Path::new("/dev/fd") => {
+            return Some(PathBuf::from(format!("/proc/{process_pid}/fd")));
+        }
+        path if path == Path::new("/dev/stdin") => {
+            return Some(PathBuf::from(format!("/proc/{process_pid}/fd/0")));
+        }
+        path if path == Path::new("/dev/stdout") => {
+            return Some(PathBuf::from(format!("/proc/{process_pid}/fd/1")));
+        }
+        path if path == Path::new("/dev/stderr") => {
+            return Some(PathBuf::from(format!("/proc/{process_pid}/fd/2")));
+        }
+        _ => {}
+    }
+
+    let mut components = original.components();
+    if components.next() != Some(Component::RootDir)
+        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("proc")))
+    {
+        return None;
+    }
+
+    let proc_component = components.next()?;
+    let mut rewritten = PathBuf::from("/proc");
+
+    match proc_component {
+        Component::Normal(part) if part == std::ffi::OsStr::new("self") => {
+            rewritten.push(process_pid.to_string());
+        }
+        Component::Normal(part) if part == std::ffi::OsStr::new("thread-self") => {
+            rewritten.push(process_pid.to_string());
+            rewritten.push("task");
+            rewritten.push(thread_pid.to_string());
+        }
+        _ => return None,
+    }
+
+    for component in components {
+        match component {
+            Component::Normal(part) => rewritten.push(part),
+            Component::CurDir => rewritten.push("."),
+            Component::ParentDir => rewritten.push(".."),
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+
+    Some(rewritten)
+}
+
+#[cfg(test)]
+mod procfs_remap_tests {
+    use super::*;
+
+    #[test]
+    fn remap_procfs_self_rewrites_proc_self_capability() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/proc/self"),
+            resolved: PathBuf::from("/proc/111/self-was-parent"),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::Group("system_read_linux".to_string()),
+        });
+
+        caps.remap_procfs_self_references(4242, None);
+
+        assert_eq!(
+            caps.fs_capabilities()[0].original,
+            PathBuf::from("/proc/self")
+        );
+        assert_eq!(
+            caps.fs_capabilities()[0].resolved,
+            PathBuf::from("/proc/4242")
+        );
+    }
+
+    #[test]
+    fn remap_procfs_self_rewrites_dev_fd_aliases() {
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/fd"),
+            resolved: PathBuf::from("/proc/111/fd"),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::Group("system_read_linux".to_string()),
+        });
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/stdout"),
+            resolved: PathBuf::from("/proc/111/fd/1"),
+            access: AccessMode::ReadWrite,
+            is_file: true,
+            source: CapabilitySource::Group("system_read_linux".to_string()),
+        });
+
+        caps.remap_procfs_self_references(4242, None);
+
+        assert_eq!(
+            caps.fs_capabilities()[0].resolved,
+            PathBuf::from("/proc/4242/fd")
+        );
+        assert_eq!(
+            caps.fs_capabilities()[1].resolved,
+            PathBuf::from("/proc/4242/fd/1")
+        );
     }
 }
 

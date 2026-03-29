@@ -11,6 +11,21 @@
 
 use super::*;
 use crate::trust_intercept::TrustInterceptor;
+use nono::AccessMode;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InitialCapability {
+    pub(super) path: std::path::PathBuf,
+    pub(super) access: AccessMode,
+    pub(super) is_file: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitialCapabilityMatch<'a> {
+    Sufficient(&'a InitialCapability),
+    Insufficient(&'a InitialCapability),
+    None,
+}
 
 /// Token-bucket rate limiter for supervisor expansion requests.
 ///
@@ -86,14 +101,14 @@ impl RateLimiter {
 ///   digest is re-checked against the opened fd to detect races between
 ///   trust verification and file open.
 ///
-/// The initial_caps parameter contains (path, is_file) tuples:
-/// - For files (is_file=true): only exact path matches are allowed
-/// - For directories (is_file=false): subpath matches via starts_with are allowed
+/// The initial_caps parameter contains the static capabilities applied to the
+/// sandbox, allowing the supervisor to distinguish "path not granted" from
+/// "path granted, but only with a narrower access mode".
 pub(super) fn handle_seccomp_notification(
     notify_fd: std::os::fd::RawFd,
     child: Pid,
     config: &SupervisorConfig<'_>,
-    initial_caps: &[(std::path::PathBuf, bool)],
+    initial_caps: &[InitialCapability],
     rate_limiter: &mut RateLimiter,
     denials: &mut Vec<DenialRecord>,
     mut trust_interceptor: Option<&mut TrustInterceptor>,
@@ -219,71 +234,84 @@ pub(super) fn handle_seccomp_notification(
         return Ok(());
     }
 
-    // 5. Fast-path: check if path is in the initial capability set.
-    // File capabilities require exact match; directory capabilities allow subpaths.
-    let in_initial_set = initial_caps.iter().any(|(cap_path, is_file)| {
-        if *is_file {
-            // File capability: exact match only
-            canonicalized == *cap_path
-        } else {
-            // Directory capability: subpath match
-            canonicalized.starts_with(cap_path)
+    // 5. Fast-path: if the path is covered by the initial capability set and
+    // the requested access mode is already granted, proceed immediately. If the
+    // path matches but only with narrower access, record the denial here so the
+    // footer can explain the near-miss precisely.
+    match match_initial_capability(&canonicalized, access, initial_caps) {
+        InitialCapabilityMatch::Insufficient(cap) => {
+            debug!(
+                "Seccomp: path {} matched initial capability {} but {} access was requested",
+                canonicalized.display(),
+                cap.path.display(),
+                access,
+            );
+            record_denial(
+                denials,
+                DenialRecord {
+                    path: canonicalized.clone(),
+                    access,
+                    reason: DenialReason::InsufficientAccess,
+                },
+            );
+            let _ = deny_notif(notify_fd, notif.id);
+            return Ok(());
         }
-    });
-
-    if in_initial_set {
-        if canonicalized.starts_with("/proc") {
-            match open_path_for_access(
-                &path,
-                &access,
-                config.protected_roots,
-                None,
-                Some(procfs_context),
-            ) {
-                Ok(file) => {
-                    if notif_id_valid(notify_fd, notif.id)? {
-                        if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
-                            debug!(
-                                "inject_fd failed for initial-set proc path {}: {}",
-                                path.display(),
-                                e
+        InitialCapabilityMatch::Sufficient(_) => {
+            if canonicalized.starts_with("/proc") {
+                match open_path_for_access(
+                    &path,
+                    &access,
+                    config.protected_roots,
+                    None,
+                    Some(procfs_context),
+                ) {
+                    Ok(file) => {
+                        if notif_id_valid(notify_fd, notif.id)? {
+                            if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
+                                debug!(
+                                    "inject_fd failed for initial-set proc path {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                                let _ = deny_notif(notify_fd, notif.id);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Failed to open initial-set proc path {}: {}",
+                            path.display(),
+                            e
+                        );
+                        if e.is_policy_blocked() {
+                            record_denial(
+                                denials,
+                                DenialRecord {
+                                    path: canonicalized.clone(),
+                                    access,
+                                    reason: DenialReason::PolicyBlocked,
+                                },
                             );
                             let _ = deny_notif(notify_fd, notif.id);
+                        } else {
+                            let _ = respond_notif_errno(notify_fd, notif.id, e.errno());
                         }
                     }
                 }
-                Err(e) => {
+            } else if notif_id_valid(notify_fd, notif.id)? {
+                if let Err(e) = continue_notif(notify_fd, notif.id) {
                     debug!(
-                        "Failed to open initial-set proc path {}: {}",
+                        "continue_notif failed for initial-set path {}: {}",
                         path.display(),
                         e
                     );
-                    if e.is_policy_blocked() {
-                        record_denial(
-                            denials,
-                            DenialRecord {
-                                path: canonicalized.clone(),
-                                access,
-                                reason: DenialReason::PolicyBlocked,
-                            },
-                        );
-                        let _ = deny_notif(notify_fd, notif.id);
-                    } else {
-                        let _ = respond_notif_errno(notify_fd, notif.id, e.errno());
-                    }
+                    let _ = deny_notif(notify_fd, notif.id);
                 }
             }
-        } else if notif_id_valid(notify_fd, notif.id)? {
-            if let Err(e) = continue_notif(notify_fd, notif.id) {
-                debug!(
-                    "continue_notif failed for initial-set path {}: {}",
-                    path.display(),
-                    e
-                );
-                let _ = deny_notif(notify_fd, notif.id);
-            }
+            return Ok(());
         }
-        return Ok(());
+        InitialCapabilityMatch::None => {}
     }
 
     // Preserve native ENOENT/ENOTDIR behavior for nonexistent paths. Runtimes
@@ -557,22 +585,49 @@ pub(super) fn handle_network_notification(
 
 /// Check if a path matches any capability in the initial set.
 ///
-/// - File capabilities (is_file=true): require exact path match
-/// - Directory capabilities (is_file=false): allow subpath matches via starts_with
-///
-/// This is the same logic used in the fast-path, extracted for testing.
-#[cfg(test)]
-fn path_matches_initial_caps(
+/// Prefers the most specific capability. If the path is covered but the
+/// requested access mode is not granted, returns
+/// `InitialCapabilityMatch::Insufficient`.
+fn match_initial_capability<'a>(
     path: &std::path::Path,
-    initial_caps: &[(std::path::PathBuf, bool)],
-) -> bool {
-    initial_caps.iter().any(|(cap_path, is_file)| {
-        if *is_file {
-            path == cap_path
+    requested: AccessMode,
+    initial_caps: &'a [InitialCapability],
+) -> InitialCapabilityMatch<'a> {
+    let mut best_covering: Option<&'a InitialCapability> = None;
+    let mut best_sufficient: Option<&'a InitialCapability> = None;
+    let mut best_covering_score = 0usize;
+    let mut best_sufficient_score = 0usize;
+
+    for cap in initial_caps {
+        let covers = if cap.is_file {
+            path == cap.path
         } else {
-            path.starts_with(cap_path)
+            path.starts_with(&cap.path)
+        };
+
+        if !covers {
+            continue;
         }
-    })
+
+        let score = cap.path.as_os_str().len();
+        if score >= best_covering_score {
+            best_covering = Some(cap);
+            best_covering_score = score;
+        }
+
+        if cap.access.contains(requested) && score >= best_sufficient_score {
+            best_sufficient = Some(cap);
+            best_sufficient_score = score;
+        }
+    }
+
+    if let Some(cap) = best_sufficient {
+        InitialCapabilityMatch::Sufficient(cap)
+    } else if let Some(cap) = best_covering {
+        InitialCapabilityMatch::Insufficient(cap)
+    } else {
+        InitialCapabilityMatch::None
+    }
 }
 
 #[cfg(test)]
@@ -602,92 +657,155 @@ mod tests {
 
     #[test]
     fn test_file_capability_exact_match_only() {
-        let caps = vec![(PathBuf::from("/home/user/config.json"), true)];
+        let caps = vec![InitialCapability {
+            path: PathBuf::from("/home/user/config.json"),
+            access: AccessMode::Read,
+            is_file: true,
+        }];
 
-        // Exact match should succeed
-        assert!(path_matches_initial_caps(
-            &PathBuf::from("/home/user/config.json"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/home/user/config.json"),
+                AccessMode::Read,
+                &caps
+            ),
+            InitialCapabilityMatch::Sufficient(_)
         ));
 
-        // Subpath should NOT match for file capability
-        assert!(!path_matches_initial_caps(
-            &PathBuf::from("/home/user/config.json/subpath"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/home/user/config.json/subpath"),
+                AccessMode::Read,
+                &caps
+            ),
+            InitialCapabilityMatch::None
         ));
 
-        // Different file should not match
-        assert!(!path_matches_initial_caps(
-            &PathBuf::from("/home/user/other.json"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/home/user/other.json"),
+                AccessMode::Read,
+                &caps
+            ),
+            InitialCapabilityMatch::None
         ));
     }
 
     #[test]
     fn test_directory_capability_allows_subpaths() {
-        let caps = vec![(PathBuf::from("/home/user/project"), false)];
+        let caps = vec![InitialCapability {
+            path: PathBuf::from("/home/user/project"),
+            access: AccessMode::Read,
+            is_file: false,
+        }];
 
-        // Exact match should succeed
-        assert!(path_matches_initial_caps(
-            &PathBuf::from("/home/user/project"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/home/user/project"),
+                AccessMode::Read,
+                &caps
+            ),
+            InitialCapabilityMatch::Sufficient(_)
         ));
 
-        // Subpath should match for directory capability
-        assert!(path_matches_initial_caps(
-            &PathBuf::from("/home/user/project/src/main.rs"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/home/user/project/src/main.rs"),
+                AccessMode::Read,
+                &caps
+            ),
+            InitialCapabilityMatch::Sufficient(_)
         ));
 
-        // Sibling directory should not match
-        assert!(!path_matches_initial_caps(
-            &PathBuf::from("/home/user/other"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(&PathBuf::from("/home/user/other"), AccessMode::Read, &caps),
+            InitialCapabilityMatch::None
         ));
     }
 
     #[test]
     fn test_file_capability_does_not_authorize_fake_subpath() {
-        // Regression test: a file capability for "/foo/bar" must NOT
-        // authorize access to "/foo/bar/subpath" - files don't have children.
-        let caps = vec![(PathBuf::from("/foo/bar"), true)];
+        let caps = vec![InitialCapability {
+            path: PathBuf::from("/foo/bar"),
+            access: AccessMode::Read,
+            is_file: true,
+        }];
 
-        assert!(path_matches_initial_caps(&PathBuf::from("/foo/bar"), &caps));
-        assert!(!path_matches_initial_caps(
-            &PathBuf::from("/foo/bar/subpath"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(&PathBuf::from("/foo/bar"), AccessMode::Read, &caps),
+            InitialCapabilityMatch::Sufficient(_)
         ));
-        assert!(!path_matches_initial_caps(
-            &PathBuf::from("/foo/bar/deep/nested/path"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(&PathBuf::from("/foo/bar/subpath"), AccessMode::Read, &caps),
+            InitialCapabilityMatch::None
+        ));
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/foo/bar/deep/nested/path"),
+                AccessMode::Read,
+                &caps
+            ),
+            InitialCapabilityMatch::None
         ));
     }
 
     #[test]
     fn test_mixed_file_and_directory_capabilities() {
         let caps = vec![
-            (PathBuf::from("/etc/passwd"), true),         // file
-            (PathBuf::from("/home/user/project"), false), // directory
+            InitialCapability {
+                path: PathBuf::from("/etc/passwd"),
+                access: AccessMode::Read,
+                is_file: true,
+            },
+            InitialCapability {
+                path: PathBuf::from("/home/user/project"),
+                access: AccessMode::Read,
+                is_file: false,
+            },
         ];
 
-        // File capability: exact match only
-        assert!(path_matches_initial_caps(
-            &PathBuf::from("/etc/passwd"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(&PathBuf::from("/etc/passwd"), AccessMode::Read, &caps),
+            InitialCapabilityMatch::Sufficient(_)
         ));
-        assert!(!path_matches_initial_caps(
-            &PathBuf::from("/etc/passwd/fake"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(&PathBuf::from("/etc/passwd/fake"), AccessMode::Read, &caps),
+            InitialCapabilityMatch::None
         ));
 
-        // Directory capability: subpaths allowed
-        assert!(path_matches_initial_caps(
-            &PathBuf::from("/home/user/project"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/home/user/project"),
+                AccessMode::Read,
+                &caps
+            ),
+            InitialCapabilityMatch::Sufficient(_)
         ));
-        assert!(path_matches_initial_caps(
-            &PathBuf::from("/home/user/project/src/lib.rs"),
-            &caps
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/home/user/project/src/lib.rs"),
+                AccessMode::Read,
+                &caps
+            ),
+            InitialCapabilityMatch::Sufficient(_)
+        ));
+    }
+
+    #[test]
+    fn test_directory_capability_reports_insufficient_access() {
+        let caps = vec![InitialCapability {
+            path: PathBuf::from("/home/user/project"),
+            access: AccessMode::Read,
+            is_file: false,
+        }];
+
+        assert!(matches!(
+            match_initial_capability(
+                &PathBuf::from("/home/user/project/output.txt"),
+                AccessMode::Write,
+                &caps
+            ),
+            InitialCapabilityMatch::Insufficient(_)
         ));
     }
 }

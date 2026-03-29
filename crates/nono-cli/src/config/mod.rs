@@ -104,12 +104,12 @@ pub fn check_blocked_command(
     Ok(None)
 }
 
-/// Check if a path is in the sensitive paths list (for `nono why` command)
-/// Returns Some(category_description) if blocked, None if not in list
+/// Check if a path is in the sensitive paths list (for `nono why` command).
+/// Returns the matched policy rule if blocked, None if not in list.
 ///
 /// Uses `Path::starts_with()` for component-wise comparison, preventing
 /// bypass attacks like `~/.sshevil` matching `~/.ssh`.
-pub fn check_sensitive_path(path_str: &str) -> Result<Option<String>> {
+pub fn check_sensitive_path(path_str: &str) -> Result<Option<policy::SensitivePathRule>> {
     let home = validated_home()?;
     let expanded = if path_str.starts_with("~/") {
         path_str.replacen("~", &home, 1)
@@ -123,11 +123,11 @@ pub fn check_sensitive_path(path_str: &str) -> Result<Option<String>> {
     let loaded_policy = policy::load_embedded_policy()?;
     let sensitive = policy::get_sensitive_paths(&loaded_policy)?;
 
-    for (sensitive_expanded, description) in &sensitive {
-        let sensitive_path = Path::new(sensitive_expanded);
+    for rule in sensitive {
+        let sensitive_path = Path::new(&rule.expanded_path);
 
         if expanded_path == sensitive_path || expanded_path.starts_with(sensitive_path) {
-            return Ok(Some(description.clone()));
+            return Ok(Some(rule));
         }
     }
 

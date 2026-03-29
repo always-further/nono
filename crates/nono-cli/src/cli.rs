@@ -36,6 +36,13 @@ const STYLES: Styles = Styles::plain().header(Style::new().bold());
   why        Check why a path or network operation would be allowed or denied
 
 \x1b[1mSESSION MANAGEMENT\x1b[0m
+  ps         List running or detached sandbox sessions
+  stop       Stop a running sandbox session
+  detach     Detach from an interactive runtime session
+  attach     Attach to a detached runtime session
+  logs       View runtime session event logs
+  inspect    Show detailed runtime session state
+  prune      Clean up old runtime session files
   rollback   Manage rollback sessions (browse, restore, cleanup)
   audit      View audit trail of sandboxed commands
   trust      Manage file trust and attestation
@@ -258,6 +265,165 @@ pub enum Commands {
   nono trust keygen                            # Generate a new signing key pair
 ")]
     Trust(TrustArgs),
+
+    /// List running sandboxed sessions
+    #[command(help_template = "\
+{about}
+
+\x1b[1mUSAGE\x1b[0m
+  nono ps [flags]
+
+{all-args}
+{after-help}")]
+    #[command(after_help = "EXAMPLES:
+    # Show running sessions
+    nono ps
+
+    # Show all sessions (including exited)
+    nono ps --all
+
+    # JSON output
+    nono ps --json
+")]
+    Ps(PsArgs),
+
+    /// Stop a running sandboxed session
+    #[command(help_template = "\
+{about}
+
+\x1b[1mUSAGE\x1b[0m
+  nono stop [flags] <session>
+
+{all-args}
+{after-help}")]
+    #[command(after_help = "EXAMPLES:
+    # Stop a session by ID (prefix match)
+    nono stop a3f7c2
+
+    # Force stop (SIGKILL)
+    nono stop --force a3f7c2
+")]
+    Stop(StopArgs),
+
+    /// Detach from a running sandboxed session and return to the shell
+    #[command(
+        help_template = "\
+{about}
+
+\x1b[1mUSAGE\x1b[0m
+  nono detach <session>
+
+{all-args}
+{after-help}",
+        alias = "pause",
+        after_help = "EXAMPLES:
+    # Detach by session ID
+    nono detach a3f7c2
+
+    # Detach by name
+    nono detach calm-gate
+
+IN-BAND DETACH:
+    By default, press Ctrl-] then d to detach without opening a second terminal.
+    This can be changed in ~/.config/nono/config.toml:
+      [ui]
+      detach_sequence = \"ctrl-] d\"
+"
+    )]
+    Detach(DetachArgs),
+
+    /// Attach to a detached or running session from another terminal
+    #[command(
+        help_template = "\
+{about}
+
+\x1b[1mUSAGE\x1b[0m
+  nono attach <session>
+
+{all-args}
+{after-help}",
+        alias = "resume",
+        after_help = "EXAMPLES:
+    # Attach by session ID
+    nono attach a3f7c2
+
+    # Attach by name
+    nono attach calm-gate
+
+IN-BAND DETACH:
+    By default, press Ctrl-] then d to detach from the session.
+    This can be changed in ~/.config/nono/config.toml:
+      [ui]
+      detach_sequence = \"ctrl-] d\"
+"
+    )]
+    Attach(AttachArgs),
+
+    /// View event log for a session
+    #[command(help_template = "\
+{about}
+
+\x1b[1mUSAGE\x1b[0m
+  nono logs [flags] <session>
+
+{all-args}
+{after-help}")]
+    #[command(after_help = "EXAMPLES:
+    # View recent events
+    nono logs a3f7c2
+
+    # Follow events in real-time
+    nono logs -f a3f7c2
+
+    # Show last 20 events
+    nono logs --tail 20 a3f7c2
+
+    # JSON output
+    nono logs --json a3f7c2
+")]
+    Logs(LogsArgs),
+
+    /// Show detailed information about a session
+    #[command(help_template = "\
+{about}
+
+\x1b[1mUSAGE\x1b[0m
+  nono inspect [flags] <session>
+
+{all-args}
+{after-help}")]
+    #[command(after_help = "EXAMPLES:
+    # Inspect a session
+    nono inspect a3f7c2
+
+    # Include event log
+    nono inspect --events a3f7c2
+
+    # JSON output
+    nono inspect --json a3f7c2
+")]
+    Inspect(InspectArgs),
+
+    /// Clean up old session files
+    #[command(help_template = "\
+{about}
+
+\x1b[1mUSAGE\x1b[0m
+  nono prune [flags]
+
+{all-args}
+{after-help}")]
+    #[command(after_help = "EXAMPLES:
+    # Preview what would be cleaned
+    nono prune --dry-run
+
+    # Remove sessions older than 7 days
+    nono prune --older-than 7
+
+    # Keep only 10 most recent sessions
+    nono prune --keep 10
+")]
+    Prune(PruneArgs),
 
     // ── Policy & profiles ────────────────────────────────────────────────
     /// Inspect policy groups, profiles, and security rules
@@ -892,6 +1058,12 @@ pub struct RunArgs {
     #[command(flatten)]
     pub sandbox: SandboxArgs,
 
+    /// Start the session without attaching the current terminal.
+    /// The supervisor keeps the sandboxed process running in the background;
+    /// use `nono attach <session>` later to inspect or interact with it.
+    #[arg(long, help_heading = "OPTIONS")]
+    pub detached: bool,
+
     // ── Rollback ──────────────────────────────────────────────────────
     /// Enable atomic rollback snapshots for the session
     #[arg(long, conflicts_with = "no_rollback", help_heading = "ROLLBACK")]
@@ -948,7 +1120,14 @@ pub struct RunArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub trust_override: bool,
 
-    /// Enable runtime capability elevation (interactive prompts)
+    /// Name for this session (shown in `nono ps`)
+    #[arg(long, value_name = "NAME", help_heading = "OPTIONS")]
+    pub name: Option<String>,
+
+    /// Enable runtime capability elevation (seccomp-notify + approval prompts).
+    /// Overrides the profile's capability_elevation setting.
+    /// When enabled, the supervisor can grant access to paths not in the
+    /// initial capability set via interactive prompts.
     #[arg(long, env = "NONO_CAPABILITY_ELEVATION", help_heading = "OPTIONS")]
     pub capability_elevation: bool,
 
@@ -970,6 +1149,10 @@ pub struct ShellArgs {
     /// Shell to execute (defaults to $SHELL or /bin/sh)
     #[arg(long, value_name = "SHELL", help_heading = "OPTIONS")]
     pub shell: Option<PathBuf>,
+
+    /// Name for this session (shown in `nono ps`)
+    #[arg(long, value_name = "NAME", help_heading = "OPTIONS")]
+    pub name: Option<String>,
 
     /// Print help
     #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
@@ -1338,6 +1521,94 @@ pub struct AuditShowArgs {
     /// Print help
     #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
     pub help: Option<bool>,
+}
+
+#[derive(Parser, Debug)]
+pub struct PsArgs {
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Include exited sessions
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct StopArgs {
+    /// Session ID (or prefix)
+    pub session: String,
+
+    /// Force stop (SIGKILL instead of SIGTERM)
+    #[arg(long)]
+    pub force: bool,
+
+    /// Grace period in seconds before SIGKILL (default: 10)
+    #[arg(long, default_value = "10")]
+    pub timeout: u64,
+}
+
+#[derive(Parser, Debug)]
+pub struct DetachArgs {
+    /// Session ID, prefix, or name
+    pub session: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct AttachArgs {
+    /// Session ID, prefix, or name
+    pub session: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct LogsArgs {
+    /// Session ID (or prefix)
+    pub session: String,
+
+    /// Follow events in real-time
+    #[arg(long, short = 'f')]
+    pub follow: bool,
+
+    /// Show last N events
+    #[arg(long, value_name = "N")]
+    pub tail: Option<usize>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct InspectArgs {
+    /// Session ID (or prefix)
+    pub session: String,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Include event log
+    #[arg(long)]
+    pub events: bool,
+
+    /// Include file changes
+    #[arg(long)]
+    pub changes: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct PruneArgs {
+    /// Show what would be removed without deleting
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Remove sessions older than N days
+    #[arg(long, value_name = "DAYS")]
+    pub older_than: Option<u64>,
+
+    /// Keep only the N most recent sessions
+    #[arg(long, value_name = "N")]
+    pub keep: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2454,8 +2725,8 @@ mod tests {
     /// All subcommand names that must appear in the root help template.
     /// If you add a new command to the `Commands` enum, add it here too.
     const ALL_SUBCOMMANDS: &[&str] = &[
-        "setup", "run", "shell", "wrap", "learn", "why", "rollback", "audit", "trust", "policy",
-        "profile",
+        "setup", "run", "shell", "wrap", "learn", "why", "ps", "stop", "detach", "attach", "logs",
+        "inspect", "prune", "rollback", "audit", "trust", "policy", "profile",
     ];
 
     #[test]
