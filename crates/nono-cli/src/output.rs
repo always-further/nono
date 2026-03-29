@@ -392,18 +392,15 @@ fn render_diagnostic_footer(footer: &str) -> String {
 fn print_terminal_block(message: &str, leading_blank_line: bool) {
     let mut stderr = std::io::stderr();
     let had_pending_status = take_pending_status_line();
+    let needs_leading_break = had_pending_status || leading_blank_line;
     if stderr.is_terminal() {
         let normalized = normalize_terminal_line_endings(message);
-        if had_pending_status {
-            let _ = write!(stderr, "\r\n");
-        } else if leading_blank_line {
+        if needs_leading_break {
             let _ = write!(stderr, "\r\n");
         }
         let _ = write!(stderr, "\r{}\r\n", normalized);
     } else {
-        if had_pending_status {
-            let _ = writeln!(stderr);
-        } else if leading_blank_line {
+        if needs_leading_break {
             let _ = writeln!(stderr);
         }
         let _ = writeln!(stderr, "{}", message);
