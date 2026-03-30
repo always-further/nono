@@ -50,6 +50,7 @@ use cli::{
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::process::Command;
 use std::sync::Mutex;
@@ -1650,6 +1651,142 @@ fn windows_runtime_state_dir(
 }
 
 #[cfg(target_os = "windows")]
+struct WindowsRuntimeLayout {
+    runtime_root: std::path::PathBuf,
+    dirs: BTreeMap<&'static str, std::path::PathBuf>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsRuntimeLayout {
+    fn new(runtime_root: std::path::PathBuf) -> Self {
+        let mut dirs = BTreeMap::new();
+        let mut insert_dir = |key: &'static str, relative: &[&str]| {
+            let mut path = runtime_root.clone();
+            for segment in relative {
+                path.push(segment);
+            }
+            dirs.insert(key, path);
+        };
+
+        insert_dir("tmp", &["tmp"]);
+        insert_dir("home", &["home"]);
+        insert_dir("appdata_roaming", &["appdata", "Roaming"]);
+        insert_dir("appdata_local", &["appdata", "Local"]);
+        insert_dir("programdata", &["programdata"]);
+        insert_dir("programfiles", &["programfiles"]);
+        insert_dir("programfiles_x86", &["programfilesx86"]);
+        insert_dir("common_programfiles", &["common-programfiles"]);
+        insert_dir("common_programfiles_x86", &["common-programfilesx86"]);
+        insert_dir("bin", &["bin"]);
+        insert_dir("public", &["public"]);
+        insert_dir("onedrive", &["onedrive"]);
+        insert_dir("inetcache", &["inetcache"]);
+        insert_dir("inetcookies", &["inetcookies"]);
+        insert_dir("inethistory", &["inethistory"]);
+        insert_dir("psmodules", &["psmodules"]);
+        insert_dir("psmodule_analysis_cache", &["psmodule-analysis-cache"]);
+        insert_dir("cargo_home", &["cargo-home"]);
+        insert_dir("rustup_home", &["rustup-home"]);
+        insert_dir("dotnet_home", &["dotnet-home"]);
+        insert_dir("nuget_packages", &["nuget-packages"]);
+        insert_dir("nuget_http_cache", &["nuget-http-cache"]);
+        insert_dir("nuget_plugins_cache", &["nuget-plugins-cache"]);
+        insert_dir("chocolatey", &["chocolatey"]);
+        insert_dir("vcpkg", &["vcpkg"]);
+        insert_dir("npm_cache", &["npm-cache"]);
+        insert_dir("yarn_cache", &["yarn-cache"]);
+        insert_dir("pip_cache", &["pip-cache"]);
+        insert_dir("pip_build_tracker", &["pip-build-tracker"]);
+        insert_dir("python_pycache", &["python-pycache"]);
+        insert_dir("python_user_base", &["python-user-base"]);
+        insert_dir("go_cache", &["go-cache"]);
+        insert_dir("go_mod_cache", &["go-mod-cache"]);
+        insert_dir("go_path", &["go-path"]);
+        insert_dir("history", &["history"]);
+        insert_dir("ipython", &["ipython"]);
+        insert_dir("gem_home", &["gem-home"]);
+        insert_dir("gem_path", &["gem-path"]);
+        insert_dir("bundler_home", &["bundler-home"]);
+        insert_dir("bundler_cache", &["bundler-cache"]);
+        insert_dir("bundler_config", &["bundler-config"]);
+        insert_dir("composer_home", &["composer-home"]);
+        insert_dir("composer_cache", &["composer-cache"]);
+        insert_dir("gradle_home", &["gradle-home"]);
+        insert_dir("maven_home", &["maven-home"]);
+        insert_dir("xdg_config", &["xdg", "config"]);
+        insert_dir("xdg_data", &["xdg", "data"]);
+
+        Self { runtime_root, dirs }
+    }
+
+    fn ensure_dirs(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.runtime_root).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to prepare Windows runtime state directory {}: {}",
+                self.runtime_root.display(),
+                e
+            ))
+        })?;
+
+        for dir in self.dirs.values() {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Failed to prepare Windows runtime state directory {}: {}",
+                    dir.display(),
+                    e
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn dir(&self, key: &'static str) -> &std::path::Path {
+        self.dirs
+            .get(key)
+            .map(std::path::PathBuf::as_path)
+            .unwrap_or_else(|| panic!("missing Windows runtime layout key: {key}"))
+    }
+
+    fn file(&self, key: &'static str, name: &str) -> std::path::PathBuf {
+        self.dir(key).join(name)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_baseline_env(
+    system_root: &str,
+    system32: &std::path::Path,
+    system_drive: &str,
+) -> Result<Vec<(String, String)>> {
+    let path_value = std::env::join_paths([
+        system32.as_os_str(),
+        std::path::Path::new(system_root).as_os_str(),
+    ])
+    .map_err(|e| NonoError::SandboxInit(format!("Failed to prepare Windows runtime PATH: {e}")))?
+    .to_string_lossy()
+    .into_owned();
+
+    Ok(vec![
+        ("PATH".to_string(), path_value),
+        (
+            "PATHEXT".to_string(),
+            ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".to_string(),
+        ),
+        (
+            "COMSPEC".to_string(),
+            system32.join("cmd.exe").to_string_lossy().into_owned(),
+        ),
+        ("SystemRoot".to_string(), system_root.to_string()),
+        ("windir".to_string(), system_root.to_string()),
+        ("SystemDrive".to_string(), system_drive.to_string()),
+        (
+            "NoDefaultCurrentDirectoryInExePath".to_string(),
+            "1".to_string(),
+        ),
+    ])
+}
+
+#[cfg(target_os = "windows")]
 fn try_prepare_low_integrity_runtime_root(
     runtime_state_dir: &std::path::Path,
 ) -> Result<Option<std::path::PathBuf>> {
@@ -1697,34 +1834,7 @@ fn prepare_windows_runtime_env_vars(
     };
 
     let Some(runtime_state_dir) = runtime_state_dir else {
-        let path_value = std::env::join_paths([
-            system32.as_os_str(),
-            std::path::Path::new(&system_root).as_os_str(),
-        ])
-        .map_err(|e| {
-            NonoError::SandboxInit(format!("Failed to prepare Windows runtime PATH: {e}"))
-        })?
-        .to_string_lossy()
-        .into_owned();
-
-        return Ok(vec![
-            ("PATH".to_string(), path_value),
-            (
-                "PATHEXT".to_string(),
-                ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".to_string(),
-            ),
-            (
-                "COMSPEC".to_string(),
-                system32.join("cmd.exe").to_string_lossy().into_owned(),
-            ),
-            ("SystemRoot".to_string(), system_root.clone()),
-            ("windir".to_string(), system_root.clone()),
-            ("SystemDrive".to_string(), system_drive),
-            (
-                "NoDefaultCurrentDirectoryInExePath".to_string(),
-                "1".to_string(),
-            ),
-        ]);
+        return build_windows_baseline_env(&system_root, &system32, &system_drive);
     };
 
     let runtime_root = if Sandbox::windows_supports_direct_writable_dir(runtime_state_dir) {
@@ -1743,397 +1853,112 @@ fn prepare_windows_runtime_env_vars(
                     .replace(['\\', '/', ':'], "_"),
             )
     };
-    let tmp_dir = runtime_root.join("tmp");
-    let home_dir = runtime_root.join("home");
-    let appdata_dir = runtime_root.join("appdata").join("Roaming");
-    let local_appdata_dir = runtime_root.join("appdata").join("Local");
-    let programdata_dir = runtime_root.join("programdata");
-    let program_files_dir = runtime_root.join("programfiles");
-    let program_files_x86_dir = runtime_root.join("programfilesx86");
-    let common_program_files_dir = runtime_root.join("common-programfiles");
-    let common_program_files_x86_dir = runtime_root.join("common-programfilesx86");
-    let runtime_bin_dir = runtime_root.join("bin");
-    let public_dir = runtime_root.join("public");
-    let onedrive_dir = runtime_root.join("onedrive");
-    let inetcache_dir = runtime_root.join("inetcache");
-    let inetcookies_dir = runtime_root.join("inetcookies");
-    let inethistory_dir = runtime_root.join("inethistory");
-    let psmodules_dir = runtime_root.join("psmodules");
-    let psmodule_analysis_cache = runtime_root.join("psmodule-analysis-cache");
-    let cargo_home_dir = runtime_root.join("cargo-home");
-    let rustup_home_dir = runtime_root.join("rustup-home");
-    let dotnet_home_dir = runtime_root.join("dotnet-home");
-    let nuget_packages_dir = runtime_root.join("nuget-packages");
-    let nuget_http_cache_dir = runtime_root.join("nuget-http-cache");
-    let nuget_plugins_cache_dir = runtime_root.join("nuget-plugins-cache");
-    let chocolatey_dir = runtime_root.join("chocolatey");
-    let vcpkg_root_dir = runtime_root.join("vcpkg");
-    let npm_cache_dir = runtime_root.join("npm-cache");
-    let yarn_cache_dir = runtime_root.join("yarn-cache");
-    let pip_cache_dir = runtime_root.join("pip-cache");
-    let pip_build_tracker_dir = runtime_root.join("pip-build-tracker");
-    let python_pycache_dir = runtime_root.join("python-pycache");
-    let python_user_base_dir = runtime_root.join("python-user-base");
-    let go_cache_dir = runtime_root.join("go-cache");
-    let go_mod_cache_dir = runtime_root.join("go-mod-cache");
-    let go_path_dir = runtime_root.join("go-path");
-    let history_dir = runtime_root.join("history");
-    let ipython_dir = runtime_root.join("ipython");
-    let gem_home_dir = runtime_root.join("gem-home");
-    let gem_path_dir = runtime_root.join("gem-path");
-    let bundler_home_dir = runtime_root.join("bundler-home");
-    let bundler_cache_dir = runtime_root.join("bundler-cache");
-    let bundler_config_dir = runtime_root.join("bundler-config");
-    let composer_home_dir = runtime_root.join("composer-home");
-    let composer_cache_dir = runtime_root.join("composer-cache");
-    let gradle_home_dir = runtime_root.join("gradle-home");
-    let maven_home_dir = runtime_root.join("maven-home");
-    let xdg_config_dir = runtime_root.join("xdg").join("config");
-    let xdg_data_dir = runtime_root.join("xdg").join("data");
+    let layout = WindowsRuntimeLayout::new(runtime_root);
+    layout.ensure_dirs()?;
 
-    for dir in [
-        &runtime_root,
-        &tmp_dir,
-        &home_dir,
-        &appdata_dir,
-        &local_appdata_dir,
-        &programdata_dir,
-        &program_files_dir,
-        &program_files_x86_dir,
-        &common_program_files_dir,
-        &common_program_files_x86_dir,
-        &runtime_bin_dir,
-        &public_dir,
-        &onedrive_dir,
-        &inetcache_dir,
-        &inetcookies_dir,
-        &inethistory_dir,
-        &psmodules_dir,
-        &psmodule_analysis_cache,
-        &cargo_home_dir,
-        &rustup_home_dir,
-        &dotnet_home_dir,
-        &nuget_packages_dir,
-        &nuget_http_cache_dir,
-        &nuget_plugins_cache_dir,
-        &chocolatey_dir,
-        &vcpkg_root_dir,
-        &npm_cache_dir,
-        &yarn_cache_dir,
-        &pip_cache_dir,
-        &pip_build_tracker_dir,
-        &python_pycache_dir,
-        &python_user_base_dir,
-        &go_cache_dir,
-        &go_mod_cache_dir,
-        &go_path_dir,
-        &history_dir,
-        &ipython_dir,
-        &gem_home_dir,
-        &gem_path_dir,
-        &bundler_home_dir,
-        &bundler_cache_dir,
-        &bundler_config_dir,
-        &composer_home_dir,
-        &composer_cache_dir,
-        &gradle_home_dir,
-        &maven_home_dir,
-        &xdg_config_dir,
-        &xdg_data_dir,
-    ] {
-        std::fs::create_dir_all(dir).map_err(|e| {
-            NonoError::SandboxInit(format!(
-                "Failed to prepare Windows runtime state directory {}: {}",
-                dir.display(),
-                e
-            ))
-        })?;
-    }
-
-    if !Sandbox::windows_supports_direct_writable_dir(&runtime_root) {
+    if !Sandbox::windows_supports_direct_writable_dir(&layout.runtime_root) {
         return Err(NonoError::SandboxInit(format!(
             "Failed to prepare Windows writable runtime root {}: the directory is not low-integrity-compatible",
-            runtime_root.display()
+            layout.runtime_root.display()
         )));
     }
 
     let path_value = std::env::join_paths([
         system32.as_os_str(),
         std::path::Path::new(&system_root).as_os_str(),
-        runtime_bin_dir.as_os_str(),
-        program_files_dir.as_os_str(),
-        common_program_files_dir.as_os_str(),
+        layout.dir("bin").as_os_str(),
+        layout.dir("programfiles").as_os_str(),
+        layout.dir("common_programfiles").as_os_str(),
     ])
     .map_err(|e| NonoError::SandboxInit(format!("Failed to prepare Windows runtime PATH: {e}")))?
     .to_string_lossy()
     .into_owned();
 
-    let mut env = vec![
-        ("TMP".to_string(), tmp_dir.to_string_lossy().into_owned()),
-        ("TEMP".to_string(), tmp_dir.to_string_lossy().into_owned()),
-        ("TMPDIR".to_string(), tmp_dir.to_string_lossy().into_owned()),
-        ("PATH".to_string(), path_value),
-        (
-            "PATHEXT".to_string(),
-            ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".to_string(),
-        ),
-        (
-            "COMSPEC".to_string(),
-            system32.join("cmd.exe").to_string_lossy().into_owned(),
-        ),
-        ("SystemRoot".to_string(), system_root.clone()),
-        ("windir".to_string(), system_root),
-        ("SystemDrive".to_string(), system_drive),
-        (
-            "NoDefaultCurrentDirectoryInExePath".to_string(),
-            "1".to_string(),
-        ),
-        ("HOME".to_string(), home_dir.to_string_lossy().into_owned()),
-        (
-            "USERPROFILE".to_string(),
-            home_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "APPDATA".to_string(),
-            appdata_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "LOCALAPPDATA".to_string(),
-            local_appdata_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "XDG_CONFIG_HOME".to_string(),
-            xdg_config_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "XDG_DATA_HOME".to_string(),
-            xdg_data_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "PROGRAMDATA".to_string(),
-            programdata_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "ALLUSERSPROFILE".to_string(),
-            programdata_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "PUBLIC".to_string(),
-            public_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "ProgramFiles".to_string(),
-            program_files_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "ProgramFiles(x86)".to_string(),
-            program_files_x86_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "ProgramW6432".to_string(),
-            program_files_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "CommonProgramFiles".to_string(),
-            common_program_files_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "CommonProgramFiles(x86)".to_string(),
-            common_program_files_x86_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "CommonProgramW6432".to_string(),
-            common_program_files_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "OneDrive".to_string(),
-            onedrive_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "OneDriveConsumer".to_string(),
-            onedrive_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "OneDriveCommercial".to_string(),
-            onedrive_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "INETCACHE".to_string(),
-            inetcache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "INETCOOKIES".to_string(),
-            inetcookies_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "INETHISTORY".to_string(),
-            inethistory_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "PSModulePath".to_string(),
-            psmodules_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "PSModuleAnalysisCachePath".to_string(),
-            psmodule_analysis_cache
-                .join("ModuleAnalysisCache")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (
-            "CARGO_HOME".to_string(),
-            cargo_home_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "RUSTUP_HOME".to_string(),
-            rustup_home_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "DOTNET_CLI_HOME".to_string(),
-            dotnet_home_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "NUGET_PACKAGES".to_string(),
-            nuget_packages_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "NUGET_HTTP_CACHE_PATH".to_string(),
-            nuget_http_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "NUGET_PLUGINS_CACHE_PATH".to_string(),
-            nuget_plugins_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "ChocolateyInstall".to_string(),
-            chocolatey_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "ChocolateyToolsLocation".to_string(),
-            chocolatey_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "VCPKG_ROOT".to_string(),
-            vcpkg_root_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "NPM_CONFIG_CACHE".to_string(),
-            npm_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "YARN_CACHE_FOLDER".to_string(),
-            yarn_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "PIP_CACHE_DIR".to_string(),
-            pip_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "PIP_BUILD_TRACKER".to_string(),
-            pip_build_tracker_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "PYTHONPYCACHEPREFIX".to_string(),
-            python_pycache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "PYTHONUSERBASE".to_string(),
-            python_user_base_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "GOCACHE".to_string(),
-            go_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "GOMODCACHE".to_string(),
-            go_mod_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "GOPATH".to_string(),
-            go_path_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "HISTFILE".to_string(),
-            history_dir
-                .join("shell_history")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (
-            "LESSHISTFILE".to_string(),
-            history_dir
-                .join("less_history")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (
-            "NODE_REPL_HISTORY".to_string(),
-            history_dir
-                .join("node_repl_history")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (
-            "PYTHONHISTFILE".to_string(),
-            history_dir
-                .join("python_history")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (
-            "SQLITE_HISTORY".to_string(),
-            history_dir
-                .join("sqlite_history")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        (
-            "IPYTHONDIR".to_string(),
-            ipython_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "GEM_HOME".to_string(),
-            gem_home_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "GEM_PATH".to_string(),
-            gem_path_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "BUNDLE_USER_HOME".to_string(),
-            bundler_home_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "BUNDLE_USER_CACHE".to_string(),
-            bundler_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "BUNDLE_USER_CONFIG".to_string(),
-            bundler_config_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "COMPOSER_HOME".to_string(),
-            composer_home_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "COMPOSER_CACHE_DIR".to_string(),
-            composer_cache_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "GRADLE_USER_HOME".to_string(),
-            gradle_home_dir.to_string_lossy().into_owned(),
-        ),
-        (
-            "MAVEN_USER_HOME".to_string(),
-            maven_home_dir.to_string_lossy().into_owned(),
-        ),
-    ];
+    let mut env = build_windows_baseline_env(&system_root, &system32, &system_drive)?;
+    env[0].1 = path_value;
 
-    let home_str = home_dir.to_string_lossy().into_owned();
+    for (key, dir_key) in [
+        ("TMP", "tmp"),
+        ("TEMP", "tmp"),
+        ("TMPDIR", "tmp"),
+        ("HOME", "home"),
+        ("USERPROFILE", "home"),
+        ("APPDATA", "appdata_roaming"),
+        ("LOCALAPPDATA", "appdata_local"),
+        ("XDG_CONFIG_HOME", "xdg_config"),
+        ("XDG_DATA_HOME", "xdg_data"),
+        ("PROGRAMDATA", "programdata"),
+        ("ALLUSERSPROFILE", "programdata"),
+        ("PUBLIC", "public"),
+        ("ProgramFiles", "programfiles"),
+        ("ProgramFiles(x86)", "programfiles_x86"),
+        ("ProgramW6432", "programfiles"),
+        ("CommonProgramFiles", "common_programfiles"),
+        ("CommonProgramFiles(x86)", "common_programfiles_x86"),
+        ("CommonProgramW6432", "common_programfiles"),
+        ("OneDrive", "onedrive"),
+        ("OneDriveConsumer", "onedrive"),
+        ("OneDriveCommercial", "onedrive"),
+        ("INETCACHE", "inetcache"),
+        ("INETCOOKIES", "inetcookies"),
+        ("INETHISTORY", "inethistory"),
+        ("PSModulePath", "psmodules"),
+        ("CARGO_HOME", "cargo_home"),
+        ("RUSTUP_HOME", "rustup_home"),
+        ("DOTNET_CLI_HOME", "dotnet_home"),
+        ("NUGET_PACKAGES", "nuget_packages"),
+        ("NUGET_HTTP_CACHE_PATH", "nuget_http_cache"),
+        ("NUGET_PLUGINS_CACHE_PATH", "nuget_plugins_cache"),
+        ("ChocolateyInstall", "chocolatey"),
+        ("ChocolateyToolsLocation", "chocolatey"),
+        ("VCPKG_ROOT", "vcpkg"),
+        ("NPM_CONFIG_CACHE", "npm_cache"),
+        ("YARN_CACHE_FOLDER", "yarn_cache"),
+        ("PIP_CACHE_DIR", "pip_cache"),
+        ("PIP_BUILD_TRACKER", "pip_build_tracker"),
+        ("PYTHONPYCACHEPREFIX", "python_pycache"),
+        ("PYTHONUSERBASE", "python_user_base"),
+        ("GOCACHE", "go_cache"),
+        ("GOMODCACHE", "go_mod_cache"),
+        ("GOPATH", "go_path"),
+        ("IPYTHONDIR", "ipython"),
+        ("GEM_HOME", "gem_home"),
+        ("GEM_PATH", "gem_path"),
+        ("BUNDLE_USER_HOME", "bundler_home"),
+        ("BUNDLE_USER_CACHE", "bundler_cache"),
+        ("BUNDLE_USER_CONFIG", "bundler_config"),
+        ("COMPOSER_HOME", "composer_home"),
+        ("COMPOSER_CACHE_DIR", "composer_cache"),
+        ("GRADLE_USER_HOME", "gradle_home"),
+        ("MAVEN_USER_HOME", "maven_home"),
+    ] {
+        env.push((
+            key.to_string(),
+            layout.dir(dir_key).to_string_lossy().into_owned(),
+        ));
+    }
+
+    for (key, file_path) in [
+        (
+            "PSModuleAnalysisCachePath",
+            layout.file("psmodule_analysis_cache", "ModuleAnalysisCache"),
+        ),
+        ("HISTFILE", layout.file("history", "shell_history")),
+        ("LESSHISTFILE", layout.file("history", "less_history")),
+        (
+            "NODE_REPL_HISTORY",
+            layout.file("history", "node_repl_history"),
+        ),
+        ("PYTHONHISTFILE", layout.file("history", "python_history")),
+        ("SQLITE_HISTORY", layout.file("history", "sqlite_history")),
+    ] {
+        env.push((key.to_string(), file_path.to_string_lossy().into_owned()));
+    }
+
+    let home_str = layout.dir("home").to_string_lossy().into_owned();
     if home_str.len() >= 3 && home_str.as_bytes()[1] == b':' {
         env.push(("HOMEDRIVE".to_string(), home_str[..2].to_string()));
-        let home_path = home_str[2..].to_string();
-        env.push(("HOMEPATH".to_string(), home_path));
+        env.push(("HOMEPATH".to_string(), home_str[2..].to_string()));
     }
 
     Ok(env)

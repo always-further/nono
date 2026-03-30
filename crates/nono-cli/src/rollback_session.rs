@@ -198,9 +198,18 @@ fn validate_session_id(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Parse the PID from a session ID formatted as `YYYYMMDD-HHMMSS-<pid>`.
+/// Parse the PID from a session ID.
+///
+/// Supported formats:
+/// - `YYYYMMDD-HHMMSS-<pid>`
+/// - `windows-preview-<pid>-<timestamp>`
 fn parse_pid_from_session_id(session_id: &str) -> Option<u32> {
-    session_id.rsplit('-').next()?.parse().ok()
+    let parts: Vec<_> = session_id.split('-').collect();
+    match parts.as_slice() {
+        [_, _, pid] => pid.parse().ok(),
+        ["windows", "preview", pid, _timestamp] => pid.parse().ok(),
+        _ => None,
+    }
 }
 
 /// Check if a process with the given PID is still alive.
@@ -213,7 +222,30 @@ fn is_process_alive(pid: u32) -> bool {
         unsafe { nix::libc::kill(pid as nix::libc::pid_t, 0) == 0 }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // SAFETY: OpenProcess is called with query-only access for the
+        // provided PID. A null handle indicates that the process is not
+        // available to query.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+
+        unsafe {
+            // SAFETY: `handle` is valid because OpenProcess returned a
+            // non-null handle above, and it is closed exactly once here.
+            CloseHandle(handle);
+        }
+        true
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
     {
         pid != 0
     }
@@ -272,12 +304,20 @@ mod tests {
             parse_pid_from_session_id("20260214-143022-12345"),
             Some(12345)
         );
+        assert_eq!(
+            parse_pid_from_session_id("windows-preview-12345-1743359910"),
+            Some(12345)
+        );
     }
 
     #[test]
     fn parse_pid_from_session_id_invalid() {
         assert_eq!(parse_pid_from_session_id("no-pid-here"), None);
         assert_eq!(parse_pid_from_session_id(""), None);
+        assert_eq!(
+            parse_pid_from_session_id("windows-preview-not-a-pid-1743359910"),
+            None
+        );
     }
 
     #[test]
