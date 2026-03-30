@@ -1,0 +1,92 @@
+---
+title: Windows Network Enforcement
+description: Design spike for the Windows network enforcement backend
+---
+
+This note captures the initial `WIN-704` design spike for Windows network enforcement. It does not claim real enforcement yet. It defines the backend policy model and the implementation target so follow-on work can stay backend-owned and deterministic.
+
+## Selected Direction
+
+The recommended target for real Windows network enforcement is:
+
+- **Windows Filtering Platform (WFP)** for the long-term backend
+
+This is the only option in scope that plausibly gives:
+
+- real per-process connect and bind enforcement
+- deterministic allow-all vs blocked runtime behavior
+- auditable deny paths
+- an upgrade path to proxy-only and richer policy shapes
+
+The spike does **not** implement WFP yet. It adds the compiled Windows network policy model that later WFP work will consume.
+
+## Why Not the Other Options
+
+- **user-mode proxy only**
+  Useful for routing and credential injection, but not a real enforcement primitive. A child can bypass it unless the platform blocks direct network access separately.
+
+- **Windows Firewall rule orchestration**
+  Possible for coarse experiments, but awkward for short-lived per-session rules and weaker for process-scoped semantics.
+
+- **AppContainer**
+  Strong boundary, but it changes execution identity and filesystem semantics too much for the current port stage.
+
+## Initial Enforceable Subset
+
+The first backend-owned network policy model distinguishes:
+
+- `AllowAll`
+- `Blocked`
+- `ProxyOnly { port, bind_ports }`
+
+The spike also makes unsupported shapes explicit:
+
+- TCP connect allowlists
+- TCP bind allowlists
+- localhost-only port filters
+
+Those unsupported shapes now compile into deterministic backend labels instead of being inferred ad hoc at call sites.
+
+## Policy Compilation Contract
+
+The library now exposes a Windows network policy compiler:
+
+- `Sandbox::windows_network_policy(&caps) -> WindowsNetworkPolicy`
+
+That compiled policy carries:
+
+- the selected Windows network mode
+- a list of unsupported network capability shapes
+
+This mirrors the Windows filesystem policy compiler and is the intended backend contract for later runtime installation.
+
+## Runtime Plan
+
+Recommended sequence:
+
+1. compile `WindowsNetworkPolicy` from `CapabilitySet`
+2. keep preview/runtime classification backend-owned
+3. implement real `Blocked` enforcement first
+4. then add `ProxyOnly localhost:<port>` enforcement
+5. defer richer port filters until the WFP path is stable
+
+## Preview and Full-Port Boundary
+
+Today:
+
+- preview/live Windows runs still fail closed when network enforcement is required
+- backend reporting now has a real Windows network policy object behind that decision
+
+Later full-port work should:
+
+- install a real Windows network enforcement primitive
+- make `AllowAll` and `Blocked` distinct in runtime behavior
+- return deterministic unsupported results for policy shapes still outside the first backend subset
+
+## Real Blockers
+
+The remaining blockers for actual `WIN-704` implementation are:
+
+- choosing and shipping the privileged WFP integration model
+- defining install/setup requirements for that component
+- deciding whether first release network enforcement is limited to `Blocked` before `ProxyOnly`

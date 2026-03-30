@@ -7,8 +7,9 @@ use crate::capability::CapabilitySet;
 use crate::error::{NonoError, Result};
 use crate::sandbox::{
     PreviewRuntimeStatus, SupportInfo, SupportStatus, WindowsFilesystemPolicy,
-    WindowsFilesystemRule, WindowsPreviewContext, WindowsPreviewEntryPoint,
-    WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
+    WindowsFilesystemRule, WindowsNetworkPolicy, WindowsNetworkPolicyMode, WindowsPreviewContext,
+    WindowsPreviewEntryPoint, WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
+    WindowsUnsupportedNetworkIssue, WindowsUnsupportedNetworkIssueKind,
 };
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -82,15 +83,12 @@ pub fn preview_runtime_status(
         reasons.push("filesystem deny-override policy");
     }
 
-    if !matches!(caps.network_mode(), crate::NetworkMode::AllowAll) {
+    let network_policy = compile_network_policy(caps);
+    if !matches!(network_policy.mode, WindowsNetworkPolicyMode::AllowAll) {
         reasons.push("network restrictions");
     }
-
-    if !caps.tcp_connect_ports().is_empty()
-        || !caps.tcp_bind_ports().is_empty()
-        || !caps.localhost_ports().is_empty()
-    {
-        reasons.push("port-level network filtering");
+    for label in network_policy.unsupported_reason_labels() {
+        reasons.push(label);
     }
 
     if caps.extensions_enabled() {
@@ -151,6 +149,40 @@ This is a preview limitation, not permanent product behavior."
                 .to_string(),
         )),
     }
+}
+
+#[must_use]
+pub fn compile_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
+    let mode = match caps.network_mode() {
+        crate::NetworkMode::AllowAll => WindowsNetworkPolicyMode::AllowAll,
+        crate::NetworkMode::Blocked => WindowsNetworkPolicyMode::Blocked,
+        crate::NetworkMode::ProxyOnly { port, bind_ports } => WindowsNetworkPolicyMode::ProxyOnly {
+            port: *port,
+            bind_ports: bind_ports.clone(),
+        },
+    };
+
+    let mut unsupported = Vec::new();
+    if !caps.tcp_connect_ports().is_empty() {
+        unsupported.push(WindowsUnsupportedNetworkIssue {
+            kind: WindowsUnsupportedNetworkIssueKind::PortConnectAllowlist,
+        });
+    }
+    if !caps.tcp_bind_ports().is_empty() {
+        unsupported.push(WindowsUnsupportedNetworkIssue {
+            kind: WindowsUnsupportedNetworkIssueKind::PortBindAllowlist,
+        });
+    }
+    if !caps.localhost_ports().is_empty() {
+        unsupported.push(WindowsUnsupportedNetworkIssue {
+            kind: WindowsUnsupportedNetworkIssueKind::LocalhostPortAllowlist,
+        });
+    }
+
+    unsupported.sort_by(|left, right| left.kind.cmp(&right.kind));
+    unsupported.dedup();
+
+    WindowsNetworkPolicy { mode, unsupported }
 }
 
 fn normalize_windows_path(path: &Path) -> PathBuf {
@@ -1133,6 +1165,40 @@ mod tests {
             PreviewRuntimeStatus::RequiresEnforcement {
                 reasons: vec!["network restrictions"]
             }
+        );
+    }
+
+    #[test]
+    fn compile_network_policy_allow_all_has_no_unsupported_shapes() {
+        let policy = compile_network_policy(&CapabilitySet::new());
+        assert_eq!(policy.mode, WindowsNetworkPolicyMode::AllowAll);
+        assert!(policy.is_fully_supported());
+    }
+
+    #[test]
+    fn compile_network_policy_tracks_blocked_mode() {
+        let policy =
+            compile_network_policy(&CapabilitySet::new().set_network_mode(NetworkMode::Blocked));
+        assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
+        assert!(policy.is_fully_supported());
+    }
+
+    #[test]
+    fn compile_network_policy_marks_port_filters_unsupported() {
+        let mut caps = CapabilitySet::new().set_network_mode(NetworkMode::Blocked);
+        caps.add_tcp_connect_port(443);
+        caps.add_tcp_bind_port(8080);
+        caps.add_localhost_port(3000);
+
+        let policy = compile_network_policy(&caps);
+        assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
+        assert_eq!(
+            policy.unsupported_reason_labels(),
+            vec![
+                "localhost port filtering",
+                "port-level bind filtering",
+                "port-level connect filtering"
+            ]
         );
     }
 

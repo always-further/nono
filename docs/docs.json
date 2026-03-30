@@ -83,6 +83,7 @@
           "cli/development/windows-supervisor-ipc",
           "cli/development/windows-feature-gap-matrix",
           "cli/development/windows-security-model",
+          "cli/development/windows-network-enforcement",
           "cli/development/windows-full-port-roadmap",
           "cli/development/windows-preview-pilot",
           "cli/development/windows-preview-validation"

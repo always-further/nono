@@ -168,6 +168,119 @@ impl WindowsUnsupportedIssueKind {
     }
 }
 
+/// The Windows network enforcement shape selected for a capability set.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowsNetworkPolicyMode {
+    /// No network restriction is requested.
+    AllowAll,
+    /// Full outbound/inbound network denial is requested.
+    Blocked,
+    /// Traffic is expected to flow through a localhost proxy, optionally with
+    /// explicit bind ports.
+    ProxyOnly { port: u16, bind_ports: Vec<u16> },
+}
+
+/// A Windows network capability shape that the current backend does not yet
+/// enforce directly.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WindowsUnsupportedNetworkIssueKind {
+    PortConnectAllowlist,
+    PortBindAllowlist,
+    LocalhostPortAllowlist,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsUnsupportedNetworkIssueKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PortConnectAllowlist => "port-level connect filtering",
+            Self::PortBindAllowlist => "port-level bind filtering",
+            Self::LocalhostPortAllowlist => "localhost port filtering",
+        }
+    }
+
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::PortConnectAllowlist => {
+                "TCP connect allowlists are not in the current Windows network enforcement subset"
+            }
+            Self::PortBindAllowlist => {
+                "TCP bind allowlists are not in the current Windows network enforcement subset"
+            }
+            Self::LocalhostPortAllowlist => {
+                "localhost-only port filters are not in the current Windows network enforcement subset"
+            }
+        }
+    }
+}
+
+/// A specific unsupported Windows network capability instance.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsUnsupportedNetworkIssue {
+    pub kind: WindowsUnsupportedNetworkIssueKind,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsUnsupportedNetworkIssue {
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        self.kind.label()
+    }
+
+    #[must_use]
+    pub fn message(&self) -> String {
+        self.kind.description().to_string()
+    }
+}
+
+/// Compiled Windows network policy plan derived from a capability set.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsNetworkPolicy {
+    /// The primary network mode requested by the capability set.
+    pub mode: WindowsNetworkPolicyMode,
+    /// Network capability shapes that are intentionally not in the first
+    /// enforceable subset.
+    pub unsupported: Vec<WindowsUnsupportedNetworkIssue>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsNetworkPolicy {
+    #[must_use]
+    pub fn is_fully_supported(&self) -> bool {
+        self.unsupported.is_empty()
+    }
+
+    #[must_use]
+    pub fn unsupported_reason_labels(&self) -> Vec<&'static str> {
+        let mut labels: Vec<_> = self
+            .unsupported
+            .iter()
+            .map(WindowsUnsupportedNetworkIssue::label)
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels
+    }
+
+    #[must_use]
+    pub fn unsupported_messages(&self) -> Vec<String> {
+        let mut messages: Vec<_> = self
+            .unsupported
+            .iter()
+            .map(WindowsUnsupportedNetworkIssue::message)
+            .collect();
+        messages.sort();
+        messages.dedup();
+        messages
+    }
+}
+
 /// A specific unsupported Windows filesystem capability instance.
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -448,6 +561,14 @@ impl Sandbox {
     #[must_use]
     pub fn windows_filesystem_policy(caps: &CapabilitySet) -> WindowsFilesystemPolicy {
         windows::compile_filesystem_policy(caps)
+    }
+
+    /// Compile the current capability set into the Windows network policy
+    /// representation used by the backend implementation work.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn windows_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
+        windows::compile_network_policy(caps)
     }
 
     /// Validate whether the current Windows filesystem policy can enforce the
