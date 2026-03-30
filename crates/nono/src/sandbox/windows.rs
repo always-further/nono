@@ -9,7 +9,8 @@ use crate::sandbox::{
     PreviewRuntimeStatus, SupportInfo, SupportStatus, WindowsFilesystemPolicy,
     WindowsFilesystemRule, WindowsNetworkBackendKind, WindowsNetworkLaunchSupport,
     WindowsNetworkPolicy, WindowsNetworkPolicyMode, WindowsPreviewContext,
-    WindowsPreviewEntryPoint, WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
+    WindowsPreviewEntryPoint, WindowsSupervisorContext, WindowsSupervisorFeatureKind,
+    WindowsSupervisorSupport, WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
     WindowsUnsupportedNetworkIssue, WindowsUnsupportedNetworkIssueKind,
 };
 use std::os::windows::ffi::OsStrExt;
@@ -152,6 +153,35 @@ Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspe
 This is a preview limitation, not permanent product behavior."
                 .to_string(),
         )),
+    }
+}
+
+#[must_use]
+pub fn classify_supervisor_support(context: WindowsSupervisorContext) -> WindowsSupervisorSupport {
+    let mut supported = Vec::new();
+    let mut unsupported = Vec::new();
+
+    if context.rollback_snapshots {
+        supported.push(WindowsSupervisorFeatureKind::RollbackSnapshots);
+    }
+    if context.proxy_filtering {
+        unsupported.push(WindowsSupervisorFeatureKind::ProxyFiltering);
+    }
+    if context.runtime_capability_expansion {
+        unsupported.push(WindowsSupervisorFeatureKind::RuntimeCapabilityExpansion);
+    }
+    if context.runtime_trust_interception {
+        unsupported.push(WindowsSupervisorFeatureKind::RuntimeTrustInterception);
+    }
+
+    supported.sort_unstable();
+    supported.dedup();
+    unsupported.sort_unstable();
+    unsupported.dedup();
+
+    WindowsSupervisorSupport {
+        supported,
+        unsupported,
     }
 }
 
@@ -1370,6 +1400,36 @@ mod tests {
         )
         .expect_err("wrap should remain unsupported on Windows preview");
         assert!(err.to_string().contains("`nono wrap`"));
+    }
+
+    #[test]
+    fn classify_supervisor_support_tracks_supported_and_unsupported_features() {
+        let support = classify_supervisor_support(WindowsSupervisorContext {
+            rollback_snapshots: true,
+            proxy_filtering: true,
+            runtime_capability_expansion: true,
+            runtime_trust_interception: false,
+        });
+
+        assert_eq!(
+            support.supported,
+            vec![WindowsSupervisorFeatureKind::RollbackSnapshots]
+        );
+        assert_eq!(
+            support.unsupported,
+            vec![
+                WindowsSupervisorFeatureKind::ProxyFiltering,
+                WindowsSupervisorFeatureKind::RuntimeCapabilityExpansion,
+            ]
+        );
+        assert_eq!(
+            support.requested_feature_labels(),
+            vec![
+                "proxy filtering",
+                "rollback snapshots",
+                "runtime capability elevation",
+            ]
+        );
     }
 
     #[test]

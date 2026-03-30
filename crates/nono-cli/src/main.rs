@@ -1369,13 +1369,21 @@ fn build_supervisor_config<'a>(
     flags: &'a ExecutionFlags,
     supervisor_session_id: &'a str,
 ) -> exec_strategy::SupervisorConfig<'a> {
+    let requested_features: Vec<_> = flags
+        .supervisor_requested_features
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let support = Sandbox::windows_supervisor_support(nono::WindowsSupervisorContext {
+        rollback_snapshots: requested_features.contains(&"rollback snapshots"),
+        proxy_filtering: requested_features.contains(&"proxy filtering"),
+        runtime_capability_expansion: requested_features.contains(&"runtime capability elevation"),
+        runtime_trust_interception: requested_features.contains(&"runtime trust interception"),
+    });
     exec_strategy::SupervisorConfig {
         session_id: supervisor_session_id,
-        requested_features: flags
-            .supervisor_requested_features
-            .iter()
-            .map(String::as_str)
-            .collect(),
+        requested_features,
+        support,
     }
 }
 
@@ -1386,20 +1394,16 @@ fn collect_windows_supervisor_requested_features(
     capability_elevation: bool,
     trust_interception_active: bool,
 ) -> Vec<String> {
-    let mut features = Vec::new();
-    if rollback {
-        features.push("rollback snapshots".to_string());
-    }
-    if proxy_active {
-        features.push("proxy filtering".to_string());
-    }
-    if capability_elevation {
-        features.push("runtime capability elevation".to_string());
-    }
-    if trust_interception_active {
-        features.push("runtime trust interception".to_string());
-    }
-    features
+    Sandbox::windows_supervisor_support(nono::WindowsSupervisorContext {
+        rollback_snapshots: rollback,
+        proxy_filtering: proxy_active,
+        runtime_capability_expansion: capability_elevation,
+        runtime_trust_interception: trust_interception_active,
+    })
+    .requested_feature_labels()
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 #[cfg(target_os = "windows")]

@@ -126,6 +126,109 @@ pub enum WindowsPreviewEntryPoint {
     Wrap,
 }
 
+/// Additional Windows supervised-execution context owned by callers but
+/// classified by the backend.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowsSupervisorContext {
+    pub rollback_snapshots: bool,
+    pub proxy_filtering: bool,
+    pub runtime_capability_expansion: bool,
+    pub runtime_trust_interception: bool,
+}
+
+/// Windows supervised feature classes tracked by the backend.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WindowsSupervisorFeatureKind {
+    RollbackSnapshots,
+    ProxyFiltering,
+    RuntimeCapabilityExpansion,
+    RuntimeTrustInterception,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsSupervisorFeatureKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RollbackSnapshots => "rollback snapshots",
+            Self::ProxyFiltering => "proxy filtering",
+            Self::RuntimeCapabilityExpansion => "runtime capability elevation",
+            Self::RuntimeTrustInterception => "runtime trust interception",
+        }
+    }
+
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::RollbackSnapshots => {
+                "Windows supervised execution supports rollback-oriented parent/child lifecycle handling"
+            }
+            Self::ProxyFiltering => {
+                "Windows supervised execution does not implement proxy-filter-driven supervision yet"
+            }
+            Self::RuntimeCapabilityExpansion => {
+                "Windows supervised execution does not implement runtime capability expansion yet"
+            }
+            Self::RuntimeTrustInterception => {
+                "Windows supervised execution does not implement runtime trust interception yet"
+            }
+        }
+    }
+}
+
+/// Backend-owned Windows supervised feature classification.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsSupervisorSupport {
+    pub supported: Vec<WindowsSupervisorFeatureKind>,
+    pub unsupported: Vec<WindowsSupervisorFeatureKind>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsSupervisorSupport {
+    #[must_use]
+    pub fn requested_feature_labels(&self) -> Vec<&'static str> {
+        let mut labels: Vec<_> = self
+            .supported
+            .iter()
+            .chain(self.unsupported.iter())
+            .copied()
+            .map(WindowsSupervisorFeatureKind::label)
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels
+    }
+
+    #[must_use]
+    pub fn unsupported_feature_labels(&self) -> Vec<&'static str> {
+        let mut labels: Vec<_> = self
+            .unsupported
+            .iter()
+            .copied()
+            .map(WindowsSupervisorFeatureKind::label)
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels
+    }
+
+    #[must_use]
+    pub fn supported_feature_labels(&self) -> Vec<&'static str> {
+        let mut labels: Vec<_> = self
+            .supported
+            .iter()
+            .copied()
+            .map(WindowsSupervisorFeatureKind::label)
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels
+    }
+}
+
 /// A Windows filesystem rule compiled from the capability set.
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,6 +730,16 @@ impl Sandbox {
         resolved_program: &Path,
     ) -> WindowsNetworkLaunchSupport {
         windows::network_launch_support(policy, resolved_program)
+    }
+
+    /// Classify Windows supervised feature support for the current preview
+    /// backend.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn windows_supervisor_support(
+        context: WindowsSupervisorContext,
+    ) -> WindowsSupervisorSupport {
+        windows::classify_supervisor_support(context)
     }
 
     /// Validate whether the current Windows filesystem policy can enforce the

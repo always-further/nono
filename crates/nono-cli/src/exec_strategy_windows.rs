@@ -77,6 +77,7 @@ pub struct ExecConfig<'a> {
 pub struct SupervisorConfig<'a> {
     pub session_id: &'a str,
     pub requested_features: Vec<&'a str>,
+    pub support: nono::WindowsSupervisorSupport,
 }
 
 #[derive(Debug)]
@@ -1748,15 +1749,6 @@ fn initialize_supervisor_control_channel(
     })
 }
 
-fn collect_unsupported_supervised_features(supervisor: &SupervisorConfig<'_>) -> Vec<String> {
-    supervisor
-        .requested_features
-        .iter()
-        .filter(|feature| **feature != "rollback snapshots")
-        .map(|feature| (*feature).to_string())
-        .collect()
-}
-
 fn prepare_runtime_hardened_args(resolved_program: &Path, args: &[String]) -> Vec<String> {
     let program_name = resolved_program
         .file_name()
@@ -2280,16 +2272,22 @@ pub fn execute_supervised(
     };
 
     let (parent_control, _child_control) = initialize_supervisor_control_channel()?;
-    let unsupported = collect_unsupported_supervised_features(supervisor);
+    let unsupported = supervisor.support.unsupported_feature_labels();
+    let supported = supervisor.support.supported_feature_labels();
     if !unsupported.is_empty() {
         return Err(NonoError::UnsupportedPlatform(format!(
             "Windows supervised execution initialized the control channel \
              (session: {}, transport: {}), but these supervised features are not implemented yet: {}. \
-             Supported Windows supervised features currently: rollback snapshots. \
+             Supported Windows supervised features currently: {}. \
              This is a preview limitation, not permanent product behavior.",
             supervisor.session_id,
             parent_control.transport_name(),
-            unsupported.join(", ")
+            unsupported.join(", "),
+            if supported.is_empty() {
+                "none".to_string()
+            } else {
+                supported.join(", ")
+            }
         )));
     }
 
@@ -2381,7 +2379,13 @@ mod tests {
         };
         let supervisor = SupervisorConfig {
             session_id: "test-session",
-            requested_features: vec!["rollback"],
+            requested_features: vec!["rollback snapshots", "proxy filtering"],
+            support: Sandbox::windows_supervisor_support(nono::WindowsSupervisorContext {
+                rollback_snapshots: true,
+                proxy_filtering: true,
+                runtime_capability_expansion: false,
+                runtime_trust_interception: false,
+            }),
         };
 
         let err = execute_supervised(&config, Some(&supervisor), None)
@@ -2415,6 +2419,12 @@ mod tests {
         let supervisor = SupervisorConfig {
             session_id: "rollback-session",
             requested_features: vec!["rollback snapshots"],
+            support: Sandbox::windows_supervisor_support(nono::WindowsSupervisorContext {
+                rollback_snapshots: true,
+                proxy_filtering: false,
+                runtime_capability_expansion: false,
+                runtime_trust_interception: false,
+            }),
         };
 
         let exit_code =

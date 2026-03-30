@@ -79,7 +79,8 @@ pub use sandbox::{PreviewRuntimeStatus, Sandbox, SupportInfo, SupportStatus};
 pub use sandbox::{
     WindowsFilesystemPolicy, WindowsFilesystemRule, WindowsNetworkBackendKind,
     WindowsNetworkLaunchSupport, WindowsNetworkPolicy, WindowsNetworkPolicyMode,
-    WindowsPreviewContext, WindowsPreviewEntryPoint,
+    WindowsPreviewContext, WindowsPreviewEntryPoint, WindowsSupervisorContext,
+    WindowsSupervisorFeatureKind, WindowsSupervisorSupport,
 };
 pub use state::SandboxState;
 pub use supervisor::{
