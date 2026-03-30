@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.26.0] - 2026-03-30
+
+### Bug Fixes
+
+- *(wsl2)* Security hardening from code review
+
+- *(learn)* Resolve fs_usage pipe buffering and process name mismatch on macOS
+
+
+### CI/CD
+
+- *(workflows)* Extract push condition to environment variable
+
+- *(workflows)* Extract Docker image build into reusable workflow
+
+- *(release)* Fix workflow inputs reference syntax
+
+- *(release)* Use inputs.tag fallback in Docker publish condition
+
+- *(release)* Support manual tag input in workflow conditions
+
+
+### Documentation
+
+- *(wsl2)* Add WSL2 documentation and feature matrix (Track 1.5)
+
+
+### Features
+
+- *(wsl2)* Add WSL2 feature matrix to setup --check-only (Track 1.4)
+
+- *(wsl2)* Clarify proxy network enforcement on WSL2 (Track 1.3)
+
+- *(wsl2)* Guard seccomp notify paths for WSL2 (Track 1.2)
+
+- *(wsl2)* Add WSL2 detection, feature matrix, and integration tests (Track 1.1)
+
+- *(proxy)* Add L7 method+path endpoint filtering for reverse proxy routes (#465)
+
+- *(ci)* Add Docker image build and push to release workflow (#511) ([#511](https://github.com/always-further/nono/pull/511))
+
+- *(cli)* Add --log-file flag to redirect logs to a file (#490) ([#490](https://github.com/always-further/nono/pull/490))
+
+
+### Miscellaneous
+
+- Add .gitattributes to enforce LF line endings
+
 ## [0.25.0] - 2026-03-26
 
 ### Features
