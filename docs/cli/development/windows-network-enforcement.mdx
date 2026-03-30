@@ -116,6 +116,12 @@ The WFP scaffold does not claim success. It returns deterministic diagnostics fo
 - WFP backend not available in the current build
 - WFP service or driver not running
 
+The first real probing layer is now in place for that scaffold:
+
+- it probes the Windows Base Filtering Engine (`BFE`) service as the platform prerequisite
+- it is structured to probe backend service/driver components once they exist in-repo
+- because this branch still does not ship a WFP service or driver component, current probe results land on `backend not available in this build`
+
 ## Real Blockers
 
 The remaining blockers for actual `WIN-704` implementation are:

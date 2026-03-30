@@ -96,6 +96,30 @@ trait WindowsNetworkBackend {
 struct FirewallRulesNetworkBackend;
 struct WfpNetworkBackend;
 
+const WINDOWS_WFP_PLATFORM_SERVICE: &str = "BFE";
+const WINDOWS_WFP_BACKEND_SERVICE: Option<&str> = None;
+const WINDOWS_WFP_BACKEND_DRIVER: Option<&str> = None;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsServiceState {
+    Running,
+    Stopped,
+    Missing,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WfpProbeStatus {
+    Ready,
+    BackendNotAvailableInBuild,
+    PlatformServiceMissing,
+    PlatformServiceStopped,
+    BackendServiceMissing,
+    BackendServiceStopped,
+    BackendDriverMissing,
+    BackendDriverStopped,
+}
+
 struct ProcessContainment {
     job: HANDLE,
 }
@@ -225,6 +249,137 @@ fn cleanup_network_enforcement_staging(staged_dir: &Path) {
     let _ = std::fs::remove_dir_all(staged_dir);
 }
 
+fn run_sc_query(service: &str) -> Result<String> {
+    let output = Command::new("sc")
+        .args(["query", service])
+        .output()
+        .map_err(NonoError::CommandExecution)?;
+    Ok(format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+fn parse_windows_service_state(output: &str) -> WindowsServiceState {
+    let normalized = output.to_ascii_uppercase();
+    if normalized.contains("FAILED 1060") || normalized.contains("DOES NOT EXIST") {
+        WindowsServiceState::Missing
+    } else if normalized.contains("STATE") && normalized.contains("RUNNING") {
+        WindowsServiceState::Running
+    } else if normalized.contains("STATE")
+        && (normalized.contains("STOPPED") || normalized.contains("STOP_PENDING"))
+    {
+        WindowsServiceState::Stopped
+    } else {
+        WindowsServiceState::Unknown
+    }
+}
+
+fn build_wfp_probe_status(
+    platform_service: WindowsServiceState,
+    backend_service: Option<WindowsServiceState>,
+    backend_driver: Option<WindowsServiceState>,
+) -> WfpProbeStatus {
+    match platform_service {
+        WindowsServiceState::Missing | WindowsServiceState::Unknown => {
+            return WfpProbeStatus::PlatformServiceMissing;
+        }
+        WindowsServiceState::Stopped => return WfpProbeStatus::PlatformServiceStopped,
+        WindowsServiceState::Running => {}
+    }
+
+    let Some(backend_service_name) = WINDOWS_WFP_BACKEND_SERVICE else {
+        let _ = backend_service;
+        let _ = backend_driver;
+        return WfpProbeStatus::BackendNotAvailableInBuild;
+    };
+
+    let service_state = backend_service.unwrap_or(WindowsServiceState::Missing);
+    match service_state {
+        WindowsServiceState::Missing | WindowsServiceState::Unknown => {
+            let _ = backend_service_name;
+            return WfpProbeStatus::BackendServiceMissing;
+        }
+        WindowsServiceState::Stopped => return WfpProbeStatus::BackendServiceStopped,
+        WindowsServiceState::Running => {}
+    }
+
+    if WINDOWS_WFP_BACKEND_DRIVER.is_some() {
+        match backend_driver.unwrap_or(WindowsServiceState::Missing) {
+            WindowsServiceState::Missing | WindowsServiceState::Unknown => {
+                return WfpProbeStatus::BackendDriverMissing;
+            }
+            WindowsServiceState::Stopped => return WfpProbeStatus::BackendDriverStopped,
+            WindowsServiceState::Running => {}
+        }
+    }
+
+    WfpProbeStatus::Ready
+}
+
+fn probe_wfp_backend_status() -> Result<WfpProbeStatus> {
+    let platform_output = run_sc_query(WINDOWS_WFP_PLATFORM_SERVICE)?;
+    let platform_state = parse_windows_service_state(&platform_output);
+
+    let backend_service_state = WINDOWS_WFP_BACKEND_SERVICE
+        .map(run_sc_query)
+        .transpose()?
+        .as_deref()
+        .map(parse_windows_service_state);
+    let backend_driver_state = WINDOWS_WFP_BACKEND_DRIVER
+        .map(run_sc_query)
+        .transpose()?
+        .as_deref()
+        .map(parse_windows_service_state);
+
+    Ok(build_wfp_probe_status(
+        platform_state,
+        backend_service_state,
+        backend_driver_state,
+    ))
+}
+
+fn describe_wfp_probe_failure(
+    policy: &nono::WindowsNetworkPolicy,
+    status: WfpProbeStatus,
+) -> String {
+    match status {
+        WfpProbeStatus::Ready => format!(
+            "Windows WFP backend probing reported ready, but the enforcement installer is not implemented yet ({}).",
+            policy.backend_summary()
+        ),
+        WfpProbeStatus::BackendNotAvailableInBuild => format!(
+            "Windows network enforcement is targeting the WFP backend, but that backend is not available in this build yet ({}).",
+            policy.backend_summary()
+        ),
+        WfpProbeStatus::PlatformServiceMissing => format!(
+            "Windows WFP prerequisites are unavailable because the Base Filtering Engine service is missing or could not be queried ({}).",
+            policy.backend_summary()
+        ),
+        WfpProbeStatus::PlatformServiceStopped => format!(
+            "Windows WFP prerequisites are unavailable because the Base Filtering Engine service is not running ({}).",
+            policy.backend_summary()
+        ),
+        WfpProbeStatus::BackendServiceMissing => format!(
+            "Windows WFP backend is not installed: its service is missing ({}).",
+            policy.backend_summary()
+        ),
+        WfpProbeStatus::BackendServiceStopped => format!(
+            "Windows WFP backend is installed but its service is not running ({}).",
+            policy.backend_summary()
+        ),
+        WfpProbeStatus::BackendDriverMissing => format!(
+            "Windows WFP backend is installed incompletely: its driver is missing ({}).",
+            policy.backend_summary()
+        ),
+        WfpProbeStatus::BackendDriverStopped => format!(
+            "Windows WFP backend is installed but its driver is not running ({}).",
+            policy.backend_summary()
+        ),
+    }
+}
+
 fn select_network_backend(
     policy: &nono::WindowsNetworkPolicy,
 ) -> Result<Option<Box<dyn WindowsNetworkBackend>>> {
@@ -337,19 +492,21 @@ impl WindowsNetworkBackend for WfpNetworkBackend {
         _config: &ExecConfig<'_>,
     ) -> Result<Option<NetworkEnforcementGuard>> {
         match &policy.mode {
-            nono::WindowsNetworkPolicyMode::Blocked => Err(NonoError::UnsupportedPlatform(
-                format!(
-                    "Windows blocked-network enforcement is targeting the WFP backend, but that backend is not installed or available in this build yet ({}). The current narrow fallback backend is Windows Firewall rules for standalone executables only.",
-                    policy.backend_summary()
-                ),
-            )),
-            nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => Err(NonoError::UnsupportedPlatform(
-                format!(
-                    "Windows proxy-only network enforcement requires the WFP backend, but that backend is not installed or its service/driver is not running yet ({}). This request remains fail-closed until WFP is available.",
-                    policy.backend_summary()
-                ),
-            )),
             nono::WindowsNetworkPolicyMode::AllowAll => Ok(None),
+            nono::WindowsNetworkPolicyMode::Blocked
+            | nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => {
+                let status = probe_wfp_backend_status().map_err(|err| {
+                    NonoError::SandboxInit(format!(
+                        "Failed to probe Windows WFP backend status ({}): {}",
+                        policy.backend_summary(),
+                        err
+                    ))
+                })?;
+                Err(NonoError::UnsupportedPlatform(format!(
+                    "{} This request remains fail-closed until WFP is available.",
+                    describe_wfp_probe_failure(policy, status)
+                )))
+            }
         }
     }
 }
@@ -1375,6 +1532,52 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_windows_service_state_detects_running() {
+        let output = "STATE              : 4  RUNNING";
+        assert_eq!(
+            parse_windows_service_state(output),
+            WindowsServiceState::Running
+        );
+    }
+
+    #[test]
+    fn test_parse_windows_service_state_detects_stopped() {
+        let output = "STATE              : 1  STOPPED";
+        assert_eq!(
+            parse_windows_service_state(output),
+            WindowsServiceState::Stopped
+        );
+    }
+
+    #[test]
+    fn test_parse_windows_service_state_detects_missing() {
+        let output = "[SC] OpenService FAILED 1060:\nThe specified service does not exist as an installed service.";
+        assert_eq!(
+            parse_windows_service_state(output),
+            WindowsServiceState::Missing
+        );
+    }
+
+    #[test]
+    fn test_build_wfp_probe_status_reports_backend_not_available_in_build() {
+        let status = build_wfp_probe_status(WindowsServiceState::Running, None, None);
+        assert_eq!(status, WfpProbeStatus::BackendNotAvailableInBuild);
+    }
+
+    #[test]
+    fn test_describe_wfp_probe_failure_reports_platform_service_stopped() {
+        let policy = Sandbox::windows_network_policy(&CapabilitySet::new().set_network_mode(
+            nono::NetworkMode::ProxyOnly {
+                port: 8080,
+                bind_ports: vec![8080],
+            },
+        ));
+        let message = describe_wfp_probe_failure(&policy, WfpProbeStatus::PlatformServiceStopped);
+        assert!(message.contains("Base Filtering Engine service is not running"));
+        assert!(message.contains("preferred backend: windows-filtering-platform"));
+    }
+
+    #[test]
     fn test_wfp_backend_reports_blocked_backend_unavailable() {
         let backend = WfpNetworkBackend;
         let mut caps = CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked);
@@ -1396,8 +1599,9 @@ mod tests {
             .install(&policy, &config)
             .expect_err("WFP scaffold should fail closed for blocked mode");
         let message = err.to_string();
-        assert!(message.contains("not installed or available in this build yet"));
+        assert!(message.contains("not available in this build yet"));
         assert!(message.contains("preferred backend: windows-filtering-platform"));
+        assert!(message.contains("fail-closed"));
     }
 
     #[test]
@@ -1424,7 +1628,7 @@ mod tests {
             .install(&policy, &config)
             .expect_err("WFP scaffold should fail closed for proxy mode");
         let message = err.to_string();
-        assert!(message.contains("service/driver is not running yet"));
+        assert!(message.contains("not available in this build yet"));
         assert!(message.contains("fail-closed"));
     }
 }
