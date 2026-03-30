@@ -100,6 +100,7 @@ const WINDOWS_WFP_PLATFORM_SERVICE: &str = "BFE";
 const WINDOWS_WFP_BACKEND_SERVICE: &str = "nono-wfp-service";
 const WINDOWS_WFP_BACKEND_DRIVER: &str = "nono-wfp-driver";
 const WINDOWS_WFP_BACKEND_BINARY: &str = "nono-wfp-service.exe";
+const WINDOWS_WFP_BACKEND_DRIVER_BINARY: &str = "nono-wfp-driver.sys";
 const WINDOWS_WFP_BACKEND_SERVICE_ARGS: &[&str] = &["--service-mode"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +119,7 @@ enum WfpProbeStatus {
     PlatformServiceStopped,
     BackendServiceMissing,
     BackendServiceStopped,
+    BackendDriverBinaryMissing,
     BackendDriverMissing,
     BackendDriverStopped,
 }
@@ -128,6 +130,7 @@ struct WfpProbeConfig {
     backend_service: &'static str,
     backend_driver: &'static str,
     backend_binary_path: PathBuf,
+    backend_driver_binary_path: PathBuf,
     backend_service_args: &'static [&'static str],
 }
 
@@ -296,6 +299,7 @@ fn current_wfp_probe_config() -> Result<WfpProbeConfig> {
         backend_service: WINDOWS_WFP_BACKEND_SERVICE,
         backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
         backend_binary_path: exe_dir.join(WINDOWS_WFP_BACKEND_BINARY),
+        backend_driver_binary_path: exe_dir.join(WINDOWS_WFP_BACKEND_DRIVER_BINARY),
         backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
     })
 }
@@ -376,6 +380,7 @@ fn parse_windows_service_state(output: &str) -> WindowsServiceState {
 
 fn build_wfp_probe_status(
     backend_binary_exists: bool,
+    backend_driver_binary_exists: bool,
     platform_service: WindowsServiceState,
     backend_service: WindowsServiceState,
     backend_driver: WindowsServiceState,
@@ -398,6 +403,10 @@ fn build_wfp_probe_status(
         }
         WindowsServiceState::Stopped => return WfpProbeStatus::BackendServiceStopped,
         WindowsServiceState::Running => {}
+    }
+
+    if !backend_driver_binary_exists {
+        return WfpProbeStatus::BackendDriverBinaryMissing;
     }
 
     match backend_driver {
@@ -423,6 +432,7 @@ fn probe_wfp_backend_status_with_config(config: &WfpProbeConfig) -> Result<WfpPr
 
     Ok(build_wfp_probe_status(
         true,
+        config.backend_driver_binary_path.exists(),
         platform_state,
         backend_service_state,
         backend_driver_state,
@@ -463,8 +473,12 @@ fn describe_wfp_probe_failure(
             "Windows WFP backend is installed but its service is not running ({}).",
             policy.backend_summary()
         ),
+        WfpProbeStatus::BackendDriverBinaryMissing => format!(
+            "Windows WFP backend is installed incompletely: its expected driver binary is missing from this build or install layout ({}).",
+            policy.backend_summary()
+        ),
         WfpProbeStatus::BackendDriverMissing => format!(
-            "Windows WFP backend is installed incompletely: its driver is missing ({}).",
+            "Windows WFP backend is installed incompletely: its driver is not registered ({}).",
             policy.backend_summary()
         ),
         WfpProbeStatus::BackendDriverStopped => format!(
@@ -478,17 +492,19 @@ fn describe_wfp_probe_status_for_setup(config: &WfpProbeConfig, status: WfpProbe
     let service_command = format_wfp_service_command(config);
     match status {
         WfpProbeStatus::Ready => format!(
-            "WFP backend components are present (binary: {}, service: {}, driver: {}), but the runtime installer is not implemented yet. Expected service command: {}.",
+            "WFP backend components are present (service binary: {}, driver binary: {}, service: {}, driver: {}), but the runtime installer is not implemented yet. Expected service command: {}.",
             config.backend_binary_path.display(),
+            config.backend_driver_binary_path.display(),
             config.backend_service,
             config.backend_driver,
             service_command
         ),
         WfpProbeStatus::BackendBinaryMissing => format!(
-            "Expected WFP backend binary is missing: {}. Expected service: {}. Expected driver: {}. Expected registration/start command: {}.",
+            "Expected WFP backend service binary is missing: {}. Expected service: {}. Expected driver: {}. Expected driver binary: {}. Expected registration/start command: {}.",
             config.backend_binary_path.display(),
             config.backend_service,
             config.backend_driver,
+            config.backend_driver_binary_path.display(),
             service_command
         ),
         WfpProbeStatus::PlatformServiceMissing => format!(
@@ -510,13 +526,20 @@ fn describe_wfp_probe_status_for_setup(config: &WfpProbeConfig, status: WfpProbe
             config.backend_service,
             service_command
         ),
-        WfpProbeStatus::BackendDriverMissing => format!(
-            "WFP backend driver is missing: {}.",
+        WfpProbeStatus::BackendDriverBinaryMissing => format!(
+            "WFP backend driver binary is missing: {}. Expected driver registration name: {}.",
+            config.backend_driver_binary_path.display(),
             config.backend_driver
         ),
+        WfpProbeStatus::BackendDriverMissing => format!(
+            "WFP backend driver is not registered: {}. Expected driver binary: {}.",
+            config.backend_driver,
+            config.backend_driver_binary_path.display()
+        ),
         WfpProbeStatus::BackendDriverStopped => format!(
-            "WFP backend driver is installed but not running: {}.",
-            config.backend_driver
+            "WFP backend driver is installed but not running: {}. Expected driver binary: {}.",
+            config.backend_driver,
+            config.backend_driver_binary_path.display()
         ),
     }
 }
@@ -687,7 +710,8 @@ pub(crate) fn probe_windows_wfp_readiness() -> WindowsWfpReadinessReport {
                 WfpProbeStatus::PlatformServiceStopped => "bfe stopped",
                 WfpProbeStatus::BackendServiceMissing => "missing service",
                 WfpProbeStatus::BackendServiceStopped => "service stopped",
-                WfpProbeStatus::BackendDriverMissing => "missing driver",
+                WfpProbeStatus::BackendDriverBinaryMissing => "missing driver binary",
+                WfpProbeStatus::BackendDriverMissing => "driver not registered",
                 WfpProbeStatus::BackendDriverStopped => "driver stopped",
             },
             details: describe_wfp_probe_status_for_setup(&config, status),
@@ -1881,6 +1905,7 @@ mod tests {
     fn test_build_wfp_probe_status_reports_missing_binary() {
         let status = build_wfp_probe_status(
             false,
+            false,
             WindowsServiceState::Running,
             WindowsServiceState::Running,
             WindowsServiceState::Running,
@@ -1892,11 +1917,36 @@ mod tests {
     fn test_build_wfp_probe_status_reports_missing_service() {
         let status = build_wfp_probe_status(
             true,
+            true,
             WindowsServiceState::Running,
             WindowsServiceState::Missing,
             WindowsServiceState::Running,
         );
         assert_eq!(status, WfpProbeStatus::BackendServiceMissing);
+    }
+
+    #[test]
+    fn test_build_wfp_probe_status_reports_missing_driver_binary() {
+        let status = build_wfp_probe_status(
+            true,
+            false,
+            WindowsServiceState::Running,
+            WindowsServiceState::Running,
+            WindowsServiceState::Running,
+        );
+        assert_eq!(status, WfpProbeStatus::BackendDriverBinaryMissing);
+    }
+
+    #[test]
+    fn test_build_wfp_probe_status_reports_driver_not_registered() {
+        let status = build_wfp_probe_status(
+            true,
+            true,
+            WindowsServiceState::Running,
+            WindowsServiceState::Running,
+            WindowsServiceState::Missing,
+        );
+        assert_eq!(status, WfpProbeStatus::BackendDriverMissing);
     }
 
     #[test]
@@ -1923,17 +1973,29 @@ mod tests {
     }
 
     #[test]
+    fn test_describe_wfp_probe_failure_reports_missing_driver_binary() {
+        let policy = Sandbox::windows_network_policy(
+            &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
+        );
+        let message =
+            describe_wfp_probe_failure(&policy, WfpProbeStatus::BackendDriverBinaryMissing);
+        assert!(message.contains("expected driver binary is missing"));
+        assert!(message.contains("preferred backend: windows-filtering-platform"));
+    }
+
+    #[test]
     fn test_describe_wfp_probe_status_for_setup_reports_missing_binary() {
         let config = WfpProbeConfig {
             platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: PathBuf::from(r"C:\missing\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\missing\nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
         let message =
             describe_wfp_probe_status_for_setup(&config, WfpProbeStatus::BackendBinaryMissing);
-        assert!(message.contains("Expected WFP backend binary is missing"));
+        assert!(message.contains("Expected WFP backend service binary is missing"));
         assert!(message.contains("nono-wfp-service"));
         assert!(message.contains("nono-wfp-driver"));
         assert!(message.contains("--service-mode"));
@@ -1947,6 +2009,7 @@ mod tests {
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: dir.path().join("missing-wfp-service.exe"),
+            backend_driver_binary_path: dir.path().join("missing-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
 
@@ -1962,6 +2025,7 @@ mod tests {
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
         let message =
@@ -1971,12 +2035,51 @@ mod tests {
     }
 
     #[test]
+    fn test_describe_wfp_probe_status_for_setup_reports_missing_driver_binary() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let message = describe_wfp_probe_status_for_setup(
+            &config,
+            WfpProbeStatus::BackendDriverBinaryMissing,
+        );
+        assert!(message.contains(r"C:\tools\nono-wfp-driver.sys"));
+        assert!(message.contains("Expected driver registration name"));
+    }
+
+    #[test]
+    fn test_probe_wfp_backend_status_with_config_reports_missing_driver_binary_before_driver_query()
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service_binary = dir.path().join("nono-wfp-service.exe");
+        std::fs::write(&service_binary, b"stub").expect("write stub service binary");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: service_binary,
+            backend_driver_binary_path: dir.path().join("missing-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let status =
+            probe_wfp_backend_status_with_config(&config).expect("probe status should resolve");
+        assert_eq!(status, WfpProbeStatus::BackendServiceMissing);
+    }
+
+    #[test]
     fn test_build_wfp_service_create_args_uses_service_contract() {
         let config = WfpProbeConfig {
             platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
         let args = build_wfp_service_create_args(&config);
@@ -1993,6 +2096,7 @@ mod tests {
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
         let args = build_wfp_service_start_args(&config);
@@ -2014,6 +2118,7 @@ mod tests {
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: binary_path,
+            backend_driver_binary_path: dir.path().join("nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
 
@@ -2061,6 +2166,7 @@ mod tests {
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: binary_path,
+            backend_driver_binary_path: dir.path().join("nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
 
@@ -2091,6 +2197,7 @@ mod tests {
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: binary_path,
+            backend_driver_binary_path: dir.path().join("nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
 
@@ -2124,6 +2231,7 @@ mod tests {
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: binary_path,
+            backend_driver_binary_path: dir.path().join("nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
 
@@ -2157,6 +2265,7 @@ mod tests {
             backend_service: WINDOWS_WFP_BACKEND_SERVICE,
             backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
             backend_binary_path: binary_path,
+            backend_driver_binary_path: dir.path().join("nono-wfp-driver.sys"),
             backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
         let backend_service_seen = std::cell::RefCell::new(0usize);

@@ -123,6 +123,7 @@ The first real probing layer is now in place for that scaffold:
   - binary: `nono-wfp-service.exe`
   - service: `nono-wfp-service`
   - driver: `nono-wfp-driver`
+  - driver binary: `nono-wfp-driver.sys`
 - the binary now also defines the first explicit startup contract for service registration:
   - registration target: `nono-wfp-service`
   - startup args: `--service-mode`
@@ -142,6 +143,10 @@ The first real probing layer is now in place for that scaffold:
 - missing backend binary is treated as an early installability failure before service probing
 - this repo now ships the first backend artifact, `nono-wfp-service`, as a placeholder binary that establishes the component contract without claiming service readiness
 - after building all CLI bins, readiness can advance from `missing binary` to `missing service` / `missing driver`, and after registration it can advance again to `missing driver`
+- the probe now distinguishes driver lifecycle states explicitly:
+  - `missing driver binary`
+  - `driver not registered`
+  - `driver stopped`
 - because this branch still does not install the backend service or driver, current post-build probe results land on those service/driver readiness failures rather than a working backend
 
 ## Real Blockers
