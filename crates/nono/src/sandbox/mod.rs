@@ -104,6 +104,14 @@ impl PreviewRuntimeStatus {
     }
 }
 
+/// Additional Windows preview-only context owned by callers but classified by
+/// the backend.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowsPreviewContext {
+    pub has_deny_override_policy: bool,
+}
+
 /// A Windows filesystem rule compiled from the capability set.
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,8 +414,9 @@ impl Sandbox {
     pub fn preview_runtime_status(
         caps: &CapabilitySet,
         execution_dir: &Path,
+        context: WindowsPreviewContext,
     ) -> PreviewRuntimeStatus {
-        windows::preview_runtime_status(caps, execution_dir)
+        windows::preview_runtime_status(caps, execution_dir, context)
     }
 
     /// Compile the current capability set into the Windows filesystem policy

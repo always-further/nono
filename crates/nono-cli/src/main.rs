@@ -926,8 +926,6 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             allow_endpoint: args.allow_endpoint.clone(),
             proxy_port: args.proxy_port,
             #[cfg(target_os = "windows")]
-            preview_requested_restrictions: collect_windows_preview_requested_restrictions(&args),
-            #[cfg(target_os = "windows")]
             supervisor_requested_features: collect_windows_supervisor_requested_features(
                 rollback,
                 proxy_active,
@@ -1202,7 +1200,6 @@ struct ExecutionFlags {
     allow_bind_ports: Vec<u16>,
     allow_endpoint: Vec<String>,
     proxy_port: Option<u16>,
-    preview_requested_restrictions: Vec<String>,
     supervisor_requested_features: Vec<String>,
     override_deny_paths: Vec<std::path::PathBuf>,
 }
@@ -1315,7 +1312,6 @@ impl ExecutionFlags {
             allow_bind_ports: Vec::new(),
             allow_endpoint: Vec::new(),
             proxy_port: None,
-            preview_requested_restrictions: Vec::new(),
             supervisor_requested_features: Vec::new(),
             override_deny_paths: Vec::new(),
         })
@@ -1335,17 +1331,6 @@ fn build_supervisor_config<'a>(
             .map(String::as_str)
             .collect(),
     }
-}
-
-#[cfg(target_os = "windows")]
-fn collect_windows_preview_requested_restrictions(args: &SandboxArgs) -> Vec<String> {
-    let mut reasons = Vec::new();
-
-    if !args.override_deny.is_empty() {
-        reasons.push("filesystem deny-override policy".to_string());
-    }
-
-    reasons
 }
 
 #[cfg(target_os = "windows")]
@@ -1381,17 +1366,17 @@ fn validate_windows_preview_direct_execution(
         return Ok(());
     }
 
-    let mut reasons = flags.preview_requested_restrictions.clone();
+    let mut reasons = Vec::new();
     if let nono::PreviewRuntimeStatus::RequiresEnforcement {
         reasons: backend_reasons,
-    } = Sandbox::preview_runtime_status(caps, &flags.workdir)
-    {
-        for reason in backend_reasons {
-            let reason = reason.to_string();
-            if !reasons.contains(&reason) {
-                reasons.push(reason);
-            }
-        }
+    } = Sandbox::preview_runtime_status(
+        caps,
+        &flags.workdir,
+        nono::WindowsPreviewContext {
+            has_deny_override_policy: !flags.override_deny_paths.is_empty(),
+        },
+    ) {
+        reasons.extend(backend_reasons.into_iter().map(str::to_string));
     }
 
     if reasons.is_empty() {
@@ -1478,7 +1463,13 @@ fn apply_pre_fork_sandbox(
         {
             let support = Sandbox::support_info();
             if !support.is_supported {
-                let preview = Sandbox::preview_runtime_status(caps, current_dir);
+                let preview = Sandbox::preview_runtime_status(
+                    caps,
+                    current_dir,
+                    nono::WindowsPreviewContext {
+                        has_deny_override_policy: false,
+                    },
+                );
                 info!("Windows preview runtime status: {:?}", preview);
                 if !silent {
                     output::print_warning(
@@ -3634,7 +3625,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn test_collect_windows_preview_requested_restrictions_only_keeps_cli_only_windows_gaps() {
+    fn test_windows_preview_context_marks_deny_override_policy() {
         let args = SandboxArgs {
             profile: Some("codex".to_string()),
             block_net: true,
@@ -3644,8 +3635,10 @@ mod tests {
             ..sandbox_args()
         };
 
-        let reasons = collect_windows_preview_requested_restrictions(&args);
-        assert_eq!(reasons, vec!["filesystem deny-override policy".to_string()]);
+        let context = nono::WindowsPreviewContext {
+            has_deny_override_policy: !args.override_deny.is_empty(),
+        };
+        assert!(context.has_deny_override_policy);
     }
 
     #[cfg(target_os = "windows")]
@@ -3682,7 +3675,6 @@ mod tests {
             allow_bind_ports: Vec::new(),
             allow_endpoint: Vec::new(),
             proxy_port: None,
-            preview_requested_restrictions: Vec::new(),
             supervisor_requested_features: Vec::new(),
             override_deny_paths: Vec::new(),
         };
@@ -3720,7 +3712,6 @@ mod tests {
             allow_bind_ports: Vec::new(),
             allow_endpoint: Vec::new(),
             proxy_port: None,
-            preview_requested_restrictions: vec!["filesystem deny-override policy".to_string()],
             supervisor_requested_features: Vec::new(),
             override_deny_paths: vec![dir.path().to_path_buf()],
         };

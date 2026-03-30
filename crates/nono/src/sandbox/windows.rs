@@ -7,7 +7,8 @@ use crate::capability::CapabilitySet;
 use crate::error::{NonoError, Result};
 use crate::sandbox::{
     PreviewRuntimeStatus, SupportInfo, SupportStatus, WindowsFilesystemPolicy,
-    WindowsFilesystemRule, WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
+    WindowsFilesystemRule, WindowsPreviewContext, WindowsUnsupportedIssue,
+    WindowsUnsupportedIssueKind,
 };
 use std::path::{Component, Path, PathBuf};
 
@@ -41,7 +42,11 @@ pub fn support_info() -> SupportInfo {
 }
 
 #[must_use]
-pub fn preview_runtime_status(caps: &CapabilitySet, execution_dir: &Path) -> PreviewRuntimeStatus {
+pub fn preview_runtime_status(
+    caps: &CapabilitySet,
+    execution_dir: &Path,
+    context: WindowsPreviewContext,
+) -> PreviewRuntimeStatus {
     let mut reasons = Vec::new();
 
     let execution_dir = execution_dir
@@ -62,6 +67,9 @@ pub fn preview_runtime_status(caps: &CapabilitySet, execution_dir: &Path) -> Pre
 
     if has_user_intent_fs && !fs_policy.covers_path(&execution_dir, crate::AccessMode::Read) {
         reasons.push("execution directory outside supported allowlist");
+    }
+    if context.has_deny_override_policy {
+        reasons.push("filesystem deny-override policy");
     }
 
     if !matches!(caps.network_mode(), crate::NetworkMode::AllowAll) {
@@ -924,7 +932,7 @@ mod tests {
             .allow_path(dir.path(), AccessMode::Read)
             .expect("allow path");
 
-        let status = preview_runtime_status(&caps, dir.path());
+        let status = preview_runtime_status(&caps, dir.path(), WindowsPreviewContext::default());
         assert!(status.is_advisory_only());
     }
 
@@ -932,7 +940,8 @@ mod tests {
     fn preview_runtime_status_blocks_network_restrictions() {
         let caps = CapabilitySet::new().set_network_mode(NetworkMode::Blocked);
 
-        let status = preview_runtime_status(&caps, Path::new("."));
+        let status =
+            preview_runtime_status(&caps, Path::new("."), WindowsPreviewContext::default());
         assert_eq!(
             status,
             PreviewRuntimeStatus::RequiresEnforcement {
@@ -949,7 +958,7 @@ mod tests {
             .allow_path(other.path(), AccessMode::Read)
             .expect("allow path");
 
-        let status = preview_runtime_status(&caps, dir.path());
+        let status = preview_runtime_status(&caps, dir.path(), WindowsPreviewContext::default());
         assert_eq!(
             status,
             PreviewRuntimeStatus::RequiresEnforcement {
@@ -967,8 +976,25 @@ mod tests {
             .allow_path(dir.path(), AccessMode::ReadWrite)
             .expect("allow path");
 
-        let status = preview_runtime_status(&caps, &work_dir);
+        let status = preview_runtime_status(&caps, &work_dir, WindowsPreviewContext::default());
         assert!(status.is_advisory_only());
+    }
+
+    #[test]
+    fn preview_runtime_status_blocks_deny_override_policy() {
+        let status = preview_runtime_status(
+            &CapabilitySet::new(),
+            Path::new("."),
+            WindowsPreviewContext {
+                has_deny_override_policy: true,
+            },
+        );
+        assert_eq!(
+            status,
+            PreviewRuntimeStatus::RequiresEnforcement {
+                reasons: vec!["filesystem deny-override policy"]
+            }
+        );
     }
 
     #[test]
