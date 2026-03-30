@@ -97,8 +97,9 @@ struct FirewallRulesNetworkBackend;
 struct WfpNetworkBackend;
 
 const WINDOWS_WFP_PLATFORM_SERVICE: &str = "BFE";
-const WINDOWS_WFP_BACKEND_SERVICE: Option<&str> = None;
-const WINDOWS_WFP_BACKEND_DRIVER: Option<&str> = None;
+const WINDOWS_WFP_BACKEND_SERVICE: &str = "nono-wfp-service";
+const WINDOWS_WFP_BACKEND_DRIVER: &str = "nono-wfp-driver";
+const WINDOWS_WFP_BACKEND_BINARY: &str = "nono-wfp-service.exe";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowsServiceState {
@@ -111,13 +112,21 @@ enum WindowsServiceState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WfpProbeStatus {
     Ready,
-    BackendNotAvailableInBuild,
+    BackendBinaryMissing,
     PlatformServiceMissing,
     PlatformServiceStopped,
     BackendServiceMissing,
     BackendServiceStopped,
     BackendDriverMissing,
     BackendDriverStopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WfpProbeConfig {
+    platform_service: &'static str,
+    backend_service: &'static str,
+    backend_driver: &'static str,
+    backend_binary_path: PathBuf,
 }
 
 struct ProcessContainment {
@@ -249,6 +258,27 @@ fn cleanup_network_enforcement_staging(staged_dir: &Path) {
     let _ = std::fs::remove_dir_all(staged_dir);
 }
 
+fn current_wfp_probe_config() -> Result<WfpProbeConfig> {
+    let current_exe = std::env::current_exe().map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to resolve current executable for Windows WFP backend probing: {e}"
+        ))
+    })?;
+    let exe_dir = current_exe.parent().ok_or_else(|| {
+        NonoError::SandboxInit(format!(
+            "Failed to resolve executable directory for Windows WFP backend probing: {}",
+            current_exe.display()
+        ))
+    })?;
+
+    Ok(WfpProbeConfig {
+        platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+        backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+        backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+        backend_binary_path: exe_dir.join(WINDOWS_WFP_BACKEND_BINARY),
+    })
+}
+
 fn run_sc_query(service: &str) -> Result<String> {
     let output = Command::new("sc")
         .args(["query", service])
@@ -277,10 +307,15 @@ fn parse_windows_service_state(output: &str) -> WindowsServiceState {
 }
 
 fn build_wfp_probe_status(
+    backend_binary_exists: bool,
     platform_service: WindowsServiceState,
-    backend_service: Option<WindowsServiceState>,
-    backend_driver: Option<WindowsServiceState>,
+    backend_service: WindowsServiceState,
+    backend_driver: WindowsServiceState,
 ) -> WfpProbeStatus {
+    if !backend_binary_exists {
+        return WfpProbeStatus::BackendBinaryMissing;
+    }
+
     match platform_service {
         WindowsServiceState::Missing | WindowsServiceState::Unknown => {
             return WfpProbeStatus::PlatformServiceMissing;
@@ -289,55 +324,46 @@ fn build_wfp_probe_status(
         WindowsServiceState::Running => {}
     }
 
-    let Some(backend_service_name) = WINDOWS_WFP_BACKEND_SERVICE else {
-        let _ = backend_service;
-        let _ = backend_driver;
-        return WfpProbeStatus::BackendNotAvailableInBuild;
-    };
-
-    let service_state = backend_service.unwrap_or(WindowsServiceState::Missing);
-    match service_state {
+    match backend_service {
         WindowsServiceState::Missing | WindowsServiceState::Unknown => {
-            let _ = backend_service_name;
             return WfpProbeStatus::BackendServiceMissing;
         }
         WindowsServiceState::Stopped => return WfpProbeStatus::BackendServiceStopped,
         WindowsServiceState::Running => {}
     }
 
-    if WINDOWS_WFP_BACKEND_DRIVER.is_some() {
-        match backend_driver.unwrap_or(WindowsServiceState::Missing) {
-            WindowsServiceState::Missing | WindowsServiceState::Unknown => {
-                return WfpProbeStatus::BackendDriverMissing;
-            }
-            WindowsServiceState::Stopped => return WfpProbeStatus::BackendDriverStopped,
-            WindowsServiceState::Running => {}
+    match backend_driver {
+        WindowsServiceState::Missing | WindowsServiceState::Unknown => {
+            return WfpProbeStatus::BackendDriverMissing;
         }
+        WindowsServiceState::Stopped => return WfpProbeStatus::BackendDriverStopped,
+        WindowsServiceState::Running => {}
     }
 
     WfpProbeStatus::Ready
 }
 
-fn probe_wfp_backend_status() -> Result<WfpProbeStatus> {
-    let platform_output = run_sc_query(WINDOWS_WFP_PLATFORM_SERVICE)?;
-    let platform_state = parse_windows_service_state(&platform_output);
+fn probe_wfp_backend_status_with_config(config: &WfpProbeConfig) -> Result<WfpProbeStatus> {
+    if !config.backend_binary_path.exists() {
+        return Ok(WfpProbeStatus::BackendBinaryMissing);
+    }
 
-    let backend_service_state = WINDOWS_WFP_BACKEND_SERVICE
-        .map(run_sc_query)
-        .transpose()?
-        .as_deref()
-        .map(parse_windows_service_state);
-    let backend_driver_state = WINDOWS_WFP_BACKEND_DRIVER
-        .map(run_sc_query)
-        .transpose()?
-        .as_deref()
-        .map(parse_windows_service_state);
+    let platform_output = run_sc_query(config.platform_service)?;
+    let platform_state = parse_windows_service_state(&platform_output);
+    let backend_service_state = parse_windows_service_state(&run_sc_query(config.backend_service)?);
+    let backend_driver_state = parse_windows_service_state(&run_sc_query(config.backend_driver)?);
 
     Ok(build_wfp_probe_status(
+        true,
         platform_state,
         backend_service_state,
         backend_driver_state,
     ))
+}
+
+fn probe_wfp_backend_status() -> Result<WfpProbeStatus> {
+    let config = current_wfp_probe_config()?;
+    probe_wfp_backend_status_with_config(&config)
 }
 
 fn describe_wfp_probe_failure(
@@ -349,8 +375,8 @@ fn describe_wfp_probe_failure(
             "Windows WFP backend probing reported ready, but the enforcement installer is not implemented yet ({}).",
             policy.backend_summary()
         ),
-        WfpProbeStatus::BackendNotAvailableInBuild => format!(
-            "Windows network enforcement is targeting the WFP backend, but that backend is not available in this build yet ({}).",
+        WfpProbeStatus::BackendBinaryMissing => format!(
+            "Windows network enforcement is targeting the WFP backend, but its expected binary is missing from this build output ({}).",
             policy.backend_summary()
         ),
         WfpProbeStatus::PlatformServiceMissing => format!(
@@ -1559,9 +1585,25 @@ mod tests {
     }
 
     #[test]
-    fn test_build_wfp_probe_status_reports_backend_not_available_in_build() {
-        let status = build_wfp_probe_status(WindowsServiceState::Running, None, None);
-        assert_eq!(status, WfpProbeStatus::BackendNotAvailableInBuild);
+    fn test_build_wfp_probe_status_reports_missing_binary() {
+        let status = build_wfp_probe_status(
+            false,
+            WindowsServiceState::Running,
+            WindowsServiceState::Running,
+            WindowsServiceState::Running,
+        );
+        assert_eq!(status, WfpProbeStatus::BackendBinaryMissing);
+    }
+
+    #[test]
+    fn test_build_wfp_probe_status_reports_missing_service() {
+        let status = build_wfp_probe_status(
+            true,
+            WindowsServiceState::Running,
+            WindowsServiceState::Missing,
+            WindowsServiceState::Running,
+        );
+        assert_eq!(status, WfpProbeStatus::BackendServiceMissing);
     }
 
     #[test]
@@ -1575,6 +1617,31 @@ mod tests {
         let message = describe_wfp_probe_failure(&policy, WfpProbeStatus::PlatformServiceStopped);
         assert!(message.contains("Base Filtering Engine service is not running"));
         assert!(message.contains("preferred backend: windows-filtering-platform"));
+    }
+
+    #[test]
+    fn test_describe_wfp_probe_failure_reports_missing_binary() {
+        let policy = Sandbox::windows_network_policy(
+            &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
+        );
+        let message = describe_wfp_probe_failure(&policy, WfpProbeStatus::BackendBinaryMissing);
+        assert!(message.contains("expected binary is missing from this build output"));
+        assert!(message.contains("preferred backend: windows-filtering-platform"));
+    }
+
+    #[test]
+    fn test_probe_wfp_backend_status_with_config_reports_missing_binary_before_service_checks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: dir.path().join("missing-wfp-service.exe"),
+        };
+
+        let status =
+            probe_wfp_backend_status_with_config(&config).expect("probe status should resolve");
+        assert_eq!(status, WfpProbeStatus::BackendBinaryMissing);
     }
 
     #[test]
@@ -1599,7 +1666,7 @@ mod tests {
             .install(&policy, &config)
             .expect_err("WFP scaffold should fail closed for blocked mode");
         let message = err.to_string();
-        assert!(message.contains("not available in this build yet"));
+        assert!(message.contains("expected binary is missing from this build output"));
         assert!(message.contains("preferred backend: windows-filtering-platform"));
         assert!(message.contains("fail-closed"));
     }
@@ -1628,7 +1695,7 @@ mod tests {
             .install(&policy, &config)
             .expect_err("WFP scaffold should fail closed for proxy mode");
         let message = err.to_string();
-        assert!(message.contains("not available in this build yet"));
+        assert!(message.contains("expected binary is missing from this build output"));
         assert!(message.contains("fail-closed"));
     }
 }

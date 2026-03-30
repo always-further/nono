@@ -119,8 +119,12 @@ The WFP scaffold does not claim success. It returns deterministic diagnostics fo
 The first real probing layer is now in place for that scaffold:
 
 - it probes the Windows Base Filtering Engine (`BFE`) service as the platform prerequisite
-- it is structured to probe backend service/driver components once they exist in-repo
-- because this branch still does not ship a WFP service or driver component, current probe results land on `backend not available in this build`
+- it probes explicit expected backend component names:
+  - binary: `nono-wfp-service.exe`
+  - service: `nono-wfp-service`
+  - driver: `nono-wfp-driver`
+- missing backend binary is treated as an early installability failure before service probing
+- because this branch still does not ship that backend binary, current probe results land on `expected binary is missing from this build output`
 
 ## Real Blockers
 
