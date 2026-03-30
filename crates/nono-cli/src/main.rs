@@ -50,8 +50,10 @@ use cli::{
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
+#[cfg(target_os = "windows")]
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+#[cfg(target_os = "windows")]
 use std::process::Command;
 use std::sync::Mutex;
 use tracing::{error, info, warn};
@@ -1482,7 +1484,8 @@ pub(crate) fn merge_dedup_ports(a: &[u16], b: &[u16]) -> Vec<u16> {
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
     caps: &CapabilitySet,
-    current_dir: &std::path::Path,
+    #[cfg(target_os = "windows")] current_dir: &std::path::Path,
+    #[cfg(not(target_os = "windows"))] _current_dir: &std::path::Path,
     silent: bool,
 ) -> Result<()> {
     if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
@@ -2565,7 +2568,7 @@ fn execute_sandboxed(
                 &protected_roots,
                 &approval_backend,
                 &supervisor_session_id,
-                flags,
+                &flags,
                 #[cfg(target_os = "linux")]
                 sup_proxy_port,
                 #[cfg(target_os = "linux")]

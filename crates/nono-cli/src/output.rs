@@ -389,10 +389,10 @@ pub fn print_dry_run(
     );
 }
 
-fn dry_run_summary(support: &nono::SupportInfo) -> &'static str {
+fn dry_run_summary(_support: &nono::SupportInfo) -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        if !support.is_supported {
+        if !_support.is_supported {
             return "preview validation only; sandbox enforcement is not implemented on Windows yet";
         }
     }

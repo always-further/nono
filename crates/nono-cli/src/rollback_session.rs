@@ -4,7 +4,6 @@
 //! stored in the platform's nono rollback directory. This is a CLI concern — the library
 //! provides primitives, the CLI provides session lifecycle management.
 
-use crate::config;
 use nono::undo::{SessionMetadata, SnapshotManager};
 use nono::{NonoError, Result};
 use std::fs;
@@ -30,7 +29,7 @@ pub struct SessionInfo {
 pub fn rollback_root() -> Result<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        config::user_state_dir()
+        crate::config::user_state_dir()
             .ok_or(NonoError::ConfigParse(
                 "Could not determine Windows state directory for rollback storage".to_string(),
             ))
