@@ -24,8 +24,8 @@ Status labels:
 | Dry-run validation | working | Validates command, profile, and capability state without claiming enforcement | None for preview validation itself |
 | Direct `nono run` preview execution | partial | Executes commands with explicit preview warnings, environment sanitization, basic process-lifetime containment, and launch-time executable policy validation | Full filesystem and network enforcement are not active yet |
 | Live restricted execution (`--allow`, `--read`, `--block-net`, profile-backed policy) | partial | Supported directory-only allowlists can run when the workdir stays inside the compiled Windows subset; unsupported filesystem shapes and network controls still fail loudly | Needs a real Windows sandbox backend |
-| `nono shell` live execution | stubbed | Explicitly rejected on Windows preview | Requires real enforcement semantics for interactive shells |
-| `nono wrap` live execution | stubbed | Explicitly rejected on Windows preview | Requires real one-way sandbox application support |
+| `nono shell` live execution | stubbed | Backend-owned Windows preview entry-point validation rejects shell mode deterministically because interactive shell enforcement is not implemented | Requires real enforcement semantics for interactive shells |
+| `nono wrap` live execution | stubbed | Backend-owned Windows preview entry-point validation rejects wrap mode deterministically because one-way wrap enforcement is not implemented | Requires real one-way sandbox application support |
 | Supervisor control channel | partial | Windows execution can initialize supervisor control-channel plumbing | The supervisor event loop and capability expansion are not implemented yet |
 | Supervisor-driven rollback / audit session flow | stubbed | Windows can surface scaffold-state errors for supervised requests | Requires a real parent/child supervisor loop |
 | Runtime capability elevation | stubbed | Control-channel scaffold exists only for future wiring | Needs Windows interception and approval flow |

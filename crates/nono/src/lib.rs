@@ -76,7 +76,9 @@ pub use net_filter::{FilterResult, HostFilter};
 pub use sandbox::{detect_abi, DetectedAbi};
 pub use sandbox::{PreviewRuntimeStatus, Sandbox, SupportInfo, SupportStatus};
 #[cfg(target_os = "windows")]
-pub use sandbox::{WindowsFilesystemPolicy, WindowsFilesystemRule, WindowsPreviewContext};
+pub use sandbox::{
+    WindowsFilesystemPolicy, WindowsFilesystemRule, WindowsPreviewContext, WindowsPreviewEntryPoint,
+};
 pub use state::SandboxState;
 pub use supervisor::{
     ApprovalBackend, ApprovalDecision, CapabilityRequest, SupervisorSocket, UrlOpenRequest,

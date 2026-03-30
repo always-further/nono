@@ -7,8 +7,8 @@ use crate::capability::CapabilitySet;
 use crate::error::{NonoError, Result};
 use crate::sandbox::{
     PreviewRuntimeStatus, SupportInfo, SupportStatus, WindowsFilesystemPolicy,
-    WindowsFilesystemRule, WindowsPreviewContext, WindowsUnsupportedIssue,
-    WindowsUnsupportedIssueKind,
+    WindowsFilesystemRule, WindowsPreviewContext, WindowsPreviewEntryPoint,
+    WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
 };
 use std::path::{Component, Path, PathBuf};
 
@@ -105,6 +105,41 @@ pub fn preview_runtime_status(
         PreviewRuntimeStatus::AdvisoryOnly
     } else {
         PreviewRuntimeStatus::RequiresEnforcement { reasons }
+    }
+}
+
+pub fn validate_preview_entry_point(
+    entry_point: WindowsPreviewEntryPoint,
+    caps: &CapabilitySet,
+    execution_dir: &Path,
+    context: WindowsPreviewContext,
+) -> Result<()> {
+    match entry_point {
+        WindowsPreviewEntryPoint::RunDirect => {
+            if let PreviewRuntimeStatus::RequiresEnforcement { reasons } =
+                preview_runtime_status(caps, execution_dir, context)
+            {
+                return Err(NonoError::UnsupportedPlatform(format!(
+                    "Windows preview cannot enforce the requested sandbox controls for this live run ({}). \
+Use `nono run --dry-run ...` to validate policy, or rerun without those controls. \
+This is a preview limitation, not permanent product behavior.",
+                    reasons.join(", ")
+                )));
+            }
+            Ok(())
+        }
+        WindowsPreviewEntryPoint::Shell => Err(NonoError::UnsupportedPlatform(
+            "Windows preview does not support `nono shell` live execution yet because interactive shell enforcement is not implemented. \
+Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspect policy. \
+This is a preview limitation, not permanent product behavior."
+                .to_string(),
+        )),
+        WindowsPreviewEntryPoint::Wrap => Err(NonoError::UnsupportedPlatform(
+            "Windows preview does not support `nono wrap` live execution yet because one-way wrap enforcement is not implemented. \
+Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspect policy. \
+This is a preview limitation, not permanent product behavior."
+                .to_string(),
+        )),
     }
 }
 
@@ -995,6 +1030,30 @@ mod tests {
                 reasons: vec!["filesystem deny-override policy"]
             }
         );
+    }
+
+    #[test]
+    fn validate_preview_entry_point_rejects_shell() {
+        let err = validate_preview_entry_point(
+            WindowsPreviewEntryPoint::Shell,
+            &CapabilitySet::new(),
+            Path::new("."),
+            WindowsPreviewContext::default(),
+        )
+        .expect_err("shell should remain unsupported on Windows preview");
+        assert!(err.to_string().contains("`nono shell`"));
+    }
+
+    #[test]
+    fn validate_preview_entry_point_rejects_wrap() {
+        let err = validate_preview_entry_point(
+            WindowsPreviewEntryPoint::Wrap,
+            &CapabilitySet::new(),
+            Path::new("."),
+            WindowsPreviewContext::default(),
+        )
+        .expect_err("wrap should remain unsupported on Windows preview");
+        assert!(err.to_string().contains("`nono wrap`"));
     }
 
     #[test]

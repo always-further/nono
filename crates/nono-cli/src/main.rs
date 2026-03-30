@@ -986,12 +986,19 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
 
     #[cfg(target_os = "windows")]
     if !Sandbox::support_info().is_supported {
-        return Err(NonoError::UnsupportedPlatform(
-            "Windows preview does not support `nono shell` live execution yet because sandbox enforcement is not implemented. \
-Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspect policy. \
-This is a preview limitation, not permanent product behavior."
-                .to_string(),
-        ));
+        Sandbox::validate_windows_preview_entry_point(
+            nono::WindowsPreviewEntryPoint::Shell,
+            &prepared.caps,
+            &args
+                .sandbox
+                .workdir
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
+            nono::WindowsPreviewContext {
+                has_deny_override_policy: !prepared.override_deny_paths.is_empty(),
+            },
+        )?;
     }
 
     if prepared.allow_launch_services_active {
@@ -1061,12 +1068,18 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
 
     #[cfg(target_os = "windows")]
     if !Sandbox::support_info().is_supported {
-        return Err(NonoError::UnsupportedPlatform(
-            "Windows preview does not support `nono wrap` live execution yet because it would imply sandbox enforcement that is not implemented. \
-Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspect policy. \
-This is a preview limitation, not permanent product behavior."
-                .to_string(),
-        ));
+        Sandbox::validate_windows_preview_entry_point(
+            nono::WindowsPreviewEntryPoint::Wrap,
+            &prepared.caps,
+            &args
+                .workdir
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
+            nono::WindowsPreviewContext {
+                has_deny_override_policy: !prepared.override_deny_paths.is_empty(),
+            },
+        )?;
     }
 
     // Also reject proxy flags that came from the profile (not just CLI).
@@ -1366,29 +1379,14 @@ fn validate_windows_preview_direct_execution(
         return Ok(());
     }
 
-    let mut reasons = Vec::new();
-    if let nono::PreviewRuntimeStatus::RequiresEnforcement {
-        reasons: backend_reasons,
-    } = Sandbox::preview_runtime_status(
+    Sandbox::validate_windows_preview_entry_point(
+        nono::WindowsPreviewEntryPoint::RunDirect,
         caps,
         &flags.workdir,
         nono::WindowsPreviewContext {
             has_deny_override_policy: !flags.override_deny_paths.is_empty(),
         },
-    ) {
-        reasons.extend(backend_reasons.into_iter().map(str::to_string));
-    }
-
-    if reasons.is_empty() {
-        return Ok(());
-    }
-
-    Err(NonoError::UnsupportedPlatform(format!(
-        "Windows preview cannot enforce the requested sandbox controls for this live run ({}). \
-Use `nono run --dry-run ...` to validate policy, or rerun without those controls. \
-This is a preview limitation, not permanent product behavior.",
-        reasons.join(", ")
-    )))
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]

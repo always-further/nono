@@ -112,6 +112,16 @@ pub struct WindowsPreviewContext {
     pub has_deny_override_policy: bool,
 }
 
+/// Windows command entry points that may need distinct preview enforcement
+/// decisions.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsPreviewEntryPoint {
+    RunDirect,
+    Shell,
+    Wrap,
+}
+
 /// A Windows filesystem rule compiled from the capability set.
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +427,19 @@ impl Sandbox {
         context: WindowsPreviewContext,
     ) -> PreviewRuntimeStatus {
         windows::preview_runtime_status(caps, execution_dir, context)
+    }
+
+    /// Validate whether a Windows preview entry point can proceed for the
+    /// requested capability set and context.
+    #[cfg(target_os = "windows")]
+    #[must_use = "Windows preview entry-point validation result should be checked"]
+    pub fn validate_windows_preview_entry_point(
+        entry_point: WindowsPreviewEntryPoint,
+        caps: &CapabilitySet,
+        execution_dir: &Path,
+        context: WindowsPreviewContext,
+    ) -> Result<()> {
+        windows::validate_preview_entry_point(entry_point, caps, execution_dir, context)
     }
 
     /// Compile the current capability set into the Windows filesystem policy
