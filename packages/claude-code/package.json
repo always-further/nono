@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "name": "claude-code",
+  "description": "Sandbox profile, hooks, and trust policy for Anthropic Claude Code",
+  "license": "Apache-2.0",
+  "platforms": ["macos", "linux"],
+  "min_nono_version": "0.19.0",
+  "artifacts": [
+    {
+      "type": "profile",
+      "path": "claude-code.profile.json",
+      "install_as": "claude-code"
+    },
+    {
+      "type": "hook",
+      "path": "hooks/nono-hook.sh",
+      "target": "claude-code",
+      "install_dir": "~/.claude/hooks"
+    },
+    {
+      "type": "instruction",
+      "path": "CLAUDE.md",
+      "placement": "project"
+    },
+    {
+      "type": "groups",
+      "path": "groups.json",
+      "prefix": "claude_code"
+    }
+  ]
+}

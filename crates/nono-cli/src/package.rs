@@ -105,6 +105,10 @@ pub struct LockedArtifact {
     pub sha256: String,
     #[serde(rename = "type")]
     pub artifact_type: ArtifactType,
+    /// External path where this artifact was installed (outside the package store).
+    /// Used by `nono remove` to clean up files placed via `install_dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_path: Option<String>,
 }
 
 impl Default for LockedPackage {

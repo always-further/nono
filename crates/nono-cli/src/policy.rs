@@ -1324,7 +1324,12 @@ pub fn load_embedded_policy() -> Result<Policy> {
 }
 
 pub fn load_package_groups(policy: &mut Policy) -> Result<()> {
-    let lockfile = package::read_lockfile()?;
+    // Tolerate missing config dir / lockfile — no packages installed means
+    // no groups to load. This is the common case in tests and fresh installs.
+    let lockfile = match package::read_lockfile() {
+        Ok(lf) => lf,
+        Err(_) => return Ok(()),
+    };
     for package_key in lockfile.packages.keys() {
         let (namespace, name) = package_key.split_once('/').ok_or_else(|| {
             NonoError::PackageInstall(format!("invalid lockfile package key '{package_key}'"))

@@ -1,0 +1,52 @@
+{
+  "extends": "default",
+  "meta": {
+    "name": "claude-code",
+    "version": "1.0.0",
+    "description": "Anthropic Claude Code CLI agent",
+    "author": "nono-project"
+  },
+  "security": {
+    "groups": [
+      "claude_code_macos",
+      "claude_code_linux",
+      "claude_code_cache_linux",
+      "user_caches_macos",
+      "node_runtime",
+      "rust_runtime",
+      "python_runtime",
+      "vscode_macos",
+      "vscode_linux",
+      "nix_runtime",
+      "git_config",
+      "unlink_protection"
+    ],
+    "signal_mode": "isolated",
+    "capability_elevation": false
+  },
+  "filesystem": {
+    "allow": ["$HOME/.claude"],
+    "allow_file": ["$HOME/.claude.json", "$HOME/.claude.json.lock"]
+  },
+  "network": { "block": false },
+  "workdir": { "access": "readwrite" },
+  "open_urls": {
+    "allow_origins": [
+      "https://claude.ai"
+    ],
+    "allow_localhost": true
+  },
+  "allow_launch_services": true,
+  "hooks": {
+    "claude-code": {
+      "event": "PostToolUseFailure",
+      "matcher": "Read|Write|Edit|Bash",
+      "script": "nono-hook.sh"
+    }
+  },
+  "undo": {
+    "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
+    "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
+  },
+  "interactive": true
+}

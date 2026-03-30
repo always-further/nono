@@ -1,0 +1,29 @@
+{
+  "claude_code_macos": {
+    "description": "Claude Code macOS-specific state and credential paths",
+    "platform": "macos",
+    "allow": {
+      "read": [
+        "$HOME/Library/Keychains/login.keychain-db"
+      ]
+    }
+  },
+  "claude_code_linux": {
+    "description": "Claude Code Linux-specific state paths",
+    "platform": "linux",
+    "allow": {
+      "read": [
+        "$HOME/.local/share/claude"
+      ]
+    }
+  },
+  "claude_code_cache_linux": {
+    "description": "Claude Code CLI cache and MCP log directories on Linux",
+    "platform": "linux",
+    "allow": {
+      "readwrite": [
+        "~/.cache/claude-cli-nodejs"
+      ]
+    }
+  }
+}
