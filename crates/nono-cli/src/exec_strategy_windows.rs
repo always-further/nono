@@ -96,6 +96,11 @@ enum NetworkEnforcementGuard {
     },
 }
 
+struct PreparedWindowsLaunch {
+    _network_enforcement: Option<NetworkEnforcementGuard>,
+    launch_program: PathBuf,
+}
+
 impl NetworkEnforcementGuard {
     fn launch_program(&self) -> &Path {
         match self {
@@ -107,6 +112,38 @@ impl NetworkEnforcementGuard {
             }
         }
     }
+}
+
+fn prepare_live_windows_launch(config: &ExecConfig<'_>) -> Result<PreparedWindowsLaunch> {
+    let fs_policy = Sandbox::windows_filesystem_policy(config.caps);
+    Sandbox::validate_windows_launch_paths(
+        &fs_policy,
+        config.resolved_program,
+        config.current_dir,
+    )?;
+    Sandbox::validate_windows_command_args(
+        &fs_policy,
+        config.resolved_program,
+        &config.command[1..],
+        config.current_dir,
+    )?;
+    tracing::debug!(
+        "Windows live-execution backend prepared filesystem policy: {} compiled rule(s), {} unsupported rule(s)",
+        fs_policy.rules.len(),
+        fs_policy.unsupported.len()
+    );
+
+    let network_enforcement = prepare_network_enforcement(config)?;
+    let launch_program = network_enforcement
+        .as_ref()
+        .map(NetworkEnforcementGuard::launch_program)
+        .unwrap_or(config.resolved_program)
+        .to_path_buf();
+
+    Ok(PreparedWindowsLaunch {
+        _network_enforcement: network_enforcement,
+        launch_program,
+    })
 }
 
 trait WindowsNetworkBackend {
@@ -2218,28 +2255,8 @@ fn execute_supervised_with_standard_token(
 }
 
 pub fn execute_direct(config: &ExecConfig<'_>) -> Result<i32> {
-    let fs_policy = Sandbox::windows_filesystem_policy(config.caps);
-    Sandbox::validate_windows_launch_paths(
-        &fs_policy,
-        config.resolved_program,
-        config.current_dir,
-    )?;
-    Sandbox::validate_windows_command_args(
-        &fs_policy,
-        config.resolved_program,
-        &config.command[1..],
-        config.current_dir,
-    )?;
-    tracing::debug!(
-        "Windows direct-execution filesystem policy compiler is available: {} compiled rule(s), {} unsupported rule(s)",
-        fs_policy.rules.len(),
-        fs_policy.unsupported.len()
-    );
-    let network_enforcement = prepare_network_enforcement(config)?;
-    let launch_program = network_enforcement
-        .as_ref()
-        .map(NetworkEnforcementGuard::launch_program)
-        .unwrap_or(config.resolved_program);
+    let prepared = prepare_live_windows_launch(config)?;
+    let launch_program = prepared.launch_program.as_path();
 
     let cmd_args = prepare_runtime_hardened_args(launch_program, &config.command[1..]);
     let containment = create_process_containment()?;
@@ -2291,23 +2308,8 @@ pub fn execute_supervised(
         )));
     }
 
-    let fs_policy = Sandbox::windows_filesystem_policy(config.caps);
-    Sandbox::validate_windows_launch_paths(
-        &fs_policy,
-        config.resolved_program,
-        config.current_dir,
-    )?;
-    Sandbox::validate_windows_command_args(
-        &fs_policy,
-        config.resolved_program,
-        &config.command[1..],
-        config.current_dir,
-    )?;
-    let network_enforcement = prepare_network_enforcement(config)?;
-    let launch_program = network_enforcement
-        .as_ref()
-        .map(NetworkEnforcementGuard::launch_program)
-        .unwrap_or(config.resolved_program);
+    let prepared = prepare_live_windows_launch(config)?;
+    let launch_program = prepared.launch_program.as_path();
 
     let containment = create_process_containment()?;
     tracing::debug!(

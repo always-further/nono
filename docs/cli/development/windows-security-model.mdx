@@ -162,6 +162,13 @@ The Windows supervised path is now split intentionally:
 
 That means Windows supervised execution is no longer purely scaffold-only, but it is also not Unix-parity supervision yet. The current implementation is a rollback-oriented supervised runtime with deterministic rejection for the remaining unsupported feature classes.
 
+The live Windows launch path is now also shared intentionally across direct and supervised execution for the currently supported subset:
+
+- both paths compile the same Windows filesystem and network backend plans
+- both paths validate launch-time filesystem and argument coverage through the backend before spawn
+- both paths route blocked-network enforcement through the same promoted WFP-backed service contract for the supported subset
+- unsupported direct or supervised restrictions fail with backend-owned diagnostics instead of caller-specific fallback wording
+
 ## Design Rules
 
 - Do not report Windows support as full until filesystem and network restrictions are truly enforced.

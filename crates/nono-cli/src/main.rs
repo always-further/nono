@@ -1509,7 +1509,7 @@ fn apply_pre_fork_sandbox(
                 info!("Windows preview runtime status: {:?}", preview);
                 if !silent {
                     output::print_warning(
-                        "Windows preview: running with basic Windows process containment and a limited Windows filesystem subset for executable coverage and supported directory allowlists; full filesystem and network enforcement are not active yet",
+                        "Windows preview: running with backend-owned Windows process containment plus the currently supported enforced subset for filesystem and blocked-network policy; unsupported Windows restrictions still fail closed with backend diagnostics",
                     );
                     eprintln!();
                 }
@@ -2363,7 +2363,7 @@ fn execute_sandboxed(
             #[cfg(target_os = "windows")]
             if !Sandbox::support_info().is_supported && !flags.silent {
                 output::print_warning(
-                    "Windows preview: supervised execution is active for supported Windows features such as rollback snapshots; unsupported supervised features still fail loudly",
+                    "Windows preview: supervised execution uses backend-owned Windows feature classification, so supported supervised features run and unsupported ones fail closed with backend diagnostics",
                 );
                 eprintln!();
             }

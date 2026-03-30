@@ -2290,6 +2290,75 @@ fn windows_run_supervised_rollback_executes_command() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_run_supervised_rollback_block_net_uses_promoted_wfp_backend() {
+    let probe = windows_net_probe_bin();
+    if !try_add_and_remove_windows_firewall_rule(&probe) {
+        return;
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set listener nonblocking");
+    let port = listener
+        .local_addr()
+        .expect("listener addr")
+        .port()
+        .to_string();
+
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let rollback_dest = dir.path().join("rollbacks");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    std::fs::create_dir_all(&rollback_dest).expect("mkdir rollback dest");
+    let allowed = dir.path().to_string_lossy().into_owned();
+    let workdir = workspace.to_string_lossy().into_owned();
+    let rollback_dest = rollback_dest.to_string_lossy().into_owned();
+    let probe = probe.to_string_lossy().into_owned();
+
+    let output = nono_bin()
+        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
+        .args([
+            "run",
+            "--rollback",
+            "--no-rollback-prompt",
+            "--block-net",
+            "--allow",
+            &allowed,
+            "--workdir",
+            &workdir,
+            "--rollback-dest",
+            &rollback_dest,
+            "--",
+            &probe,
+            "127.0.0.1",
+            &port,
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows supervised rollback blocked-network run should fail the probe connection, output:\n{text}"
+    );
+    assert!(
+        !text.contains("install-wfp-service"),
+        "expected promoted WFP backend path rather than readiness/setup failure, got:\n{text}"
+    );
+    assert!(
+        !text.contains("not implemented yet"),
+        "expected live supervised blocked-network path rather than placeholder activation, got:\n{text}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(
+        listener.accept().is_err(),
+        "listener unexpectedly accepted a connection during supervised blocked run, output:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn windows_wrap_reports_preview_limitation() {
     let output = nono_bin()
         .args(["wrap", "--", "cmd", "/c", "echo", "test"])
