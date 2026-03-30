@@ -1816,7 +1816,7 @@ fn windows_run_blocks_live_block_net_without_enforcement() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_run_supervised_preview_initializes_control_channel_scaffold() {
+fn windows_run_supervised_blocks_runtime_capability_elevation_with_actionable_diagnostic() {
     let output = nono_bin()
         .args([
             "run",
@@ -1834,15 +1834,62 @@ fn windows_run_supervised_preview_initializes_control_channel_scaffold() {
     let text = combined_output(&output);
     assert!(
         !output.status.success(),
-        "Windows preview rollback should stop after scaffold init, output:\n{text}"
+        "Windows preview should fail clearly for unsupported supervised features, output:\n{text}"
     );
     assert!(
-        text.contains("control channel scaffold"),
-        "expected supervisor scaffold message, got:\n{text}"
+        text.contains("initialized the control channel"),
+        "expected supervisor control-channel startup message, got:\n{text}"
     );
     assert!(
         text.contains("runtime capability elevation"),
         "expected requested supervised feature in message, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_supervised_rollback_executes_command() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    let rollback_dest = dir.path().join("rollbacks");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    std::fs::create_dir_all(&rollback_dest).expect("mkdir rollback dest");
+    let allowed = dir.path().to_string_lossy().into_owned();
+    let workdir = workspace.to_string_lossy().into_owned();
+    let rollback_dest = rollback_dest.to_string_lossy().into_owned();
+
+    let output = nono_bin()
+        .args([
+            "run",
+            "--rollback",
+            "--no-rollback-prompt",
+            "--allow",
+            &allowed,
+            "--workdir",
+            &workdir,
+            "--rollback-dest",
+            &rollback_dest,
+            "--",
+            "cmd",
+            "/c",
+            "echo",
+            "test",
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows supervised rollback run should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("test"),
+        "expected child command output from supervised rollback run, got:\n{text}"
+    );
+    assert!(
+        !text.contains("scaffold only"),
+        "supported supervised rollback should not claim scaffold-only behavior, got:\n{text}"
     );
 }
 

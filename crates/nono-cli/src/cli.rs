@@ -892,7 +892,7 @@ pub struct RunArgs {
     pub skip_dir: Vec<String>,
 
     /// Override the rollback snapshot destination directory.
-    /// By default, snapshots are stored in ~/.nono/rollbacks/.
+    /// By default, snapshots are stored in the platform's nono rollback directory.
     /// The destination must be within a path already granted write access
     /// by --allow (or profile); nono will fail with a clear error if not.
     /// Useful for Docker volume mounts or shared storage paths.

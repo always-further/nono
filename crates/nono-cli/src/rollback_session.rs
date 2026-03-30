@@ -1,9 +1,10 @@
 //! Session discovery and management for the rollback system
 //!
 //! Provides functions to discover, load, and manage rollback sessions
-//! stored in `~/.nono/rollbacks/`. This is a CLI concern — the library
+//! stored in the platform's nono rollback directory. This is a CLI concern — the library
 //! provides primitives, the CLI provides session lifecycle management.
 
+use crate::config;
 use nono::undo::{SessionMetadata, SnapshotManager};
 use nono::{NonoError, Result};
 use std::fs;
@@ -25,9 +26,20 @@ pub struct SessionInfo {
     pub is_stale: bool,
 }
 
-/// Get the rollback root directory (`~/.nono/rollbacks/`)
+/// Get the rollback root directory.
 pub fn rollback_root() -> Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        config::user_state_dir()
+            .ok_or(NonoError::ConfigParse(
+                "Could not determine Windows state directory for rollback storage".to_string(),
+            ))
+            .map(|root| root.join("rollbacks"))
+    }
+
+    #[cfg(not(target_os = "windows"))]
     let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+    #[cfg(not(target_os = "windows"))]
     Ok(home.join(".nono").join("rollbacks"))
 }
 
@@ -35,7 +47,7 @@ pub fn rollback_root() -> Result<PathBuf> {
 ///
 /// When `override_path` is `Some`, it is returned directly, allowing the user
 /// to redirect snapshot storage (e.g., to a Docker volume mount). When `None`,
-/// falls back to the default `~/.nono/rollbacks/`.
+/// falls back to the default rollback root for the current platform.
 pub fn rollback_root_with_override(override_path: Option<&PathBuf>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path.clone());
@@ -43,7 +55,7 @@ pub fn rollback_root_with_override(override_path: Option<&PathBuf>) -> Result<Pa
     rollback_root()
 }
 
-/// Discover all rollback sessions in `~/.nono/rollbacks/`.
+/// Discover all rollback sessions in the default rollback root.
 ///
 /// Scans the rollback root directory, loads session metadata from each
 /// subdirectory, and enriches with derived data (disk size, alive status).
@@ -292,6 +304,15 @@ mod tests {
         fs::write(dir.path().join("b.txt"), b"world!").expect("write");
         let size = calculate_dir_size(dir.path());
         assert_eq!(size, 11); // 5 + 6
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rollback_root_uses_windows_state_dir() {
+        let expected = crate::config::user_state_dir()
+            .expect("Windows state dir")
+            .join("rollbacks");
+        assert_eq!(rollback_root().expect("rollback root"), expected);
     }
 
     #[test]

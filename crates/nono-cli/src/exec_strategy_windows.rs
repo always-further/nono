@@ -200,6 +200,15 @@ fn initialize_supervisor_control_channel(
     })
 }
 
+fn collect_unsupported_supervised_features(supervisor: &SupervisorConfig<'_>) -> Vec<String> {
+    supervisor
+        .requested_features
+        .iter()
+        .filter(|feature| **feature != "rollback snapshots")
+        .map(|feature| (*feature).to_string())
+        .collect()
+}
+
 fn prepare_runtime_hardened_args(resolved_program: &Path, args: &[String]) -> Vec<String> {
     let program_name = resolved_program
         .file_name()
@@ -624,6 +633,32 @@ fn execute_direct_with_low_integrity(
     Ok(exit_code as i32)
 }
 
+fn execute_supervised_with_low_integrity(
+    config: &ExecConfig<'_>,
+    containment: &ProcessContainment,
+) -> Result<i32> {
+    let cmd_args = prepare_runtime_hardened_args(config.resolved_program, &config.command[1..]);
+    execute_direct_with_low_integrity(config, containment, &cmd_args)
+}
+
+fn execute_supervised_with_standard_token(
+    config: &ExecConfig<'_>,
+    containment: &ProcessContainment,
+) -> Result<i32> {
+    let cmd_args = prepare_runtime_hardened_args(config.resolved_program, &config.command[1..]);
+    let mut cmd = Command::new(config.resolved_program);
+    cmd.env_clear();
+    cmd.current_dir(config.current_dir);
+    for (key, value) in build_child_env(config) {
+        cmd.env(key, value);
+    }
+    cmd.args(&cmd_args);
+    let mut child = cmd.spawn().map_err(NonoError::CommandExecution)?;
+    apply_process_containment(containment, &child)?;
+    let status = child.wait().map_err(NonoError::CommandExecution)?;
+    Ok(status.code().unwrap_or(1))
+}
+
 pub fn execute_direct(config: &ExecConfig<'_>) -> Result<i32> {
     let fs_policy = Sandbox::windows_filesystem_policy(config.caps);
     Sandbox::validate_windows_launch_paths(
@@ -663,32 +698,68 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<i32> {
 }
 
 pub fn execute_supervised(
-    _config: &ExecConfig<'_>,
+    config: &ExecConfig<'_>,
     supervisor: Option<&SupervisorConfig<'_>>,
     _trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
 ) -> Result<i32> {
-    if let Some(supervisor) = supervisor {
-        let (parent_control, _child_control) = initialize_supervisor_control_channel()?;
-        let requested = if supervisor.requested_features.is_empty() {
-            "future supervisor features".to_string()
-        } else {
-            supervisor.requested_features.join(", ")
-        };
+    let Some(supervisor) = supervisor else {
         return Err(NonoError::UnsupportedPlatform(
-            format!(
-                "Windows preview initialized the supervisor control channel scaffold \
-                 (session: {}, transport: {}), but the supervisor event loop is not implemented yet. \
-                 Requested features: {}. This is a preview limitation, not permanent product behavior.",
-                supervisor.session_id,
-                parent_control.transport_name(),
-                requested
-            ),
+            "Windows supervised execution requires supervisor configuration".to_string(),
         ));
+    };
+
+    let (parent_control, _child_control) = initialize_supervisor_control_channel()?;
+    let unsupported = collect_unsupported_supervised_features(supervisor);
+    if !unsupported.is_empty() {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows supervised execution initialized the control channel \
+             (session: {}, transport: {}), but these supervised features are not implemented yet: {}. \
+             Supported Windows supervised features currently: rollback snapshots. \
+             This is a preview limitation, not permanent product behavior.",
+            supervisor.session_id,
+            parent_control.transport_name(),
+            unsupported.join(", ")
+        )));
     }
 
-    Err(NonoError::UnsupportedPlatform(
-        "Windows supervised execution is not implemented yet".to_string(),
-    ))
+    let fs_policy = Sandbox::windows_filesystem_policy(config.caps);
+    Sandbox::validate_windows_launch_paths(
+        &fs_policy,
+        config.resolved_program,
+        config.current_dir,
+    )?;
+    Sandbox::validate_windows_command_args(
+        &fs_policy,
+        config.resolved_program,
+        &config.command[1..],
+        config.current_dir,
+    )?;
+
+    let containment = create_process_containment()?;
+    tracing::debug!(
+        "Windows supervised execution starting event loop (session: {}, transport: {}, features: {})",
+        supervisor.session_id,
+        parent_control.transport_name(),
+        if supervisor.requested_features.is_empty() {
+            "none".to_string()
+        } else {
+            supervisor.requested_features.join(", ")
+        }
+    );
+
+    let exit_code = if should_use_low_integrity_windows_launch(config.caps) {
+        execute_supervised_with_low_integrity(config, &containment)?
+    } else {
+        execute_supervised_with_standard_token(config, &containment)?
+    };
+
+    tracing::debug!(
+        "Windows supervised execution finished cleanly (session: {}, transport: {}, exit_code: {})",
+        supervisor.session_id,
+        parent_control.transport_name(),
+        exit_code
+    );
+    Ok(exit_code)
 }
 
 #[cfg(test)]
@@ -714,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_supervised_reports_scaffold_state() {
+    fn test_execute_supervised_rejects_unsupported_features() {
         let command = vec![
             "cmd".to_string(),
             "/c".to_string(),
@@ -738,11 +809,41 @@ mod tests {
         };
 
         let err = execute_supervised(&config, Some(&supervisor), None)
-            .expect_err("supervised preview should stop after initializing the channel");
+            .expect_err("unsupported supervised features should fail clearly");
         let message = err.to_string();
-        assert!(message.contains("control channel scaffold"));
+        assert!(message.contains("initialized the control channel"));
         assert!(message.contains("transport:"));
-        assert!(message.contains("event loop is not implemented yet"));
+        assert!(message.contains("rollback snapshots"));
+        assert!(message.contains("not implemented yet"));
+    }
+
+    #[test]
+    fn test_execute_supervised_runs_supported_rollback_lifecycle() {
+        let command = vec![
+            "cmd".to_string(),
+            "/c".to_string(),
+            "exit".to_string(),
+            "0".to_string(),
+        ];
+        let resolved_program = PathBuf::from(r"C:\Windows\System32\cmd.exe");
+        let cap_file = PathBuf::from("C:\\tmp\\nono-cap-state");
+        let current_dir = std::env::current_dir().expect("cwd");
+        let config = ExecConfig {
+            command: &command,
+            resolved_program: &resolved_program,
+            caps: &CapabilitySet::new(),
+            env_vars: Vec::new(),
+            cap_file: Some(&cap_file),
+            current_dir: &current_dir,
+        };
+        let supervisor = SupervisorConfig {
+            session_id: "rollback-session",
+            requested_features: vec!["rollback snapshots"],
+        };
+
+        let exit_code =
+            execute_supervised(&config, Some(&supervisor), None).expect("rollback should run");
+        assert_eq!(exit_code, 0);
     }
 
     #[test]

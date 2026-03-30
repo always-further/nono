@@ -861,7 +861,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         if !covered {
             eprintln!(
                 "nono: --rollback-dest '{}' is not covered by sandbox write permissions.\n\
-                 Add --allow {} to grant access, or omit --rollback-dest to use the default path (~/.nono/rollbacks/).",
+                 Add --allow {} to grant access, or omit --rollback-dest to use the default platform rollback path.",
                 dest.display(),
                 dest.display()
             );
@@ -1138,7 +1138,7 @@ struct ExecutionFlags {
     rollback_all: bool,
     /// Force-include specific directories that would otherwise be auto-excluded
     rollback_include: Vec<String>,
-    /// Custom destination directory for rollback snapshots (overrides ~/.nono/rollbacks/)
+    /// Custom destination directory for rollback snapshots (overrides the default platform rollback path)
     rollback_dest: Option<std::path::PathBuf>,
     /// Root directory for trust policy discovery and scanning
     scan_root: std::path::PathBuf,
@@ -2375,7 +2375,7 @@ fn execute_sandboxed(
             #[cfg(target_os = "windows")]
             if !Sandbox::support_info().is_supported && !flags.silent {
                 output::print_warning(
-                    "Windows preview: initializing supervisor scaffold only; sandbox enforcement is not implemented yet",
+                    "Windows preview: supervised execution is active for supported Windows features such as rollback snapshots; unsupported supervised features still fail loudly",
                 );
                 eprintln!();
             }
@@ -3405,11 +3405,11 @@ fn write_capability_state_file(
     // Write sandbox state for `nono why --self`.
     #[cfg(target_os = "windows")]
     let cap_file = if let Some(runtime_dir) = preferred_runtime_dir {
-        let runtime_root = runtime_dir.join(".nono-runtime");
-        if let Err(e) = std::fs::create_dir_all(&runtime_root) {
+        let runtime_tmp_dir = runtime_dir.join(".nono-runtime").join("tmp");
+        if let Err(e) = std::fs::create_dir_all(&runtime_tmp_dir) {
             error!(
                 "Failed to create Windows runtime state directory {}: {}",
-                runtime_root.display(),
+                runtime_tmp_dir.display(),
                 e
             );
             if !silent {
@@ -3420,7 +3420,7 @@ fn write_capability_state_file(
             }
             return None;
         }
-        runtime_root.join(format!(".nono-{}.json", std::process::id()))
+        runtime_tmp_dir.join(format!(".nono-{}.json", std::process::id()))
     } else {
         return None;
     };
