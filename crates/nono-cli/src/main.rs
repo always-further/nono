@@ -40,6 +40,7 @@ mod trust_intercept;
 mod trust_keystore;
 mod trust_scan;
 mod update_check;
+#[cfg(target_os = "windows")]
 mod windows_wfp_contract;
 
 use capability_ext::CapabilitySetExt;
