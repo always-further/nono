@@ -1765,6 +1765,13 @@ fn prepare_windows_runtime_env_vars(
     let go_path_dir = runtime_root.join("go-path");
     let history_dir = runtime_root.join("history");
     let ipython_dir = runtime_root.join("ipython");
+    let gem_home_dir = runtime_root.join("gem-home");
+    let gem_path_dir = runtime_root.join("gem-path");
+    let bundler_home_dir = runtime_root.join("bundler-home");
+    let bundler_cache_dir = runtime_root.join("bundler-cache");
+    let bundler_config_dir = runtime_root.join("bundler-config");
+    let composer_home_dir = runtime_root.join("composer-home");
+    let composer_cache_dir = runtime_root.join("composer-cache");
     let gradle_home_dir = runtime_root.join("gradle-home");
     let maven_home_dir = runtime_root.join("maven-home");
     let xdg_config_dir = runtime_root.join("xdg").join("config");
@@ -1808,6 +1815,13 @@ fn prepare_windows_runtime_env_vars(
         &go_path_dir,
         &history_dir,
         &ipython_dir,
+        &gem_home_dir,
+        &gem_path_dir,
+        &bundler_home_dir,
+        &bundler_cache_dir,
+        &bundler_config_dir,
+        &composer_home_dir,
+        &composer_cache_dir,
         &gradle_home_dir,
         &maven_home_dir,
         &xdg_config_dir,
@@ -2054,6 +2068,34 @@ fn prepare_windows_runtime_env_vars(
         (
             "IPYTHONDIR".to_string(),
             ipython_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "GEM_HOME".to_string(),
+            gem_home_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "GEM_PATH".to_string(),
+            gem_path_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "BUNDLE_USER_HOME".to_string(),
+            bundler_home_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "BUNDLE_USER_CACHE".to_string(),
+            bundler_cache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "BUNDLE_USER_CONFIG".to_string(),
+            bundler_config_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "COMPOSER_HOME".to_string(),
+            composer_home_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "COMPOSER_CACHE_DIR".to_string(),
+            composer_cache_dir.to_string_lossy().into_owned(),
         ),
         (
             "GRADLE_USER_HOME".to_string(),

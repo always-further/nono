@@ -562,7 +562,7 @@ fn windows_run_redirects_profile_state_vars_into_writable_allowlist() {
             "--",
             "cmd",
             "/c",
-            "echo PATH=%PATH% PATHEXT=%PATHEXT% COMSPEC=%COMSPEC% SystemRoot=%SystemRoot% windir=%windir% SystemDrive=%SystemDrive% NoDefaultCurrentDirectoryInExePath=%NoDefaultCurrentDirectoryInExePath% APPDATA=%APPDATA% LOCALAPPDATA=%LOCALAPPDATA% HOME=%HOME% USERPROFILE=%USERPROFILE% XDG_CONFIG_HOME=%XDG_CONFIG_HOME% XDG_DATA_HOME=%XDG_DATA_HOME% PROGRAMDATA=%PROGRAMDATA% ALLUSERSPROFILE=%ALLUSERSPROFILE% PUBLIC=%PUBLIC% ProgramFiles=%ProgramFiles% ProgramFiles(x86)=%ProgramFiles(x86)% ProgramW6432=%ProgramW6432% CommonProgramFiles=%CommonProgramFiles% CommonProgramFiles(x86)=%CommonProgramFiles(x86)% CommonProgramW6432=%CommonProgramW6432% OneDrive=%OneDrive% INETCACHE=%INETCACHE% INETCOOKIES=%INETCOOKIES% INETHISTORY=%INETHISTORY% PSModulePath=%PSModulePath% PSModuleAnalysisCachePath=%PSModuleAnalysisCachePath% CARGO_HOME=%CARGO_HOME% RUSTUP_HOME=%RUSTUP_HOME% DOTNET_CLI_HOME=%DOTNET_CLI_HOME% NUGET_PACKAGES=%NUGET_PACKAGES% NUGET_HTTP_CACHE_PATH=%NUGET_HTTP_CACHE_PATH% NUGET_PLUGINS_CACHE_PATH=%NUGET_PLUGINS_CACHE_PATH% ChocolateyInstall=%ChocolateyInstall% ChocolateyToolsLocation=%ChocolateyToolsLocation% VCPKG_ROOT=%VCPKG_ROOT% NPM_CONFIG_CACHE=%NPM_CONFIG_CACHE% YARN_CACHE_FOLDER=%YARN_CACHE_FOLDER% PIP_CACHE_DIR=%PIP_CACHE_DIR% PIP_BUILD_TRACKER=%PIP_BUILD_TRACKER% PYTHONPYCACHEPREFIX=%PYTHONPYCACHEPREFIX% PYTHONUSERBASE=%PYTHONUSERBASE% GOCACHE=%GOCACHE% GOMODCACHE=%GOMODCACHE% GOPATH=%GOPATH% HISTFILE=%HISTFILE% LESSHISTFILE=%LESSHISTFILE% NODE_REPL_HISTORY=%NODE_REPL_HISTORY% PYTHONHISTFILE=%PYTHONHISTFILE% SQLITE_HISTORY=%SQLITE_HISTORY% IPYTHONDIR=%IPYTHONDIR% GRADLE_USER_HOME=%GRADLE_USER_HOME% MAVEN_USER_HOME=%MAVEN_USER_HOME%",
+            "echo PATH=%PATH% PATHEXT=%PATHEXT% COMSPEC=%COMSPEC% SystemRoot=%SystemRoot% windir=%windir% SystemDrive=%SystemDrive% NoDefaultCurrentDirectoryInExePath=%NoDefaultCurrentDirectoryInExePath% APPDATA=%APPDATA% LOCALAPPDATA=%LOCALAPPDATA% HOME=%HOME% USERPROFILE=%USERPROFILE% XDG_CONFIG_HOME=%XDG_CONFIG_HOME% XDG_DATA_HOME=%XDG_DATA_HOME% PROGRAMDATA=%PROGRAMDATA% ALLUSERSPROFILE=%ALLUSERSPROFILE% PUBLIC=%PUBLIC% ProgramFiles=%ProgramFiles% ProgramFiles(x86)=%ProgramFiles(x86)% ProgramW6432=%ProgramW6432% CommonProgramFiles=%CommonProgramFiles% CommonProgramFiles(x86)=%CommonProgramFiles(x86)% CommonProgramW6432=%CommonProgramW6432% OneDrive=%OneDrive% INETCACHE=%INETCACHE% INETCOOKIES=%INETCOOKIES% INETHISTORY=%INETHISTORY% PSModulePath=%PSModulePath% PSModuleAnalysisCachePath=%PSModuleAnalysisCachePath% CARGO_HOME=%CARGO_HOME% RUSTUP_HOME=%RUSTUP_HOME% DOTNET_CLI_HOME=%DOTNET_CLI_HOME% NUGET_PACKAGES=%NUGET_PACKAGES% NUGET_HTTP_CACHE_PATH=%NUGET_HTTP_CACHE_PATH% NUGET_PLUGINS_CACHE_PATH=%NUGET_PLUGINS_CACHE_PATH% ChocolateyInstall=%ChocolateyInstall% ChocolateyToolsLocation=%ChocolateyToolsLocation% VCPKG_ROOT=%VCPKG_ROOT% NPM_CONFIG_CACHE=%NPM_CONFIG_CACHE% YARN_CACHE_FOLDER=%YARN_CACHE_FOLDER% PIP_CACHE_DIR=%PIP_CACHE_DIR% PIP_BUILD_TRACKER=%PIP_BUILD_TRACKER% PYTHONPYCACHEPREFIX=%PYTHONPYCACHEPREFIX% PYTHONUSERBASE=%PYTHONUSERBASE% GOCACHE=%GOCACHE% GOMODCACHE=%GOMODCACHE% GOPATH=%GOPATH% HISTFILE=%HISTFILE% LESSHISTFILE=%LESSHISTFILE% NODE_REPL_HISTORY=%NODE_REPL_HISTORY% PYTHONHISTFILE=%PYTHONHISTFILE% SQLITE_HISTORY=%SQLITE_HISTORY% IPYTHONDIR=%IPYTHONDIR% GEM_HOME=%GEM_HOME% GEM_PATH=%GEM_PATH% BUNDLE_USER_HOME=%BUNDLE_USER_HOME% BUNDLE_USER_CACHE=%BUNDLE_USER_CACHE% BUNDLE_USER_CONFIG=%BUNDLE_USER_CONFIG% COMPOSER_HOME=%COMPOSER_HOME% COMPOSER_CACHE_DIR=%COMPOSER_CACHE_DIR% GRADLE_USER_HOME=%GRADLE_USER_HOME% MAVEN_USER_HOME=%MAVEN_USER_HOME%",
         ])
         .output()
         .expect("failed to run nono");
@@ -650,6 +650,13 @@ fn windows_run_redirects_profile_state_vars_into_writable_allowlist() {
         "pythonhistfile=",
         "sqlite_history=",
         "ipythondir=",
+        "gem_home=",
+        "gem_path=",
+        "bundle_user_home=",
+        "bundle_user_cache=",
+        "bundle_user_config=",
+        "composer_home=",
+        "composer_cache_dir=",
         "gradle_user_home=",
         "maven_user_home=",
     ] {
@@ -690,6 +697,13 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         .env("PYTHONHISTFILE", r"C:\host-history\python")
         .env("SQLITE_HISTORY", r"C:\host-history\sqlite")
         .env("IPYTHONDIR", r"C:\host-history\ipython")
+        .env("GEM_HOME", r"C:\host-ruby\gem-home")
+        .env("GEM_PATH", r"C:\host-ruby\gem-path")
+        .env("BUNDLE_USER_HOME", r"C:\host-bundler\home")
+        .env("BUNDLE_USER_CACHE", r"C:\host-bundler\cache")
+        .env("BUNDLE_USER_CONFIG", r"C:\host-bundler\config")
+        .env("COMPOSER_HOME", r"C:\host-composer\home")
+        .env("COMPOSER_CACHE_DIR", r"C:\host-composer\cache")
         .env("GRADLE_USER_HOME", r"C:\host-gradle")
         .env("MAVEN_USER_HOME", r"C:\host-maven")
         .args([
@@ -697,7 +711,7 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
             "--",
             "cmd",
             "/c",
-            "echo CARGO_HOME=%CARGO_HOME% RUSTUP_HOME=%RUSTUP_HOME% NUGET_PACKAGES=%NUGET_PACKAGES% DOTNET_CLI_HOME=%DOTNET_CLI_HOME% PSModuleAnalysisCachePath=%PSModuleAnalysisCachePath% NUGET_HTTP_CACHE_PATH=%NUGET_HTTP_CACHE_PATH% NUGET_PLUGINS_CACHE_PATH=%NUGET_PLUGINS_CACHE_PATH% ChocolateyInstall=%ChocolateyInstall% VCPKG_ROOT=%VCPKG_ROOT% NPM_CONFIG_CACHE=%NPM_CONFIG_CACHE% YARN_CACHE_FOLDER=%YARN_CACHE_FOLDER% PIP_CACHE_DIR=%PIP_CACHE_DIR% PIP_BUILD_TRACKER=%PIP_BUILD_TRACKER% PYTHONPYCACHEPREFIX=%PYTHONPYCACHEPREFIX% PYTHONUSERBASE=%PYTHONUSERBASE% GOCACHE=%GOCACHE% GOMODCACHE=%GOMODCACHE% GOPATH=%GOPATH% HISTFILE=%HISTFILE% LESSHISTFILE=%LESSHISTFILE% NODE_REPL_HISTORY=%NODE_REPL_HISTORY% PYTHONHISTFILE=%PYTHONHISTFILE% SQLITE_HISTORY=%SQLITE_HISTORY% IPYTHONDIR=%IPYTHONDIR% GRADLE_USER_HOME=%GRADLE_USER_HOME% MAVEN_USER_HOME=%MAVEN_USER_HOME%",
+            "echo CARGO_HOME=%CARGO_HOME% RUSTUP_HOME=%RUSTUP_HOME% NUGET_PACKAGES=%NUGET_PACKAGES% DOTNET_CLI_HOME=%DOTNET_CLI_HOME% PSModuleAnalysisCachePath=%PSModuleAnalysisCachePath% NUGET_HTTP_CACHE_PATH=%NUGET_HTTP_CACHE_PATH% NUGET_PLUGINS_CACHE_PATH=%NUGET_PLUGINS_CACHE_PATH% ChocolateyInstall=%ChocolateyInstall% VCPKG_ROOT=%VCPKG_ROOT% NPM_CONFIG_CACHE=%NPM_CONFIG_CACHE% YARN_CACHE_FOLDER=%YARN_CACHE_FOLDER% PIP_CACHE_DIR=%PIP_CACHE_DIR% PIP_BUILD_TRACKER=%PIP_BUILD_TRACKER% PYTHONPYCACHEPREFIX=%PYTHONPYCACHEPREFIX% PYTHONUSERBASE=%PYTHONUSERBASE% GOCACHE=%GOCACHE% GOMODCACHE=%GOMODCACHE% GOPATH=%GOPATH% HISTFILE=%HISTFILE% LESSHISTFILE=%LESSHISTFILE% NODE_REPL_HISTORY=%NODE_REPL_HISTORY% PYTHONHISTFILE=%PYTHONHISTFILE% SQLITE_HISTORY=%SQLITE_HISTORY% IPYTHONDIR=%IPYTHONDIR% GEM_HOME=%GEM_HOME% GEM_PATH=%GEM_PATH% BUNDLE_USER_HOME=%BUNDLE_USER_HOME% BUNDLE_USER_CACHE=%BUNDLE_USER_CACHE% BUNDLE_USER_CONFIG=%BUNDLE_USER_CONFIG% COMPOSER_HOME=%COMPOSER_HOME% COMPOSER_CACHE_DIR=%COMPOSER_CACHE_DIR% GRADLE_USER_HOME=%GRADLE_USER_HOME% MAVEN_USER_HOME=%MAVEN_USER_HOME%",
         ])
         .output()
         .expect("failed to run nono");
@@ -733,6 +747,13 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         "pythonhistfile=",
         "sqlite_history=",
         "ipythondir=",
+        "gem_home=",
+        "gem_path=",
+        "bundle_user_home=",
+        "bundle_user_cache=",
+        "bundle_user_config=",
+        "composer_home=",
+        "composer_cache_dir=",
         "gradle_user_home=",
         "maven_user_home=",
     ] {
@@ -766,6 +787,13 @@ fn windows_run_filters_host_toolchain_home_vars_without_runtime_dir() {
         r"c:\host-history\python",
         r"c:\host-history\sqlite",
         r"c:\host-history\ipython",
+        r"c:\host-ruby\gem-home",
+        r"c:\host-ruby\gem-path",
+        r"c:\host-bundler\home",
+        r"c:\host-bundler\cache",
+        r"c:\host-bundler\config",
+        r"c:\host-composer\home",
+        r"c:\host-composer\cache",
         r"c:\host-gradle",
         r"c:\host-maven",
     ] {
