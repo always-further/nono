@@ -869,6 +869,45 @@ fn windows_run_allows_cmd_write_into_redirected_tmp_runtime_dir() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_run_blocks_unverified_runtime_root_override() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    let fake_localappdata = dir.path().join("fake-localappdata");
+    std::fs::create_dir_all(&fake_localappdata).expect("mkdir fake localappdata");
+
+    let allowed = dir.path().to_string_lossy().into_owned();
+    let workdir = workspace.to_string_lossy().into_owned();
+
+    let output = nono_bin()
+        .env("LOCALAPPDATA", &fake_localappdata)
+        .args([
+            "run",
+            "--allow",
+            &allowed,
+            "--workdir",
+            &workdir,
+            "--",
+            "cmd",
+            "/c",
+            "echo redirected>%TMP%\\probe.txt",
+        ])
+        .output()
+        .expect("failed to run nono");
+
+    let text = combined_output(&output);
+    assert!(
+        !output.status.success(),
+        "Windows preview should fail closed when runtime root is not low-integrity-compatible, output:\n{text}"
+    );
+    assert!(
+        text.contains("not low-integrity-compatible"),
+        "expected explicit low-integrity runtime-root failure, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn windows_run_blocks_workspace_write_even_with_writable_allowlist() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let workspace = dir.path().join("workspace");

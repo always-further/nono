@@ -1813,6 +1813,14 @@ fn prepare_windows_runtime_env_vars(
             ))
         })?;
     }
+
+    if !Sandbox::windows_supports_direct_writable_dir(&runtime_root) {
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to prepare Windows writable runtime root {}: the directory is not low-integrity-compatible",
+            runtime_root.display()
+        )));
+    }
+
     let path_value = std::env::join_paths([
         system32.as_os_str(),
         std::path::Path::new(&system_root).as_os_str(),
