@@ -736,6 +736,9 @@ fn print_windows_wfp_readiness_report(
 ) {
     println!("{prefix}WFP readiness: {}", wfp.status_label);
     println!("{prefix}{}", wfp.details);
+    if let Some(next_action) = &wfp.next_action {
+        println!("{prefix}{next_action}");
+    }
     println!(
         "{prefix}WFP service readiness: {}",
         wfp.service_status_label

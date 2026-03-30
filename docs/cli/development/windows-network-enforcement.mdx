@@ -116,6 +116,20 @@ The WFP scaffold does not claim success. It returns deterministic diagnostics fo
 - WFP backend not available in the current build
 - WFP service or driver not running
 
+The runtime activation path now uses the same lifecycle model as setup readiness:
+
+- `install service first`
+- `start service first`
+- `install driver first`
+- `start driver first`
+- `components present, but runtime activation is not implemented yet`
+
+That keeps setup, readiness, and live WFP activation failures aligned without falsely claiming working WFP enforcement.
+
+`nono setup --check-only` now also prints a single `Next action:` line derived from that same lifecycle state, so setup guidance and live activation failures point at the same recovery step.
+
+When the service and driver both probe as present, the Windows runtime now performs a first explicit backend handshake by running `nono-wfp-service --probe-runtime-activation`. That handshake still returns `activation=not-implemented` today, so live WFP activation remains fail-closed, but the failure now comes from an explicit backend protocol check rather than only static readiness.
+
 The first real probing layer is now in place for that scaffold:
 
 - it probes the Windows Base Filtering Engine (`BFE`) service as the platform prerequisite
@@ -127,6 +141,7 @@ The first real probing layer is now in place for that scaffold:
 - the binary now also defines the first explicit startup contract for service registration:
   - registration target: `nono-wfp-service`
   - startup args: `--service-mode`
+  - runtime probe arg: `--probe-runtime-activation`
   - runtime result today: fail closed with a clear "not implemented yet" service-host error
 - `nono setup --install-wfp-service` now performs the first repo-owned registration flow:
   - verifies the WFP binary artifact is present

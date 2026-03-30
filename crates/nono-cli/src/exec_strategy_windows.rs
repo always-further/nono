@@ -102,6 +102,7 @@ const WINDOWS_WFP_BACKEND_DRIVER: &str = "nono-wfp-driver";
 const WINDOWS_WFP_BACKEND_BINARY: &str = "nono-wfp-service.exe";
 const WINDOWS_WFP_BACKEND_DRIVER_BINARY: &str = "nono-wfp-driver.sys";
 const WINDOWS_WFP_BACKEND_SERVICE_ARGS: &[&str] = &["--service-mode"];
+const WINDOWS_WFP_RUNTIME_PROBE_ARG: &str = "--probe-runtime-activation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowsServiceState {
@@ -135,9 +136,23 @@ struct WfpProbeConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct WfpRuntimeProbeOutput {
+    status_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WfpRuntimeActivationProbeStatus {
+    Ready,
+    NotImplemented,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WindowsWfpReadinessReport {
     pub status_label: &'static str,
     pub details: String,
+    pub next_action: Option<String>,
     pub service_status_label: &'static str,
     pub service_details: String,
     pub driver_status_label: &'static str,
@@ -482,51 +497,66 @@ fn probe_wfp_backend_status_with_config(config: &WfpProbeConfig) -> Result<WfpPr
     ))
 }
 
-fn probe_wfp_backend_status() -> Result<WfpProbeStatus> {
-    let config = current_wfp_probe_config()?;
-    probe_wfp_backend_status_with_config(&config)
-}
-
-fn describe_wfp_probe_failure(
+fn describe_wfp_runtime_activation_failure(
     policy: &nono::WindowsNetworkPolicy,
+    config: &WfpProbeConfig,
     status: WfpProbeStatus,
 ) -> String {
-    match status {
+    let runtime_target = describe_windows_network_runtime_target(policy);
+    let reason = match status {
         WfpProbeStatus::Ready => format!(
-            "Windows WFP backend probing reported ready, but the enforcement installer is not implemented yet ({}).",
-            policy.backend_summary()
+            "the service `{}` and driver `{}` are present, but runtime activation is not implemented in this build yet",
+            config.backend_service, config.backend_driver
         ),
         WfpProbeStatus::BackendBinaryMissing => format!(
-            "Windows network enforcement is targeting the WFP backend, but its expected binary is missing from this build output ({}).",
-            policy.backend_summary()
+            "the WFP service binary `{}` is missing from this build output. Run `cargo build -p nono-cli --bins` first",
+            config.backend_binary_path.display()
         ),
         WfpProbeStatus::PlatformServiceMissing => format!(
-            "Windows WFP prerequisites are unavailable because the Base Filtering Engine service is missing or could not be queried ({}).",
-            policy.backend_summary()
+            "the Windows Base Filtering Engine service `{}` is missing on this machine",
+            config.platform_service
         ),
         WfpProbeStatus::PlatformServiceStopped => format!(
-            "Windows WFP prerequisites are unavailable because the Base Filtering Engine service is not running ({}).",
-            policy.backend_summary()
+            "the Windows Base Filtering Engine service `{}` is not running. Start it before retrying WFP activation",
+            config.platform_service
         ),
         WfpProbeStatus::BackendServiceMissing => format!(
-            "Windows WFP backend is not installed: its service is missing ({}).",
-            policy.backend_summary()
+            "the WFP service `{}` is not registered. Run `nono setup --install-wfp-service` first",
+            config.backend_service
         ),
         WfpProbeStatus::BackendServiceStopped => format!(
-            "Windows WFP backend is installed but its service is not running ({}).",
-            policy.backend_summary()
+            "the WFP service `{}` is registered but not running. Run `nono setup --start-wfp-service` first",
+            config.backend_service
         ),
         WfpProbeStatus::BackendDriverBinaryMissing => format!(
-            "Windows WFP backend is installed incompletely: its expected driver binary is missing from this build or install layout ({}).",
-            policy.backend_summary()
+            "the WFP driver binary `{}` is missing from this build output. Run `cargo build -p nono-cli --bins` first",
+            config.backend_driver_binary_path.display()
         ),
         WfpProbeStatus::BackendDriverMissing => format!(
-            "Windows WFP backend is installed incompletely: its driver is not registered ({}).",
-            policy.backend_summary()
+            "the WFP driver `{}` is not registered. Run `nono setup --install-wfp-driver` first",
+            config.backend_driver
         ),
         WfpProbeStatus::BackendDriverStopped => format!(
-            "Windows WFP backend is installed but its driver is not running ({}).",
-            policy.backend_summary()
+            "the WFP driver `{}` is registered but not running. Run `nono setup --start-wfp-driver` first",
+            config.backend_driver
+        ),
+    };
+
+    format!(
+        "Windows WFP runtime activation is required for {} but {} ({}). This request remains fail-closed until WFP activation is implemented.",
+        runtime_target,
+        reason,
+        policy.backend_summary()
+    )
+}
+
+fn describe_windows_network_runtime_target(policy: &nono::WindowsNetworkPolicy) -> String {
+    match &policy.mode {
+        nono::WindowsNetworkPolicyMode::AllowAll => "allow-all Windows network access".to_string(),
+        nono::WindowsNetworkPolicyMode::Blocked => "blocked Windows network access".to_string(),
+        nono::WindowsNetworkPolicyMode::ProxyOnly { port, bind_ports } => format!(
+            "Windows proxy-only network access via localhost:{} with bind ports {:?}",
+            port, bind_ports
         ),
     }
 }
@@ -722,6 +752,96 @@ fn describe_wfp_driver_status_for_setup(
             ),
         ),
     }
+}
+
+fn describe_wfp_next_action_for_setup(
+    config: &WfpProbeConfig,
+    status: WfpProbeStatus,
+) -> Option<String> {
+    match status {
+        WfpProbeStatus::Ready => Some(
+            "Next action: Windows WFP components are present, but runtime activation is still not implemented in this build."
+                .to_string(),
+        ),
+        WfpProbeStatus::BackendBinaryMissing => Some(format!(
+            "Next action: build the Windows backend artifacts first with `cargo build -p nono-cli --bins` so `{}` exists.",
+            config.backend_binary_path.display()
+        )),
+        WfpProbeStatus::PlatformServiceMissing => Some(format!(
+            "Next action: verify that the Windows Base Filtering Engine service `{}` is available on this machine.",
+            config.platform_service
+        )),
+        WfpProbeStatus::PlatformServiceStopped => Some(format!(
+            "Next action: start the Windows Base Filtering Engine service `{}` before retrying WFP setup or activation.",
+            config.platform_service
+        )),
+        WfpProbeStatus::BackendServiceMissing => Some(
+            "Next action: run `nono setup --install-wfp-service`.".to_string(),
+        ),
+        WfpProbeStatus::BackendServiceStopped => Some(
+            "Next action: run `nono setup --start-wfp-service`.".to_string(),
+        ),
+        WfpProbeStatus::BackendDriverBinaryMissing => Some(format!(
+            "Next action: build the Windows backend artifacts first with `cargo build -p nono-cli --bins` so `{}` exists.",
+            config.backend_driver_binary_path.display()
+        )),
+        WfpProbeStatus::BackendDriverMissing => Some(
+            "Next action: run `nono setup --install-wfp-driver`.".to_string(),
+        ),
+        WfpProbeStatus::BackendDriverStopped => Some(
+            "Next action: run `nono setup --start-wfp-driver`.".to_string(),
+        ),
+    }
+}
+
+fn run_wfp_runtime_probe(config: &WfpProbeConfig) -> Result<WfpRuntimeProbeOutput> {
+    let output = Command::new(&config.backend_binary_path)
+        .arg(WINDOWS_WFP_RUNTIME_PROBE_ARG)
+        .output()
+        .map_err(|err| {
+            NonoError::SandboxInit(format!(
+                "Failed to execute Windows WFP runtime probe `{}` {}: {}",
+                config.backend_binary_path.display(),
+                WINDOWS_WFP_RUNTIME_PROBE_ARG,
+                err
+            ))
+        })?;
+
+    Ok(WfpRuntimeProbeOutput {
+        status_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn parse_wfp_runtime_probe_status(
+    output: &WfpRuntimeProbeOutput,
+) -> Result<WfpRuntimeActivationProbeStatus> {
+    if output.stdout.contains("activation=ready") {
+        return Ok(WfpRuntimeActivationProbeStatus::Ready);
+    }
+    if output.stdout.contains("activation=not-implemented") {
+        return Ok(WfpRuntimeActivationProbeStatus::NotImplemented);
+    }
+
+    Err(NonoError::SandboxInit(format!(
+        "Windows WFP runtime probe returned unexpected output (status: {:?}, stdout: {:?}, stderr: {:?})",
+        output.status_code, output.stdout, output.stderr
+    )))
+}
+
+fn describe_wfp_runtime_probe_failure(
+    config: &WfpProbeConfig,
+    output: &WfpRuntimeProbeOutput,
+) -> String {
+    format!(
+        "the WFP service probe `{}` {} reported runtime activation is not implemented yet (status: {:?}, stdout: {:?}, stderr: {:?})",
+        config.backend_binary_path.display(),
+        WINDOWS_WFP_RUNTIME_PROBE_ARG,
+        output.status_code,
+        output.stdout,
+        output.stderr
+    )
 }
 
 fn install_windows_wfp_service_with_runner<Q, R>(
@@ -1030,6 +1150,7 @@ pub(crate) fn probe_windows_wfp_readiness() -> WindowsWfpReadinessReport {
         return WindowsWfpReadinessReport {
             status_label: "probe failed",
             details: "Failed to resolve expected WFP backend component paths from the current executable layout.".to_string(),
+            next_action: None,
             service_status_label: "probe failed",
             service_details: "Failed to resolve expected WFP backend service component paths from the current executable layout.".to_string(),
             driver_status_label: "probe failed",
@@ -1056,6 +1177,7 @@ pub(crate) fn probe_windows_wfp_readiness() -> WindowsWfpReadinessReport {
                     WfpProbeStatus::BackendDriverStopped => "driver stopped",
                 },
                 details: describe_wfp_probe_status_for_setup(&config, status),
+                next_action: describe_wfp_next_action_for_setup(&config, status),
                 service_status_label,
                 service_details,
                 driver_status_label,
@@ -1065,6 +1187,7 @@ pub(crate) fn probe_windows_wfp_readiness() -> WindowsWfpReadinessReport {
         Err(err) => WindowsWfpReadinessReport {
             status_label: "probe failed",
             details: format!("Failed to probe Windows WFP readiness: {err}"),
+            next_action: None,
             service_status_label: "probe failed",
             service_details: format!("Failed to probe Windows WFP service readiness: {err}"),
             driver_status_label: "probe failed",
@@ -1184,22 +1307,49 @@ impl WindowsNetworkBackend for WfpNetworkBackend {
         policy: &nono::WindowsNetworkPolicy,
         _config: &ExecConfig<'_>,
     ) -> Result<Option<NetworkEnforcementGuard>> {
-        match &policy.mode {
-            nono::WindowsNetworkPolicyMode::AllowAll => Ok(None),
-            nono::WindowsNetworkPolicyMode::Blocked
-            | nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => {
-                let status = probe_wfp_backend_status().map_err(|err| {
-                    NonoError::SandboxInit(format!(
-                        "Failed to probe Windows WFP backend status ({}): {}",
-                        policy.backend_summary(),
-                        err
-                    ))
-                })?;
-                Err(NonoError::UnsupportedPlatform(format!(
-                    "{} This request remains fail-closed until WFP is available.",
-                    describe_wfp_probe_failure(policy, status)
-                )))
+        let probe_config = current_wfp_probe_config()?;
+        install_wfp_network_backend(policy, &probe_config)
+    }
+}
+
+fn install_wfp_network_backend(
+    policy: &nono::WindowsNetworkPolicy,
+    probe_config: &WfpProbeConfig,
+) -> Result<Option<NetworkEnforcementGuard>> {
+    match &policy.mode {
+        nono::WindowsNetworkPolicyMode::AllowAll => Ok(None),
+        nono::WindowsNetworkPolicyMode::Blocked
+        | nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => {
+            let status = probe_wfp_backend_status_with_config(probe_config).map_err(|err| {
+                NonoError::SandboxInit(format!(
+                    "Failed to probe Windows WFP backend status ({}): {}",
+                    policy.backend_summary(),
+                    err
+                ))
+            })?;
+            if status == WfpProbeStatus::Ready {
+                let probe_output = run_wfp_runtime_probe(probe_config)?;
+                return match parse_wfp_runtime_probe_status(&probe_output)? {
+                    WfpRuntimeActivationProbeStatus::Ready => Err(NonoError::UnsupportedPlatform(
+                        format!(
+                            "Windows WFP runtime activation reported ready for {}, but enforcement installation is still not implemented ({}). This request remains fail-closed.",
+                            describe_windows_network_runtime_target(policy),
+                            policy.backend_summary()
+                        ),
+                    )),
+                    WfpRuntimeActivationProbeStatus::NotImplemented => Err(
+                        NonoError::UnsupportedPlatform(format!(
+                            "Windows WFP runtime activation is required for {} but {} ({}). This request remains fail-closed until WFP activation is implemented.",
+                            describe_windows_network_runtime_target(policy),
+                            describe_wfp_runtime_probe_failure(probe_config, &probe_output),
+                            policy.backend_summary()
+                        )),
+                    ),
+                };
             }
+            Err(NonoError::UnsupportedPlatform(
+                describe_wfp_runtime_activation_failure(policy, probe_config, status),
+            ))
         }
     }
 }
@@ -2300,36 +2450,71 @@ mod tests {
     }
 
     #[test]
-    fn test_describe_wfp_probe_failure_reports_platform_service_stopped() {
+    fn test_describe_wfp_runtime_activation_failure_reports_platform_service_stopped() {
         let policy = Sandbox::windows_network_policy(&CapabilitySet::new().set_network_mode(
             nono::NetworkMode::ProxyOnly {
                 port: 8080,
                 bind_ports: vec![8080],
             },
         ));
-        let message = describe_wfp_probe_failure(&policy, WfpProbeStatus::PlatformServiceStopped);
-        assert!(message.contains("Base Filtering Engine service is not running"));
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let message = describe_wfp_runtime_activation_failure(
+            &policy,
+            &config,
+            WfpProbeStatus::PlatformServiceStopped,
+        );
+        assert!(message.contains("Base Filtering Engine service `BFE` is not running"));
         assert!(message.contains("preferred backend: windows-filtering-platform"));
     }
 
     #[test]
-    fn test_describe_wfp_probe_failure_reports_missing_binary() {
+    fn test_describe_wfp_runtime_activation_failure_reports_missing_binary() {
         let policy = Sandbox::windows_network_policy(
             &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
         );
-        let message = describe_wfp_probe_failure(&policy, WfpProbeStatus::BackendBinaryMissing);
-        assert!(message.contains("expected binary is missing from this build output"));
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\missing\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let message = describe_wfp_runtime_activation_failure(
+            &policy,
+            &config,
+            WfpProbeStatus::BackendBinaryMissing,
+        );
+        assert!(message.contains("WFP service binary `C:\\missing\\nono-wfp-service.exe` is missing from this build output"));
         assert!(message.contains("preferred backend: windows-filtering-platform"));
     }
 
     #[test]
-    fn test_describe_wfp_probe_failure_reports_missing_driver_binary() {
+    fn test_describe_wfp_runtime_activation_failure_reports_missing_driver_binary() {
         let policy = Sandbox::windows_network_policy(
             &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
         );
-        let message =
-            describe_wfp_probe_failure(&policy, WfpProbeStatus::BackendDriverBinaryMissing);
-        assert!(message.contains("expected driver binary is missing"));
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\missing\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let message = describe_wfp_runtime_activation_failure(
+            &policy,
+            &config,
+            WfpProbeStatus::BackendDriverBinaryMissing,
+        );
+        assert!(message.contains("WFP driver binary `C:\\missing\\nono-wfp-driver.sys` is missing from this build output"));
         assert!(message.contains("preferred backend: windows-filtering-platform"));
     }
 
@@ -2448,6 +2633,73 @@ mod tests {
             describe_wfp_driver_status_for_setup(&config, WfpProbeStatus::BackendDriverMissing);
         assert_eq!(label, "not registered");
         assert!(details.contains("nono-wfp-driver"));
+    }
+
+    #[test]
+    fn test_describe_wfp_next_action_for_setup_reports_install_service() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let action =
+            describe_wfp_next_action_for_setup(&config, WfpProbeStatus::BackendServiceMissing);
+        assert_eq!(
+            action.as_deref(),
+            Some("Next action: run `nono setup --install-wfp-service`.")
+        );
+    }
+
+    #[test]
+    fn test_describe_wfp_next_action_for_setup_reports_start_driver() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let action =
+            describe_wfp_next_action_for_setup(&config, WfpProbeStatus::BackendDriverStopped);
+        assert_eq!(
+            action.as_deref(),
+            Some("Next action: run `nono setup --start-wfp-driver`.")
+        );
+    }
+
+    #[test]
+    fn test_parse_wfp_runtime_probe_status_reports_not_implemented() {
+        let output = WfpRuntimeProbeOutput {
+            status_code: Some(4),
+            stdout: "activation=not-implemented".to_string(),
+            stderr: "placeholder".to_string(),
+        };
+        let status = parse_wfp_runtime_probe_status(&output).expect("probe output should parse");
+        assert_eq!(status, WfpRuntimeActivationProbeStatus::NotImplemented);
+    }
+
+    #[test]
+    fn test_describe_wfp_runtime_probe_failure_includes_probe_command() {
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+        let output = WfpRuntimeProbeOutput {
+            status_code: Some(4),
+            stdout: "activation=not-implemented".to_string(),
+            stderr: "placeholder".to_string(),
+        };
+        let message = describe_wfp_runtime_probe_failure(&config, &output);
+        assert!(message.contains("--probe-runtime-activation"));
+        assert!(message.contains("activation=not-implemented"));
     }
 
     #[test]
@@ -2922,57 +3174,99 @@ mod tests {
     }
 
     #[test]
-    fn test_wfp_backend_reports_blocked_backend_unavailable() {
-        let backend = WfpNetworkBackend;
-        let mut caps = CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked);
-        caps.add_tcp_connect_port(443);
-        let policy = Sandbox::windows_network_policy(&caps);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let command = vec![r"C:\tools\probe.exe".to_string()];
-        let resolved_program = PathBuf::from(r"C:\tools\probe.exe");
-        let config = ExecConfig {
-            command: &command,
-            resolved_program: &resolved_program,
-            caps: &caps,
-            env_vars: Vec::new(),
-            cap_file: None,
-            current_dir: dir.path(),
-        };
-
-        let err = backend
-            .install(&policy, &config)
-            .expect_err("WFP scaffold should fail closed for blocked mode");
-        let message = err.to_string();
-        assert!(message.contains("expected binary is missing from this build output"));
-        assert!(message.contains("preferred backend: windows-filtering-platform"));
-        assert!(message.contains("fail-closed"));
-    }
-
-    #[test]
-    fn test_wfp_backend_reports_proxy_backend_unavailable() {
-        let backend = WfpNetworkBackend;
+    fn test_wfp_runtime_activation_reports_missing_service_registration() {
         let caps = CapabilitySet::new().set_network_mode(nono::NetworkMode::ProxyOnly {
             port: 8080,
             bind_ports: vec![8080],
         });
         let policy = Sandbox::windows_network_policy(&caps);
         let dir = tempfile::tempdir().expect("tempdir");
-        let command = vec![r"C:\tools\probe.exe".to_string()];
-        let resolved_program = PathBuf::from(r"C:\tools\probe.exe");
-        let config = ExecConfig {
-            command: &command,
-            resolved_program: &resolved_program,
-            caps: &caps,
-            env_vars: Vec::new(),
-            cap_file: None,
-            current_dir: dir.path(),
+        let service_binary = dir.path().join("nono-wfp-service.exe");
+        let driver_binary = dir.path().join("nono-wfp-driver.sys");
+        std::fs::write(&service_binary, b"stub").expect("write stub service binary");
+        std::fs::write(&driver_binary, b"stub").expect("write stub driver binary");
+        let probe_config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: service_binary,
+            backend_driver_binary_path: driver_binary,
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
         };
 
-        let err = backend
-            .install(&policy, &config)
-            .expect_err("WFP scaffold should fail closed for proxy mode");
+        let err = install_wfp_network_backend(&policy, &probe_config)
+            .expect_err("missing service registration should fail closed");
         let message = err.to_string();
-        assert!(message.contains("expected binary is missing from this build output"));
+        assert!(message.contains("Run `nono setup --install-wfp-service` first"));
+        assert!(message.contains("preferred backend: windows-filtering-platform"));
+        assert!(message.contains("active backend: none"));
+        assert!(message.contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_wfp_runtime_activation_reports_stopped_service() {
+        let policy = Sandbox::windows_network_policy(
+            &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
+        );
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let message = describe_wfp_runtime_activation_failure(
+            &policy,
+            &config,
+            WfpProbeStatus::BackendServiceStopped,
+        );
+        assert!(message.contains("Run `nono setup --start-wfp-service` first"));
+        assert!(message.contains("active backend: windows-firewall-rules"));
+        assert!(message.contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_wfp_runtime_activation_reports_stopped_driver() {
+        let policy = Sandbox::windows_network_policy(
+            &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
+        );
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let message = describe_wfp_runtime_activation_failure(
+            &policy,
+            &config,
+            WfpProbeStatus::BackendDriverStopped,
+        );
+        assert!(message.contains("Run `nono setup --start-wfp-driver` first"));
+        assert!(message.contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_wfp_runtime_activation_reports_ready_but_not_implemented() {
+        let policy = Sandbox::windows_network_policy(
+            &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
+        );
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: PathBuf::from(r"C:\tools\nono-wfp-service.exe"),
+            backend_driver_binary_path: PathBuf::from(r"C:\tools\nono-wfp-driver.sys"),
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let message =
+            describe_wfp_runtime_activation_failure(&policy, &config, WfpProbeStatus::Ready);
+        assert!(message.contains("runtime activation is not implemented in this build yet"));
         assert!(message.contains("fail-closed"));
     }
 }
