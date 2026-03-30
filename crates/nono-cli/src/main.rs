@@ -1344,17 +1344,6 @@ fn collect_windows_preview_requested_restrictions(args: &SandboxArgs) -> Vec<Str
     if !args.override_deny.is_empty() {
         reasons.push("filesystem deny-override policy".to_string());
     }
-    if args.block_net
-        || args.network_profile.is_some()
-        || !args.allow_proxy.is_empty()
-        || !args.allow_bind.is_empty()
-        || !args.allow_port.is_empty()
-        || args.external_proxy.is_some()
-        || !args.external_proxy_bypass.is_empty()
-        || args.proxy_port.is_some()
-    {
-        reasons.push("network filtering or proxy policy".to_string());
-    }
 
     reasons
 }
@@ -3645,15 +3634,18 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn test_collect_windows_preview_requested_restrictions_for_profile_and_block_net() {
+    fn test_collect_windows_preview_requested_restrictions_only_keeps_cli_only_windows_gaps() {
         let args = SandboxArgs {
             profile: Some("codex".to_string()),
             block_net: true,
+            network_profile: Some("restricted".to_string()),
+            allow_proxy: vec!["example.com".to_string()],
+            override_deny: vec![std::path::PathBuf::from("~/secret")],
             ..sandbox_args()
         };
 
         let reasons = collect_windows_preview_requested_restrictions(&args);
-        assert!(reasons.iter().any(|reason| reason.contains("network")));
+        assert_eq!(reasons, vec!["filesystem deny-override policy".to_string()]);
     }
 
     #[cfg(target_os = "windows")]
