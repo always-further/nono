@@ -1426,6 +1426,10 @@ fn select_network_backend(
             nono::WindowsNetworkPolicyMode::Blocked,
             nono::WindowsNetworkBackendKind::FirewallRules,
         ) => Ok(Some(Box::new(FirewallRulesNetworkBackend))),
+        (
+            nono::WindowsNetworkPolicyMode::Blocked,
+            nono::WindowsNetworkBackendKind::Wfp,
+        ) => Ok(Some(Box::new(WfpNetworkBackend))),
         (nono::WindowsNetworkPolicyMode::Blocked, nono::WindowsNetworkBackendKind::None)
             if policy.preferred_backend == nono::WindowsNetworkBackendKind::Wfp =>
         {
@@ -1540,6 +1544,17 @@ fn install_wfp_network_backend(
         nono::WindowsNetworkPolicyMode::AllowAll => Ok(None),
         nono::WindowsNetworkPolicyMode::Blocked
         | nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => {
+            match Sandbox::windows_network_launch_support(policy, config.resolved_program) {
+                nono::WindowsNetworkLaunchSupport::Supported => {}
+                nono::WindowsNetworkLaunchSupport::UnsupportedShellHost => {
+                    return Err(NonoError::UnsupportedPlatform(format!(
+                        "Windows blocked-network WFP activation currently supports standalone executable launches, not shell or interpreter hosts such as {}. \
+Use a direct executable target for the current backend subset. \
+This is a current Windows backend limitation, not permanent product behavior.",
+                        config.resolved_program.display(),
+                    )));
+                }
+            }
             let status = probe_wfp_backend_status_with_config(probe_config).map_err(|err| {
                 NonoError::SandboxInit(format!(
                     "Failed to probe Windows WFP backend status ({}): {}",
@@ -2629,6 +2644,18 @@ mod tests {
     }
 
     #[test]
+    fn test_select_network_backend_routes_supported_blocked_mode_to_wfp() {
+        let policy = Sandbox::windows_network_policy(
+            &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
+        );
+
+        let backend = select_network_backend(&policy)
+            .expect("supported blocked policy should select a backend")
+            .expect("supported blocked policy should use a backend");
+        assert_eq!(backend.label(), "windows-filtering-platform");
+    }
+
+    #[test]
     fn test_parse_windows_service_state_detects_running() {
         let output = "STATE              : 4  RUNNING";
         assert_eq!(
@@ -3655,7 +3682,7 @@ mod tests {
             WfpProbeStatus::BackendServiceStopped,
         );
         assert!(message.contains("Run `nono setup --start-wfp-service` first"));
-        assert!(message.contains("active backend: windows-firewall-rules"));
+        assert!(message.contains("active backend: windows-filtering-platform"));
         assert!(message.contains("fail-closed"));
     }
 

@@ -3,7 +3,10 @@ title: Windows Network Enforcement
 description: Design spike for the Windows network enforcement backend
 ---
 
-This note now covers both the initial `WIN-704` design spike and the first implementation slice. Windows still does **not** have full network parity, but it now has a real first blocked-network backend path for a narrow subset.
+This note now covers both the initial `WIN-704` design spike and the current implementation slice. Windows still does **not** have full network parity, but it now has both:
+
+- a real first blocked-network backend path for a narrow supported subset
+- a first real WFP API-backed install/delete primitive behind the service-host activation contract
 
 ## Selected Direction
 
@@ -18,7 +21,7 @@ This is the only option in scope that plausibly gives:
 - auditable deny paths
 - an upgrade path to proxy-only and richer policy shapes
 
-The current implementation does **not** implement WFP yet. It adds the compiled Windows network policy model, records both the preferred backend (`WFP`) and the currently active backend for the narrow supported subset, and keeps the first real blocked-network path isolated so later WFP work can replace that coarse backend cleanly.
+The current implementation does **not** have full WFP parity yet. It adds the compiled Windows network policy model, records both the preferred backend (`WFP`) and the currently active backend for the narrow supported subset, and now also provides a first real user-mode WFP app-id filter install/delete path inside `nono-wfp-service`.
 
 ## Why Not the Other Options
 
@@ -88,7 +91,7 @@ Today:
 
 Later full-port work should:
 
-- replace the coarse firewall-backed `Blocked` slice with a stronger WFP-backed primitive
+- expand the WFP-backed `Blocked` slice beyond the current narrow subset
 - make `AllowAll` and `Blocked` distinct in runtime behavior
 - return deterministic unsupported results for policy shapes still outside the first backend subset
 
@@ -99,16 +102,16 @@ The current backend contract now carries two backend states per compiled Windows
 - `preferred backend`
   This is the long-term Windows target. For `Blocked` and `ProxyOnly`, it is `windows-filtering-platform`.
 - `active backend`
-  This is what the current runtime can actually install today. For the narrow supported `Blocked` subset, it is `windows-firewall-rules`. Unsupported shapes keep `active backend: none`.
+  This is what the current runtime can actually install today. For the narrow supported `Blocked` subset, it is now `windows-filtering-platform`. Unsupported shapes keep `active backend: none`.
 
 That means later WFP work can replace the active backend without changing the higher-level `WindowsNetworkPolicy` contract again.
 
 The runtime code now also reflects that split directly:
 
-- `FirewallRulesNetworkBackend`
-  The current active backend for the narrow supported `Blocked` subset.
 - `WfpNetworkBackend`
-  A fail-closed scaffold backend that is selected for future-targeted shapes when the compiled policy prefers WFP but no active backend is available yet.
+  The current active backend for the narrow supported `Blocked` subset and the preferred backend for future-targeted shapes.
+- `FirewallRulesNetworkBackend`
+  The older coarse backend slice kept in code as a fallback implementation path while the WFP path is hardened further.
 
 The WFP scaffold does not claim success. It returns deterministic diagnostics for cases such as:
 
@@ -136,11 +139,21 @@ That service-owned blocked-mode workflow now:
 - performs a first backend-owned blocked-mode activation attempt
 - returns a structured activation state
 
-Today, `activate_blocked_mode` installs target-attached firewall deny rules through the service host and returns `enforced-pending-cleanup` when that install succeeds. That means the activation decision and the first real OS filtering action now live inside the service host. The runtime still fails closed because this path is not yet backed by real WFP filtering or durable target attachment beyond the current service-managed firewall-rule slice. Unsupported request kinds are rejected explicitly, and missing local prerequisites return a distinct fail-closed state.
+Today, `activate_blocked_mode` inside `nono-wfp-service` validates the request, derives the target app id with `FwpmGetAppIdFromFileName0`, opens the WFP engine, and installs app-scoped block filters on:
 
-The next backend-owned step is now more complete: `activate_blocked_mode` first attempts a true WFP backend path inside `nono-wfp-service`. Because the real WFP installation primitive is still unavailable in this build, the service explicitly falls back to a service-managed firewall-rule path under the same activation contract.
+- `FWPM_LAYER_ALE_AUTH_CONNECT_V4`
+- `FWPM_LAYER_ALE_AUTH_CONNECT_V6`
+- `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4`
+- `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6`
 
-That fallback now installs target-attached firewall deny rules for the actual blocked-mode executable and keeps cleanup under service ownership through a matching `deactivate_blocked_mode` request. The runtime still fails closed because this is not real WFP enforcement, but the activation path now uses the actual target path rather than only a service-local probe.
+Those filters are keyed deterministically from the existing runtime request fields so the matching `deactivate_blocked_mode` request can remove them by key. That means the service host now owns both install and cleanup for a real WFP-backed blocked-mode primitive under the existing JSON transport contract.
+
+This does **not** mean the broader Windows network backend is finished:
+
+- backend selection now routes the narrow supported direct `Blocked` subset to the `windows-filtering-platform` backend
+- shell and interpreter hosts still fail closed for that subset
+- runtime still fails closed when activation cannot install or clean up those filters
+- richer modes and wider process-tree semantics are still deferred
 
 The first real probing layer is now in place for that scaffold:
 
@@ -154,7 +167,7 @@ The first real probing layer is now in place for that scaffold:
   - registration target: `nono-wfp-service`
   - startup args: `--service-mode`
   - runtime probe arg: `--probe-runtime-activation`
-  - runtime result today: fail closed with a clear "not implemented yet" service-host error
+  - runtime result today: fail closed unless the service can install and later clean up the target app's WFP filters successfully
 - `nono setup --install-wfp-service` now performs the first repo-owned registration flow:
   - verifies the WFP binary artifact is present
   - verifies the Windows Base Filtering Engine (`BFE`) prerequisite is running

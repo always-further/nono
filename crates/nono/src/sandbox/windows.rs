@@ -195,7 +195,7 @@ pub fn compile_network_policy(caps: &CapabilitySet) -> WindowsNetworkPolicy {
     let active_backend = match mode {
         WindowsNetworkPolicyMode::AllowAll => WindowsNetworkBackendKind::None,
         WindowsNetworkPolicyMode::Blocked if unsupported.is_empty() => {
-            WindowsNetworkBackendKind::FirewallRules
+            WindowsNetworkBackendKind::Wfp
         }
         WindowsNetworkPolicyMode::Blocked | WindowsNetworkPolicyMode::ProxyOnly { .. } => {
             WindowsNetworkBackendKind::None
@@ -1257,10 +1257,7 @@ mod tests {
         assert_eq!(policy.mode, WindowsNetworkPolicyMode::Blocked);
         assert!(policy.is_fully_supported());
         assert_eq!(policy.preferred_backend, WindowsNetworkBackendKind::Wfp);
-        assert_eq!(
-            policy.active_backend,
-            WindowsNetworkBackendKind::FirewallRules
-        );
+        assert_eq!(policy.active_backend, WindowsNetworkBackendKind::Wfp);
     }
 
     #[test]

@@ -1,12 +1,14 @@
 //! Windows WFP backend service placeholder.
 //!
 //! This binary is the first repo-owned artifact for the future Windows WFP
-//! backend. It establishes the expected Windows service contract without
-//! claiming working service-host or enforcement behavior yet.
+//! backend. It establishes the expected Windows service contract and now owns
+//! the first real user-mode WFP install/cleanup primitive for blocked-mode
+//! activation.
 
 #[path = "../windows_wfp_contract.rs"]
 mod windows_wfp_contract;
 
+use sha2::{Digest, Sha256};
 use std::process::ExitCode;
 use windows_wfp_contract::{
     WfpRuntimeActivationRequest, WfpRuntimeActivationResponse, WFP_RUNTIME_PROTOCOL_VERSION,
@@ -16,6 +18,31 @@ const SERVICE_NAME: &str = "nono-wfp-service";
 const SERVICE_MODE_ARG: &str = "--service-mode";
 const PROBE_RUNTIME_ACTIVATION_ARG: &str = "--probe-runtime-activation";
 const EXPECTED_DRIVER_BINARY: &str = "nono-wfp-driver.sys";
+
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+
+#[cfg(target_os = "windows")]
+use std::ptr::{null, null_mut};
+
+#[cfg(target_os = "windows")]
+use windows_sys::{
+    core::GUID,
+    Win32::{
+        Foundation::HANDLE,
+        NetworkManagement::WindowsFilteringPlatform::{
+            FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterDeleteByKey0,
+            FwpmFreeMemory0, FwpmGetAppIdFromFileName0, FwpmTransactionAbort0,
+            FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_ACTION0_0,
+            FWPM_CONDITION_ALE_APP_ID, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER0_0,
+            FWPM_FILTER_CONDITION0, FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_SESSION0,
+            FWPM_SUBLAYER_UNIVERSAL, FWP_ACTION_BLOCK, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
+            FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_EMPTY, FWP_MATCH_EQUAL,
+        },
+        System::Rpc::RPC_C_AUTHN_WINNT,
+    },
+};
 
 fn print_help() {
     println!("nono-wfp-service {}", env!("CARGO_PKG_VERSION"));
@@ -129,17 +156,6 @@ fn build_cleanup_failed_response(
     }
 }
 
-fn annotate_fallback_details(
-    mut response: WfpRuntimeActivationResponse,
-    fallback_reason: &str,
-) -> WfpRuntimeActivationResponse {
-    response.details = format!(
-        "attempted WFP backend path first but {}. Fallback result: {}",
-        fallback_reason, response.details
-    );
-    response
-}
-
 fn build_filtering_probe_failed_response(
     request: &WfpRuntimeActivationRequest,
     details: String,
@@ -194,174 +210,323 @@ fn validate_target_request_fields(
     Ok((target_program, outbound_rule, inbound_rule))
 }
 
-fn attempt_true_wfp_blocked_mode_activation(
-    request: &WfpRuntimeActivationRequest,
-) -> Result<WfpRuntimeActivationResponse, String> {
-    let _ = request;
-    Err(
-        "no true Windows Filtering Platform installation primitive is available in this build"
-            .to_string(),
-    )
-}
+#[cfg(target_os = "windows")]
+struct WfpEngine(HANDLE);
 
-fn build_target_firewall_add_args(
-    outbound_rule: &str,
-    inbound_rule: &str,
-    target_program: &std::path::Path,
-) -> [Vec<String>; 2] {
-    [
-        vec![
-            "advfirewall".to_string(),
-            "firewall".to_string(),
-            "add".to_string(),
-            "rule".to_string(),
-            format!("name={outbound_rule}"),
-            "dir=out".to_string(),
-            "action=block".to_string(),
-            format!("program={}", target_program.display()),
-            "enable=yes".to_string(),
-            "profile=any".to_string(),
-        ],
-        vec![
-            "advfirewall".to_string(),
-            "firewall".to_string(),
-            "add".to_string(),
-            "rule".to_string(),
-            format!("name={inbound_rule}"),
-            "dir=in".to_string(),
-            "action=block".to_string(),
-            format!("program={}", target_program.display()),
-            "enable=yes".to_string(),
-            "profile=any".to_string(),
-        ],
-    ]
-}
-
-fn build_target_firewall_delete_args(outbound_rule: &str, inbound_rule: &str) -> [Vec<String>; 2] {
-    [
-        build_firewall_delete_args(inbound_rule),
-        build_firewall_delete_args(outbound_rule),
-    ]
-}
-
-fn build_firewall_delete_args(rule_name: &str) -> Vec<String> {
-    vec![
-        "advfirewall".to_string(),
-        "firewall".to_string(),
-        "delete".to_string(),
-        "rule".to_string(),
-        format!("name={rule_name}"),
-    ]
-}
-
-fn run_netsh_command(args: &[String]) -> Result<String, String> {
-    let output = std::process::Command::new("netsh")
-        .args(args)
-        .output()
-        .map_err(|err| format!("failed to execute netsh {:?}: {}", args, err))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if output.status.success() {
-        Ok(stdout)
-    } else {
-        Err(format!(
-            "netsh {:?} failed with status {:?}, stdout: {:?}, stderr: {:?}",
-            args,
-            output.status.code(),
-            stdout,
-            stderr
-        ))
+#[cfg(target_os = "windows")]
+impl Drop for WfpEngine {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: The handle was returned by FwpmEngineOpen0 and remains valid
+            // until this drop closes it once.
+            unsafe {
+                let _ = FwpmEngineClose0(self.0);
+            }
+        }
     }
 }
 
-fn activate_target_attached_blocked_mode_with_runner<R>(
-    request: &WfpRuntimeActivationRequest,
-    run_command: R,
-) -> WfpRuntimeActivationResponse
-where
-    R: Fn(&[String]) -> Result<String, String>,
-{
-    let (target_program, outbound_rule, inbound_rule) =
-        match validate_target_request_fields(request) {
-            Ok(fields) => fields,
-            Err(response) => return response,
-        };
-    if !target_program.exists() {
-        return build_prerequisites_missing_response(format!(
-            "target program for blocked-mode enforcement does not exist: {}",
+#[cfg(target_os = "windows")]
+struct WfpAppIdBlob(*mut FWP_BYTE_BLOB);
+
+#[cfg(target_os = "windows")]
+impl WfpAppIdBlob {
+    fn as_ptr(&self) -> *mut FWP_BYTE_BLOB {
+        self.0
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WfpAppIdBlob {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            let mut ptr = self.0.cast();
+            // SAFETY: The blob pointer was allocated by FwpmGetAppIdFromFileName0 and
+            // must be released via FwpmFreeMemory0 exactly once.
+            unsafe {
+                FwpmFreeMemory0(&mut ptr);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WfpTransaction<'a> {
+    engine: &'a WfpEngine,
+    committed: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl<'a> WfpTransaction<'a> {
+    fn begin(engine: &'a WfpEngine) -> Result<Self, String> {
+        // SAFETY: engine handle is valid for the lifetime of this transaction.
+        let status = unsafe { FwpmTransactionBegin0(engine.0, 0) };
+        if status != 0 {
+            return Err(format_windows_error(
+                status,
+                "failed to begin WFP transaction",
+            ));
+        }
+        Ok(Self {
+            engine,
+            committed: false,
+        })
+    }
+
+    fn commit(mut self) -> Result<(), String> {
+        // SAFETY: engine handle is valid and has an active transaction.
+        let status = unsafe { FwpmTransactionCommit0(self.engine.0) };
+        if status != 0 {
+            return Err(format_windows_error(
+                status,
+                "failed to commit WFP transaction",
+            ));
+        }
+        self.committed = true;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WfpTransaction<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            // SAFETY: engine handle is valid and aborting an uncommitted transaction
+            // is the required fail-secure cleanup path.
+            unsafe {
+                let _ = FwpmTransactionAbort0(self.engine.0);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct WfpLayerSpec {
+    key: GUID,
+    label: &'static str,
+    rule_name: &'static str,
+}
+
+#[cfg(target_os = "windows")]
+fn build_wfp_layer_specs() -> [WfpLayerSpec; 4] {
+    [
+        WfpLayerSpec {
+            key: FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            label: "connect-v4",
+            rule_name: "outbound",
+        },
+        WfpLayerSpec {
+            key: FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            label: "connect-v6",
+            rule_name: "outbound",
+        },
+        WfpLayerSpec {
+            key: FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+            label: "recv-accept-v4",
+            rule_name: "inbound",
+        },
+        WfpLayerSpec {
+            key: FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+            label: "recv-accept-v6",
+            rule_name: "inbound",
+        },
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn to_utf16_null(value: &std::ffi::OsStr) -> Vec<u16> {
+    value.encode_wide().chain([0]).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn zeroed<T>() -> T {
+    // SAFETY: The WFP FFI structs used here are plain old data. They are
+    // immediately initialized field-by-field before being passed to Win32 APIs.
+    unsafe { std::mem::zeroed() }
+}
+
+#[cfg(target_os = "windows")]
+fn format_windows_error(status: u32, context: &str) -> String {
+    format!("{context} (win32 status {status}, 0x{status:08x})")
+}
+
+#[cfg(target_os = "windows")]
+fn deterministic_filter_key(base_name: &str, label: &str) -> GUID {
+    let mut hasher = Sha256::new();
+    hasher.update(b"nono-wfp-filter");
+    hasher.update(base_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(label.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    GUID::from_u128(u128::from_be_bytes(bytes))
+}
+
+#[cfg(target_os = "windows")]
+fn open_wfp_engine() -> Result<WfpEngine, String> {
+    let session: FWPM_SESSION0 = zeroed();
+    let mut handle: HANDLE = null_mut();
+    // SAFETY: All pointers are either null or point to initialized POD
+    // structures valid for the duration of the call. The returned handle is
+    // wrapped immediately for RAII cleanup.
+    let status =
+        unsafe { FwpmEngineOpen0(null(), RPC_C_AUTHN_WINNT, null(), &session, &mut handle) };
+    if status != 0 {
+        return Err(format_windows_error(
+            status,
+            "failed to open Windows Filtering Platform engine",
+        ));
+    }
+    if handle.is_null() {
+        return Err("WFP engine returned a null handle".to_string());
+    }
+    Ok(WfpEngine(handle))
+}
+
+#[cfg(target_os = "windows")]
+fn get_app_id_blob(target_program: &std::path::Path) -> Result<WfpAppIdBlob, String> {
+    let path_wide = to_utf16_null(target_program.as_os_str());
+    let mut blob: *mut FWP_BYTE_BLOB = null_mut();
+    // SAFETY: path_wide is a valid null-terminated UTF-16 buffer for the target
+    // program path, and blob points to writable storage for the returned pointer.
+    let status = unsafe { FwpmGetAppIdFromFileName0(path_wide.as_ptr(), &mut blob) };
+    if status != 0 {
+        return Err(format_windows_error(
+            status,
+            &format!(
+                "failed to derive WFP app id for {}",
+                target_program.display()
+            ),
+        ));
+    }
+    if blob.is_null() {
+        return Err(format!(
+            "WFP returned a null app id blob for {}",
             target_program.display()
         ));
     }
-    let [out_add, in_add] =
-        build_target_firewall_add_args(&outbound_rule, &inbound_rule, &target_program);
-    match run_command(&out_add) {
-        Ok(out_add_result) => match run_command(&in_add) {
-            Ok(in_add_result) => build_enforced_pending_cleanup_response(
-                request,
-                format!(
-                    "installed firewall rules {} and {} for target {} (outbound: {:?}, inbound: {:?})",
-                    outbound_rule,
-                    inbound_rule,
-                    target_program.display(),
-                    out_add_result,
-                    in_add_result
-                ),
-            ),
-            Err(err) => {
-                let cleanup_args = build_target_firewall_delete_args(&outbound_rule, &inbound_rule);
-                let _ = run_command(&cleanup_args[1]);
-                build_filtering_probe_failed_response(
-                    request,
-                    format!(
-                        "installed outbound rule {} but failed to install inbound rule {}: {}",
-                        outbound_rule, inbound_rule, err
-                    ),
-                )
-            }
-        },
-        Err(err) => build_filtering_probe_failed_response(
-            request,
-            format!(
-                "failed to install outbound target-attached rule {} for {}: {}",
-                outbound_rule,
-                target_program.display(),
-                err
-            ),
-        ),
-    }
+    Ok(WfpAppIdBlob(blob))
 }
 
-fn deactivate_target_attached_blocked_mode_with_runner<R>(
-    request: &WfpRuntimeActivationRequest,
-    run_command: R,
-) -> WfpRuntimeActivationResponse
-where
-    R: Fn(&[String]) -> Result<String, String>,
-{
-    let (_target_program, outbound_rule, inbound_rule) =
-        match validate_target_request_fields(request) {
-            Ok(fields) => fields,
-            Err(response) => return response,
-        };
-    let [in_delete, out_delete] = build_target_firewall_delete_args(&outbound_rule, &inbound_rule);
-    let in_result = run_command(&in_delete);
-    let out_result = run_command(&out_delete);
-    match (in_result, out_result) {
-        (Ok(in_details), Ok(out_details)) => build_cleanup_succeeded_response(
-            request,
-            format!(
-                "removed firewall rules {} and {} (inbound: {:?}, outbound: {:?})",
-                inbound_rule, outbound_rule, in_details, out_details
-            ),
-        ),
-        (in_err, out_err) => build_cleanup_failed_response(
-            request,
-            format!(
-                "cleanup results for {} / {} were inbound={:?}, outbound={:?}",
-                inbound_rule, outbound_rule, in_err, out_err
-            ),
-        ),
+#[cfg(target_os = "windows")]
+fn add_block_filter(
+    engine: &WfpEngine,
+    filter_key: GUID,
+    layer_key: GUID,
+    app_id_blob: *mut FWP_BYTE_BLOB,
+) -> Result<(), String> {
+    let mut condition = FWPM_FILTER_CONDITION0 {
+        fieldKey: FWPM_CONDITION_ALE_APP_ID,
+        matchType: FWP_MATCH_EQUAL,
+        conditionValue: FWP_CONDITION_VALUE0 {
+            r#type: FWP_BYTE_BLOB_TYPE,
+            Anonymous: FWP_CONDITION_VALUE0_0 {
+                byteBlob: app_id_blob,
+            },
+        },
+    };
+    let action = FWPM_ACTION0 {
+        r#type: FWP_ACTION_BLOCK,
+        Anonymous: FWPM_ACTION0_0 {
+            filterType: GUID::from_u128(0),
+        },
+    };
+    let mut filter: FWPM_FILTER0 = zeroed();
+    filter.filterKey = filter_key;
+    filter.displayData = FWPM_DISPLAY_DATA0 {
+        name: null_mut(),
+        description: null_mut(),
+    };
+    filter.layerKey = layer_key;
+    filter.subLayerKey = FWPM_SUBLAYER_UNIVERSAL;
+    filter.weight.r#type = FWP_EMPTY;
+    filter.numFilterConditions = 1;
+    filter.filterCondition = &mut condition;
+    filter.action = action;
+    filter.Anonymous = FWPM_FILTER0_0 { rawContext: 0 };
+
+    let mut filter_id = 0u64;
+    // SAFETY: engine handle is valid; filter points to initialized WFP POD data
+    // whose nested pointers remain valid for the duration of the call.
+    let status = unsafe { FwpmFilterAdd0(engine.0, &filter, null_mut(), &mut filter_id) };
+    if status != 0 {
+        return Err(format_windows_error(
+            status,
+            "failed to install WFP blocked-mode filter",
+        ));
     }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn delete_block_filter(engine: &WfpEngine, filter_key: GUID) -> Result<(), String> {
+    // SAFETY: engine handle is valid and filter_key points to an initialized GUID.
+    let status = unsafe { FwpmFilterDeleteByKey0(engine.0, &filter_key) };
+    if status != 0 {
+        return Err(format_windows_error(
+            status,
+            "failed to delete WFP blocked-mode filter",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn install_wfp_blocked_mode_filters(
+    target_program: &std::path::Path,
+    outbound_rule: &str,
+    inbound_rule: &str,
+) -> Result<String, String> {
+    let engine = open_wfp_engine()?;
+    let app_id = get_app_id_blob(target_program)?;
+    let transaction = WfpTransaction::begin(&engine)?;
+
+    for layer in build_wfp_layer_specs() {
+        let base = if layer.rule_name == "outbound" {
+            outbound_rule
+        } else {
+            inbound_rule
+        };
+        let filter_key = deterministic_filter_key(base, layer.label);
+        add_block_filter(&engine, filter_key, layer.key, app_id.as_ptr())?;
+    }
+
+    transaction.commit()?;
+    Ok(format!(
+        "installed WFP app-id block filters for {} using outbound rule base {} and inbound rule base {}",
+        target_program.display(),
+        outbound_rule,
+        inbound_rule
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn remove_wfp_blocked_mode_filters(
+    outbound_rule: &str,
+    inbound_rule: &str,
+) -> Result<String, String> {
+    let engine = open_wfp_engine()?;
+    let transaction = WfpTransaction::begin(&engine)?;
+
+    for layer in build_wfp_layer_specs() {
+        let base = if layer.rule_name == "outbound" {
+            outbound_rule
+        } else {
+            inbound_rule
+        };
+        let filter_key = deterministic_filter_key(base, layer.label);
+        delete_block_filter(&engine, filter_key)?;
+    }
+
+    transaction.commit()?;
+    Ok(format!(
+        "removed WFP app-id block filters for outbound rule base {} and inbound rule base {}",
+        outbound_rule, inbound_rule
+    ))
 }
 
 fn activate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeActivationResponse {
@@ -382,12 +547,63 @@ fn activate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeAct
             driver_binary_path.display()
         ));
     }
-    match attempt_true_wfp_blocked_mode_activation(request) {
-        Ok(response) => response,
-        Err(reason) => annotate_fallback_details(
-            activate_target_attached_blocked_mode_with_runner(request, run_netsh_command),
-            &reason,
-        ),
+
+    let (target_program, outbound_rule, inbound_rule) =
+        match validate_target_request_fields(request) {
+            Ok(fields) => fields,
+            Err(response) => return response,
+        };
+    if !target_program.exists() {
+        return build_prerequisites_missing_response(format!(
+            "target program for blocked-mode enforcement does not exist: {}",
+            target_program.display()
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        match install_wfp_blocked_mode_filters(&target_program, &outbound_rule, &inbound_rule) {
+            Ok(details) => build_enforced_pending_cleanup_response(request, details),
+            Err(err) => build_filtering_probe_failed_response(request, err),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (target_program, outbound_rule, inbound_rule);
+        build_filtering_probe_failed_response(
+            request,
+            "WFP APIs are only available on Windows".to_string(),
+        )
+    }
+}
+
+fn deactivate_blocked_mode(request: &WfpRuntimeActivationRequest) -> WfpRuntimeActivationResponse {
+    if request.protocol_version != WFP_RUNTIME_PROTOCOL_VERSION {
+        return build_protocol_mismatch_response(request);
+    }
+
+    let (_target_program, outbound_rule, inbound_rule) =
+        match validate_target_request_fields(request) {
+            Ok(fields) => fields,
+            Err(response) => return response,
+        };
+
+    #[cfg(target_os = "windows")]
+    {
+        match remove_wfp_blocked_mode_filters(&outbound_rule, &inbound_rule) {
+            Ok(details) => build_cleanup_succeeded_response(request, details),
+            Err(err) => build_cleanup_failed_response(request, err),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (outbound_rule, inbound_rule);
+        build_cleanup_failed_response(
+            request,
+            "WFP APIs are only available on Windows".to_string(),
+        )
     }
 }
 
@@ -408,16 +624,8 @@ fn probe_runtime_activation() -> ExitCode {
         }
     };
     let response = match request.request_kind.as_str() {
-        "activate_blocked_mode" => {
-            let prereq = activate_blocked_mode(&request);
-            match prereq.status.as_str() {
-                "prerequisites-missing" | "protocol-mismatch" | "invalid-request" => prereq,
-                _ => activate_target_attached_blocked_mode_with_runner(&request, run_netsh_command),
-            }
-        }
-        "deactivate_blocked_mode" => {
-            deactivate_target_attached_blocked_mode_with_runner(&request, run_netsh_command)
-        }
+        "activate_blocked_mode" => activate_blocked_mode(&request),
+        "deactivate_blocked_mode" => deactivate_blocked_mode(&request),
         _ => build_invalid_activation_response(&request),
     };
     match serde_json::to_string(&response) {
@@ -431,8 +639,7 @@ fn probe_runtime_activation() -> ExitCode {
         }
     }
     eprintln!(
-        "nono-wfp-service: request {} resolved to status {}; \
-         service-owned activation still fails closed until a real WFP primitive is available",
+        "nono-wfp-service: request {} resolved to status {}",
         request.request_kind, response.status
     );
     if response.status == "invalid-request" || response.status == "protocol-mismatch" {
@@ -483,6 +690,20 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    fn sample_request() -> WfpRuntimeActivationRequest {
+        WfpRuntimeActivationRequest {
+            protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
+            request_kind: "activate_blocked_mode".to_string(),
+            network_mode: "blocked".to_string(),
+            preferred_backend: "windows-filtering-platform".to_string(),
+            active_backend: "none".to_string(),
+            runtime_target: "blocked Windows network access".to_string(),
+            target_program_path: Some(r"C:\tools\target.exe".to_string()),
+            outbound_rule_name: Some("nono-test-out".to_string()),
+            inbound_rule_name: Some("nono-test-in".to_string()),
+        }
+    }
+
     #[test]
     fn service_contract_output_is_stable() {
         let text = format!("service_name={SERVICE_NAME}\nstartup_args={SERVICE_MODE_ARG}\n");
@@ -497,17 +718,7 @@ mod tests {
 
     #[test]
     fn runtime_activation_probe_fails_closed() {
-        let request = WfpRuntimeActivationRequest {
-            protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
-            request_kind: "activate_blocked_mode".to_string(),
-            network_mode: "blocked".to_string(),
-            preferred_backend: "windows-filtering-platform".to_string(),
-            active_backend: "none".to_string(),
-            runtime_target: "blocked Windows network access".to_string(),
-            target_program_path: Some(r"C:\tools\target.exe".to_string()),
-            outbound_rule_name: Some("nono-test-out".to_string()),
-            inbound_rule_name: Some("nono-test-in".to_string()),
-        };
+        let request = sample_request();
         let response = build_enforced_pending_cleanup_response(&request, "placeholder".to_string());
         assert_eq!(response.status, "enforced-pending-cleanup");
         assert!(response.details.contains("blocked Windows network access"));
@@ -533,88 +744,50 @@ mod tests {
 
     #[test]
     fn protocol_mismatch_returns_protocol_mismatch_response() {
-        let request = WfpRuntimeActivationRequest {
-            protocol_version: WFP_RUNTIME_PROTOCOL_VERSION + 1,
-            request_kind: "activate_blocked_mode".to_string(),
-            network_mode: "blocked".to_string(),
-            preferred_backend: "windows-filtering-platform".to_string(),
-            active_backend: "none".to_string(),
-            runtime_target: "blocked Windows network access".to_string(),
-            target_program_path: Some(r"C:\tools\target.exe".to_string()),
-            outbound_rule_name: Some("nono-test-out".to_string()),
-            inbound_rule_name: Some("nono-test-in".to_string()),
-        };
+        let mut request = sample_request();
+        request.protocol_version = WFP_RUNTIME_PROTOCOL_VERSION + 1;
         let response = build_protocol_mismatch_response(&request);
         assert_eq!(response.status, "protocol-mismatch");
         assert!(response.details.contains("expected 1"));
     }
 
     #[test]
-    fn blocked_mode_probe_reports_enforced_pending_cleanup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join("target.exe");
-        std::fs::write(&target, b"stub").expect("write target");
+    fn validate_target_request_fields_requires_program_and_rule_names() {
         let request = WfpRuntimeActivationRequest {
-            protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
-            request_kind: "activate_blocked_mode".to_string(),
-            network_mode: "blocked".to_string(),
-            preferred_backend: "windows-filtering-platform".to_string(),
-            active_backend: "none".to_string(),
-            runtime_target: "blocked Windows network access".to_string(),
-            target_program_path: Some(target.display().to_string()),
-            outbound_rule_name: Some("nono-test-out".to_string()),
-            inbound_rule_name: Some("nono-test-in".to_string()),
+            target_program_path: None,
+            outbound_rule_name: Some("out".to_string()),
+            inbound_rule_name: Some("in".to_string()),
+            ..sample_request()
         };
-        let response = activate_target_attached_blocked_mode_with_runner(&request, |_args| {
-            Ok("ok".to_string())
-        });
-        assert_eq!(response.status, "enforced-pending-cleanup");
-        assert!(response.details.contains("installed firewall rules"));
+        let response = validate_target_request_fields(&request);
+        assert!(response.is_err());
     }
 
     #[test]
-    fn blocked_mode_probe_reports_filtering_probe_failed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join("target.exe");
-        std::fs::write(&target, b"stub").expect("write target");
-        let request = WfpRuntimeActivationRequest {
-            protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
-            request_kind: "activate_blocked_mode".to_string(),
-            network_mode: "blocked".to_string(),
-            preferred_backend: "windows-filtering-platform".to_string(),
-            active_backend: "none".to_string(),
-            runtime_target: "blocked Windows network access".to_string(),
-            target_program_path: Some(target.display().to_string()),
-            outbound_rule_name: Some("nono-test-out".to_string()),
-            inbound_rule_name: Some("nono-test-in".to_string()),
-        };
-        let response = activate_target_attached_blocked_mode_with_runner(&request, |_args| {
-            Err("access denied".to_string())
-        });
-        assert_eq!(response.status, "filtering-probe-failed");
-        assert!(response.details.contains("access denied"));
+    fn blocked_mode_probe_reports_missing_target_program() {
+        let request = sample_request();
+        let response = activate_blocked_mode(&request);
+        assert!(matches!(
+            response.status.as_str(),
+            "prerequisites-missing" | "filtering-probe-failed"
+        ));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn fallback_annotation_mentions_wfp_path_first() {
-        let request = WfpRuntimeActivationRequest {
-            protocol_version: WFP_RUNTIME_PROTOCOL_VERSION,
-            request_kind: "activate_blocked_mode".to_string(),
-            network_mode: "blocked".to_string(),
-            preferred_backend: "windows-filtering-platform".to_string(),
-            active_backend: "none".to_string(),
-            runtime_target: "blocked Windows network access".to_string(),
-            target_program_path: Some(r"C:\tools\target.exe".to_string()),
-            outbound_rule_name: Some("nono-test-out".to_string()),
-            inbound_rule_name: Some("nono-test-in".to_string()),
-        };
-        let response = annotate_fallback_details(
-            build_enforced_pending_cleanup_response(&request, "ok".to_string()),
-            "wfp primitive unavailable",
+    fn deterministic_filter_keys_are_stable() {
+        let first = deterministic_filter_key("nono-test-out", "connect-v4");
+        let second = deterministic_filter_key("nono-test-out", "connect-v4");
+        let different = deterministic_filter_key("nono-test-out", "connect-v6");
+        let first_raw = (first.data1, first.data2, first.data3, first.data4);
+        let second_raw = (second.data1, second.data2, second.data3, second.data4);
+        let different_raw = (
+            different.data1,
+            different.data2,
+            different.data3,
+            different.data4,
         );
-        assert!(response
-            .details
-            .contains("attempted WFP backend path first"));
-        assert!(response.details.contains("wfp primitive unavailable"));
+        assert_eq!(first_raw, second_raw);
+        assert_ne!(first_raw, different_raw);
     }
 }
