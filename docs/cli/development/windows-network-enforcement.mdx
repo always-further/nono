@@ -103,6 +103,19 @@ The current backend contract now carries two backend states per compiled Windows
 
 That means later WFP work can replace the active backend without changing the higher-level `WindowsNetworkPolicy` contract again.
 
+The runtime code now also reflects that split directly:
+
+- `FirewallRulesNetworkBackend`
+  The current active backend for the narrow supported `Blocked` subset.
+- `WfpNetworkBackend`
+  A fail-closed scaffold backend that is selected for future-targeted shapes when the compiled policy prefers WFP but no active backend is available yet.
+
+The WFP scaffold does not claim success. It returns deterministic diagnostics for cases such as:
+
+- WFP backend not installed
+- WFP backend not available in the current build
+- WFP service or driver not running
+
 ## Real Blockers
 
 The remaining blockers for actual `WIN-704` implementation are:

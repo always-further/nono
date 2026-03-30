@@ -84,6 +84,8 @@ struct NetworkEnforcementGuard {
 }
 
 trait WindowsNetworkBackend {
+    fn label(&self) -> &'static str;
+
     fn install(
         &self,
         policy: &nono::WindowsNetworkPolicy,
@@ -92,6 +94,7 @@ trait WindowsNetworkBackend {
 }
 
 struct FirewallRulesNetworkBackend;
+struct WfpNetworkBackend;
 
 struct ProcessContainment {
     job: HANDLE,
@@ -233,18 +236,16 @@ fn select_network_backend(
             nono::WindowsNetworkPolicyMode::Blocked,
             nono::WindowsNetworkBackendKind::FirewallRules,
         ) => Ok(Some(Box::new(FirewallRulesNetworkBackend))),
-        (nono::WindowsNetworkPolicyMode::Blocked, nono::WindowsNetworkBackendKind::None) => Err(
-            NonoError::UnsupportedPlatform(format!(
-                "Windows blocked-network enforcement has no active backend for this launch yet ({}). The preferred backend is WFP.",
-                policy.backend_summary()
-            )),
-        ),
-        (nono::WindowsNetworkPolicyMode::ProxyOnly { .. }, _) => Err(
-            NonoError::UnsupportedPlatform(format!(
-                "Windows proxy-only network enforcement is not implemented yet ({}). This is a current Windows backend limitation, not permanent product behavior.",
-                policy.backend_summary()
-            )),
-        ),
+        (nono::WindowsNetworkPolicyMode::Blocked, nono::WindowsNetworkBackendKind::None)
+            if policy.preferred_backend == nono::WindowsNetworkBackendKind::Wfp =>
+        {
+            Ok(Some(Box::new(WfpNetworkBackend)))
+        }
+        (nono::WindowsNetworkPolicyMode::ProxyOnly { .. }, _)
+            if policy.preferred_backend == nono::WindowsNetworkBackendKind::Wfp =>
+        {
+            Ok(Some(Box::new(WfpNetworkBackend)))
+        }
         (_, active_backend) => Err(NonoError::UnsupportedPlatform(format!(
             "Windows network enforcement does not have an applicable active backend for this policy ({}, active backend: {}).",
             policy.backend_summary(),
@@ -254,6 +255,10 @@ fn select_network_backend(
 }
 
 impl WindowsNetworkBackend for FirewallRulesNetworkBackend {
+    fn label(&self) -> &'static str {
+        "windows-firewall-rules"
+    }
+
     fn install(
         &self,
         policy: &nono::WindowsNetworkPolicy,
@@ -321,6 +326,34 @@ This is a current Windows backend limitation, not permanent product behavior.",
     }
 }
 
+impl WindowsNetworkBackend for WfpNetworkBackend {
+    fn label(&self) -> &'static str {
+        "windows-filtering-platform"
+    }
+
+    fn install(
+        &self,
+        policy: &nono::WindowsNetworkPolicy,
+        _config: &ExecConfig<'_>,
+    ) -> Result<Option<NetworkEnforcementGuard>> {
+        match &policy.mode {
+            nono::WindowsNetworkPolicyMode::Blocked => Err(NonoError::UnsupportedPlatform(
+                format!(
+                    "Windows blocked-network enforcement is targeting the WFP backend, but that backend is not installed or available in this build yet ({}). The current narrow fallback backend is Windows Firewall rules for standalone executables only.",
+                    policy.backend_summary()
+                ),
+            )),
+            nono::WindowsNetworkPolicyMode::ProxyOnly { .. } => Err(NonoError::UnsupportedPlatform(
+                format!(
+                    "Windows proxy-only network enforcement requires the WFP backend, but that backend is not installed or its service/driver is not running yet ({}). This request remains fail-closed until WFP is available.",
+                    policy.backend_summary()
+                ),
+            )),
+            nono::WindowsNetworkPolicyMode::AllowAll => Ok(None),
+        }
+    }
+}
+
 fn prepare_network_enforcement(config: &ExecConfig<'_>) -> Result<Option<NetworkEnforcementGuard>> {
     let policy = Sandbox::windows_network_policy(config.caps);
     if !policy.is_fully_supported() {
@@ -334,6 +367,12 @@ fn prepare_network_enforcement(config: &ExecConfig<'_>) -> Result<Option<Network
     let Some(backend) = select_network_backend(&policy)? else {
         return Ok(None);
     };
+
+    tracing::debug!(
+        "Windows network enforcement selecting backend {} ({})",
+        backend.label(),
+        policy.backend_summary()
+    );
 
     backend.install(&policy, config)
 }
@@ -1317,13 +1356,75 @@ mod tests {
             },
         ));
 
-        match select_network_backend(&policy) {
-            Ok(_) => panic!("proxy-only should fail without backend"),
-            Err(err) => {
-                let message = err.to_string();
-                assert!(message.contains("proxy-only network enforcement is not implemented yet"));
-                assert!(message.contains("preferred backend: windows-filtering-platform"));
-            }
-        }
+        let backend = select_network_backend(&policy)
+            .expect("proxy-only should select the WFP scaffold backend")
+            .expect("proxy-only should use a backend scaffold");
+        assert_eq!(backend.label(), "windows-filtering-platform");
+    }
+
+    #[test]
+    fn test_select_network_backend_routes_blocked_without_active_backend_to_wfp_scaffold() {
+        let mut caps = CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked);
+        caps.add_tcp_connect_port(443);
+        let policy = Sandbox::windows_network_policy(&caps);
+
+        let backend = select_network_backend(&policy)
+            .expect("blocked policy should select a backend scaffold")
+            .expect("blocked policy should use a backend scaffold");
+        assert_eq!(backend.label(), "windows-filtering-platform");
+    }
+
+    #[test]
+    fn test_wfp_backend_reports_blocked_backend_unavailable() {
+        let backend = WfpNetworkBackend;
+        let mut caps = CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked);
+        caps.add_tcp_connect_port(443);
+        let policy = Sandbox::windows_network_policy(&caps);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let command = vec![r"C:\tools\probe.exe".to_string()];
+        let resolved_program = PathBuf::from(r"C:\tools\probe.exe");
+        let config = ExecConfig {
+            command: &command,
+            resolved_program: &resolved_program,
+            caps: &caps,
+            env_vars: Vec::new(),
+            cap_file: None,
+            current_dir: dir.path(),
+        };
+
+        let err = backend
+            .install(&policy, &config)
+            .expect_err("WFP scaffold should fail closed for blocked mode");
+        let message = err.to_string();
+        assert!(message.contains("not installed or available in this build yet"));
+        assert!(message.contains("preferred backend: windows-filtering-platform"));
+    }
+
+    #[test]
+    fn test_wfp_backend_reports_proxy_backend_unavailable() {
+        let backend = WfpNetworkBackend;
+        let caps = CapabilitySet::new().set_network_mode(nono::NetworkMode::ProxyOnly {
+            port: 8080,
+            bind_ports: vec![8080],
+        });
+        let policy = Sandbox::windows_network_policy(&caps);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let command = vec![r"C:\tools\probe.exe".to_string()];
+        let resolved_program = PathBuf::from(r"C:\tools\probe.exe");
+        let config = ExecConfig {
+            command: &command,
+            resolved_program: &resolved_program,
+            caps: &caps,
+            env_vars: Vec::new(),
+            cap_file: None,
+            current_dir: dir.path(),
+        };
+
+        let err = backend
+            .install(&policy, &config)
+            .expect_err("WFP scaffold should fail closed for proxy mode");
+        let message = err.to_string();
+        assert!(message.contains("service/driver is not running yet"));
+        assert!(message.contains("fail-closed"));
     }
 }
