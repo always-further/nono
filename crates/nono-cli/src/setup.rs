@@ -92,9 +92,12 @@ impl SetupRunner {
     #[cfg(target_os = "windows")]
     fn test_windows_support(&self) -> Result<()> {
         let info = nono::Sandbox::support_info();
+        let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
         println!("  * Platform: {}", info.platform);
         println!("  * Support status: {}", info.status_label());
         println!("  * {}", info.details);
+        println!("  * WFP readiness: {}", wfp.status_label);
+        println!("  * {}", wfp.details);
         Ok(())
     }
 
@@ -496,8 +499,11 @@ fn print_shell_help_body() {
 #[cfg(target_os = "windows")]
 fn print_check_only_summary() {
     let info = nono::Sandbox::support_info();
+    let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
     println!("Support status: {}", info.status_label());
     println!("{}", info.details);
+    println!("WFP readiness: {}", wfp.status_label);
+    println!("{}", wfp.details);
     println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
     println!("Plain 'nono run -- <command>' is preview-safe direct execution only.");
     println!("Run 'nono run --help' to inspect the current command surface.");
