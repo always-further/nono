@@ -246,17 +246,39 @@ pub fn print_abi_info(silent: bool) {
                 .filter(|(_, check)| !check(&detected))
                 .map(|(name, _)| *name)
                 .collect();
-            if !missing.is_empty() {
-                eprintln!(
-                    "          {}",
-                    fg(
-                        &format!(
-                            "degraded: {} (upgrade kernel for full support)",
-                            missing.join(", "),
-                        ),
-                        t.yellow,
-                    ),
-                );
+            let is_wsl2 = nono::sandbox::is_wsl2();
+
+            // On WSL2, seccomp notify is always unavailable (EBUSY) regardless
+            // of Landlock ABI level, so we show a banner even when all Landlock
+            // features are present.
+            if !missing.is_empty() || is_wsl2 {
+                let hint = if is_wsl2 {
+                    let pad = " ".repeat(10);
+                    let mut wsl2_missing: Vec<&str> = Vec::new();
+                    if !detected.has_network() {
+                        wsl2_missing.push("per-port filtering");
+                    }
+                    if !detected.has_ioctl_dev() {
+                        wsl2_missing.push("device ioctl");
+                    }
+                    if !detected.has_scoping() {
+                        wsl2_missing.push("process scoping");
+                    }
+                    // seccomp notify is always unavailable on WSL2 (EBUSY)
+                    wsl2_missing.push("capability elevation (seccomp notify)");
+                    format!(
+                        "degraded: {} unavailable on WSL2\n\
+                         {pad}(block-all network via --block-net still works)\n\
+                         {pad}details: https://nono.sh/docs/cli/internals/wsl2",
+                        wsl2_missing.join(", "),
+                    )
+                } else {
+                    format!(
+                        "degraded: {} (upgrade kernel for full support)",
+                        missing.join(", "),
+                    )
+                };
+                eprintln!("          {}", fg(&hint, t.yellow),);
             }
         }
         Err(e) => {

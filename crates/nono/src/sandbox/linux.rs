@@ -165,6 +165,61 @@ fn probe_abi_candidate(abi: ABI) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Cached WSL2 detection result.
+///
+/// Uses `OnceLock` so the filesystem/env checks happen at most once per process.
+static WSL2_DETECTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Detect whether the current process is running inside WSL2.
+///
+/// Uses only kernel-controlled indicators to prevent spoofing:
+/// 1. The file `/proc/sys/fs/binfmt_misc/WSLInterop` exists
+/// 2. `/proc/version` contains "microsoft" or "WSL"
+///
+/// The `WSL_DISTRO_NAME` environment variable is intentionally NOT
+/// trusted because it is caller-controlled and could be set by a
+/// malicious wrapper to disable security features on native Linux.
+///
+/// The result is cached for the lifetime of the process.
+#[must_use]
+pub fn is_wsl2() -> bool {
+    *WSL2_DETECTED.get_or_init(detect_wsl2)
+}
+
+/// Perform the actual WSL2 detection (called once, cached).
+///
+/// Only trusts kernel-controlled indicators. Environment variables alone
+/// are not sufficient because they are caller-controlled and could be
+/// spoofed to disable security features on native Linux.
+fn detect_wsl2() -> bool {
+    // Primary: WSLInterop binfmt entry (kernel-controlled, present in all WSL2 distros)
+    if std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists() {
+        info!("WSL2 detected via /proc/sys/fs/binfmt_misc/WSLInterop");
+        return true;
+    }
+
+    // Secondary: kernel version string contains "microsoft" or "WSL2"
+    // This is written by the kernel build and cannot be spoofed from userspace.
+    if let Ok(version) = std::fs::read_to_string("/proc/version") {
+        if version.contains("microsoft") || version.contains("WSL") {
+            info!("WSL2 detected via /proc/version kernel string");
+            return true;
+        }
+    }
+
+    // WSL_DISTRO_NAME env var is NOT trusted on its own — it is caller-controlled
+    // and could be set by a malicious wrapper to disable security features.
+    // Only log it for diagnostics if other indicators were negative.
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        warn!(
+            "WSL_DISTRO_NAME is set but no kernel-controlled WSL2 indicators found; \
+             ignoring env var to prevent security downgrade"
+        );
+    }
+
+    false
+}
+
 /// Check if Landlock is supported on this system
 pub fn is_supported() -> bool {
     detect_abi().is_ok()
@@ -3056,5 +3111,54 @@ mod tests {
             "bind() should fail with EACCES when has_bind_ports=false, got errno={}",
             buf[0]
         );
+    }
+
+    // =========================================================================
+    // WSL2 detection tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_wsl2_does_not_panic() {
+        // Must not panic regardless of environment
+        let _ = is_wsl2();
+    }
+
+    #[test]
+    fn test_is_wsl2_consistent() {
+        // Cached result must be stable across calls
+        let first = is_wsl2();
+        let second = is_wsl2();
+        assert_eq!(first, second, "is_wsl2() must return consistent results");
+    }
+
+    #[test]
+    fn test_detect_wsl2_matches_indicators() {
+        // Verify detection agrees with kernel-controlled indicators.
+        // WSL_DISTRO_NAME env var alone is NOT sufficient (spoofable).
+        let has_interop = std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists();
+        let has_kernel_string = std::fs::read_to_string("/proc/version")
+            .map(|v| v.contains("microsoft") || v.contains("WSL"))
+            .unwrap_or(false);
+
+        if has_interop || has_kernel_string {
+            assert!(
+                is_wsl2(),
+                "Kernel-controlled WSL2 indicators present but is_wsl2() returned false"
+            );
+        }
+        // Note: we don't assert the negative because the OnceLock cache
+        // may have been populated by another test or indicator.
+    }
+
+    #[test]
+    fn test_wsl2_landlock_available() {
+        // Landlock should be available on both WSL2 and native Linux
+        // (WSL2 kernel 6.6 has Landlock V3)
+        if is_wsl2() || is_supported() {
+            assert!(
+                is_supported(),
+                "Landlock must be available when WSL2 or native Linux"
+            );
+        }
     }
 }

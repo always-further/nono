@@ -668,6 +668,26 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         prepared.capability_elevation = true;
     }
 
+    // On WSL2, seccomp user notification returns EBUSY (microsoft/WSL#9548).
+    // Disable features that depend on it and warn the user.
+    // If the kernel banner already showed the WSL2 docs link (Landlock < V4),
+    // keep the message brief. If V4+ arrives but EBUSY persists, include the URL.
+    #[cfg(target_os = "linux")]
+    if nono::is_wsl2() && prepared.capability_elevation {
+        let banner_showed_wsl2_link = nono::Sandbox::detect_abi()
+            .ok()
+            .is_some_and(|abi| !abi.has_network() || !abi.has_ioctl_dev() || !abi.has_scoping());
+        if banner_showed_wsl2_link {
+            eprintln!("  [nono] WSL2: capability elevation disabled");
+        } else {
+            eprintln!(
+                "  [nono] WSL2: capability elevation disabled \
+                 (https://nono.sh/docs/cli/internals/wsl2)"
+            );
+        }
+        prepared.capability_elevation = false;
+    }
+
     // Compute scan root for trust policy discovery and instruction file scanning.
     let scan_root = args
         .workdir
@@ -917,6 +937,8 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             skip_dirs: merged_skip_dirs,
             #[cfg(not(target_os = "windows"))]
             capability_elevation: prepared.capability_elevation,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy: prepared.wsl2_proxy_policy,
             proxy_active,
             network_profile,
             allow_domain,
@@ -1159,6 +1181,9 @@ struct ExecutionFlags {
     /// Whether runtime capability elevation is enabled (seccomp-notify + PTY mux).
     /// When false, supervised mode runs with static capabilities only.
     capability_elevation: bool,
+    /// WSL2 proxy fallback policy from profile (controls fail-secure vs insecure-proxy)
+    #[cfg(target_os = "linux")]
+    wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,
     /// Whether proxy-based network filtering is active (forces Supervised mode)
     proxy_active: bool,
     /// Network profile name for proxy filtering (from --network-profile or profile config)
@@ -1247,6 +1272,8 @@ impl ExecutionFlags {
             rollback_exclude_globs: Vec::new(),
             skip_dirs: Vec::new(),
             capability_elevation: false,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
             proxy_active: false,
             network_profile: None,
             allow_domain: Vec::new(),
@@ -2174,10 +2201,44 @@ fn execute_sandboxed(
 
     // Determine whether the seccomp proxy-only fallback is needed.
     // This must be decided before fork so both parent and child agree.
+    //
+    // On WSL2, seccomp user notification is unavailable (EBUSY). The
+    // wsl2_proxy_policy controls what happens:
+    //   Error (default) → refuse to run, fail secure
+    //   InsecureProxy   → allow degraded execution with explicit warning
     #[cfg(target_os = "linux")]
     let seccomp_proxy_fallback = {
         let needs_proxy = matches!(caps.network_mode(), nono::NetworkMode::ProxyOnly { .. });
-        if needs_proxy {
+        if needs_proxy && nono::is_wsl2() {
+            let needs_seccomp_fallback = !Sandbox::detect_abi()
+                .ok()
+                .is_some_and(|abi| abi.has_network());
+            if needs_seccomp_fallback {
+                match flags.wsl2_proxy_policy {
+                    crate::profile::Wsl2ProxyPolicy::Error => {
+                        return Err(NonoError::SandboxInit(
+                            "WSL2: proxy-only network mode cannot be kernel-enforced. \
+                             seccomp user notification returns EBUSY on WSL2 and Landlock V4 \
+                             (per-port TCP filtering) is not available on this kernel.\n\n\
+                             The sandboxed process would be able to bypass the credential proxy \
+                             and open arbitrary outbound connections.\n\n\
+                             To allow degraded execution (credential proxy without network lockdown), \
+                             set wsl2_proxy_policy: \"insecure_proxy\" in your profile's security config.\n\n\
+                             See: https://nono.sh/docs/cli/internals/wsl2"
+                                .to_string(),
+                        ));
+                    }
+                    crate::profile::Wsl2ProxyPolicy::InsecureProxy => {
+                        eprintln!(
+                            "  [nono] WARNING: WSL2 insecure proxy mode — credential proxy active \
+                             but network is NOT kernel-enforced. The sandboxed process can bypass \
+                             the proxy and open arbitrary outbound connections."
+                        );
+                    }
+                }
+            }
+            false
+        } else if needs_proxy {
             match Sandbox::detect_abi() {
                 Ok(detected) => !detected.has_network(),
                 Err(_) => false,
@@ -2641,6 +2702,9 @@ struct PreparedSandbox {
     listen_ports: Vec<u16>,
     /// Whether the profile enables runtime capability elevation (seccomp-notify + PTY)
     capability_elevation: bool,
+    /// WSL2 proxy fallback policy from profile
+    #[cfg(target_os = "linux")]
+    wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,
     /// Whether direct LaunchServices opens are enabled for this session.
     allow_launch_services_active: bool,
     /// Allowed URL origins for supervisor-delegated browser opens
@@ -2851,6 +2915,11 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .as_ref()
         .and_then(|p| p.security.capability_elevation)
         .unwrap_or(false);
+    #[cfg(target_os = "linux")]
+    let wsl2_proxy_policy = loaded_profile
+        .as_ref()
+        .and_then(|p| p.security.wsl2_proxy_policy)
+        .unwrap_or_default();
     let profile_workdir_access = loaded_profile.as_ref().map(|p| p.workdir.access.clone());
     let profile_rollback_patterns = loaded_profile
         .as_ref()
@@ -3157,6 +3226,8 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         upstream_bypass: profile_upstream_bypass,
         listen_ports: profile_listen_ports,
         capability_elevation,
+        #[cfg(target_os = "linux")]
+        wsl2_proxy_policy,
         allow_launch_services_active,
         #[cfg(not(target_os = "windows"))]
         open_url_origins,
@@ -3414,6 +3485,8 @@ mod tests {
             upstream_bypass: Vec::new(),
             listen_ports: Vec::new(),
             capability_elevation: false,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
             allow_launch_services_active: false,
             #[cfg(not(target_os = "windows"))]
             open_url_origins: Vec::new(),
@@ -3456,6 +3529,8 @@ mod tests {
             upstream_bypass: Vec::new(),
             listen_ports: Vec::new(),
             capability_elevation: false,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
             allow_launch_services_active: false,
             #[cfg(not(target_os = "windows"))]
             open_url_origins: Vec::new(),

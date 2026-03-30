@@ -193,6 +193,26 @@ impl SetupRunner {
 
         println!("  * Filesystem ruleset creation verified");
 
+        // WSL2 environment detection and feature matrix
+        if nono::sandbox::is_wsl2() {
+            println!("  * WSL2 environment detected");
+            println!(
+                "    - Filesystem sandbox: available (Landlock {})",
+                detected.version_string()
+            );
+            println!("    - Block-all network (--block-net): available");
+            if detected.has_network() {
+                println!("    - Per-port network filtering: available (Landlock V4+)");
+            } else {
+                println!("    - Per-port network filtering: unavailable (needs kernel 6.7+ for Landlock V4)");
+            }
+            println!(
+                "    - Credential proxy (--credential): requires wsl2_proxy_policy profile opt-in"
+            );
+            println!("    - Capability elevation (--capability-elevation): unavailable");
+            println!("    Note: seccomp user notification returns EBUSY (microsoft/WSL#9548)");
+        }
+
         if detected.has_network() {
             if verify_landlock_network_rule_support(detected.abi)? {
                 println!("  * TCP network rule support verified");

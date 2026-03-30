@@ -201,6 +201,30 @@ skip_unless_linux() {
     return 0
 }
 
+# Check if running inside WSL2 (kernel-controlled indicators only)
+is_wsl2() {
+    [[ -f /proc/sys/fs/binfmt_misc/WSLInterop ]] || \
+        grep -qi 'microsoft\|WSL' /proc/version 2>/dev/null
+}
+
+# Skip test unless on WSL2
+skip_unless_wsl2() {
+    if ! is_wsl2; then
+        skip_test "$1" "WSL2 only"
+        return 1
+    fi
+    return 0
+}
+
+# Skip test if on WSL2 (for tests that are known-broken under WSL2)
+skip_on_wsl2() {
+    if is_wsl2; then
+        skip_test "$1" "not supported on WSL2"
+        return 1
+    fi
+    return 0
+}
+
 # Check if a command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1

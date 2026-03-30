@@ -157,8 +157,20 @@
             { "type": "null" }
           ],
           "description": "Enable runtime capability elevation via seccomp-notify (Linux). When true, the supervisor intercepts file opens and can grant access to paths not in the initial capability set. When false, the sandbox is static."
+        },
+        "wsl2_proxy_policy": {
+          "oneOf": [
+            { "$ref": "#/$defs/Wsl2ProxyPolicy" },
+            { "type": "null" }
+          ],
+          "description": "WSL2 proxy fallback policy. Controls behavior when proxy-only network mode cannot be kernel-enforced on WSL2 (seccomp notify returns EBUSY). Default: error (refuse to run). Set to insecure_proxy to allow degraded execution where the credential proxy runs but network is not locked down."
         }
       }
+    },
+    "Wsl2ProxyPolicy": {
+      "type": "string",
+      "enum": ["error", "insecure_proxy"],
+      "description": "WSL2 proxy fallback policy. 'error' (default) refuses to run if proxy-only mode cannot be kernel-enforced. 'insecure_proxy' allows degraded execution where the credential proxy injects credentials but the sandboxed process is not prevented from bypassing the proxy."
     },
     "ProfileSignalMode": {
       "type": "string",

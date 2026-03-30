@@ -494,6 +494,13 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
             theme::fg(if elev { "enabled" } else { "disabled" }, t.text)
         );
     }
+    if let Some(policy) = profile.security.wsl2_proxy_policy {
+        println!(
+            "  {} {}",
+            theme::fg("WSL2 proxy policy:", t.subtext),
+            theme::fg(&format!("{policy:?}"), t.text)
+        );
+    }
 
     // Filesystem
     let fs = &profile.filesystem;
@@ -716,6 +723,7 @@ fn profile_to_json(
         "process_info_mode": format!("{:?}", profile.security.process_info_mode),
         "ipc_mode": format!("{:?}", profile.security.ipc_mode),
         "capability_elevation": profile.security.capability_elevation,
+        "wsl2_proxy_policy": format!("{:?}", profile.security.wsl2_proxy_policy),
     });
 
     // Filesystem
@@ -941,6 +949,12 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
         "capability_elevation",
         &p1.security.capability_elevation.map(|v| format!("{v}")),
         &p2.security.capability_elevation.map(|v| format!("{v}")),
+        t,
+    );
+    any_diff |= diff_scalar_option(
+        "wsl2_proxy_policy",
+        &p1.security.wsl2_proxy_policy.map(|v| format!("{v:?}")),
+        &p2.security.wsl2_proxy_policy.map(|v| format!("{v:?}")),
         t,
     );
     any_diff |= diff_scalar_option(
@@ -1448,6 +1462,11 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
             "profile1": p1.security.capability_elevation,
             "profile2": p2.security.capability_elevation,
             "changed": p1.security.capability_elevation != p2.security.capability_elevation,
+        },
+        "wsl2_proxy_policy": {
+            "profile1": format!("{:?}", p1.security.wsl2_proxy_policy),
+            "profile2": format!("{:?}", p2.security.wsl2_proxy_policy),
+            "changed": p1.security.wsl2_proxy_policy != p2.security.wsl2_proxy_policy,
         },
         "filesystem": diff_fs_json(&p1.filesystem, &p2.filesystem),
         "workdir": {

@@ -141,6 +141,7 @@ impl ProfileDef {
                 process_info_mode: self.security.process_info_mode,
                 ipc_mode: self.security.ipc_mode,
                 capability_elevation: self.security.capability_elevation,
+                wsl2_proxy_policy: self.security.wsl2_proxy_policy,
             },
             filesystem: self.filesystem.clone(),
             policy,

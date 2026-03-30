@@ -27,6 +27,10 @@ pub use macos::{extension_consume, extension_issue_file, extension_release};
 #[cfg(target_os = "linux")]
 pub use linux::{detect_abi, DetectedAbi};
 
+// Re-export Linux WSL2 detection
+#[cfg(target_os = "linux")]
+pub use linux::is_wsl2;
+
 // Re-export Linux seccomp-notify primitives for supervisor use
 #[cfg(target_os = "linux")]
 pub use linux::{

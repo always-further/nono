@@ -1,0 +1,173 @@
+---
+title: WSL2 Support
+description: Running nono inside Windows Subsystem for Linux 2 (WSL2) — what works, what's limited, and why
+---
+
+nono works on WSL2 with most features available. This page documents the compatibility details, known limitations, and workarounds.
+
+For the complete feature-by-feature breakdown (110 features), see the [WSL2 Feature Matrix](/cli/internals/wsl2-feature-matrix).
+
+**At a glance: 84% full, 16% blocked by default (most recoverable with profile opt-in or kernel upgrade).**
+
+## Quick Summary
+
+WSL2 runs a real Linux kernel with Landlock LSM enabled. Core filesystem sandboxing works out of the box. Two kernel-level limitations affect advanced features:
+
+1. **Landlock ABI V3** (kernel 6.6) — no per-port TCP filtering (needs V4, kernel 6.7+)
+2. **seccomp user notification conflict** — WSL2's init process claims the sole notify listener, blocking capability elevation
+
+## Compatibility Matrix
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Filesystem sandbox (`--allow`, `--read`, `--write`) | Available | Landlock V1-V3, full enforcement |
+| Sensitive path blocking | Available | All 46 paths blocked |
+| Dangerous command blocking | Available | All 46 commands blocked |
+| Block-all network (`--block-net`) | Available | seccomp `RET_ERRNO`, kernel-enforced |
+| Per-port network filtering | Unavailable | Needs Landlock V4 (kernel 6.7+) |
+| Credential proxy (`--credential`) | Blocked (default) | Fails secure; requires `wsl2_proxy_policy: "insecure_proxy"` in profile |
+| Supervised mode (`nono run`) | Available | Basic fork+sandbox+exec works |
+| Direct mode (`nono wrap`) | Available | No fork, no supervisor |
+| Capability elevation (`--capability-elevation`) | Unavailable | seccomp notify returns `EBUSY` |
+| Snapshots and rollback (`--rollback`) | Available | Pure userspace |
+| Audit trail | Available | Pure userspace |
+| Profiles | Available | All built-in profiles work |
+| `nono setup --check-only` | Available | Reports WSL2 feature matrix |
+
+## Detection
+
+nono detects WSL2 automatically at runtime by checking:
+
+1. `/proc/sys/fs/binfmt_misc/WSLInterop` (filesystem indicator, present in all WSL2 distros)
+2. `/proc/version` contains "microsoft" or "WSL" (kernel-controlled string)
+
+The `WSL_DISTRO_NAME` environment variable is intentionally **not** trusted because it is caller-controlled and could be spoofed to disable security features on native Linux.
+
+The result is cached for the process lifetime. You can verify detection with:
+
+```bash
+nono setup --check-only
+```
+
+On WSL2, this prints a feature availability matrix under "Testing sandbox support".
+
+## Landlock ABI Versions
+
+WSL2 shares a single Microsoft-built kernel across all distros. The kernel version determines which Landlock ABI is available:
+
+| Landlock ABI | Kernel | Key Feature | WSL2 (kernel 6.6) |
+|-------------|--------|-------------|-----|
+| V1 | 5.13+ | Basic filesystem access | Yes |
+| V2 | 5.19+ | File rename across directories (Refer) | Yes |
+| V3 | 6.2+ | File truncation (Truncate) | Yes |
+| V4 | 6.7+ | TCP network filtering | No |
+| V5 | 6.10+ | Device ioctl filtering | No |
+| V6 | 6.12+ | Process scoping | No |
+
+nono automatically detects the highest available ABI. When Microsoft upgrades the WSL2 kernel to 6.7+, per-port network filtering will activate automatically with no code changes needed.
+
+The WSL2 kernel version is independent of the Linux distribution — upgrading from Ubuntu 20.04 to 24.04 does not change the kernel.
+
+## seccomp User Notification Limitation
+
+### What is seccomp notify?
+
+`SECCOMP_RET_USER_NOTIF` is a Linux kernel feature that allows a supervisor process to intercept and make decisions about a child's system calls. nono uses this for:
+
+- **Capability elevation** — intercepting `openat` calls to grant access to paths not in the original capability set
+- **Proxy network filtering** — intercepting `connect`/`bind` calls to enforce per-connection rules on pre-V4 kernels
+
+### Why it fails on WSL2
+
+WSL2's init process (PID 1) installs its own seccomp user notification filter for Windows/Linux interop (running `.exe` files from Linux). The Linux kernel only allows **one** user notification listener per filter chain. When nono tries to install a second listener, it receives `EBUSY`.
+
+This is tracked in [microsoft/WSL#9548](https://github.com/microsoft/WSL/issues/9548) (open since January 2023).
+
+### What nono does about it
+
+When WSL2 is detected:
+
+1. `--capability-elevation` is automatically disabled with a warning
+2. Proxy-only network mode (`--credential`, `--network-profile`) is **rejected by default** to prevent unenforced execution
+3. All other features continue to work normally
+
+## Credential Proxy on WSL2
+
+On native Linux (including pre-Landlock-V4 kernels), the credential proxy's network lockdown is enforced via seccomp user notification — the supervisor validates every `connect`/`bind` call. On WSL2, this enforcement is unavailable.
+
+**By default, nono refuses to run in proxy-only mode on WSL2** rather than silently losing network enforcement. You will see:
+
+```
+nono: Sandbox initialization failed: WSL2: proxy-only network mode cannot be kernel-enforced.
+...
+To allow degraded execution, set wsl2_proxy_policy: "insecure_proxy" in your profile's security config.
+```
+
+### Opting in to insecure proxy mode
+
+If credential injection is more important than network lockdown for your use case (e.g., development workflows where the agent is trusted), you can explicitly opt in by adding `wsl2_proxy_policy` to your profile:
+
+```json
+{
+  "security": {
+    "wsl2_proxy_policy": "insecure_proxy"
+  }
+}
+```
+
+**Policy values:**
+
+| Value | Behavior |
+|-------|----------|
+| `error` (default) | Refuse to run if proxy-only mode cannot be kernel-enforced |
+| `insecure_proxy` | Allow degraded execution with a strong warning. The credential proxy runs and injects credentials, but the child is **not** prevented from bypassing the proxy and opening arbitrary outbound connections. |
+
+When `insecure_proxy` is active, nono prints:
+
+```
+[nono] WARNING: WSL2 insecure proxy mode — credential proxy active but network is NOT
+kernel-enforced. The sandboxed process can bypass the proxy and open arbitrary outbound connections.
+```
+
+**This is an explicit opt-in to reduced enforcement.** Do not set `insecure_proxy` in profiles distributed to untrusted users.
+
+When Landlock V4 becomes available on WSL2 (kernel 6.7+), port-level lockdown will activate automatically and both policy values will behave identically.
+
+## Workarounds
+
+### Custom WSL2 Kernel
+
+Advanced users can build a custom WSL2 kernel from [microsoft/WSL2-Linux-Kernel](https://github.com/microsoft/WSL2-Linux-Kernel) with a newer Landlock ABI or modified seccomp configuration:
+
+```bash
+git clone --depth 1 --branch linux-msft-wsl-6.6.y \
+  https://github.com/microsoft/WSL2-Linux-Kernel.git
+cd WSL2-Linux-Kernel
+cp arch/x86/configs/config-wsl .config
+make -j$(nproc)
+```
+
+Then configure WSL2 to use the custom kernel in `%USERPROFILE%\.wslconfig`:
+
+```ini
+[wsl2]
+kernel=C:\\path\\to\\bzImage
+```
+
+Restart WSL2 with `wsl --shutdown`.
+
+Note: Getting Landlock V4 requires rebasing Microsoft's patches onto a 6.7+ upstream kernel or cherry-picking V4 patches into their 6.6 tree.
+
+### Block-All Network
+
+If you need guaranteed network isolation (not just proxy routing), use `--block-net` which is fully kernel-enforced on WSL2:
+
+```bash
+nono run --block-net --allow /path/to/project -- your-command
+```
+
+## Future Improvements
+
+- **Landlock V4+**: Will arrive when Microsoft upgrades the WSL2 kernel (no nono changes needed)
+- **eBPF LSM**: WSL2 kernel has `CONFIG_BPF_LSM=y` enabled, which could provide an alternative to seccomp notify for capability elevation
+- **microsoft/WSL#9548**: If Microsoft resolves the seccomp notify conflict, all features will work automatically

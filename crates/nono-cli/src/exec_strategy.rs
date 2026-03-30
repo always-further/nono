@@ -625,9 +625,22 @@ pub fn execute_supervised(
             // the supervisor, which can inject fds for approved paths.
             // Without elevation, seccomp is not installed — the child runs
             // with static Landlock capabilities only.
+            //
+            // On WSL2, seccomp user notification returns EBUSY because WSL2's
+            // init already claims the notify listener. The main.rs guards should
+            // have disabled these flags, but we check again as defense in depth.
             #[cfg(target_os = "linux")]
             {
-                if config.capability_elevation {
+                if config.capability_elevation && nono::sandbox::is_wsl2() {
+                    let msg = b"nono: WSL2 detected, skipping seccomp-notify (capability elevation unavailable)\n";
+                    unsafe {
+                        libc::write(
+                            libc::STDERR_FILENO,
+                            msg.as_ptr().cast::<libc::c_void>(),
+                            msg.len(),
+                        );
+                    }
+                } else if config.capability_elevation {
                     if let Some(fd) = child_sock_fd {
                         match nono::sandbox::install_seccomp_notify() {
                             Ok(notify_fd) => {
@@ -674,7 +687,18 @@ pub fn execute_supervised(
                 // If the parent determined that seccomp proxy fallback is needed
                 // (Landlock ABI lacks AccessNet + ProxyOnly mode), install the
                 // proxy filter and send its notify fd to the parent.
-                if config.seccomp_proxy_fallback {
+                // On WSL2 this flag should already be false (guarded in main.rs),
+                // but check again to avoid EBUSY / _exit(126).
+                if config.seccomp_proxy_fallback && nono::sandbox::is_wsl2() {
+                    let msg = b"nono: WSL2 detected, skipping seccomp proxy filter (proxy network filtering unavailable)\n";
+                    unsafe {
+                        libc::write(
+                            libc::STDERR_FILENO,
+                            msg.as_ptr().cast::<libc::c_void>(),
+                            msg.len(),
+                        );
+                    }
+                } else if config.seccomp_proxy_fallback {
                     let has_bind = match effective_caps.network_mode() {
                         nono::NetworkMode::ProxyOnly { bind_ports, .. } => !bind_ports.is_empty(),
                         _ => false,
