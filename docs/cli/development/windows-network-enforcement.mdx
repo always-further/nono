@@ -125,7 +125,7 @@ The runtime activation path now uses the same lifecycle model as setup readiness
 - `start service first`
 - `install driver first`
 - `start driver first`
-- `components present, but runtime activation is not implemented yet`
+- `components present, but runtime activation still must install or clean up enforceable blocked-mode state`
 
 That keeps setup, readiness, and live WFP activation failures aligned without falsely claiming working WFP enforcement.
 

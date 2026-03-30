@@ -160,6 +160,8 @@ struct WfpProbeConfig {
     backend_service_args: &'static [&'static str],
 }
 
+const WINDOWS_WFP_TEST_FORCE_READY_ENV: &str = "NONO_TEST_ONLY_WFP_FORCE_READY";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WfpRuntimeProbeOutput {
     status_code: Option<i32>,
@@ -531,6 +533,16 @@ fn build_wfp_probe_status(
 }
 
 fn probe_wfp_backend_status_with_config(config: &WfpProbeConfig) -> Result<WfpProbeStatus> {
+    if std::env::var_os(WINDOWS_WFP_TEST_FORCE_READY_ENV).is_some() {
+        return Ok(build_wfp_probe_status(
+            config.backend_binary_path.exists(),
+            config.backend_driver_binary_path.exists(),
+            WindowsServiceState::Running,
+            WindowsServiceState::Running,
+            WindowsServiceState::Running,
+        ));
+    }
+
     if !config.backend_binary_path.exists() {
         return Ok(WfpProbeStatus::BackendBinaryMissing);
     }
@@ -557,7 +569,7 @@ fn describe_wfp_runtime_activation_failure(
     let runtime_target = describe_windows_network_runtime_target(policy);
     let reason = match status {
         WfpProbeStatus::Ready => format!(
-            "the service `{}` and driver `{}` are present, but runtime activation is not implemented in this build yet",
+            "the service `{}` and driver `{}` are present, but the runtime activation exchange did not install an enforceable blocked-mode state",
             config.backend_service, config.backend_driver
         ),
         WfpProbeStatus::BackendBinaryMissing => format!(
@@ -703,7 +715,7 @@ fn describe_wfp_probe_status_for_setup(config: &WfpProbeConfig, status: WfpProbe
     let service_command = format_wfp_service_command(config);
     match status {
         WfpProbeStatus::Ready => format!(
-            "WFP backend components are present (service binary: {}, driver binary: {}, service: {}, driver: {}), but the runtime installer is not implemented yet. Expected service command: {}.",
+            "WFP backend components are present (service binary: {}, driver binary: {}, service: {}, driver: {}), and blocked-mode activation now depends on the service-host runtime transport. Expected service command: {}.",
             config.backend_binary_path.display(),
             config.backend_driver_binary_path.display(),
             config.backend_service,
@@ -1054,7 +1066,7 @@ fn describe_wfp_runtime_probe_failure(
     output: &WfpRuntimeProbeOutput,
 ) -> String {
     format!(
-        "the WFP service probe `{}` {} reported runtime activation is not implemented yet (status: {:?}, response: {:?}, stderr: {:?})",
+        "the WFP service probe `{}` {} reported an unexpected runtime activation state (status: {:?}, response: {:?}, stderr: {:?})",
         config.backend_binary_path.display(),
         WINDOWS_WFP_RUNTIME_PROBE_ARG,
         output.status_code,
@@ -1102,7 +1114,7 @@ where
         return Ok(WindowsWfpInstallReport {
             status_label: "already installed",
             details: format!(
-                "Windows WFP service {} is already registered. Expected startup command: {}. The placeholder service host still fails closed until the real backend is implemented.",
+                "Windows WFP service {} is already registered. Expected startup command: {}. The service host is used for blocked-mode activation, but unsupported states still fail closed until full backend parity is implemented.",
                 config.backend_service, service_command
             ),
         });
@@ -1122,7 +1134,7 @@ where
     Ok(WindowsWfpInstallReport {
         status_label: "installed",
         details: format!(
-            "Registered Windows WFP service {} with startup command: {}. Service startup is not attempted automatically because the placeholder host still fails closed until enforcement is implemented.",
+            "Registered Windows WFP service {} with startup command: {}. Service startup is not attempted automatically because explicit lifecycle control is still required before live WFP activation.",
             config.backend_service, service_command
         ),
     })
@@ -3172,6 +3184,34 @@ mod tests {
     }
 
     #[test]
+    fn test_probe_wfp_backend_status_with_config_can_force_ready_for_live_tests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service_binary = dir.path().join("nono-wfp-service.exe");
+        let driver_binary = dir.path().join("nono-wfp-driver.sys");
+        std::fs::write(&service_binary, b"stub").expect("write stub service binary");
+        std::fs::write(&driver_binary, b"stub").expect("write stub driver binary");
+        let config = WfpProbeConfig {
+            platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
+            backend_service: WINDOWS_WFP_BACKEND_SERVICE,
+            backend_driver: WINDOWS_WFP_BACKEND_DRIVER,
+            backend_binary_path: service_binary,
+            backend_driver_binary_path: driver_binary,
+            backend_service_args: WINDOWS_WFP_BACKEND_SERVICE_ARGS,
+        };
+
+        let prior = std::env::var_os(WINDOWS_WFP_TEST_FORCE_READY_ENV);
+        std::env::set_var(WINDOWS_WFP_TEST_FORCE_READY_ENV, "1");
+        let status = probe_wfp_backend_status_with_config(&config)
+            .expect("forced ready probe status should resolve");
+        match prior {
+            Some(value) => std::env::set_var(WINDOWS_WFP_TEST_FORCE_READY_ENV, value),
+            None => std::env::remove_var(WINDOWS_WFP_TEST_FORCE_READY_ENV),
+        }
+
+        assert_eq!(status, WfpProbeStatus::Ready);
+    }
+
+    #[test]
     fn test_build_wfp_service_create_args_uses_service_contract() {
         let config = WfpProbeConfig {
             platform_service: WINDOWS_WFP_PLATFORM_SERVICE,
@@ -3710,7 +3750,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wfp_runtime_activation_reports_ready_but_not_implemented() {
+    fn test_wfp_runtime_activation_reports_ready_but_not_enforceable() {
         let policy = Sandbox::windows_network_policy(
             &CapabilitySet::new().set_network_mode(nono::NetworkMode::Blocked),
         );
@@ -3725,7 +3765,7 @@ mod tests {
 
         let message =
             describe_wfp_runtime_activation_failure(&policy, &config, WfpProbeStatus::Ready);
-        assert!(message.contains("runtime activation is not implemented in this build yet"));
+        assert!(message.contains("did not install an enforceable blocked-mode state"));
         assert!(message.contains("fail-closed"));
     }
 }

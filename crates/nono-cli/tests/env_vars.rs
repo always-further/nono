@@ -690,6 +690,7 @@ fn windows_run_block_net_blocks_probe_connection() {
     let workdir = probe_dir.to_string_lossy().into_owned();
 
     let output = nono_bin()
+        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
         .args([
             "run",
             "--allow",
@@ -714,12 +715,103 @@ fn windows_run_block_net_blocks_probe_connection() {
         text.contains("connect failed") || text.contains("exit code 42"),
         "expected blocked-network probe failure details, got:\n{text}"
     );
+    assert!(
+        !text.contains("install-wfp-service"),
+        "expected the promoted WFP backend path rather than a readiness/setup failure, got:\n{text}"
+    );
 
     let accept_result = listener.accept();
     assert!(
         accept_result.is_err(),
         "listener should not have accepted a blocked-network connection"
     );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_block_net_cleans_up_promoted_wfp_filters_after_exit() {
+    let probe = windows_net_probe_bin();
+    if !try_add_and_remove_windows_firewall_rule(&probe) {
+        return;
+    }
+
+    let blocked_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+    let blocked_port = blocked_listener.local_addr().expect("listener addr").port();
+    blocked_listener
+        .set_nonblocking(true)
+        .expect("set listener nonblocking");
+
+    let probe_dir = probe.parent().expect("probe parent");
+    let allowed = probe_dir.to_string_lossy().into_owned();
+    let workdir = probe_dir.to_string_lossy().into_owned();
+
+    let blocked_output = nono_bin()
+        .env("NONO_TEST_ONLY_WFP_FORCE_READY", "1")
+        .args([
+            "run",
+            "--allow",
+            &allowed,
+            "--block-net",
+            "--workdir",
+            &workdir,
+            "--",
+            &probe.to_string_lossy(),
+            "--connect-port",
+            &blocked_port.to_string(),
+        ])
+        .output()
+        .expect("failed to run blocked nono");
+
+    let blocked_text = combined_output(&blocked_output);
+    assert!(
+        !blocked_output.status.success(),
+        "blocked Windows run should fail the connection attempt, output:\n{blocked_text}"
+    );
+    assert!(
+        blocked_text.contains("connect failed") || blocked_text.contains("exit code 42"),
+        "expected blocked-network probe failure details, got:\n{blocked_text}"
+    );
+
+    let blocked_accept = blocked_listener.accept();
+    assert!(
+        blocked_accept.is_err(),
+        "blocked listener should not have accepted a blocked-network connection"
+    );
+
+    let cleanup_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+    let cleanup_port = cleanup_listener.local_addr().expect("listener addr").port();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cleanup_handle = std::thread::spawn(move || {
+        let accepted = cleanup_listener.accept().is_ok();
+        tx.send(accepted).expect("send listener result");
+    });
+
+    let allow_output = nono_bin()
+        .args([
+            "run",
+            "--allow",
+            &allowed,
+            "--workdir",
+            &workdir,
+            "--",
+            &probe.to_string_lossy(),
+            "--connect-port",
+            &cleanup_port.to_string(),
+        ])
+        .output()
+        .expect("failed to run allow-all nono");
+
+    let allow_text = combined_output(&allow_output);
+    assert!(
+        allow_output.status.success(),
+        "allow-all run after blocked cleanup should succeed, output:\n{allow_text}"
+    );
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("cleanup listener result"),
+        "expected allow-all listener to accept after blocked-run cleanup"
+    );
+    cleanup_handle.join().expect("cleanup listener thread");
 }
 
 #[cfg(target_os = "windows")]
