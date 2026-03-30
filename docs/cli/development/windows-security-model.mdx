@@ -93,6 +93,7 @@ The initial compiled subset is intentionally narrow:
 The first attached enforcement behavior for that policy is a **Windows preview live-run filesystem subset**:
 
 - if the compiled policy contains unsupported grant shapes, Windows live execution fails closed
+- unsupported Windows filesystem gaps now report deterministic backend reason labels such as `single-file grants`, `write-only directory grants`, and `execution directory outside supported allowlist` instead of collapsing every failure into a generic filesystem preview error
 - if the compiled policy exists, the executable path required for launch must be covered by it
 - if a live run requests user-intent directory grants, the selected working directory must stay inside that compiled directory allowlist subset
 - restricted Windows launches now always run under the low-integrity child-token path when they use the compiled filesystem subset, so direct writes back into the user's medium-integrity workspace remain blocked even when the requested policy includes a writable directory

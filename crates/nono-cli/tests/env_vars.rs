@@ -368,8 +368,8 @@ fn windows_run_rejects_file_grants_in_preview_live_run() {
         "expected intentional Windows preview rejection, got:\n{text}"
     );
     assert!(
-        text.contains("filesystem restrictions"),
-        "expected filesystem restriction detail in output, got:\n{text}"
+        text.contains("single-file grants"),
+        "expected explicit Windows unsupported-shape detail in output, got:\n{text}"
     );
 }
 
@@ -1464,8 +1464,8 @@ fn windows_run_blocks_directory_allowlist_when_workdir_is_outside_supported_subs
         "Windows preview should fail closed when workdir is outside supported subset, output:\n{text}"
     );
     assert!(
-        text.contains("filesystem restrictions"),
-        "expected filesystem restriction rejection, got:\n{text}"
+        text.contains("execution directory outside supported allowlist"),
+        "expected explicit Windows execution-dir rejection, got:\n{text}"
     );
 }
 

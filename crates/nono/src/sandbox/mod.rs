@@ -118,6 +118,59 @@ pub struct WindowsFilesystemRule {
     pub source: crate::CapabilitySource,
 }
 
+/// A Windows filesystem capability shape that the current backend does not yet
+/// enforce directly.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WindowsUnsupportedIssueKind {
+    SingleFileGrant,
+    WriteOnlyDirectoryGrant,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsUnsupportedIssueKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SingleFileGrant => "single-file grants",
+            Self::WriteOnlyDirectoryGrant => "write-only directory grants",
+        }
+    }
+
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::SingleFileGrant => {
+                "single-file grants are not in the current Windows filesystem enforcement subset"
+            }
+            Self::WriteOnlyDirectoryGrant => {
+                "write-only directory grants are not in the current Windows filesystem enforcement subset"
+            }
+        }
+    }
+}
+
+/// A specific unsupported Windows filesystem capability instance.
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsUnsupportedIssue {
+    pub kind: WindowsUnsupportedIssueKind,
+    pub path: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsUnsupportedIssue {
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        self.kind.label()
+    }
+
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!("{}: {}", self.kind.description(), self.path.display())
+    }
+}
+
 /// Compiled Windows filesystem policy plan derived from a capability set.
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,7 +178,7 @@ pub struct WindowsFilesystemPolicy {
     /// Rules that map cleanly into the initial Windows backend plan.
     pub rules: Vec<WindowsFilesystemRule>,
     /// Rules that are intentionally not in the first enforceable subset.
-    pub unsupported: Vec<String>,
+    pub unsupported: Vec<WindowsUnsupportedIssue>,
 }
 
 #[cfg(target_os = "windows")]
@@ -150,6 +203,30 @@ impl WindowsFilesystemPolicy {
     #[must_use]
     pub fn preferred_runtime_dir(&self, current_dir: &Path) -> Option<PathBuf> {
         windows::runtime_state_dir(self, current_dir)
+    }
+
+    #[must_use]
+    pub fn unsupported_reason_labels(&self) -> Vec<&'static str> {
+        let mut labels: Vec<_> = self
+            .unsupported
+            .iter()
+            .map(WindowsUnsupportedIssue::label)
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels
+    }
+
+    #[must_use]
+    pub fn unsupported_messages(&self) -> Vec<String> {
+        let mut messages: Vec<_> = self
+            .unsupported
+            .iter()
+            .map(WindowsUnsupportedIssue::message)
+            .collect();
+        messages.sort();
+        messages.dedup();
+        messages
     }
 }
 

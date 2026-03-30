@@ -7,7 +7,7 @@ use crate::capability::CapabilitySet;
 use crate::error::{NonoError, Result};
 use crate::sandbox::{
     PreviewRuntimeStatus, SupportInfo, SupportStatus, WindowsFilesystemPolicy,
-    WindowsFilesystemRule,
+    WindowsFilesystemRule, WindowsUnsupportedIssue, WindowsUnsupportedIssueKind,
 };
 use std::path::{Component, Path, PathBuf};
 
@@ -56,10 +56,12 @@ pub fn preview_runtime_status(caps: &CapabilitySet, execution_dir: &Path) -> Pre
         .any(|rule| rule.source.is_user_intent())
         || !fs_policy.unsupported.is_empty();
 
-    if !fs_policy.unsupported.is_empty()
-        || (has_user_intent_fs && !fs_policy.covers_path(&execution_dir, crate::AccessMode::Read))
-    {
-        reasons.push("filesystem restrictions");
+    for label in fs_policy.unsupported_reason_labels() {
+        reasons.push(label);
+    }
+
+    if has_user_intent_fs && !fs_policy.covers_path(&execution_dir, crate::AccessMode::Read) {
+        reasons.push("execution directory outside supported allowlist");
     }
 
     if !matches!(caps.network_mode(), crate::NetworkMode::AllowAll) {
@@ -87,6 +89,9 @@ pub fn preview_runtime_status(caps: &CapabilitySet, execution_dir: &Path) -> Pre
     {
         reasons.push("explicit process or IPC restrictions");
     }
+
+    reasons.sort_unstable();
+    reasons.dedup();
 
     if reasons.is_empty() {
         PreviewRuntimeStatus::AdvisoryOnly
@@ -156,18 +161,18 @@ pub fn compile_filesystem_policy(caps: &CapabilitySet) -> WindowsFilesystemPolic
 
     for cap in caps.fs_capabilities() {
         if cap.is_file {
-            unsupported.push(format!(
-                "single-file grant is not in the initial Windows filesystem enforcement subset: {}",
-                cap.resolved.display()
-            ));
+            unsupported.push(WindowsUnsupportedIssue {
+                kind: WindowsUnsupportedIssueKind::SingleFileGrant,
+                path: normalize_windows_path(&cap.resolved),
+            });
             continue;
         }
 
         if cap.access == crate::AccessMode::Write {
-            unsupported.push(format!(
-                "write-only directory grant is not in the initial Windows filesystem enforcement subset: {}",
-                cap.resolved.display()
-            ));
+            unsupported.push(WindowsUnsupportedIssue {
+                kind: WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant,
+                path: normalize_windows_path(&cap.resolved),
+            });
             continue;
         }
 
@@ -187,7 +192,11 @@ pub fn compile_filesystem_policy(caps: &CapabilitySet) -> WindowsFilesystemPolic
             && left.source == right.source
     });
 
-    unsupported.sort();
+    unsupported.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.path.cmp(&right.path))
+    });
     unsupported.dedup();
 
     WindowsFilesystemPolicy { rules, unsupported }
@@ -201,7 +210,7 @@ pub fn validate_launch_paths(
     if !policy.unsupported.is_empty() {
         return Err(NonoError::UnsupportedPlatform(format!(
             "Windows filesystem enforcement does not support this capability set yet ({}).",
-            policy.unsupported.join(", ")
+            policy.unsupported_messages().join(", ")
         )));
     }
 
@@ -944,7 +953,7 @@ mod tests {
         assert_eq!(
             status,
             PreviewRuntimeStatus::RequiresEnforcement {
-                reasons: vec!["filesystem restrictions"]
+                reasons: vec!["execution directory outside supported allowlist"]
             }
         );
     }
@@ -991,7 +1000,10 @@ mod tests {
         let policy = compile_filesystem_policy(&caps);
         assert!(policy.rules.is_empty());
         assert_eq!(policy.unsupported.len(), 1);
-        assert!(policy.unsupported[0].contains("single-file grant"));
+        assert_eq!(
+            policy.unsupported[0].kind,
+            WindowsUnsupportedIssueKind::SingleFileGrant
+        );
     }
 
     #[test]
@@ -1003,7 +1015,10 @@ mod tests {
         let policy = compile_filesystem_policy(&caps);
         assert!(policy.rules.is_empty());
         assert_eq!(policy.unsupported.len(), 1);
-        assert!(policy.unsupported[0].contains("write-only directory grant"));
+        assert_eq!(
+            policy.unsupported[0].kind,
+            WindowsUnsupportedIssueKind::WriteOnlyDirectoryGrant
+        );
     }
 
     #[test]
@@ -1058,9 +1073,9 @@ mod tests {
 
         let err = validate_launch_paths(&policy, &file, dir.path())
             .expect_err("unsupported policy should fail");
-        assert!(err
-            .to_string()
-            .contains("does not support this capability set yet"));
+        assert!(err.to_string().contains(
+            "single-file grants are not in the current Windows filesystem enforcement subset"
+        ));
     }
 
     #[test]
