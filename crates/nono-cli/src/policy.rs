@@ -167,6 +167,8 @@ pub(crate) fn current_platform() -> &'static str {
         "macos"
     } else if cfg!(target_os = "linux") {
         "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
     } else {
         "unknown"
     }
@@ -1433,6 +1435,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_deny_access_includes_symlink_target() {
         // Create a temp dir with a file and a symlink to it
@@ -1497,6 +1500,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_resolve_parent_symlinks_nonexistent_leaf() {
         // Create a dir with a symlinked parent, then ask for a non-existent
@@ -1550,6 +1554,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_deny_access_nonexistent_under_symlinked_parent() {
         // Simulate /var/run/future.sock on macOS: the leaf doesn't exist yet
@@ -1608,6 +1613,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sensitive_paths_includes_symlink_targets() {
         // Create a temp dir with a symlink
@@ -1985,6 +1991,30 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_embedded_policy_includes_windows_system_read_group() {
+        let policy = load_embedded_policy().expect("embedded policy");
+        let mut caps = CapabilitySet::new();
+        resolve_groups(&policy, &["system_read_windows".to_string()], &mut caps)
+            .expect("resolve failed");
+        let windows_dir = Path::new(r"C:\Windows")
+            .canonicalize()
+            .expect("canonicalize windows dir");
+
+        let resolved_paths: Vec<PathBuf> = caps
+            .fs_capabilities()
+            .iter()
+            .map(|c| c.resolved.clone())
+            .collect();
+
+        assert!(
+            resolved_paths.iter().any(|p| p == &windows_dir),
+            "C:\\Windows must be included in system_read_windows capabilities, got: {:?}",
+            resolved_paths
+        );
+    }
+
     #[test]
     fn test_embedded_policy_required_groups() {
         let policy = load_embedded_policy().expect("embedded policy");
@@ -2251,6 +2281,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_apply_deny_overrides_removes_symlink_and_target_deny_paths() {
         let dir = tempfile::tempdir().expect("tmpdir");

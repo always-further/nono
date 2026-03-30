@@ -124,6 +124,57 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --verbose
 
+  windows-build:
+    name: Windows Build
+    needs: changes
+    if: ${{ !startsWith(github.head_ref, 'dependabot/github_actions/') && needs.changes.outputs.run_code_jobs == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build workspace
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ci-logs | Out-Null
+          cargo build --workspace --verbose 2>&1 | Tee-Object -FilePath ci-logs\windows-build.log
+
+      - name: Run Windows smoke tests
+        shell: pwsh
+        run: |
+          cargo test -p nono-cli windows_run_ -- --nocapture 2>&1 | Tee-Object -FilePath ci-logs\windows-smoke.log
+
+      - name: Run Windows env sanitization tests
+        shell: pwsh
+        run: |
+          cargo test -p nono-cli windows_run_filters_dangerous_env_vars_and_keeps_safe_ones -- --nocapture 2>&1 | Tee-Object -FilePath ci-logs\windows-env.log
+
+      - name: Upload Windows build logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: windows-build-logs
+          path: |
+            ci-logs\windows-build.log
+            ci-logs\windows-smoke.log
+            ci-logs\windows-env.log
+          if-no-files-found: warn
+
   fmt:
     name: Rustfmt
     needs: changes

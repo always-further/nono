@@ -41,6 +41,21 @@ pub fn print_banner(silent: bool) {
         theme::fg("nono", t.brand).bold(),
         theme::fg(&format!("v{version}"), t.subtext),
     );
+
+    #[cfg(target_os = "windows")]
+    {
+        let support = nono::Sandbox::support_info();
+        if !support.is_supported {
+            eprintln!(
+                "  {} {}",
+                theme::fg("preview", t.yellow).bold(),
+                theme::fg(
+                    "Windows sandbox enforcement is partial and still in progress",
+                    t.subtext
+                ),
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +287,20 @@ pub fn print_supervised_info(silent: bool, rollback: bool, proxy_active: bool) {
         features.push("proxy");
     }
     features.push("supervisor");
+
+    #[cfg(target_os = "windows")]
+    {
+        let support = nono::Sandbox::support_info();
+        if !support.is_supported {
+            eprintln!(
+                "  {} {}",
+                fg("mode", t.subtext),
+                fg(&format!("preview ({})", features.join(", ")), t.subtext,),
+            );
+            return;
+        }
+    }
+
     eprintln!(
         "  {} {}",
         fg("mode", t.subtext),
@@ -308,7 +337,12 @@ pub fn print_warning(message: &str) {
 }
 
 /// Print dry run message
-pub fn print_dry_run(program: &OsStr, cmd_args: &[OsString], silent: bool) {
+pub fn print_dry_run(
+    program: &OsStr,
+    cmd_args: &[OsString],
+    support: &nono::SupportInfo,
+    silent: bool,
+) {
     if silent {
         return;
     }
@@ -324,16 +358,24 @@ pub fn print_dry_run(program: &OsStr, cmd_args: &[OsString], silent: bool) {
     eprintln!(
         "  {} {}",
         fg("dry-run", t.yellow).bold(),
-        fg(
-            "sandbox would be applied with above capabilities",
-            t.subtext,
-        ),
+        fg(dry_run_summary(support), t.subtext),
     );
     eprintln!(
         "  {} {}",
         fg("$", t.subtext),
         fg(&command.join(" "), t.text)
     );
+}
+
+fn dry_run_summary(support: &nono::SupportInfo) -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        if !support.is_supported {
+            return "preview validation only; sandbox enforcement is not implemented on Windows yet";
+        }
+    }
+
+    "sandbox would be applied with above capabilities"
 }
 
 // ---------------------------------------------------------------------------

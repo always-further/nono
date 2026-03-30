@@ -830,6 +830,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_from_profile_policy_add_deny_access_removes_symlinked_file_grant() {
         let dir = tempdir().expect("tmpdir");
@@ -874,6 +875,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_from_profile_policy_add_deny_access_respects_override_deny_for_symlinked_file() {
         let dir = tempdir().expect("tmpdir");
@@ -918,6 +920,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_from_profile_policy_override_deny_via_symlink_path() {
         let dir = tempdir().expect("tmpdir");

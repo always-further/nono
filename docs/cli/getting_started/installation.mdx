@@ -24,6 +24,56 @@ sudo dpkg -i nono-cli_${VERSION}_${ARCH}.deb
 
 Other distributions are in the process of being packaged. In the meantime, you can use the prebuilt binaries or build from source.
 
+## Windows Preview
+
+Windows is available as a preview build distributed as either:
+
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi` for administrator-managed installs
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi` for per-user installs without elevation
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip` for portable extraction
+
+### MSI install
+
+Administrator-managed install:
+
+```powershell
+msiexec /i nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi
+```
+
+Per-user install:
+
+```powershell
+msiexec /i nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi
+```
+
+### Zip install
+
+1. Download `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip` from [GitHub Releases](https://github.com/always-further/nono/releases)
+2. Extract `nono.exe`
+3. Add the extraction directory to `PATH`, or invoke the binary directly
+
+Example:
+
+```powershell
+$version = "v0.0.0-preview"
+$zip = "nono-$version-x86_64-pc-windows-msvc.zip"
+Invoke-WebRequest `
+  -Uri "https://github.com/always-further/nono/releases/download/$version/$zip" `
+  -OutFile $zip
+Expand-Archive -LiteralPath $zip -DestinationPath .\nono-preview -Force
+.\nono-preview\nono.exe --version
+```
+
+Windows preview currently supports:
+
+- `nono --help`
+- `nono --version`
+- `nono setup --check-only`
+- `nono run --dry-run ...`
+- `nono run -- <command>` for preview-safe direct execution
+
+Windows preview intentionally does not claim full sandbox parity yet. Enforcement-dependent flows such as live restricted profiles, `--block-net`, `nono shell`, and `nono wrap` fail loudly with preview-limitation messaging.
+
 ## Building from Source
 
 See the [Development Guide](/cli/development/index) for instructions on building nono from source.
@@ -34,4 +84,4 @@ See the [Development Guide](/cli/development/index) for instructions on building
 |----------|-----------|--------|
 | Linux (kernel 5.13+) | Landlock LSM | Supported |
 | macOS | Seatbelt (sandbox_init) | Supported |
-| Windows | - | Not supported |
+| Windows | Preview direct execution and validation flows | Partial |

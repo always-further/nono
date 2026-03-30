@@ -463,6 +463,7 @@ nono ships with 32 built-in groups:
 **System path groups** (grant necessary system access):
 - `system_read_macos` - macOS system libraries, frameworks, dyld cache
 - `system_read_linux` - Linux system libraries, locale data
+- `system_read_windows` - Windows system executables and runtime DLLs
 - `system_write_macos` - macOS temp directories, cache paths
 - `system_write_linux` - Linux temp directories
 
@@ -509,7 +510,7 @@ Groups with a `platform` field only apply on that OS:
 
 Groups without a `platform` field (like `deny_credentials`) apply on all platforms.
 
-Platform-specific groups use `_macos` or `_linux` suffixes by convention.
+Platform-specific groups use `_macos`, `_linux`, or `_windows` suffixes by convention.
 
 
 ### Platform Differences

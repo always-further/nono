@@ -77,7 +77,16 @@
       },
       {
         "group": "Development",
-        "pages": ["cli/development/index", "cli/development/testing"]
+        "pages": [
+          "cli/development/index",
+          "cli/development/testing",
+          "cli/development/windows-supervisor-ipc",
+          "cli/development/windows-feature-gap-matrix",
+          "cli/development/windows-security-model",
+          "cli/development/windows-full-port-roadmap",
+          "cli/development/windows-preview-pilot",
+          "cli/development/windows-preview-validation"
+        ]
       }
     ]
   },

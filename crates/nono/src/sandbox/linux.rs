@@ -177,6 +177,7 @@ pub fn support_info() -> SupportInfo {
             let features = detected.feature_names();
             SupportInfo {
                 is_supported: true,
+                status: crate::sandbox::SupportStatus::Supported,
                 platform: "linux",
                 details: format!(
                     "Landlock available ({}, features: {})",
@@ -187,6 +188,7 @@ pub fn support_info() -> SupportInfo {
         }
         Err(_) => SupportInfo {
             is_supported: false,
+            status: crate::sandbox::SupportStatus::NotImplemented,
             platform: "linux",
             details: "Landlock not available. Requires Linux kernel 5.13+ with Landlock enabled."
                 .to_string(),

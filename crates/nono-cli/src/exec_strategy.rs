@@ -172,7 +172,7 @@ pub struct ExecConfig<'a> {
     /// Environment variables to set.
     pub env_vars: Vec<(&'a str, &'a str)>,
     /// Path to the capability state file.
-    pub cap_file: &'a std::path::Path,
+    pub cap_file: Option<&'a std::path::Path>,
     /// Directory the child process should start in.
     pub current_dir: &'a std::path::Path,
     /// Whether to suppress diagnostic output.
@@ -253,7 +253,10 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<()> {
         }
     }
 
-    cmd.args(cmd_args).env("NONO_CAP_FILE", config.cap_file);
+    cmd.args(cmd_args);
+    if let Some(cap_file) = config.cap_file {
+        cmd.env("NONO_CAP_FILE", cap_file);
+    }
 
     for (key, value) in &config.env_vars {
         cmd.env(key, value);
@@ -357,9 +360,11 @@ pub fn execute_supervised(
     }
 
     // Add NONO_CAP_FILE
-    if let Some(cap_file_str) = config.cap_file.to_str() {
-        if let Ok(cstr) = CString::new(format!("NONO_CAP_FILE={}", cap_file_str)) {
-            env_c.push(cstr);
+    if let Some(cap_file) = config.cap_file {
+        if let Some(cap_file_str) = cap_file.to_str() {
+            if let Ok(cstr) = CString::new(format!("NONO_CAP_FILE={}", cap_file_str)) {
+                env_c.push(cstr);
+            }
         }
     }
 

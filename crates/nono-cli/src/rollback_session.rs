@@ -193,10 +193,18 @@ fn parse_pid_from_session_id(session_id: &str) -> Option<u32> {
 
 /// Check if a process with the given PID is still alive.
 fn is_process_alive(pid: u32) -> bool {
-    // kill(pid, 0) checks if the process exists without sending a signal
-    // SAFETY: This is a standard POSIX way to check process existence.
-    // Signal 0 does not actually send anything.
-    unsafe { nix::libc::kill(pid as nix::libc::pid_t, 0) == 0 }
+    #[cfg(unix)]
+    {
+        // kill(pid, 0) checks if the process exists without sending a signal
+        // SAFETY: This is a standard POSIX way to check process existence.
+        // Signal 0 does not actually send anything.
+        unsafe { nix::libc::kill(pid as nix::libc::pid_t, 0) == 0 }
+    }
+
+    #[cfg(not(unix))]
+    {
+        pid != 0
+    }
 }
 
 /// Calculate the total size of all files in a directory tree.

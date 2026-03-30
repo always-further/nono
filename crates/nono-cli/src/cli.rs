@@ -9,13 +9,18 @@ use std::path::PathBuf;
 
 const STYLES: Styles = Styles::plain().header(Style::new().bold());
 
+#[cfg(target_os = "windows")]
+const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes\nwith Windows preview sandbox support. Preview commands report limitations\nexplicitly and do not imply full sandbox parity yet.";
+
+#[cfg(not(target_os = "windows"))]
+const CLI_ABOUT: &str = "A capability-based shell for running untrusted AI agents and processes\nwith OS-enforced filesystem and network isolation.";
+
 /// nono - The opposite of YOLO
 ///
-/// A capability-based shell for running untrusted AI agents and processes
-/// with OS-enforced filesystem and network isolation.
+/// A capability-based shell for running untrusted AI agents and processes.
 #[derive(Parser, Debug)]
 #[command(name = "nono")]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = CLI_ABOUT, long_about = None)]
 #[command(styles = STYLES, next_help_heading = "OPTIONS")]
 #[command(subcommand_help_heading = "")]
 #[command(help_template = "\
@@ -1609,6 +1614,42 @@ mod tests {
         assert!(!help.contains("--upstream-bypass"));
         assert!(!help.contains("--proxy-port"));
         assert!(!help.contains("--allow-net"));
+    }
+
+    #[test]
+    fn test_root_help_short_circuits_in_parser() {
+        let err = Cli::try_parse_from(["nono", "--help"])
+            .expect_err("--help should short-circuit with clap display help");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn test_root_version_short_circuits_in_parser() {
+        let err = Cli::try_parse_from(["nono", "--version"])
+            .expect_err("--version should short-circuit with clap display version");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_root_help_mentions_windows_preview() {
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        cmd.write_long_help(&mut buf)
+            .expect("failed to write root help");
+        let help = String::from_utf8(buf).expect("help is not utf-8");
+
+        assert!(
+            help.contains("Windows preview sandbox support"),
+            "root help should mention Windows preview status"
+        );
+    }
+
+    #[test]
+    fn test_invalid_subcommand_is_parse_error() {
+        let err = Cli::try_parse_from(["nono", "bad-subcommand"])
+            .expect_err("unknown subcommand should be rejected by clap");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 
     #[test]

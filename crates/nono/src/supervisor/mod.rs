@@ -26,6 +26,10 @@
 //! - Peer authentication via `SO_PEERCRED` (Linux) / `LOCAL_PEERPID` (macOS)
 //! - Path comparison uses [`Path::starts_with()`], never string operations
 
+#[cfg(not(target_os = "windows"))]
+pub mod socket;
+#[cfg(target_os = "windows")]
+#[path = "socket_windows.rs"]
 pub mod socket;
 pub mod types;
 

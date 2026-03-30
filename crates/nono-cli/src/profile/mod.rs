@@ -1341,6 +1341,17 @@ pub(crate) fn get_user_profile_path(name: &str) -> Result<PathBuf> {
 /// - If absolute, we canonicalize it to avoid path confusion through symlinks.
 /// - If invalid (relative or cannot be canonicalized), we fall back to `$HOME/.config`.
 pub(crate) fn resolve_user_config_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    if let Ok(raw) = std::env::var("APPDATA") {
+        let path = PathBuf::from(&raw);
+        if path.is_absolute() {
+            match path.canonicalize() {
+                Ok(canonical) => return Ok(canonical),
+                Err(_) => return Ok(path),
+            }
+        }
+    }
+
     if let Ok(raw) = std::env::var("XDG_CONFIG_HOME") {
         let path = PathBuf::from(&raw);
         if path.is_absolute() {
@@ -1422,18 +1433,39 @@ pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
 
     // Expand $TMPDIR and $UID
     let tmpdir = config::validated_tmpdir()?;
-    let uid = nix::unistd::getuid().to_string();
+    let uid = current_uid_string();
     let expanded = expanded
         .replace("$TMPDIR", tmpdir.trim_end_matches('/'))
         .replace("$UID", &uid);
 
-    let xdg_config = std::env::var("XDG_CONFIG_HOME")
-        .unwrap_or_else(|_| format!("{}", PathBuf::from(&home).join(".config").display()));
+    let xdg_config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("APPDATA")
+                .unwrap_or_else(|_| format!("{}", PathBuf::from(&home).join(".config").display()))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("{}", PathBuf::from(&home).join(".config").display())
+        }
+    });
     let xdg_data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-        format!(
-            "{}",
-            PathBuf::from(&home).join(".local").join("share").display()
-        )
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("APPDATA").unwrap_or_else(|_| {
+                format!(
+                    "{}",
+                    PathBuf::from(&home).join(".local").join("share").display()
+                )
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!(
+                "{}",
+                PathBuf::from(&home).join(".local").join("share").display()
+            )
+        }
     });
 
     // Validate XDG paths are absolute
@@ -1456,6 +1488,16 @@ pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
         .replace("$XDG_DATA_HOME", &xdg_data);
 
     Ok(PathBuf::from(expanded))
+}
+
+#[cfg(unix)]
+fn current_uid_string() -> String {
+    nix::unistd::getuid().to_string()
+}
+
+#[cfg(not(unix))]
+fn current_uid_string() -> String {
+    "0".to_string()
 }
 
 /// List available profiles (built-in + user)
@@ -1543,6 +1585,73 @@ mod tests {
         assert_eq!(resolved, expected_home.join(".config"));
 
         env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_resolve_user_config_dir_uses_appdata() {
+        let tmp = tempdir().expect("tmpdir");
+        let original_appdata = env::var("APPDATA").ok();
+        let original_xdg = env::var("XDG_CONFIG_HOME").ok();
+
+        env::set_var("APPDATA", tmp.path());
+        env::remove_var("XDG_CONFIG_HOME");
+
+        let resolved = resolve_user_config_dir().expect("resolve with APPDATA");
+        assert_eq!(
+            resolved,
+            tmp.path().canonicalize().expect("canonicalize tmp")
+        );
+
+        if let Some(appdata) = original_appdata {
+            env::set_var("APPDATA", appdata);
+        } else {
+            env::remove_var("APPDATA");
+        }
+        if let Some(xdg) = original_xdg {
+            env::set_var("XDG_CONFIG_HOME", xdg);
+        } else {
+            env::remove_var("XDG_CONFIG_HOME");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_expand_vars_uses_windows_home_and_appdata() {
+        let original_home = env::var("HOME").ok();
+        let original_userprofile = env::var("USERPROFILE").ok();
+        let original_appdata = env::var("APPDATA").ok();
+
+        env::remove_var("HOME");
+        env::set_var("USERPROFILE", r"C:\Users\tester");
+        env::set_var("APPDATA", r"C:\Users\tester\AppData\Roaming");
+
+        let workdir = PathBuf::from(r"C:\work\repo");
+
+        let expanded = expand_vars("$HOME\\.config", &workdir).expect("expand HOME on Windows");
+        assert_eq!(expanded, PathBuf::from(r"C:\Users\tester\.config"));
+
+        let config = expand_vars("$XDG_CONFIG_HOME\\nono", &workdir).expect("expand config dir");
+        assert_eq!(
+            config,
+            PathBuf::from(r"C:\Users\tester\AppData\Roaming\nono")
+        );
+
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(userprofile) = original_userprofile {
+            env::set_var("USERPROFILE", userprofile);
+        } else {
+            env::remove_var("USERPROFILE");
+        }
+        if let Some(appdata) = original_appdata {
+            env::set_var("APPDATA", appdata);
+        } else {
+            env::remove_var("APPDATA");
+        }
     }
 
     #[test]
@@ -1705,7 +1814,11 @@ mod tests {
                 || profile
                     .security
                     .groups
-                    .contains(&"system_read_linux".to_string()),
+                    .contains(&"system_read_linux".to_string())
+                || profile
+                    .security
+                    .groups
+                    .contains(&"system_read_windows".to_string()),
             "Expected platform system_read group"
         );
 

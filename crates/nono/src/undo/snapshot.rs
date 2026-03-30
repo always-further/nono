@@ -7,7 +7,6 @@
 use crate::error::{NonoError, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -694,8 +693,8 @@ impl SnapshotManager {
         Ok(FileState {
             hash,
             size: metadata.len(),
-            mtime: metadata.mtime(),
-            permissions: metadata.mode(),
+            mtime: metadata_mtime(&metadata),
+            permissions: metadata_mode(&metadata),
         })
     }
 
@@ -819,9 +818,36 @@ fn file_state_from_metadata(path: &Path) -> Result<FileState> {
     Ok(FileState {
         hash: super::types::ContentHash::from_bytes(hash_bytes),
         size: metadata.len(),
-        mtime: metadata.mtime(),
-        permissions: metadata.mode(),
+        mtime: metadata_mtime(&metadata),
+        permissions: metadata_mode(&metadata),
     })
+}
+
+#[cfg(unix)]
+fn metadata_mtime(metadata: &fs::Metadata) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mtime()
+}
+
+#[cfg(not(unix))]
+fn metadata_mtime(metadata: &fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn metadata_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mode()
+}
+
+#[cfg(not(unix))]
+fn metadata_mode(_metadata: &fs::Metadata) -> u32 {
+    0
 }
 
 /// Write content to a file atomically via temp file + rename.

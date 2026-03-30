@@ -1523,6 +1523,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "walkdir",
+ "windows-sys 0.59.0",
  "x509-cert",
  "zeroize",
 ]
@@ -1560,6 +1561,7 @@ dependencies = [
  "url",
  "walkdir",
  "which",
+ "windows-sys 0.59.0",
  "xdg-home",
  "zeroize",
 ]

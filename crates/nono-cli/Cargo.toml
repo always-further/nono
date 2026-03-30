@@ -83,6 +83,9 @@ nix = { version = "0.31", features = ["process", "signal", "fs", "user", "term"]
 dns-lookup = "2"
 keyring = { version = "3", features = ["apple-native"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading"] }
+
 [build-dependencies]
 toml = "1.0"
 serde = { version = "1", features = ["derive"] }

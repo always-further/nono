@@ -44,5 +44,8 @@ keyring = { version = "3", features = ["sync-secret-service"] }
 nix = { version = "0.31.2", features = ["fs", "user"] }
 keyring = { version = "3", features = ["apple-native"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes"] }
+
 [dev-dependencies]
 tempfile.workspace = true

@@ -6,6 +6,10 @@ mod audit_commands;
 mod capability_ext;
 mod cli;
 mod config;
+#[cfg(not(target_os = "windows"))]
+mod exec_strategy;
+#[cfg(target_os = "windows")]
+#[path = "exec_strategy_windows.rs"]
 mod exec_strategy;
 mod hooks;
 mod instruction_deny;
@@ -24,9 +28,14 @@ mod rollback_session;
 mod rollback_ui;
 mod sandbox_state;
 mod setup;
+#[cfg(not(target_os = "windows"))]
 mod terminal_approval;
 mod theme;
 mod trust_cmd;
+#[cfg(not(target_os = "windows"))]
+mod trust_intercept;
+#[cfg(target_os = "windows")]
+#[path = "trust_intercept_windows.rs"]
 mod trust_intercept;
 mod trust_keystore;
 mod trust_scan;
@@ -42,7 +51,6 @@ use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
 use std::ffi::OsString;
-use std::os::unix::io::FromRawFd;
 use std::sync::Mutex;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -283,9 +291,11 @@ fn show_update_notification(handle: &mut Option<update_check::UpdateCheckHandle>
 /// Reads the supervisor socket fd from `NONO_SUPERVISOR_FD`, sends an
 /// `OpenUrl` IPC message, waits for the response, and exits with the
 /// appropriate exit code.
+#[cfg(not(target_os = "windows"))]
 fn run_open_url_helper(args: OpenUrlHelperArgs) -> Result<()> {
     use nono::supervisor::types::{SupervisorMessage, SupervisorResponse};
     use nono::supervisor::{SupervisorSocket, UrlOpenRequest};
+    use std::os::fd::FromRawFd;
     use std::os::unix::net::UnixStream;
 
     let fd_str = std::env::var("NONO_SUPERVISOR_FD").map_err(|_| {
@@ -330,6 +340,13 @@ fn run_open_url_helper(args: OpenUrlHelperArgs) -> Result<()> {
             "Unexpected supervisor response: {other:?}"
         ))),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn run_open_url_helper(_args: OpenUrlHelperArgs) -> Result<()> {
+    Err(NonoError::UnsupportedPlatform(
+        "open-url-helper is not implemented on Windows yet".to_string(),
+    ))
 }
 
 /// Set up nono on this system
@@ -605,6 +622,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
 fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let args = run_args.sandbox;
     let command = run_args.command;
+    #[cfg(not(target_os = "windows"))]
     let no_diagnostics = run_args.no_diagnostics;
     let rollback = run_args.rollback;
     let no_rollback_prompt = run_args.no_rollback_prompt;
@@ -630,7 +648,8 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
                 prepared.secrets.len()
             );
         }
-        output::print_dry_run(&program, &cmd_args, silent);
+        let support = Sandbox::support_info();
+        output::print_dry_run(&program, &cmd_args, &support, silent);
         return Ok(());
     }
 
@@ -727,6 +746,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let trust_interception_active = trust_interception_active(trust_policy.as_ref());
 
     // Extract write-protected paths (signed instruction files) for diagnostic output
+    #[cfg(not(target_os = "windows"))]
     let verified_protected_paths = scan_result
         .as_ref()
         .map(|r| r.verified_paths())
@@ -873,6 +893,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from(".")),
+            #[cfg(not(target_os = "windows"))]
             no_diagnostics,
             rollback,
             no_rollback: run_args.no_rollback,
@@ -882,13 +903,17 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             rollback_all: run_args.rollback_all,
             rollback_include: run_args.rollback_include,
             rollback_dest: run_args.rollback_dest,
+            #[cfg(not(target_os = "windows"))]
             scan_root,
+            #[cfg(not(target_os = "windows"))]
             trust_policy,
             trust_interception_active,
+            #[cfg(not(target_os = "windows"))]
             protected_paths: verified_protected_paths,
             rollback_exclude_patterns: merged_patterns,
             rollback_exclude_globs: merged_globs,
             skip_dirs: merged_skip_dirs,
+            #[cfg(not(target_os = "windows"))]
             capability_elevation: prepared.capability_elevation,
             proxy_active,
             network_profile,
@@ -900,8 +925,20 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             allow_bind_ports: effective_listen_ports,
             allow_endpoint: args.allow_endpoint.clone(),
             proxy_port: args.proxy_port,
+            #[cfg(target_os = "windows")]
+            preview_requested_restrictions: collect_windows_preview_requested_restrictions(&args),
+            #[cfg(target_os = "windows")]
+            supervisor_requested_features: collect_windows_supervisor_requested_features(
+                rollback,
+                proxy_active,
+                prepared.capability_elevation,
+                trust_interception_active,
+            ),
+            #[cfg(not(target_os = "windows"))]
             open_url_origins: prepared.open_url_origins,
+            #[cfg(not(target_os = "windows"))]
             open_url_allow_localhost: prepared.open_url_allow_localhost,
+            #[cfg(not(target_os = "windows"))]
             allow_launch_services_active: prepared.allow_launch_services_active,
             override_deny_paths: prepared.override_deny_paths,
         },
@@ -942,11 +979,22 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
                 prepared.secrets.len()
             );
         }
-        output::print_dry_run(shell_path.as_os_str(), &[], silent);
+        let support = Sandbox::support_info();
+        output::print_dry_run(shell_path.as_os_str(), &[], &support, silent);
         return Ok(());
     }
 
     let prepared = prepare_sandbox(&args.sandbox, silent)?;
+
+    #[cfg(target_os = "windows")]
+    if !Sandbox::support_info().is_supported {
+        return Err(NonoError::UnsupportedPlatform(
+            "Windows preview does not support `nono shell` live execution yet because sandbox enforcement is not implemented. \
+Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspect policy. \
+This is a preview limitation, not permanent product behavior."
+                .to_string(),
+        ));
+    }
 
     if prepared.allow_launch_services_active {
         print_allow_launch_services_warning(silent);
@@ -972,7 +1020,9 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from(".")),
+            #[cfg(not(target_os = "windows"))]
             no_diagnostics: true,
+            #[cfg(not(target_os = "windows"))]
             capability_elevation: prepared.capability_elevation,
             override_deny_paths: prepared.override_deny_paths,
             ..ExecutionFlags::defaults(silent)?
@@ -985,6 +1035,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
 fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
     let args: SandboxArgs = wrap_args.sandbox.into();
     let command = wrap_args.command;
+    #[cfg(not(target_os = "windows"))]
     let no_diagnostics = wrap_args.no_diagnostics;
 
     if command.is_empty() {
@@ -1003,11 +1054,22 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
                 prepared.secrets.len()
             );
         }
-        output::print_dry_run(&program, &cmd_args, silent);
+        let support = Sandbox::support_info();
+        output::print_dry_run(&program, &cmd_args, &support, silent);
         return Ok(());
     }
 
     let prepared = prepare_sandbox(&args, silent)?;
+
+    #[cfg(target_os = "windows")]
+    if !Sandbox::support_info().is_supported {
+        return Err(NonoError::UnsupportedPlatform(
+            "Windows preview does not support `nono wrap` live execution yet because it would imply sandbox enforcement that is not implemented. \
+Use `nono run -- <command>` for preview direct execution or `--dry-run` to inspect policy. \
+This is a preview limitation, not permanent product behavior."
+                .to_string(),
+        ));
+    }
 
     // Also reject proxy flags that came from the profile (not just CLI).
     // Profile-provided upstream_proxy / network settings activate ProxyOnly
@@ -1041,6 +1103,7 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from(".")),
+            #[cfg(not(target_os = "windows"))]
             no_diagnostics,
             override_deny_paths: prepared.override_deny_paths,
             ..ExecutionFlags::defaults(silent)?
@@ -1049,6 +1112,7 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
 }
 
 /// Flags controlling sandboxed execution behavior.
+#[cfg(not(target_os = "windows"))]
 struct ExecutionFlags {
     strategy: exec_strategy::ExecStrategy,
     workdir: std::path::PathBuf,
@@ -1112,6 +1176,38 @@ struct ExecutionFlags {
     override_deny_paths: Vec<std::path::PathBuf>,
 }
 
+#[cfg(target_os = "windows")]
+struct ExecutionFlags {
+    strategy: exec_strategy::ExecStrategy,
+    workdir: std::path::PathBuf,
+    rollback: bool,
+    no_rollback: bool,
+    no_rollback_prompt: bool,
+    no_audit: bool,
+    silent: bool,
+    rollback_all: bool,
+    rollback_include: Vec<String>,
+    rollback_dest: Option<std::path::PathBuf>,
+    trust_interception_active: bool,
+    rollback_exclude_patterns: Vec<String>,
+    rollback_exclude_globs: Vec<String>,
+    skip_dirs: Vec<String>,
+    proxy_active: bool,
+    network_profile: Option<String>,
+    allow_domain: Vec<String>,
+    credentials: Vec<String>,
+    custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
+    upstream_proxy: Option<String>,
+    upstream_bypass: Vec<String>,
+    allow_bind_ports: Vec<u16>,
+    allow_endpoint: Vec<String>,
+    proxy_port: Option<u16>,
+    preview_requested_restrictions: Vec<String>,
+    supervisor_requested_features: Vec<String>,
+    override_deny_paths: Vec<std::path::PathBuf>,
+}
+
+#[cfg(not(target_os = "windows"))]
 impl ExecutionFlags {
     /// Create flags with sensible defaults.
     /// Fields that vary per call site (strategy, silent, no_diagnostics, etc.)
@@ -1157,8 +1253,168 @@ impl ExecutionFlags {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn trust_interception_active(policy: Option<&nono::trust::TrustPolicy>) -> bool {
     policy.is_some_and(|policy| !policy.includes.is_empty())
+}
+
+#[cfg(target_os = "windows")]
+fn trust_interception_active(_policy: Option<&nono::trust::TrustPolicy>) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn build_supervisor_config<'a>(
+    protected_roots: &'a protected_paths::ProtectedRoots,
+    approval_backend: &'a terminal_approval::TerminalApproval,
+    supervisor_session_id: &'a str,
+    flags: &'a ExecutionFlags,
+    #[cfg(target_os = "linux")] sup_proxy_port: u16,
+    #[cfg(target_os = "linux")] sup_proxy_bind_ports: Vec<u16>,
+) -> exec_strategy::SupervisorConfig<'a> {
+    exec_strategy::SupervisorConfig {
+        protected_roots: protected_roots.as_paths(),
+        approval_backend,
+        session_id: supervisor_session_id,
+        open_url_origins: &flags.open_url_origins,
+        open_url_allow_localhost: flags.open_url_allow_localhost,
+        allow_launch_services_active: flags.allow_launch_services_active,
+        #[cfg(target_os = "linux")]
+        proxy_port: sup_proxy_port,
+        #[cfg(target_os = "linux")]
+        proxy_bind_ports: sup_proxy_bind_ports,
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl ExecutionFlags {
+    fn defaults(silent: bool) -> Result<Self> {
+        Ok(Self {
+            strategy: exec_strategy::ExecStrategy::Supervised,
+            workdir: std::env::current_dir()
+                .map_err(|e| NonoError::SandboxInit(format!("Failed to get cwd: {e}")))?,
+            rollback: false,
+            no_rollback: false,
+            no_rollback_prompt: false,
+            no_audit: false,
+            silent,
+            rollback_all: false,
+            rollback_include: Vec::new(),
+            rollback_dest: None,
+            trust_interception_active: false,
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            skip_dirs: Vec::new(),
+            proxy_active: false,
+            network_profile: None,
+            allow_domain: Vec::new(),
+            credentials: Vec::new(),
+            custom_credentials: std::collections::HashMap::new(),
+            upstream_proxy: None,
+            upstream_bypass: Vec::new(),
+            allow_bind_ports: Vec::new(),
+            allow_endpoint: Vec::new(),
+            proxy_port: None,
+            preview_requested_restrictions: Vec::new(),
+            supervisor_requested_features: Vec::new(),
+            override_deny_paths: Vec::new(),
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn build_supervisor_config<'a>(
+    flags: &'a ExecutionFlags,
+    supervisor_session_id: &'a str,
+) -> exec_strategy::SupervisorConfig<'a> {
+    exec_strategy::SupervisorConfig {
+        session_id: supervisor_session_id,
+        requested_features: flags
+            .supervisor_requested_features
+            .iter()
+            .map(String::as_str)
+            .collect(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn collect_windows_preview_requested_restrictions(args: &SandboxArgs) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    if !args.override_deny.is_empty() {
+        reasons.push("filesystem deny-override policy".to_string());
+    }
+    if args.block_net
+        || args.network_profile.is_some()
+        || !args.allow_proxy.is_empty()
+        || !args.allow_bind.is_empty()
+        || !args.allow_port.is_empty()
+        || args.external_proxy.is_some()
+        || !args.external_proxy_bypass.is_empty()
+        || args.proxy_port.is_some()
+    {
+        reasons.push("network filtering or proxy policy".to_string());
+    }
+
+    reasons
+}
+
+#[cfg(target_os = "windows")]
+fn collect_windows_supervisor_requested_features(
+    rollback: bool,
+    proxy_active: bool,
+    capability_elevation: bool,
+    trust_interception_active: bool,
+) -> Vec<String> {
+    let mut features = Vec::new();
+    if rollback {
+        features.push("rollback snapshots".to_string());
+    }
+    if proxy_active {
+        features.push("proxy filtering".to_string());
+    }
+    if capability_elevation {
+        features.push("runtime capability elevation".to_string());
+    }
+    if trust_interception_active {
+        features.push("runtime trust interception".to_string());
+    }
+    features
+}
+
+#[cfg(target_os = "windows")]
+fn validate_windows_preview_direct_execution(
+    flags: &ExecutionFlags,
+    caps: &CapabilitySet,
+) -> Result<()> {
+    let support = Sandbox::support_info();
+    if support.is_supported {
+        return Ok(());
+    }
+
+    let mut reasons = flags.preview_requested_restrictions.clone();
+    if let nono::PreviewRuntimeStatus::RequiresEnforcement {
+        reasons: backend_reasons,
+    } = Sandbox::preview_runtime_status(caps, &flags.workdir)
+    {
+        for reason in backend_reasons {
+            let reason = reason.to_string();
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+    }
+
+    if reasons.is_empty() {
+        return Ok(());
+    }
+
+    Err(NonoError::UnsupportedPlatform(format!(
+        "Windows preview cannot enforce the requested sandbox controls for this live run ({}). \
+Use `nono run --dry-run ...` to validate policy, or rerun without those controls. \
+This is a preview limitation, not permanent product behavior.",
+        reasons.join(", ")
+    )))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1225,9 +1481,26 @@ pub(crate) fn merge_dedup_ports(a: &[u16], b: &[u16]) -> Vec<u16> {
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
     caps: &CapabilitySet,
+    current_dir: &std::path::Path,
     silent: bool,
 ) -> Result<()> {
     if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
+        #[cfg(target_os = "windows")]
+        {
+            let support = Sandbox::support_info();
+            if !support.is_supported {
+                let preview = Sandbox::preview_runtime_status(caps, current_dir);
+                info!("Windows preview runtime status: {:?}", preview);
+                if !silent {
+                    output::print_warning(
+                        "Windows preview: running with basic Windows process containment and a limited Windows filesystem subset for executable coverage and supported directory allowlists; full filesystem and network enforcement are not active yet",
+                    );
+                    eprintln!();
+                }
+                return Ok(());
+            }
+        }
+
         output::print_applying_sandbox(silent);
 
         // On Linux, use the ABI-aware path to avoid BestEffort flag masking.
@@ -1378,6 +1651,430 @@ fn cleanup_capability_state_file(cap_file_path: &std::path::Path) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn windows_runtime_state_dir(
+    strategy: exec_strategy::ExecStrategy,
+    caps: &CapabilitySet,
+    current_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if !matches!(strategy, exec_strategy::ExecStrategy::Direct) {
+        return None;
+    }
+
+    let support = Sandbox::support_info();
+    if support.is_supported {
+        return None;
+    }
+
+    let fs_policy = Sandbox::windows_filesystem_policy(caps);
+    Sandbox::windows_runtime_state_dir(&fs_policy, current_dir)
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_windows_runtime_env_vars(
+    runtime_state_dir: Option<&std::path::Path>,
+) -> Result<Vec<(String, String)>> {
+    let system_root = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("windir"))
+        .unwrap_or_else(|_| r"C:\Windows".to_string());
+    let system32 = std::path::Path::new(&system_root).join("System32");
+    let system_drive = if system_root.len() >= 2 && system_root.as_bytes()[1] == b':' {
+        system_root[..2].to_string()
+    } else {
+        "C:".to_string()
+    };
+
+    let Some(runtime_state_dir) = runtime_state_dir else {
+        let path_value = std::env::join_paths([
+            system32.as_os_str(),
+            std::path::Path::new(&system_root).as_os_str(),
+        ])
+        .map_err(|e| {
+            NonoError::SandboxInit(format!("Failed to prepare Windows runtime PATH: {e}"))
+        })?
+        .to_string_lossy()
+        .into_owned();
+
+        return Ok(vec![
+            ("PATH".to_string(), path_value),
+            (
+                "PATHEXT".to_string(),
+                ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".to_string(),
+            ),
+            (
+                "COMSPEC".to_string(),
+                system32.join("cmd.exe").to_string_lossy().into_owned(),
+            ),
+            ("SystemRoot".to_string(), system_root.clone()),
+            ("windir".to_string(), system_root.clone()),
+            ("SystemDrive".to_string(), system_drive),
+            (
+                "NoDefaultCurrentDirectoryInExePath".to_string(),
+                "1".to_string(),
+            ),
+        ]);
+    };
+
+    let runtime_root = if Sandbox::windows_supports_direct_writable_dir(runtime_state_dir) {
+        runtime_state_dir.join(".nono-runtime")
+    } else {
+        std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .map(|local| local.join("Temp").join("Low"))
+            .unwrap_or_else(|| runtime_state_dir.join(".nono-runtime-low"))
+            .join("nono")
+            .join(
+                runtime_state_dir
+                    .to_string_lossy()
+                    .replace(['\\', '/', ':'], "_"),
+            )
+    };
+    let tmp_dir = runtime_root.join("tmp");
+    let home_dir = runtime_root.join("home");
+    let appdata_dir = runtime_root.join("appdata").join("Roaming");
+    let local_appdata_dir = runtime_root.join("appdata").join("Local");
+    let programdata_dir = runtime_root.join("programdata");
+    let program_files_dir = runtime_root.join("programfiles");
+    let program_files_x86_dir = runtime_root.join("programfilesx86");
+    let common_program_files_dir = runtime_root.join("common-programfiles");
+    let common_program_files_x86_dir = runtime_root.join("common-programfilesx86");
+    let runtime_bin_dir = runtime_root.join("bin");
+    let public_dir = runtime_root.join("public");
+    let onedrive_dir = runtime_root.join("onedrive");
+    let inetcache_dir = runtime_root.join("inetcache");
+    let inetcookies_dir = runtime_root.join("inetcookies");
+    let inethistory_dir = runtime_root.join("inethistory");
+    let psmodules_dir = runtime_root.join("psmodules");
+    let psmodule_analysis_cache = runtime_root.join("psmodule-analysis-cache");
+    let cargo_home_dir = runtime_root.join("cargo-home");
+    let rustup_home_dir = runtime_root.join("rustup-home");
+    let dotnet_home_dir = runtime_root.join("dotnet-home");
+    let nuget_packages_dir = runtime_root.join("nuget-packages");
+    let nuget_http_cache_dir = runtime_root.join("nuget-http-cache");
+    let nuget_plugins_cache_dir = runtime_root.join("nuget-plugins-cache");
+    let chocolatey_dir = runtime_root.join("chocolatey");
+    let vcpkg_root_dir = runtime_root.join("vcpkg");
+    let npm_cache_dir = runtime_root.join("npm-cache");
+    let yarn_cache_dir = runtime_root.join("yarn-cache");
+    let pip_cache_dir = runtime_root.join("pip-cache");
+    let pip_build_tracker_dir = runtime_root.join("pip-build-tracker");
+    let python_pycache_dir = runtime_root.join("python-pycache");
+    let python_user_base_dir = runtime_root.join("python-user-base");
+    let go_cache_dir = runtime_root.join("go-cache");
+    let go_mod_cache_dir = runtime_root.join("go-mod-cache");
+    let go_path_dir = runtime_root.join("go-path");
+    let history_dir = runtime_root.join("history");
+    let ipython_dir = runtime_root.join("ipython");
+    let gradle_home_dir = runtime_root.join("gradle-home");
+    let maven_home_dir = runtime_root.join("maven-home");
+    let xdg_config_dir = runtime_root.join("xdg").join("config");
+    let xdg_data_dir = runtime_root.join("xdg").join("data");
+
+    for dir in [
+        &runtime_root,
+        &tmp_dir,
+        &home_dir,
+        &appdata_dir,
+        &local_appdata_dir,
+        &programdata_dir,
+        &program_files_dir,
+        &program_files_x86_dir,
+        &common_program_files_dir,
+        &common_program_files_x86_dir,
+        &runtime_bin_dir,
+        &public_dir,
+        &onedrive_dir,
+        &inetcache_dir,
+        &inetcookies_dir,
+        &inethistory_dir,
+        &psmodules_dir,
+        &psmodule_analysis_cache,
+        &cargo_home_dir,
+        &rustup_home_dir,
+        &dotnet_home_dir,
+        &nuget_packages_dir,
+        &nuget_http_cache_dir,
+        &nuget_plugins_cache_dir,
+        &chocolatey_dir,
+        &vcpkg_root_dir,
+        &npm_cache_dir,
+        &yarn_cache_dir,
+        &pip_cache_dir,
+        &pip_build_tracker_dir,
+        &python_pycache_dir,
+        &python_user_base_dir,
+        &go_cache_dir,
+        &go_mod_cache_dir,
+        &go_path_dir,
+        &history_dir,
+        &ipython_dir,
+        &gradle_home_dir,
+        &maven_home_dir,
+        &xdg_config_dir,
+        &xdg_data_dir,
+    ] {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to prepare Windows runtime state directory {}: {}",
+                dir.display(),
+                e
+            ))
+        })?;
+    }
+    let path_value = std::env::join_paths([
+        system32.as_os_str(),
+        std::path::Path::new(&system_root).as_os_str(),
+        runtime_bin_dir.as_os_str(),
+        program_files_dir.as_os_str(),
+        common_program_files_dir.as_os_str(),
+    ])
+    .map_err(|e| NonoError::SandboxInit(format!("Failed to prepare Windows runtime PATH: {e}")))?
+    .to_string_lossy()
+    .into_owned();
+
+    let mut env = vec![
+        ("TMP".to_string(), tmp_dir.to_string_lossy().into_owned()),
+        ("TEMP".to_string(), tmp_dir.to_string_lossy().into_owned()),
+        ("TMPDIR".to_string(), tmp_dir.to_string_lossy().into_owned()),
+        ("PATH".to_string(), path_value),
+        (
+            "PATHEXT".to_string(),
+            ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC".to_string(),
+        ),
+        (
+            "COMSPEC".to_string(),
+            system32.join("cmd.exe").to_string_lossy().into_owned(),
+        ),
+        ("SystemRoot".to_string(), system_root.clone()),
+        ("windir".to_string(), system_root),
+        ("SystemDrive".to_string(), system_drive),
+        (
+            "NoDefaultCurrentDirectoryInExePath".to_string(),
+            "1".to_string(),
+        ),
+        ("HOME".to_string(), home_dir.to_string_lossy().into_owned()),
+        (
+            "USERPROFILE".to_string(),
+            home_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "APPDATA".to_string(),
+            appdata_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "LOCALAPPDATA".to_string(),
+            local_appdata_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "XDG_CONFIG_HOME".to_string(),
+            xdg_config_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "XDG_DATA_HOME".to_string(),
+            xdg_data_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "PROGRAMDATA".to_string(),
+            programdata_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "ALLUSERSPROFILE".to_string(),
+            programdata_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "PUBLIC".to_string(),
+            public_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "ProgramFiles".to_string(),
+            program_files_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "ProgramFiles(x86)".to_string(),
+            program_files_x86_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "ProgramW6432".to_string(),
+            program_files_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "CommonProgramFiles".to_string(),
+            common_program_files_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "CommonProgramFiles(x86)".to_string(),
+            common_program_files_x86_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "CommonProgramW6432".to_string(),
+            common_program_files_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "OneDrive".to_string(),
+            onedrive_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "OneDriveConsumer".to_string(),
+            onedrive_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "OneDriveCommercial".to_string(),
+            onedrive_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "INETCACHE".to_string(),
+            inetcache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "INETCOOKIES".to_string(),
+            inetcookies_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "INETHISTORY".to_string(),
+            inethistory_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "PSModulePath".to_string(),
+            psmodules_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "PSModuleAnalysisCachePath".to_string(),
+            psmodule_analysis_cache
+                .join("ModuleAnalysisCache")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "CARGO_HOME".to_string(),
+            cargo_home_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "RUSTUP_HOME".to_string(),
+            rustup_home_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "DOTNET_CLI_HOME".to_string(),
+            dotnet_home_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "NUGET_PACKAGES".to_string(),
+            nuget_packages_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "NUGET_HTTP_CACHE_PATH".to_string(),
+            nuget_http_cache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "NUGET_PLUGINS_CACHE_PATH".to_string(),
+            nuget_plugins_cache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "ChocolateyInstall".to_string(),
+            chocolatey_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "ChocolateyToolsLocation".to_string(),
+            chocolatey_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "VCPKG_ROOT".to_string(),
+            vcpkg_root_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "NPM_CONFIG_CACHE".to_string(),
+            npm_cache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "YARN_CACHE_FOLDER".to_string(),
+            yarn_cache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "PIP_CACHE_DIR".to_string(),
+            pip_cache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "PIP_BUILD_TRACKER".to_string(),
+            pip_build_tracker_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "PYTHONPYCACHEPREFIX".to_string(),
+            python_pycache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "PYTHONUSERBASE".to_string(),
+            python_user_base_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "GOCACHE".to_string(),
+            go_cache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "GOMODCACHE".to_string(),
+            go_mod_cache_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "GOPATH".to_string(),
+            go_path_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "HISTFILE".to_string(),
+            history_dir
+                .join("shell_history")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "LESSHISTFILE".to_string(),
+            history_dir
+                .join("less_history")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "NODE_REPL_HISTORY".to_string(),
+            history_dir
+                .join("node_repl_history")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "PYTHONHISTFILE".to_string(),
+            history_dir
+                .join("python_history")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "SQLITE_HISTORY".to_string(),
+            history_dir
+                .join("sqlite_history")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            "IPYTHONDIR".to_string(),
+            ipython_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "GRADLE_USER_HOME".to_string(),
+            gradle_home_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "MAVEN_USER_HOME".to_string(),
+            maven_home_dir.to_string_lossy().into_owned(),
+        ),
+    ];
+
+    let home_str = home_dir.to_string_lossy().into_owned();
+    if home_str.len() >= 3 && home_str.as_bytes()[1] == b':' {
+        env.push(("HOMEDRIVE".to_string(), home_str[..2].to_string()));
+        let home_path = home_str[2..].to_string();
+        env.push(("HOMEPATH".to_string(), home_path));
+    }
+
+    Ok(env)
+}
+
 fn execution_start_dir(
     workdir: &std::path::Path,
     caps: &CapabilitySet,
@@ -1427,10 +2124,6 @@ fn execute_sandboxed(
 
     // Resolve the program path BEFORE applying the sandbox
     let resolved_program = exec_strategy::resolve_program(&command[0])?;
-
-    // Write capability state file BEFORE applying sandbox
-    let cap_file = write_capability_state_file(&caps, &flags.override_deny_paths, flags.silent);
-    let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
     // Validate that secret env var names are not dangerous (e.g. LD_PRELOAD).
     // A malicious profile could map a keystore secret to a linker/interpreter
@@ -1487,7 +2180,7 @@ fn execute_sandboxed(
         }
         caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
             port,
-            bind_ports: flags.allow_bind_ports,
+            bind_ports: flags.allow_bind_ports.clone(),
         });
 
         // Collect proxy env vars for the child process
@@ -1510,10 +2203,38 @@ fn execute_sandboxed(
         None
     };
 
+    #[cfg(not(target_os = "windows"))]
     let current_dir = execution_start_dir(&flags.workdir, &caps)?;
+    #[cfg(target_os = "windows")]
+    let current_dir = {
+        let support = Sandbox::support_info();
+        if support.is_supported {
+            execution_start_dir(&flags.workdir, &caps)?
+        } else {
+            flags.workdir.clone()
+        }
+    };
+
+    #[cfg(target_os = "windows")]
+    if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
+        validate_windows_preview_direct_execution(&flags, &caps)?;
+    }
+
+    #[cfg(target_os = "windows")]
+    let runtime_state_dir = windows_runtime_state_dir(strategy, &caps, &current_dir);
+    #[cfg(not(target_os = "windows"))]
+    let runtime_state_dir: Option<std::path::PathBuf> = None;
+
+    // Write capability state file before sandbox activation and child launch.
+    let cap_file_path = write_capability_state_file(
+        &caps,
+        &flags.override_deny_paths,
+        runtime_state_dir.as_deref(),
+        flags.silent,
+    );
 
     // Apply sandbox BEFORE fork for Direct mode.
-    apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
+    apply_pre_fork_sandbox(strategy, &caps, &current_dir, flags.silent)?;
 
     // Build environment variables for the command
     let mut env_vars: Vec<(&str, &str)> = loaded_secrets
@@ -1523,6 +2244,15 @@ fn execute_sandboxed(
 
     // Add proxy env vars (HTTP_PROXY, HTTPS_PROXY, NONO_PROXY_TOKEN)
     for (k, v) in &proxy_env_vars {
+        env_vars.push((k.as_str(), v.as_str()));
+    }
+
+    #[cfg(target_os = "windows")]
+    let windows_runtime_env_vars = prepare_windows_runtime_env_vars(runtime_state_dir.as_deref())?;
+    #[cfg(not(target_os = "windows"))]
+    let windows_runtime_env_vars: Vec<(String, String)> = Vec::new();
+    #[cfg(target_os = "windows")]
+    for (k, v) in &windows_runtime_env_vars {
         env_vars.push((k.as_str(), v.as_str()));
     }
 
@@ -1569,12 +2299,13 @@ fn execute_sandboxed(
     };
 
     // Create execution config
+    #[cfg(not(target_os = "windows"))]
     let config = exec_strategy::ExecConfig {
         command: &command,
         resolved_program: &resolved_program,
         caps: &caps,
         env_vars,
-        cap_file: &cap_file_path,
+        cap_file: cap_file_path.as_deref(),
         current_dir: &current_dir,
         no_diagnostics: flags.no_diagnostics || flags.silent,
         threading,
@@ -1583,15 +2314,43 @@ fn execute_sandboxed(
         #[cfg(target_os = "linux")]
         seccomp_proxy_fallback,
     };
+    #[cfg(target_os = "windows")]
+    let config = exec_strategy::ExecConfig {
+        command: &command,
+        resolved_program: &resolved_program,
+        caps: &caps,
+        env_vars,
+        cap_file: cap_file_path.as_deref(),
+        current_dir: &current_dir,
+    };
 
     // Execute based on strategy
     match strategy {
+        #[cfg(not(target_os = "windows"))]
         exec_strategy::ExecStrategy::Direct => {
             exec_strategy::execute_direct(&config)?;
             unreachable!("execute_direct only returns on error");
         }
+        #[cfg(target_os = "windows")]
+        exec_strategy::ExecStrategy::Direct => {
+            let exit_code = exec_strategy::execute_direct(&config)?;
+            if let Some(cap_file_path) = cap_file_path.as_ref() {
+                cleanup_capability_state_file(cap_file_path);
+            }
+            drop(config);
+            drop(loaded_secrets);
+            std::process::exit(exit_code);
+        }
         exec_strategy::ExecStrategy::Supervised => {
+            #[cfg(not(target_os = "windows"))]
             output::print_applying_sandbox(flags.silent);
+            #[cfg(target_os = "windows")]
+            if !Sandbox::support_info().is_supported && !flags.silent {
+                output::print_warning(
+                    "Windows preview: initializing supervisor scaffold only; sandbox enforcement is not implemented yet",
+                );
+                eprintln!();
+            }
 
             // --- Audit session setup (always, unless --no-audit) ---
             // The session directory and ID are shared between audit and rollback.
@@ -1772,8 +2531,11 @@ fn execute_sandboxed(
             };
 
             // --- Supervisor IPC setup (always active in Supervised mode) ---
+            #[cfg(not(target_os = "windows"))]
             let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
+            #[cfg(not(target_os = "windows"))]
             let approval_backend = terminal_approval::TerminalApproval;
+            #[cfg(not(target_os = "windows"))]
             let supervisor_session_id = audit_state
                 .as_ref()
                 .map(|(session_id, _)| session_id.clone())
@@ -1791,19 +2553,32 @@ fn execute_sandboxed(
                 _ => (0, Vec::new()),
             };
 
-            let supervisor_cfg = exec_strategy::SupervisorConfig {
-                protected_roots: protected_roots.as_paths(),
-                approval_backend: &approval_backend,
-                session_id: &supervisor_session_id,
-                open_url_origins: &flags.open_url_origins,
-                open_url_allow_localhost: flags.open_url_allow_localhost,
-                allow_launch_services_active: flags.allow_launch_services_active,
+            #[cfg(not(target_os = "windows"))]
+            let supervisor_cfg = build_supervisor_config(
+                &protected_roots,
+                &approval_backend,
+                &supervisor_session_id,
+                flags,
                 #[cfg(target_os = "linux")]
-                proxy_port: sup_proxy_port,
+                sup_proxy_port,
                 #[cfg(target_os = "linux")]
-                proxy_bind_ports: sup_proxy_bind_ports,
-            };
+                sup_proxy_bind_ports,
+            );
+            #[cfg(target_os = "windows")]
+            let supervisor_session_id = audit_state
+                .as_ref()
+                .map(|(session_id, _)| session_id.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "windows-preview-{}-{}",
+                        std::process::id(),
+                        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                    )
+                });
+            #[cfg(target_os = "windows")]
+            let supervisor_cfg = build_supervisor_config(&flags, &supervisor_session_id);
 
+            #[cfg(not(target_os = "windows"))]
             let trust_interceptor = if flags.trust_interception_active {
                 match flags.trust_policy.clone() {
                     Some(policy) => {
@@ -1831,6 +2606,8 @@ fn execute_sandboxed(
             } else {
                 None
             };
+            #[cfg(target_os = "windows")]
+            let trust_interceptor: Option<trust_intercept::TrustInterceptor> = None;
 
             let started = chrono::Local::now().to_rfc3339();
             let exit_code = exec_strategy::execute_supervised(
@@ -1901,7 +2678,9 @@ fn execute_sandboxed(
                 }
             }
 
-            cleanup_capability_state_file(&cap_file_path);
+            if let Some(cap_file_path) = cap_file_path.as_ref() {
+                cleanup_capability_state_file(cap_file_path);
+            }
             drop(config);
             drop(loaded_secrets);
             std::process::exit(exit_code);
@@ -1976,8 +2755,10 @@ struct PreparedSandbox {
     /// Whether direct LaunchServices opens are enabled for this session.
     allow_launch_services_active: bool,
     /// Allowed URL origins for supervisor-delegated browser opens
+    #[cfg(not(target_os = "windows"))]
     open_url_origins: Vec<String>,
     /// Whether to allow http://localhost URL opens
+    #[cfg(not(target_os = "windows"))]
     open_url_allow_localhost: bool,
     /// Canonicalized paths exempted from deny groups via override_deny
     override_deny_paths: Vec<std::path::PathBuf>,
@@ -2440,12 +3221,38 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
     #[cfg(target_os = "linux")]
     output::print_abi_info(silent);
 
-    // Check platform support
-    if !Sandbox::is_supported() {
-        return Err(NonoError::SandboxInit(Sandbox::support_info().details));
+    // Check platform support. Dry-run validates configuration and command
+    // resolution, so it must remain usable on preview platforms even when
+    // live sandbox enforcement is not implemented yet.
+    let support = Sandbox::support_info();
+    #[cfg(not(target_os = "windows"))]
+    if !args.dry_run && !support.is_supported {
+        return Err(NonoError::SandboxInit(format!(
+            "{} support status: {}. {}",
+            support.platform,
+            support.status_label(),
+            support.details
+        )));
     }
 
-    info!("{}", Sandbox::support_info().details);
+    #[cfg(target_os = "windows")]
+    if !args.dry_run && !support.is_supported {
+        info!(
+            "{} support status: {}. {}",
+            support.platform,
+            support.status_label(),
+            support.details
+        );
+    }
+
+    if support.is_supported || args.dry_run {
+        info!(
+            "{} support status: {}. {}",
+            support.platform,
+            support.status_label(),
+            support.details
+        );
+    }
 
     Ok(PreparedSandbox {
         caps,
@@ -2462,7 +3269,9 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         listen_ports: profile_listen_ports,
         capability_elevation,
         allow_launch_services_active,
+        #[cfg(not(target_os = "windows"))]
         open_url_origins,
+        #[cfg(not(target_os = "windows"))]
         open_url_allow_localhost,
         override_deny_paths,
     })
@@ -2562,10 +3371,37 @@ fn enforce_rollback_limits(silent: bool) {
 fn write_capability_state_file(
     caps: &CapabilitySet,
     override_deny_paths: &[std::path::PathBuf],
+    preferred_runtime_dir: Option<&std::path::Path>,
     silent: bool,
 ) -> Option<std::path::PathBuf> {
     // Write sandbox state for `nono why --self`.
-    let cap_file = std::env::temp_dir().join(format!(".nono-{}.json", std::process::id()));
+    #[cfg(target_os = "windows")]
+    let cap_file = if let Some(runtime_dir) = preferred_runtime_dir {
+        let runtime_root = runtime_dir.join(".nono-runtime");
+        if let Err(e) = std::fs::create_dir_all(&runtime_root) {
+            error!(
+                "Failed to create Windows runtime state directory {}: {}",
+                runtime_root.display(),
+                e
+            );
+            if !silent {
+                eprintln!(
+                    "  WARNING: Windows runtime state directory could not be created.\n  \
+                     The sandbox will continue, but runtime state files will be disabled."
+                );
+            }
+            return None;
+        }
+        runtime_root.join(format!(".nono-{}.json", std::process::id()))
+    } else {
+        return None;
+    };
+    #[cfg(not(target_os = "windows"))]
+    let cap_file = {
+        let _ = preferred_runtime_dir;
+        std::env::temp_dir().join(format!(".nono-{}.json", std::process::id()))
+    };
+
     let state = sandbox_state::SandboxState::from_caps(caps, override_deny_paths);
     if let Err(e) = state.write_to_file(&cap_file) {
         error!(
@@ -2690,7 +3526,9 @@ mod tests {
             listen_ports: Vec::new(),
             capability_elevation: false,
             allow_launch_services_active: false,
+            #[cfg(not(target_os = "windows"))]
             open_url_origins: Vec::new(),
+            #[cfg(not(target_os = "windows"))]
             open_url_allow_localhost: false,
             override_deny_paths: Vec::new(),
         };
@@ -2730,7 +3568,9 @@ mod tests {
             listen_ports: Vec::new(),
             capability_elevation: false,
             allow_launch_services_active: false,
+            #[cfg(not(target_os = "windows"))]
             open_url_origins: Vec::new(),
+            #[cfg(not(target_os = "windows"))]
             open_url_allow_localhost: false,
             override_deny_paths: Vec::new(),
         };
@@ -2745,6 +3585,115 @@ mod tests {
                 credentials: vec!["github".to_string(), "openai".to_string()],
             }
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_apply_pre_fork_sandbox_allows_windows_preview_direct_execution() {
+        let caps = CapabilitySet::new();
+        let current_dir = std::env::current_dir().expect("cwd");
+        apply_pre_fork_sandbox(
+            exec_strategy::ExecStrategy::Direct,
+            &caps,
+            &current_dir,
+            true,
+        )
+        .expect("windows preview direct execution should not fail");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_collect_windows_preview_requested_restrictions_for_profile_and_block_net() {
+        let args = SandboxArgs {
+            profile: Some("codex".to_string()),
+            block_net: true,
+            ..sandbox_args()
+        };
+
+        let reasons = collect_windows_preview_requested_restrictions(&args);
+        assert!(reasons.iter().any(|reason| reason.contains("network")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_windows_preview_direct_execution_allows_supported_directory_subset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workdir = dir.path().join("workspace");
+        std::fs::create_dir_all(&workdir).expect("mkdir workspace");
+        let caps = CapabilitySet::new()
+            .allow_path(dir.path(), AccessMode::ReadWrite)
+            .expect("allow path");
+        let flags = ExecutionFlags {
+            strategy: exec_strategy::ExecStrategy::Direct,
+            workdir: workdir,
+            rollback: false,
+            no_rollback: false,
+            no_rollback_prompt: false,
+            no_audit: false,
+            silent: true,
+            rollback_all: false,
+            rollback_include: Vec::new(),
+            rollback_dest: None,
+            trust_interception_active: false,
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            skip_dirs: Vec::new(),
+            proxy_active: false,
+            network_profile: None,
+            allow_domain: Vec::new(),
+            credentials: Vec::new(),
+            custom_credentials: std::collections::HashMap::new(),
+            upstream_proxy: None,
+            upstream_bypass: Vec::new(),
+            allow_bind_ports: Vec::new(),
+            allow_endpoint: Vec::new(),
+            proxy_port: None,
+            preview_requested_restrictions: Vec::new(),
+            supervisor_requested_features: Vec::new(),
+            override_deny_paths: Vec::new(),
+        };
+
+        validate_windows_preview_direct_execution(&flags, &caps)
+            .expect("supported directory subset should proceed on Windows preview");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_windows_preview_direct_execution_blocks_unsupported_override_deny() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let flags = ExecutionFlags {
+            strategy: exec_strategy::ExecStrategy::Direct,
+            workdir: dir.path().to_path_buf(),
+            rollback: false,
+            no_rollback: false,
+            no_rollback_prompt: false,
+            no_audit: false,
+            silent: true,
+            rollback_all: false,
+            rollback_include: Vec::new(),
+            rollback_dest: None,
+            trust_interception_active: false,
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            skip_dirs: Vec::new(),
+            proxy_active: false,
+            network_profile: None,
+            allow_domain: Vec::new(),
+            credentials: Vec::new(),
+            custom_credentials: std::collections::HashMap::new(),
+            upstream_proxy: None,
+            upstream_bypass: Vec::new(),
+            allow_bind_ports: Vec::new(),
+            allow_endpoint: Vec::new(),
+            proxy_port: None,
+            preview_requested_restrictions: vec!["filesystem deny-override policy".to_string()],
+            supervisor_requested_features: Vec::new(),
+            override_deny_paths: vec![dir.path().to_path_buf()],
+        };
+
+        let err = validate_windows_preview_direct_execution(&flags, &CapabilitySet::new())
+            .expect_err("override_deny should remain blocked on Windows preview");
+        assert!(err.to_string().contains("deny-override"));
     }
 
     #[test]

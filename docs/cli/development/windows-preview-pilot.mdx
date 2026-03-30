@@ -1,0 +1,95 @@
+---
+title: Windows Preview Pilot
+description: Packaging, handoff, and operator guidance for the Windows nono preview
+---
+
+This guide is the handoff package for a Windows preview pilot. It covers how to obtain a build, what the preview can do safely today, and which commands to use during pilot validation.
+
+## Artifact
+
+Windows preview builds are published as:
+
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+
+The MSI packages install `nono.exe`, `README.md`, and `LICENSE`, add the install directory to `PATH` for the selected scope, and create a standard Apps & Features uninstall entry. Signed installers and MSIX packaging are not part of the preview yet.
+
+## Install
+
+1. Download either the machine MSI, the user MSI, or the portable zip artifact from a GitHub release.
+2. For MSI, launch it directly or use `msiexec /i`.
+3. For the zip, extract it into a local tools directory such as `C:\Tools\nono`.
+4. Add that directory to `PATH`, or invoke the binary directly.
+
+Example PowerShell session:
+
+```powershell
+$version = "v0.0.0-preview"
+$msi = "nono-$version-x86_64-pc-windows-msvc-user.msi"
+$uri = "https://github.com/always-further/nono/releases/download/$version/$msi"
+$path = Join-Path $env:TEMP $msi
+Invoke-WebRequest -Uri $uri -OutFile $path
+Start-Process msiexec.exe -Wait -ArgumentList @("/i", $path)
+nono --version
+```
+
+## Preview Scope
+
+Available now:
+
+- `nono --help`
+- `nono --version`
+- `nono setup --check-only`
+- `nono run --dry-run ...`
+- `nono run -- <command>` for preview-safe direct execution
+
+Intentionally blocked in preview when real enforcement would be implied:
+
+- live profile-backed restricted runs
+- live `--block-net` or equivalent enforcement-dependent controls
+- `nono shell`
+- `nono wrap`
+- full supervised enforcement
+
+The preview is for startup, config, dry-run, and direct execution path validation. It is not a claim of full Windows sandbox parity.
+
+## Current Packaging Limits
+
+- Apps & Features uninstall is supported through the MSI package.
+- Windows service registration is not part of the preview yet.
+- A real Windows service installer requires a service-capable nono runtime mode; the current CLI binary is not a Service Control Manager host.
+
+## Pilot Smoke Checks
+
+Run these commands after installation:
+
+```powershell
+nono --help
+nono --version
+nono setup --check-only
+nono run --dry-run --profile codex -- cmd /c echo test
+nono run -- cmd /c echo hello
+```
+
+Expected blocked-preview checks:
+
+```powershell
+nono run --profile codex -- cmd /c echo hello
+nono run --block-net -- cmd /c echo hello
+nono wrap -- cmd /c echo hello
+```
+
+Those commands should fail loudly with preview-limitation messaging. They must not report that a sandbox was successfully enforced.
+
+## Debugging Inputs
+
+For pilot triage, capture:
+
+- the exact command line
+- stdout and stderr
+- `nono --version`
+- whether the run was `--dry-run` or live
+- whether a profile or network restriction was requested
+
+In CI, the Windows lane uploads build and smoke logs as artifacts for comparison with local pilot behavior.

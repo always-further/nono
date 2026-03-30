@@ -1,0 +1,617 @@
+---
+title: Windows Full Port Roadmap
+description: Epics, sprints, dependencies, and release criteria for first-class Windows support
+---
+
+# Windows Full Port Roadmap
+
+This roadmap starts from the current repository state:
+
+- Windows preview build, setup, dry-run, and direct execution already exist
+- Windows supervisor IPC scaffolding exists
+- Windows preview packaging exists as zip and MSI
+- Windows preview still blocks real enforcement-dependent flows intentionally
+
+This plan covers the **full Windows port**, not the preview track.
+
+## Planning Constraints
+
+The roadmap below is optimized for:
+
+- **one engineer**
+- **functionally equivalent Windows security** as the success bar
+- **network enforcement included in the first full-port release**
+
+That means this plan does **not** assume exact Landlock or Seatbelt semantic parity. It does assume that the Windows release must provide a defensible, enforceable Windows-native security boundary for the same core product promises:
+
+- restricted process execution
+- restricted filesystem access
+- restricted network access
+- supervised approval flow where supported
+- rollback, state, and credential/trust handling that are production-usable
+
+## Program Goals
+
+The full port is complete when Windows is a first-class supported platform in:
+
+- code
+- CLI behavior
+- test automation
+- packaging and release
+- operator documentation
+
+That requires more than compiling and running commands. The Windows path must support real enforcement and must not rely on preview-only guardrails for core restricted workflows.
+
+## Epic Overview
+
+The full port is organized into six epics:
+
+1. `WIN-EPIC-7` Windows Sandbox Backend
+2. `WIN-EPIC-8` Supervisor Parity and Execution Hardening
+3. `WIN-EPIC-9` Filesystem, Rollback, State, and Keystore Parity
+4. `WIN-EPIC-10` CLI Feature Parity and Windows UX Completion
+5. `WIN-EPIC-11` Windows Test Automation and Reliability
+6. `WIN-EPIC-12` Packaging, Signing, and Release Readiness
+
+The sequencing is intentional:
+
+- backend first
+- supervisor second
+- parity work third
+- automation and release hardening last
+
+## Epic WIN-EPIC-7: Windows Sandbox Backend
+
+Goal: replace preview classification and intentional blocking with real Windows enforcement.
+
+### Stories
+
+#### `WIN-701: Finalize Windows security model`
+Points: 5
+
+Acceptance criteria:
+
+- chosen Windows enforcement primitives are documented
+- capability mapping is explicit for filesystem, network, process, IPC, and child lifecycle controls
+- unsupported semantics are identified before implementation starts
+- the meaning of "functionally equivalent Windows security" is written down
+
+#### `WIN-702: Implement process containment primitives`
+Points: 8
+
+Acceptance criteria:
+
+- Windows child processes launch inside the chosen containment model
+- parent/child lifetime rules are enforceable
+- orphaned-process behavior is deterministic
+- tests cover process lifecycle and containment failure paths
+
+#### `WIN-703: Implement filesystem restriction backend`
+Points: 13
+
+Acceptance criteria:
+
+- Windows enforces a supported subset of allowlist path restrictions
+- denied paths fail deterministically
+- protected paths remain blocked
+- capability-to-policy mapping is documented and tested
+
+#### `WIN-704: Implement network enforcement backend`
+Points: 13
+
+Acceptance criteria:
+
+- live network restriction requests are truly enforced on Windows
+- allow-all vs restricted network modes are distinct in runtime behavior
+- blocked connections fail intentionally
+- the implementation is documented and testable
+
+#### `WIN-705: Return deterministic unsupported results for non-mapped capabilities`
+Points: 5
+
+Acceptance criteria:
+
+- each capability class reports supported, blocked, or deferred intentionally
+- no silent advisory-only success remains in live restricted execution
+- CLI messaging reflects backend reality
+
+#### `WIN-706: Wire enforced backend into live run path`
+Points: 8
+
+Acceptance criteria:
+
+- live restricted runs use the real Windows backend
+- supported restrictions execute successfully
+- unsupported restrictions fail clearly
+- call paths are test-covered
+
+## Epic WIN-EPIC-8: Supervisor Parity and Execution Hardening
+
+Goal: replace the current Windows supervisor scaffold with a real supervised runtime.
+
+### Stories
+
+#### `WIN-801: Implement Windows supervisor event loop`
+Points: 13
+
+Acceptance criteria:
+
+- the parent event loop runs on Windows
+- startup and shutdown are stable
+- supervisor diagnostics are actionable
+
+#### `WIN-802: Replace Unix fd-passing assumptions with Windows handle brokering`
+Points: 13
+
+Acceptance criteria:
+
+- approved resources can be shared using Windows-safe handle transfer
+- no Unix socket or SCM_RIGHTS dependency remains in supervised Windows flows
+- transfer failure modes are testable
+
+#### `WIN-803: Implement runtime capability expansion on Windows`
+Points: 13
+
+Acceptance criteria:
+
+- supervised requests can expand access within the Windows security model
+- denied requests fail safely
+- audit and diagnostics capture the decision path
+
+#### `WIN-804: Harden supervised teardown and recovery`
+Points: 5
+
+Acceptance criteria:
+
+- interrupted sessions clean up correctly
+- failed supervisor startup does not leave ambiguous state
+- rollback/audit hooks behave consistently on supervisor failure
+
+#### `WIN-805: Enable real supervised Windows run mode`
+Points: 8
+
+Acceptance criteria:
+
+- supervised Windows mode is no longer scaffold-only
+- CLI output no longer reports preview limitation for active supervised features
+- process-level Windows tests cover the real supervised path
+
+## Epic WIN-EPIC-9: Filesystem, Rollback, State, and Keystore Parity
+
+Goal: make Windows storage, path, rollback, and trust behavior production-usable.
+
+### Stories
+
+#### `WIN-901: Harden Windows path normalization and protected-path semantics`
+Points: 8
+
+Acceptance criteria:
+
+- canonicalization is Windows-safe
+- drive-letter, UNC, junction, and symlink behavior are handled intentionally
+- protected-path checks remain fail-closed
+
+#### `WIN-902: Port rollback snapshot semantics to Windows`
+Points: 13
+
+Acceptance criteria:
+
+- rollback snapshots work on Windows workspaces
+- exclusion rules and large-directory behavior are documented
+- Windows file-lock behavior is handled intentionally
+
+#### `WIN-903: Validate state, audit, and runtime storage behavior on Windows`
+Points: 5
+
+Acceptance criteria:
+
+- state roots resolve consistently for admin and user installs
+- audit and runtime state do not depend on Unix conventions
+- state migration or compatibility behavior is documented
+
+#### `WIN-904: Keystore parity for credential and trust flows`
+Points: 8
+
+Acceptance criteria:
+
+- Windows keystore-backed flows work for supported trust and credential paths
+- missing or inaccessible secret-store behavior fails clearly
+- tests cover expected Windows secret-loading scenarios
+
+#### `WIN-905: Document Windows-specific filesystem and rollback semantics`
+Points: 3
+
+Acceptance criteria:
+
+- docs explain Windows-specific path and rollback behavior
+- operator guidance is aligned with actual implementation limits
+
+## Epic WIN-EPIC-10: CLI Feature Parity and Windows UX Completion
+
+Goal: remove preview-era product gaps for the main Windows CLI surface.
+
+### Stories
+
+#### `WIN-1001: Enable live profile-backed restricted runs on Windows`
+Points: 8
+
+Acceptance criteria:
+
+- built-in profiles work in live mode where backend support exists
+- unsupported profile controls fail intentionally
+- output reflects real enforcement status
+
+#### `WIN-1002: Enable Windows shell mode or make a permanent product decision`
+Points: 8
+
+Acceptance criteria:
+
+- `nono shell` has a supported Windows behavior or a documented permanent limitation
+- the chosen behavior is tested
+- CLI help reflects the decision
+
+#### `WIN-1003: Enable wrap/apply semantics on Windows or make a permanent product decision`
+Points: 8
+
+Acceptance criteria:
+
+- `nono wrap` works correctly on Windows or is formally product-deferred
+- no misleading enforcement claims remain
+
+#### `WIN-1004: Enable Windows trust interception and delegated open flows`
+Points: 8
+
+Acceptance criteria:
+
+- trust interception works in supported Windows supervised flows
+- delegated browser/open flows are supported or intentionally limited
+- diagnostics explain platform-specific behavior
+
+#### `WIN-1005: Promote help/setup/support output to first-class Windows messaging`
+Points: 3
+
+Acceptance criteria:
+
+- preview-only language is removed where no longer true
+- support/setup/help text accurately reflects Windows support status
+- docs and runtime output are aligned
+
+## Epic WIN-EPIC-11: Windows Test Automation and Reliability
+
+Goal: make Windows support regression-resistant and releaseable.
+
+### Stories
+
+#### `WIN-1101: Expand unit-test coverage for backend and supervisor flows`
+Points: 8
+
+Acceptance criteria:
+
+- Windows backend and supervisor behaviors have targeted unit coverage
+- security-sensitive failure paths are exercised by tests
+
+#### `WIN-1102: Build a Windows integration harness`
+Points: 13
+
+Acceptance criteria:
+
+- integration coverage runs on Windows without Unix shell assumptions
+- key run/setup/profile/rollback paths are covered
+- test artifacts are useful for debugging failures
+
+#### `WIN-1103: Expand CI into enforced Windows test lanes`
+Points: 8
+
+Acceptance criteria:
+
+- CI runs build, smoke, and integration subsets on Windows
+- failures are isolated and debuggable
+- Windows release confidence no longer depends on ad hoc local verification
+
+#### `WIN-1104: Add regression tests for Windows path and security edge cases`
+Points: 8
+
+Acceptance criteria:
+
+- path traversal, junction, symlink, UNC, and canonicalization edge cases are covered
+- tests protect against silent security regressions
+
+#### `WIN-1105: Add Windows release-candidate validation checklist`
+Points: 3
+
+Acceptance criteria:
+
+- a formal Windows RC gate exists in-repo
+- enforcement, packaging, and upgrade checks are part of release validation
+
+## Epic WIN-EPIC-12: Packaging, Signing, and Release Readiness
+
+Goal: make Windows distribution supportable in real environments.
+
+### Stories
+
+#### `WIN-1201: Finalize Windows installer strategy`
+Points: 5
+
+Acceptance criteria:
+
+- MSI and zip delivery are the supported release paths, or a replacement decision is documented
+- user vs machine install behavior is defined
+- upgrade expectations are documented
+
+#### `WIN-1202: Add signed binary and installer workflow`
+Points: 8
+
+Acceptance criteria:
+
+- release automation supports signing
+- binaries and installers are signed in the release path
+- operator verification steps are documented
+
+#### `WIN-1203: Validate uninstall, upgrade, and repair behavior`
+Points: 5
+
+Acceptance criteria:
+
+- Apps & Features uninstall works
+- upgrade behavior is validated
+- user and machine scope installs are both covered
+
+#### `WIN-1204: Add Windows service packaging if a service-capable runtime exists`
+Points: 8
+
+Acceptance criteria:
+
+- this story only proceeds if a real Windows service runtime exists
+- installer registration and service lifecycle work correctly
+- uninstall and upgrade preserve service correctness
+
+#### `WIN-1205: Promote Windows to first-class release target`
+Points: 5
+
+Acceptance criteria:
+
+- docs, release automation, and support messaging all reflect first-class Windows support
+- Windows is no longer described as preview
+
+## Sprint Plan
+
+This sprint plan is optimized for **one engineer**, which means:
+
+- fewer concurrent workstreams
+- backend-first sequencing
+- explicit hardening checkpoints
+- realistic carryover risk on the highest-complexity stories
+
+Two-week sprints are assumed.
+
+### Sprint 3
+
+Goal: lock the Windows enforcement model and start real backend implementation.
+
+Stories:
+
+- `WIN-701`
+- `WIN-702`
+- start `WIN-703`
+
+Sprint outcome:
+
+- Windows enforcement design is locked
+- process containment implementation exists
+- filesystem enforcement work is underway on the live backend
+
+### Sprint 4
+
+Goal: complete the first usable restricted execution slice.
+
+Stories:
+
+- finish `WIN-703`
+- `WIN-704`
+- `WIN-705`
+- start `WIN-706`
+
+Sprint outcome:
+
+- filesystem and network restriction backends exist in a first usable form
+- unsupported capabilities are no longer ambiguous
+- live Windows restrictions begin using real backend logic
+
+### Sprint 5
+
+Goal: move from restricted direct execution toward real supervised Windows runtime.
+
+Stories:
+
+- finish `WIN-706`
+- `WIN-801`
+- start `WIN-802`
+
+Sprint outcome:
+
+- live restricted execution is real for supported controls
+- supervisor event loop work is underway
+- the bridge from preview scaffold to real supervision is established
+
+### Sprint 6
+
+Goal: complete the Windows supervisor transport and expansion mechanics.
+
+Stories:
+
+- finish `WIN-802`
+- `WIN-803`
+- `WIN-804`
+
+Sprint outcome:
+
+- Windows handle brokering replaces Unix assumptions
+- runtime capability expansion works within the Windows model
+- supervised teardown and failure handling are hardened
+
+### Sprint 7
+
+Goal: expose real supervised Windows mode and stabilize path/security semantics.
+
+Stories:
+
+- `WIN-805`
+- `WIN-901`
+- start `WIN-902`
+
+Sprint outcome:
+
+- supervised Windows mode becomes a real product path
+- Windows path semantics are hardened
+- rollback parity work is underway
+
+### Sprint 8
+
+Goal: complete portable platform parity foundations.
+
+Stories:
+
+- finish `WIN-902`
+- `WIN-903`
+- `WIN-904`
+- `WIN-905`
+
+Sprint outcome:
+
+- rollback, state, and keystore behavior are production-usable on Windows
+- operator docs cover Windows-specific filesystem and rollback semantics
+
+### Sprint 9
+
+Goal: close the main CLI product gaps on Windows.
+
+Stories:
+
+- `WIN-1001`
+- `WIN-1002`
+- `WIN-1003`
+- start `WIN-1004`
+
+Sprint outcome:
+
+- live profile-backed restricted execution works where supported
+- shell and wrap have real Windows decisions instead of preview-only blocking
+- trust interception work is underway
+
+### Sprint 10
+
+Goal: finish CLI parity and build the real Windows reliability harness.
+
+Stories:
+
+- finish `WIN-1004`
+- `WIN-1005`
+- `WIN-1101`
+- start `WIN-1102`
+
+Sprint outcome:
+
+- Windows messaging reaches first-class status
+- backend and supervisor behavior are covered by stronger tests
+- Windows integration harness work is underway
+
+### Sprint 11
+
+Goal: turn Windows support into an automated quality gate.
+
+Stories:
+
+- finish `WIN-1102`
+- `WIN-1103`
+- `WIN-1104`
+- `WIN-1105`
+
+Sprint outcome:
+
+- Windows integration and regression coverage are part of normal CI
+- a Windows RC checklist exists
+- release confidence no longer depends on ad hoc validation
+
+### Sprint 12
+
+Goal: finish release hardening and prepare first-class Windows support.
+
+Stories:
+
+- `WIN-1201`
+- `WIN-1202`
+- `WIN-1203`
+- optional `WIN-1204`
+- `WIN-1205`
+
+Sprint outcome:
+
+- packaging and signing are ready for real Windows release use
+- upgrade and uninstall behavior are validated
+- Windows can be promoted from preview to supported
+
+## Milestones
+
+- `M7` Windows enforcement model locked
+- `M8` first real restricted live run passes on Windows
+- `M9` supervised Windows mode is real
+- `M10` rollback, state, and keystore parity accepted
+- `M11` CLI parity accepted for supported Windows commands
+- `M12` Windows integration and regression lanes are green
+- `M13` signed Windows release candidate produced
+- `M14` Windows first-class support go/no-go
+
+## Dependency Notes
+
+The main dependency chain is:
+
+1. `WIN-701`
+2. `WIN-702`, `WIN-703`, `WIN-704`
+3. `WIN-706`
+4. `WIN-801`, `WIN-802`, `WIN-803`
+5. `WIN-805`
+6. `WIN-902`, `WIN-904`, `WIN-1001`
+7. `WIN-1102`, `WIN-1103`
+8. `WIN-1202`, `WIN-1205`
+
+The most important sequencing rule is:
+
+- do not spend heavily on full CLI parity before the backend and supervisor model are real
+
+## High-Risk Areas
+
+The highest-risk items in this plan are:
+
+- filesystem enforcement parity
+- network enforcement in the first full release
+- runtime capability expansion semantics on Windows
+- rollback behavior under Windows file-locking and metadata rules
+- Unix-to-Windows conversion of integration and regression coverage
+
+## Definition of Done
+
+Windows should only be called fully supported when:
+
+- live restricted execution is truly enforced on Windows
+- network restriction is truly enforced on Windows
+- supervised mode is real and stable
+- rollback, state, and keystore flows are validated
+- main CLI workflows work on Windows, or permanent product differences are documented explicitly
+- Windows tests run automatically in CI
+- installers and binaries are signed for release use
+- docs and runtime output no longer describe Windows as preview
+
+## Immediate Next Story
+
+The correct next story for the full port is:
+
+- `WIN-701: Finalize Windows security model`
+
+That story gates nearly every expensive implementation choice that follows, especially:
+
+- process containment
+- filesystem policy enforcement
+- network restriction design
+- supervisor-approved resource brokering
+

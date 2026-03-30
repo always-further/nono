@@ -67,22 +67,7 @@ impl SetupRunner {
         println!("  * Version: {}", env!("CARGO_PKG_VERSION"));
 
         // Detect platform
-        let platform = if cfg!(target_os = "macos") {
-            "macOS (Seatbelt sandbox)"
-        } else if cfg!(target_os = "linux") {
-            "Linux (Landlock sandbox)"
-        } else if cfg!(target_os = "windows") {
-            return Err(NonoError::Setup(
-                "Windows is not supported. nono requires macOS (Seatbelt) or Linux (Landlock) for sandboxing.".to_string()
-            ));
-        } else {
-            return Err(NonoError::Setup(
-                "Unsupported platform. nono requires macOS (Seatbelt) or Linux (Landlock)."
-                    .to_string(),
-            ));
-        };
-
-        println!("  * Platform: {}", platform);
+        println!("  * Platform: {}", installation_platform_label()?);
         println!();
 
         Ok(())
@@ -97,7 +82,19 @@ impl SetupRunner {
         #[cfg(target_os = "linux")]
         self.test_linux_landlock()?;
 
+        #[cfg(target_os = "windows")]
+        self.test_windows_support()?;
+
         println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn test_windows_support(&self) -> Result<()> {
+        let info = nono::Sandbox::support_info();
+        println!("  * Platform: {}", info.platform);
+        println!("  * Support status: {}", info.status_label());
+        println!("  * {}", info.details);
         Ok(())
     }
 
@@ -223,15 +220,27 @@ impl SetupRunner {
 
         // Get sensitive paths and dangerous commands from policy
         let loaded_policy = crate::policy::load_embedded_policy()?;
-        let sensitive_paths = crate::policy::get_sensitive_paths(&loaded_policy)?;
         let dangerous_commands = crate::policy::get_dangerous_commands(&loaded_policy);
+        match crate::policy::get_sensitive_paths(&loaded_policy) {
+            Ok(sensitive_paths) => {
+                println!(
+                    "  * {} sensitive paths blocked by default:",
+                    sensitive_paths.len()
+                );
+                println!("      SSH keys, AWS/GCP/Azure credentials, Kubernetes config,");
+                println!("      Docker config, GPG keys, password managers, shell configs");
+            }
+            Err(err) => {
+                #[cfg(target_os = "windows")]
+                println!(
+                    "  * Sensitive path expansion: unavailable in this Windows preview ({})",
+                    err
+                );
 
-        println!(
-            "  * {} sensitive paths blocked by default:",
-            sensitive_paths.len()
-        );
-        println!("      SSH keys, AWS/GCP/Azure credentials, Kubernetes config,");
-        println!("      Docker config, GPG keys, password managers, shell configs");
+                #[cfg(not(target_os = "windows"))]
+                return Err(err);
+            }
+        }
 
         println!(
             "  * {} dangerous commands blocked by default:",
@@ -277,6 +286,11 @@ impl SetupRunner {
         }
 
         println!();
+        #[cfg(target_os = "windows")]
+        println!("  Use with: nono run --dry-run --profile <name> -- <command>");
+        #[cfg(target_os = "windows")]
+        println!("            Live profile enforcement is still preview-only on Windows.");
+        #[cfg(not(target_os = "windows"))]
         println!("  Use with: nono run --profile <name> -- <command>");
         println!();
     }
@@ -322,25 +336,7 @@ impl SetupRunner {
 
     fn show_shell_help(&self) {
         println!("[6/{}] Shell integration...", self.total_phases());
-
-        // Detect shell
-        let shell = std::env::var("SHELL")
-            .ok()
-            .and_then(|s| s.split('/').next_back().map(String::from))
-            .unwrap_or_else(|| "bash".to_string());
-
-        let shell_rc = match shell.as_str() {
-            "zsh" => "~/.zshrc",
-            "bash" => "~/.bashrc",
-            "fish" => "~/.config/fish/config.fish",
-            _ => "~/.bashrc",
-        };
-
-        println!("  You can add these aliases to {}:", shell_rc);
-        println!();
-        println!("    alias nono-claude='nono run --profile claude-code -- claude'");
-        println!("    alias nono-safe='nono run --allow-cwd --block-net --'");
-        println!();
+        print_shell_help_body();
     }
 
     fn show_summary(&self) {
@@ -350,22 +346,48 @@ impl SetupRunner {
         if self.check_only {
             println!("Installation verified!");
             println!();
-            println!("Your system is ready to use nono. Run 'nono run --help' to get started.");
+            print_check_only_summary();
         } else {
             println!("Setup complete!");
             println!();
+            #[cfg(target_os = "windows")]
+            {
+                println!("Quick start examples:");
+                println!();
+                println!("  # Preview a built-in profile without claiming enforcement");
+                println!("  nono run --dry-run --profile claude-code -- claude");
+                println!();
+                println!("  # Preview-safe direct execution (no sandbox enforcement yet)");
+                println!("  nono run -- <command>");
+                println!();
+                println!("  # Check why a sensitive path is blocked");
+                println!("  nono why ~/.ssh/id_rsa");
+                println!();
+                println!("Documentation: https://github.com/always-further/nono#readme");
+                println!();
+                println!("Run 'nono run --help' to inspect the current Windows preview surface.");
+            }
+
+            #[cfg(not(target_os = "windows"))]
             println!("Quick start examples:");
             println!();
+            #[cfg(not(target_os = "windows"))]
             println!("  # Run Claude Code with built-in profile (recommended)");
+            #[cfg(not(target_os = "windows"))]
             println!("  nono run --profile claude-code -- claude");
             println!();
+            #[cfg(not(target_os = "windows"))]
             println!("  # Run any command with current directory access");
+            #[cfg(not(target_os = "windows"))]
             println!("  nono run --allow-cwd -- <command>");
             println!();
+            #[cfg(not(target_os = "windows"))]
             println!("  # Check why a sensitive path is blocked");
+            #[cfg(not(target_os = "windows"))]
             println!("  nono why ~/.ssh/id_rsa");
             println!();
 
+            #[cfg(not(target_os = "windows"))]
             if self.generate_profiles {
                 println!("Custom profiles:");
                 let profile_dir = crate::profile::resolve_user_config_dir()
@@ -376,8 +398,10 @@ impl SetupRunner {
                 println!();
             }
 
+            #[cfg(not(target_os = "windows"))]
             println!("Documentation: https://github.com/always-further/nono#readme");
             println!();
+            #[cfg(not(target_os = "windows"))]
             println!("Run 'nono run --help' to see all options.");
         }
     }
@@ -396,6 +420,72 @@ impl SetupRunner {
 
         count
     }
+}
+
+#[cfg(target_os = "macos")]
+fn installation_platform_label() -> Result<&'static str> {
+    Ok("macOS (Seatbelt sandbox)")
+}
+
+#[cfg(target_os = "linux")]
+fn installation_platform_label() -> Result<&'static str> {
+    Ok("Linux (Landlock sandbox)")
+}
+
+#[cfg(target_os = "windows")]
+fn installation_platform_label() -> Result<&'static str> {
+    Ok("Windows (preview build)")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn installation_platform_label() -> Result<&'static str> {
+    Err(NonoError::Setup(
+        "Unsupported platform. nono requires macOS (Seatbelt) or Linux (Landlock).".to_string(),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn print_shell_help_body() {
+    println!("  Add a PowerShell function or alias, for example:");
+    println!();
+    println!("    function nono-safe {{ nono run --allow-cwd --block-net -- @Args }}");
+    println!();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn print_shell_help_body() {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .and_then(|s| s.split('/').next_back().map(String::from))
+        .unwrap_or_else(|| "bash".to_string());
+
+    let shell_rc = match shell.as_str() {
+        "zsh" => "~/.zshrc",
+        "bash" => "~/.bashrc",
+        "fish" => "~/.config/fish/config.fish",
+        _ => "~/.bashrc",
+    };
+
+    println!("  You can add these aliases to {}:", shell_rc);
+    println!();
+    println!("    alias nono-claude='nono run --profile claude-code -- claude'");
+    println!("    alias nono-safe='nono run --allow-cwd --block-net --'");
+    println!();
+}
+
+#[cfg(target_os = "windows")]
+fn print_check_only_summary() {
+    let info = nono::Sandbox::support_info();
+    println!("Support status: {}", info.status_label());
+    println!("{}", info.details);
+    println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
+    println!("Plain 'nono run -- <command>' is preview-safe direct execution only.");
+    println!("Run 'nono run --help' to inspect the current command surface.");
+}
+
+#[cfg(not(target_os = "windows"))]
+fn print_check_only_summary() {
+    println!("Your system is ready to use nono. Run 'nono run --help' to get started.");
 }
 
 // ABI probing is now handled by the library's detect_abi().

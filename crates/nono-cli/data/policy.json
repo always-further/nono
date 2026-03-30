@@ -254,6 +254,15 @@
         ]
       }
     },
+    "system_read_windows": {
+      "description": "Windows system paths required for executables to function",
+      "platform": "windows",
+      "allow": {
+        "read": [
+          "C:/Windows"
+        ]
+      }
+    },
     "system_write_macos": {
       "description": "macOS paths requiring write for temp files and devices",
       "platform": "macos",
@@ -570,6 +579,7 @@
           "deny_shell_configs",
           "system_read_macos",
           "system_read_linux",
+          "system_read_windows",
           "system_write_macos",
           "system_write_linux",
           "user_tools",

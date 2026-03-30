@@ -86,6 +86,7 @@ pub fn validate_requested_path_against_protected_roots(
 
 /// Return the protected root overlapped by a requested path, if any.
 #[must_use]
+#[cfg(not(target_os = "windows"))]
 pub fn overlapping_protected_root(
     path: &Path,
     is_file: bool,
@@ -206,6 +207,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn overlapping_protected_root_reports_match() {
         let tmp = TempDir::new().expect("tmpdir");

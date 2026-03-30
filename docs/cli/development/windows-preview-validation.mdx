@@ -1,0 +1,76 @@
+---
+title: Windows Preview Validation
+description: Validation checklist for Windows preview packaging and runtime behavior
+---
+
+Use this checklist before handing a Windows preview build to a pilot user or marking a release candidate as preview-ready.
+
+## Packaging Validation
+
+- Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`.
+- Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`.
+- Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`.
+- Confirm the MSI packages install `nono.exe`, `README.md`, and `LICENSE`.
+- Confirm each MSI creates an Apps & Features uninstall entry with the expected install scope.
+- Confirm the zip contains `nono.exe`.
+- Confirm `SHA256SUMS.txt` includes the Windows zip checksum.
+- Confirm `SHA256SUMS.txt` includes both Windows MSI checksums.
+- Confirm the GitHub release exposes the Windows MSI and zip artifacts alongside existing Unix artifacts.
+
+## Local Runtime Validation
+
+Run on a clean Windows machine or VM:
+
+```powershell
+nono --help
+nono --version
+nono setup --check-only
+nono run --dry-run -- cmd /c echo test
+nono run --dry-run --profile codex -- cmd /c echo test
+nono run -- cmd /c echo hello
+```
+
+Expected results:
+
+- `--help` and `--version` succeed.
+- `setup --check-only` succeeds and reports Windows preview support as partial.
+- dry-run output reports command and capability state without implying enforcement.
+- plain `run -- cmd /c ...` succeeds with preview-safe messaging.
+
+## Guardrail Validation
+
+Run these commands and confirm they fail intentionally:
+
+```powershell
+nono run --profile codex -- cmd /c echo hello
+nono run --block-net -- cmd /c echo hello
+nono shell
+nono wrap -- cmd /c echo hello
+```
+
+Expected results:
+
+- each command returns a non-zero exit code
+- each failure uses preview-limitation wording
+- none of the outputs claim that sandbox enforcement was applied
+
+## CI Validation
+
+On pull requests or mainline pushes, confirm:
+
+- the `Windows Build` job ran on `windows-latest`
+- `windows-build.log` is available as an artifact
+- `windows-smoke.log` is available as an artifact
+- `windows-env.log` is available as an artifact
+
+These logs are the baseline comparison set for pilot bug reports.
+
+## Exit Criteria
+
+The Windows preview is ready for pilot distribution when:
+
+- the Windows zip artifact is published successfully
+- local smoke checks pass
+- unsupported enforcement-dependent flows fail loudly and consistently
+- CI Windows logs are available for debugging
+- Apps & Features uninstall works for both MSI scopes

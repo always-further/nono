@@ -46,6 +46,11 @@ jobs:
             os: ubuntu-22.04
             artifact: nono
 
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: nono.exe
+
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -72,12 +77,45 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cross build --release --target aarch64-unknown-linux-gnu -p nono-cli
 
-      - name: Package
+      - name: Install WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.*
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.dotnet\tools"
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           tar czvf ../../../nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
           cd ../../..
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          if (-not (Test-Path $binary)) {
+            Write-Error "Missing release binary: $binary"
+          }
+          $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
+          $zipPath = Join-Path $PWD $zipName
+          if (Test-Path $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Compress-Archive -LiteralPath $binary -DestinationPath $zipPath
+          .\scripts\build-windows-msi.ps1 `
+            -VersionTag "${{ env.RELEASE_TAG }}" `
+            -BinaryPath $binary `
+            -Scope machine `
+            -OutputDir artifact_staging
+          .\scripts\build-windows-msi.ps1 `
+            -VersionTag "${{ env.RELEASE_TAG }}" `
+            -BinaryPath $binary `
+            -Scope user `
+            -OutputDir artifact_staging
 
       - name: Install cargo-deb
         if: runner.os == 'Linux' && (matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu')
@@ -103,7 +141,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifact_staging
-          cp "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz" artifact_staging/
+          if [ -f "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz" ]; then
+            cp "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz" artifact_staging/
+          fi
+          if [ -f "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip" ]; then
+            cp "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip" artifact_staging/
+          fi
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ] && [ -d target/debian ]; then
             cp target/debian/*.deb artifact_staging/
           fi
@@ -135,8 +178,16 @@ jobs:
         run: |
           cd artifacts
           find . -name "*.tar.gz" -exec mv {} . \;
+          find . -name "*.zip" -exec mv {} . \;
+          find . -name "*.msi" -exec mv {} . \;
           find . -name "*.deb" -exec mv {} . \;
           sha256sum *.tar.gz > SHA256SUMS.txt
+          if ls *.zip >/dev/null 2>&1; then
+            sha256sum *.zip >> SHA256SUMS.txt
+          fi
+          if ls *.msi >/dev/null 2>&1; then
+            sha256sum *.msi >> SHA256SUMS.txt
+          fi
           cat SHA256SUMS.txt
 
       - name: Create GitHub Release
@@ -147,6 +198,8 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.msi
             artifacts/*.deb
             artifacts/SHA256SUMS.txt
 
