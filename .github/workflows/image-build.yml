@@ -1,21 +1,10 @@
 name: Image Build
 
 on:
-  workflow_call:
-    inputs:
-      ref:
-        description: Git ref to build from
-        required: true
-        type: string
-      version:
-        description: Version or tag to use for image tagging
-        required: false
-        type: string
-      push:
-        description: Whether to push the built image to GHCR
-        required: false
-        type: boolean
-        default: false
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       ref:
@@ -38,11 +27,51 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  PUSH_IMAGE: ${{ inputs.push || github.event.inputs.push == 'true' }}
 
 jobs:
+  resolve:
+    name: Resolve build parameters
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    outputs:
+      ref: ${{ steps.params.outputs.ref }}
+      version: ${{ steps.params.outputs.version }}
+      push: ${{ steps.params.outputs.push }}
+    steps:
+      - name: Compute parameters
+        id: params
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WD_REF: ${{ inputs.ref }}
+          WD_VERSION: ${{ inputs.version }}
+          WD_PUSH: ${{ inputs.push }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            TAG="$WR_HEAD_BRANCH"
+            # Skip prereleases
+            if [[ "$TAG" == *alpha* ]] || [[ "$TAG" == *beta* ]] || [[ "$TAG" == *rc* ]]; then
+              echo "Skipping prerelease tag: $TAG"
+              echo "push=false" >> "$GITHUB_OUTPUT"
+              echo "ref=$TAG" >> "$GITHUB_OUTPUT"
+              echo "version=$TAG" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "ref=$TAG" >> "$GITHUB_OUTPUT"
+            echo "version=$TAG" >> "$GITHUB_OUTPUT"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$WD_REF" >> "$GITHUB_OUTPUT"
+            echo "version=${WD_VERSION:-$WD_REF}" >> "$GITHUB_OUTPUT"
+            echo "push=$WD_PUSH" >> "$GITHUB_OUTPUT"
+          fi
+
   build-binaries:
     name: Build ${{ matrix.target }} image binary
+    needs: resolve
+    if: ${{ needs.resolve.outputs.push != 'false' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -55,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - name: Install system dependencies (x86_64)
         if: matrix.target != 'aarch64-unknown-linux-gnu'
@@ -91,7 +120,7 @@ jobs:
 
   build-image:
     name: Build image
-    needs: build-binaries
+    needs: [resolve, build-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -100,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - name: Download Linux amd64 artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -121,17 +150,20 @@ jobs:
 
       - name: Resolve image metadata
         id: meta
-        shell: bash
+        env:
+          BUILD_VERSION: ${{ needs.resolve.outputs.version }}
+          BUILD_REF: ${{ needs.resolve.outputs.ref }}
+          BUILD_PUSH: ${{ needs.resolve.outputs.push }}
         run: |
-          RAW_VERSION="${{ inputs.version }}"
+          RAW_VERSION="$BUILD_VERSION"
           if [ -z "$RAW_VERSION" ]; then
-            RAW_VERSION="${{ inputs.ref }}"
+            RAW_VERSION="$BUILD_REF"
           fi
 
           RAW_VERSION="${RAW_VERSION#refs/heads/}"
           RAW_VERSION="${RAW_VERSION#refs/tags/}"
           VERSION="${RAW_VERSION#v}"
-          REF_SLUG="$(printf '%s' "${{ inputs.ref }}" | tr '/:@' '-' | tr -cd '[:alnum:]._-')"
+          REF_SLUG="$(printf '%s' "$BUILD_REF" | tr '/:@' '-' | tr -cd '[:alnum:]._-')"
           if [ -z "$REF_SLUG" ]; then
             REF_SLUG="manual"
           fi
@@ -147,7 +179,7 @@ jobs:
           fi
 
           TAGS="ghcr.io/always-further/nono:${VERSION}"
-          if [ "${PUSH_IMAGE}" = "true" ] && [ "$STABLE" = "true" ] && [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [ "$BUILD_PUSH" = "true" ] && [ "$STABLE" = "true" ] && [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             MAJOR_MINOR="${VERSION%.*}"
             TAGS="${TAGS},ghcr.io/always-further/nono:${MAJOR_MINOR}"
             TAGS="${TAGS},ghcr.io/always-further/nono:latest"
@@ -164,7 +196,7 @@ jobs:
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log in to ghcr.io
-        if: ${{ env.PUSH_IMAGE == 'true' }}
+        if: ${{ needs.resolve.outputs.push == 'true' }}
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
         with:
           registry: ghcr.io
@@ -178,7 +210,7 @@ jobs:
           context: docker-context
           file: docker-context/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ env.PUSH_IMAGE == 'true' }}
+          push: ${{ needs.resolve.outputs.push == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/always-further/nono
@@ -186,11 +218,13 @@ jobs:
             org.opencontainers.image.description=Capability-based sandboxing for untrusted AI agents
 
       - name: Install Cosign
-        if: ${{ env.PUSH_IMAGE == 'true' }}
+        if: ${{ needs.resolve.outputs.push == 'true' }}
         uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
 
       - name: Sign image with Cosign
-        if: ${{ env.PUSH_IMAGE == 'true' }}
+        if: ${{ needs.resolve.outputs.push == 'true' }}
+        env:
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           cosign sign --yes \
-            ghcr.io/always-further/nono@${{ steps.push.outputs.digest }}
+            "ghcr.io/always-further/nono@${IMAGE_DIGEST}"
