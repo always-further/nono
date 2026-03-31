@@ -234,7 +234,11 @@ pub fn resolve_credentials(
                 query_param_name: cred.query_param_name.clone(),
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
-                tls_ca: cred.tls_ca.as_deref().map(expand_tilde),
+                tls_ca: cred
+                    .tls_ca
+                    .as_deref()
+                    .map(|p| crate::policy::expand_path(p).map(|pb| pb.to_string_lossy().into_owned()))
+                    .transpose()?,
             });
         } else if let Some(cred) = policy.credentials.get(name) {
             // Validate env_var against dangerous variable blocklist
@@ -270,16 +274,6 @@ pub fn resolve_credentials(
     Ok(routes)
 }
 
-/// Expand a leading `~/` to the user's home directory. Returns the
-/// path unchanged if it doesn't start with `~/` or if home is unknown.
-fn expand_tilde(raw: &str) -> String {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().into_owned();
-        }
-    }
-    raw.to_string()
-}
 
 /// Build a complete `ProxyConfig` from a resolved network policy.
 ///
