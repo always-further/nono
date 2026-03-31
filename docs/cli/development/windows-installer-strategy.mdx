@@ -88,7 +88,7 @@ For the current strategy:
 - zip installs are removed by deleting the extracted directory
 - repair and modify are intentionally not first-class release promises yet
 
-The generated MSI metadata explicitly disables Add/Remove Programs modify and repair UX for now. Validation of uninstall, upgrade, and any future repair expectations belongs to `WIN-1203`.
+The generated MSI metadata explicitly disables Add/Remove Programs modify and repair UX for now. `WIN-1203` validates that contract in-repo through generated WiX metadata checks and release-candidate guidance, while any future support for true repair flows would require a later packaging change.
 
 ## Release Messaging Contract
 

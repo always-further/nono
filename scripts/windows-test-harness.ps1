@@ -45,6 +45,22 @@ function Invoke-TestList {
     }
 }
 
+function Invoke-LoggedCommand {
+    param(
+        [string]$LogFile,
+        [string]$Label,
+        [scriptblock]$Command
+    )
+
+    $logPath = Join-Path $LogDir $LogFile
+    "==> $Label" | Tee-Object -FilePath $logPath -Append
+    & $Command 2>&1 | Tee-Object -FilePath $logPath -Append
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed for $Label with exit code $LASTEXITCODE"
+    }
+    "" | Tee-Object -FilePath $logPath -Append | Out-Null
+}
+
 $smokeTests = @(
     @{ Package = "nono-cli"; Filter = "windows_root_help_reports_supported_subset_messaging" },
     @{ Package = "nono-cli"; Filter = "windows_setup_check_only_reports_live_profile_subset" },
@@ -89,6 +105,9 @@ foreach ($activeSuite in $suites) {
                 "--workspace",
                 "--verbose"
             )
+            Invoke-LoggedCommand -LogFile "windows-build.log" -Label "validate windows msi contract" -Command {
+                & (Join-Path $PWD "scripts\validate-windows-msi-contract.ps1") -BinaryPath (Join-Path $PWD "target\debug\nono.exe")
+            }
         }
         "smoke" {
             Invoke-TestList -LogFile "windows-smoke.log" -Tests $smokeTests

@@ -87,6 +87,7 @@ Validate both user-scope and machine-scope installation behavior:
 - confirm Apps & Features uninstall removes the expected installation
 - confirm zip-based installs still run without MSI-specific dependencies
 - do not treat MSI-to-zip or cross-scope migration as a supported automatic upgrade path unless later release notes say otherwise
+- confirm repair/modify are intentionally unavailable in Apps & Features for the current MSI contract
 
 ## Storage and Trust Gate
 
@@ -106,3 +107,4 @@ The Windows release candidate gate is complete when:
 - supported live Windows restrictions run through the active backend subset
 - unsupported Windows flows fail explicitly
 - upgrade and uninstall behavior are validated
+- the current repair-disabled MSI contract is validated and documented
