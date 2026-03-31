@@ -563,8 +563,12 @@ mod tests {
 
     #[test]
     fn test_from_args_rejects_protected_state_subtree() {
-        let home = dirs::home_dir().expect("home");
-        let protected_subtree = home.join(".nono").join("rollbacks");
+        let protected_subtree = ProtectedRoots::from_defaults()
+            .expect("protected roots")
+            .as_paths()
+            .first()
+            .expect("at least one protected root")
+            .join("rollbacks");
 
         let args = SandboxArgs {
             allow: vec![protected_subtree],

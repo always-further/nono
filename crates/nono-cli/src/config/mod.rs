@@ -98,6 +98,17 @@ pub fn user_state_dir() -> Option<PathBuf> {
         .map(|p| p.join("nono"))
 }
 
+/// Legacy Windows state directory used by earlier preview builds.
+///
+/// The Windows port now uses the OS state directory, but we still need to
+/// recognize the historical `~/.nono` subtree for protected-path checks and
+/// compatibility with older local data.
+#[cfg(target_os = "windows")]
+pub fn legacy_windows_state_dir() -> Result<PathBuf> {
+    let home = validated_home()?;
+    Ok(Path::new(&home).join(".nono"))
+}
+
 // ============================================================================
 // Helper functions for main.rs compatibility
 // These provide access to embedded config data without requiring full config loading

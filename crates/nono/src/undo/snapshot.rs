@@ -254,6 +254,7 @@ impl SnapshotManager {
         self.validate_manifest_paths(manifest)?;
         let current_files = self.walk_current()?;
         let mut applied_changes = Vec::new();
+        let mut restore_failures = Vec::new();
 
         // Restore files from manifest
         for (path, state) in &manifest.files {
@@ -273,7 +274,10 @@ impl SnapshotManager {
                     })?;
                 }
 
-                self.object_store.retrieve_to(&state.hash, path)?;
+                if let Err(e) = self.object_store.retrieve_to(&state.hash, path) {
+                    restore_failures.push(format_restore_error("restore", path, &e));
+                    continue;
+                }
 
                 // Restore permissions (mask out setuid/setgid/sticky bits)
                 #[cfg(unix)]
@@ -305,7 +309,7 @@ impl SnapshotManager {
         for path in current_files.keys() {
             if !manifest.files.contains_key(path) {
                 if let Err(e) = fs::remove_file(path) {
-                    tracing::warn!("Failed to remove {}: {}", path.display(), e);
+                    restore_failures.push(format_restore_io_error("delete", path, &e));
                 } else {
                     applied_changes.push(Change {
                         path: path.clone(),
@@ -316,6 +320,13 @@ impl SnapshotManager {
                     });
                 }
             }
+        }
+
+        if !restore_failures.is_empty() {
+            return Err(NonoError::Snapshot(format!(
+                "Restore could not complete cleanly:\n{}",
+                restore_failures.join("\n")
+            )));
         }
 
         Ok(applied_changes)
@@ -890,14 +901,49 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         return Err(e);
     }
 
-    fs::rename(&temp_path, path).map_err(|e| {
+    super::object_store::replace_file(&temp_path, path).map_err(|e| {
         let _ = fs::remove_file(&temp_path);
         NonoError::Snapshot(format!(
-            "Failed to rename {} to {}: {e}",
+            "Failed to replace {} with {}: {e}",
             temp_path.display(),
             path.display()
         ))
     })
+}
+
+fn format_restore_error(action: &str, path: &Path, error: &NonoError) -> String {
+    let details = error.to_string();
+    #[cfg(target_os = "windows")]
+    {
+        let lower = details.to_ascii_lowercase();
+        if lower.contains("sharing violation")
+            || lower.contains("access is denied")
+            || lower.contains("used by another process")
+        {
+            return format!(
+                "{action} {} failed because the file is locked or in use by another process on Windows: {}",
+                path.display(),
+                details
+            );
+        }
+    }
+
+    format!("{action} {} failed: {}", path.display(), details)
+}
+
+fn format_restore_io_error(action: &str, path: &Path, error: &std::io::Error) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if matches!(error.kind(), std::io::ErrorKind::PermissionDenied) {
+            return format!(
+                "{action} {} failed because the file is locked or in use by another process on Windows: {}",
+                path.display(),
+                error
+            );
+        }
+    }
+
+    format!("{action} {} failed: {}", path.display(), error)
 }
 
 /// Get the current time as Unix epoch seconds.
@@ -1557,5 +1603,16 @@ mod tests {
             "Expected budget cap, got {} temps",
             temps.len()
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn format_restore_error_marks_locked_windows_files() {
+        let path = PathBuf::from(r"C:\workspace\locked.txt");
+        let error =
+            NonoError::ObjectStore("Failed to replace target: The process cannot access the file because it is being used by another process.".to_string());
+
+        let message = format_restore_error("restore", &path, &error);
+        assert!(message.contains("locked or in use by another process"));
     }
 }

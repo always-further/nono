@@ -3,6 +3,8 @@ use crate::profile;
 use nono::{NonoError, Result};
 use std::fs;
 use std::path::Path;
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 use nix::libc;
@@ -182,9 +184,20 @@ impl SetupRunner {
     fn test_windows_support(&self) -> Result<()> {
         let info = nono::Sandbox::support_info();
         let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
+        let storage = windows_storage_layout()?;
         println!("  * Platform: {}", info.platform);
         println!("  * Support status: {}", info.status_label());
         println!("  * {}", info.details);
+        println!(
+            "  * User config root: {}",
+            storage.user_config_root.display()
+        );
+        println!("  * User state root: {}", storage.user_state_root.display());
+        println!("  * Rollback root: {}", storage.rollback_root.display());
+        println!(
+            "  * User trust policy: {}",
+            storage.user_trust_policy.display()
+        );
         print_windows_wfp_readiness_report("  * ", &wfp);
         Ok(())
     }
@@ -723,6 +736,12 @@ fn print_check_only_summary() {
     let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
     println!("Support status: {}", info.status_label());
     println!("{}", info.details);
+    if let Ok(storage) = windows_storage_layout() {
+        println!("User config root: {}", storage.user_config_root.display());
+        println!("User state root: {}", storage.user_state_root.display());
+        println!("Rollback root: {}", storage.rollback_root.display());
+        println!("User trust policy: {}", storage.user_trust_policy.display());
+    }
     print_windows_wfp_readiness_report("", &wfp);
     println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
     println!("Plain 'nono run -- <command>' is preview-safe direct execution only.");
@@ -746,6 +765,34 @@ fn print_windows_wfp_readiness_report(
     println!("{prefix}{}", wfp.service_details);
     println!("{prefix}WFP driver readiness: {}", wfp.driver_status_label);
     println!("{prefix}{}", wfp.driver_details);
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsStorageLayout {
+    user_config_root: PathBuf,
+    user_state_root: PathBuf,
+    rollback_root: PathBuf,
+    user_trust_policy: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_storage_layout() -> Result<WindowsStorageLayout> {
+    let user_config_root = crate::profile::resolve_user_config_dir()?.join("nono");
+    let user_state_root = crate::config::user_state_dir().ok_or_else(|| {
+        NonoError::Setup("Could not determine Windows user state directory".to_string())
+    })?;
+    let rollback_root = crate::rollback_session::rollback_root()?;
+    let user_trust_policy = crate::trust_cmd::user_trust_policy_path().ok_or_else(|| {
+        NonoError::Setup("Could not determine Windows user trust policy path".to_string())
+    })?;
+
+    Ok(WindowsStorageLayout {
+        user_config_root,
+        user_state_root,
+        rollback_root,
+        user_trust_policy,
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -897,6 +944,21 @@ mod tests {
     fn test_library_detect_abi_returns_result() {
         // Verify the library detection works (or returns an error without panicking)
         let _ = nono::Sandbox::detect_abi();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_storage_layout_uses_absolute_user_roots() {
+        let layout = windows_storage_layout().expect("windows storage layout");
+
+        assert!(layout.user_config_root.is_absolute());
+        assert!(layout.user_state_root.is_absolute());
+        assert!(layout.rollback_root.is_absolute());
+        assert!(layout.user_trust_policy.is_absolute());
+        assert_eq!(
+            layout.rollback_root,
+            layout.user_state_root.join("rollbacks")
+        );
     }
 
     #[cfg(target_os = "linux")]

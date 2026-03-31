@@ -454,8 +454,10 @@ fn load_from_env(uri: &str) -> Result<Zeroizing<String>> {
 fn load_single_secret(service: &str, account: &str) -> Result<Zeroizing<String>> {
     let entry = keyring::Entry::new(service, account).map_err(|e| {
         NonoError::KeystoreAccess(format!(
-            "Failed to access keystore for '{}': {}",
-            account, e
+            "Failed to access {} for '{}': {}",
+            system_keystore_label(),
+            account,
+            e
         ))
     })?;
 
@@ -469,14 +471,39 @@ fn load_single_secret(service: &str, account: &str) -> Result<Zeroizing<String>>
         }
         Err(keyring::Error::NoEntry) => Err(NonoError::SecretNotFound(account.to_string())),
         Err(keyring::Error::Ambiguous(creds)) => Err(NonoError::KeystoreAccess(format!(
-            "Multiple entries ({}) found for '{}' - please resolve manually",
+            "Multiple entries ({}) found for '{}' in {} - please resolve manually",
             creds.len(),
-            account
+            account,
+            system_keystore_label()
         ))),
         Err(e) => Err(NonoError::KeystoreAccess(format!(
-            "Cannot access '{}': {}",
-            account, e
+            "Cannot access '{}' in {}: {}",
+            account,
+            system_keystore_label(),
+            e
         ))),
+    }
+}
+
+fn system_keystore_label() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Windows Credential Manager"
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        "macOS Keychain"
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "system keystore"
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        "system keystore"
     }
 }
 
@@ -953,6 +980,12 @@ pub fn build_secret_mappings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn system_keystore_label_mentions_windows_credential_manager() {
+        assert_eq!(system_keystore_label(), "Windows Credential Manager");
+    }
 
     #[test]
     fn test_build_mappings_from_list() {

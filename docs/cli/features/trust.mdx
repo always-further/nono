@@ -13,7 +13,7 @@ Nono's trust system verifies the **provenance** and **integrity** of files befor
 nono trust keygen
 ```
 
-Creates an ECDSA P-256 key pair in the system keystore (macOS Keychain / Linux Secret Service).
+Creates an ECDSA P-256 key pair in the system keystore (Windows Credential Manager / macOS Keychain / Linux Secret Service).
 
 ### 2. Create and sign a trust policy
 
@@ -338,7 +338,7 @@ This policy declares: only trust files signed by a GitHub Actions workflow in `m
 
 There are two signing modes:
 
-**Keyed signing** — A private key stored in the system keystore (macOS Keychain / Linux Secret Service). Suitable for individual developers and local workflows.
+**Keyed signing** — A private key stored in the system keystore (Windows Credential Manager / macOS Keychain / Linux Secret Service). Suitable for individual developers and local workflows.
 
 **Keyless signing** — Ephemeral key + OIDC identity + Fulcio certificate + Rekor transparency log. Suitable for CI/CD pipelines with ambient OIDC tokens (e.g., GitHub Actions with `permissions: id-token: write`). The signer's identity is cryptographically bound to the signature via the OIDC token.
 

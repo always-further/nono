@@ -112,11 +112,13 @@ The first attached enforcement behavior for that policy is a **Windows preview l
 - common Windows command surfaces now receive command-aware path mediation for `cmd.exe` builtins, `more.com`, PowerShell file cmdlets, `xcopy.exe`, `find.exe`, `findstr.exe`, `comp.exe`, `fc.exe`, and Windows Script Host launches
 - shell launchers also receive runtime hardening where Windows can enforce it directly, including `cmd.exe /d`, PowerShell `-NoProfile -NonInteractive -NoLogo`, and `cscript.exe //NoLogo //B`
 - read-only restricted launches now use a low-integrity child token, which gives Windows a real per-process write boundary for common medium-integrity host locations while still allowing reads from the compiled allowlist
+- protected-path validation now uses Windows-aware canonical comparison for case-insensitive drive letters and verbatim path prefixes, and Windows blocks access to both the current platform state root and the legacy `~/.nono` preview-era state root
 - child process executable discovery is also tightened at runtime with a minimal `PATH`, `PATHEXT`, `COMSPEC`, `SystemRoot`, `windir`, and `SystemDrive` baseline plus `NoDefaultCurrentDirectoryInExePath=1`, so preview child processes rely less on ambient host execution state even when no writable runtime directory is present
 - redirected runtime state now covers not just temp/profile/config paths but also `ProgramFiles` and `CommonProgramFiles` families so preview child processes do not inherit the host install layout by default
 - the first runtime-backed file-access hook beyond launch mediation is now in place for common developer and shell tooling: writable preview runs redirect `CARGO_HOME`, `RUSTUP_HOME`, `DOTNET_CLI_HOME`, `NUGET_PACKAGES`, `NUGET_HTTP_CACHE_PATH`, `NUGET_PLUGINS_CACHE_PATH`, `ChocolateyInstall`, `ChocolateyToolsLocation`, `VCPKG_ROOT`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `NPM_CONFIG_CACHE`, `NPM_CONFIG_USERCONFIG`, `YARN_CACHE_FOLDER`, `PIP_CACHE_DIR`, `PIP_CONFIG_FILE`, `PIP_BUILD_TRACKER`, `PYTHONPYCACHEPREFIX`, `PYTHONUSERBASE`, `GOCACHE`, `GOMODCACHE`, `GOPATH`, `HISTFILE`, `LESSHISTFILE`, `NODE_REPL_HISTORY`, `PYTHONHISTFILE`, `SQLITE_HISTORY`, `IPYTHONDIR`, `GEM_HOME`, `GEM_PATH`, `BUNDLE_USER_HOME`, `BUNDLE_USER_CACHE`, `BUNDLE_USER_CONFIG`, `BUNDLE_APP_CONFIG`, `COMPOSER_HOME`, `COMPOSER_CACHE_DIR`, `GRADLE_USER_HOME`, `MAVEN_USER_HOME`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AZURE_CONFIG_DIR`, `KUBECONFIG`, `DOCKER_CONFIG`, `CLOUDSDK_CONFIG`, `GIT_CONFIG_GLOBAL`, `GNUPGHOME`, `TF_CLI_CONFIG_FILE`, `TF_DATA_DIR`, `RIPGREP_CONFIG_PATH`, and `PSModuleAnalysisCachePath` into the writable allowlist, and runs without a safe writable runtime directory strip those host values instead of inheriting them
 - Windows env sanitization now treats overridden environment keys case-insensitively and deduplicates the final environment block case-insensitively, so redirected runtime-owned paths win even when the host uses mixed-case variable names such as `ProgramData`
 - the initial policy baseline includes a Windows `system_read_windows` group so standard system executables have an explicit read grant instead of relying on preview-era assumptions
+- Windows rollback/object-store writes now use Windows-safe replace semantics instead of assuming Unix rename behavior, and restore failures caused by locked or in-use files are surfaced as explicit restore errors rather than being downgraded into generic warnings
 
 That is not full runtime filesystem enforcement yet. It is the first enforced slice attached to the backend policy model that later denial and brokering work will consume. The current subset is limited to directory-only allowlists that the backend can classify safely; single-file grants, write-only directory grants, and deny-override semantics still fail closed until later Windows backend work lands.
 
@@ -172,6 +174,19 @@ The live Windows launch path is now also shared intentionally across direct and 
 - both paths validate launch-time filesystem and argument coverage through the backend before spawn
 - both paths route blocked-network enforcement through the same promoted WFP-backed service contract for the supported subset
 - unsupported direct or supervised restrictions fail with backend-owned diagnostics instead of caller-specific fallback wording
+
+## Windows State and Trust Storage
+
+Windows now reports its effective storage layout explicitly in `nono setup --check-only`:
+
+- user config root
+- user state root
+- rollback root
+- user trust policy path
+
+Those paths are absolute and backend-owned, and the rollback root resolves under the Windows nono state directory instead of reusing Unix-style path assumptions.
+
+Windows trust and keystore diagnostics also now identify the native backend as **Windows Credential Manager** instead of using a generic system-keystore label. That makes trust setup and failure messages match the actual platform implementation.
 
 ## Design Rules
 

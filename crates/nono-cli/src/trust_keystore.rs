@@ -36,7 +36,7 @@ impl TrustKeyStore {
 
     fn description(&self, service: &str) -> String {
         match self {
-            Self::System => format!("system keystore (service: {service})"),
+            Self::System => format!("{} (service: {service})", system_keystore_label()),
             #[cfg(feature = "test-trust-overrides")]
             Self::File(root) => format!("test keystore directory ({})", root.display()),
         }
@@ -46,13 +46,17 @@ impl TrustKeyStore {
         match self {
             Self::System => {
                 let entry = keyring::Entry::new(service, account).map_err(|e| {
-                    NonoError::KeystoreAccess(format!("failed to access keystore: {e}"))
+                    NonoError::KeystoreAccess(format!(
+                        "failed to access {}: {e}",
+                        system_keystore_label()
+                    ))
                 })?;
                 match entry.get_password() {
                     Ok(_) => Ok(true),
                     Err(keyring::Error::NoEntry) => Ok(false),
                     Err(other) => Err(NonoError::KeystoreAccess(format!(
-                        "failed to access key '{account}': {other}"
+                        "failed to access key '{account}' in {}: {other}",
+                        system_keystore_label()
                     ))),
                 }
             }
@@ -65,14 +69,19 @@ impl TrustKeyStore {
         match self {
             Self::System => {
                 let entry = keyring::Entry::new(service, account).map_err(|e| {
-                    NonoError::KeystoreAccess(format!("failed to access keystore: {e}"))
+                    NonoError::KeystoreAccess(format!(
+                        "failed to access {}: {e}",
+                        system_keystore_label()
+                    ))
                 })?;
                 entry.get_password().map_err(|e| match e {
-                    keyring::Error::NoEntry => {
-                        NonoError::SecretNotFound(format!("key '{account}' not found in keystore"))
-                    }
+                    keyring::Error::NoEntry => NonoError::SecretNotFound(format!(
+                        "key '{account}' not found in {}",
+                        system_keystore_label()
+                    )),
                     other => NonoError::KeystoreAccess(format!(
-                        "failed to load key '{account}': {other}"
+                        "failed to load key '{account}' from {}: {other}",
+                        system_keystore_label()
                     )),
                 })
             }
@@ -99,11 +108,17 @@ impl TrustKeyStore {
         match self {
             Self::System => {
                 let entry = keyring::Entry::new(service, account).map_err(|e| {
-                    NonoError::KeystoreAccess(format!("failed to access keystore: {e}"))
+                    NonoError::KeystoreAccess(format!(
+                        "failed to access {}: {e}",
+                        system_keystore_label()
+                    ))
                 })?;
-                entry
-                    .set_password(secret)
-                    .map_err(|e| NonoError::KeystoreAccess(format!("failed to store key: {e}")))
+                entry.set_password(secret).map_err(|e| {
+                    NonoError::KeystoreAccess(format!(
+                        "failed to store key in {}: {e}",
+                        system_keystore_label()
+                    ))
+                })
             }
             #[cfg(feature = "test-trust-overrides")]
             Self::File(root) => {
@@ -140,6 +155,28 @@ impl TrustKeyStore {
     }
 }
 
+fn system_keystore_label() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Windows Credential Manager"
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        "macOS Keychain"
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "system keystore"
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        "system keystore"
+    }
+}
+
 #[cfg(feature = "test-trust-overrides")]
 fn file_path(root: &Path, service: &str, account: &str) -> PathBuf {
     root.join(hex_component(service))
@@ -169,6 +206,17 @@ pub(crate) fn load_secret(service: &str, account: &str) -> Result<String> {
 
 pub(crate) fn store_secret(service: &str, account: &str, secret: &str) -> Result<()> {
     TrustKeyStore::selected().store(service, account, secret)
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn backend_description_mentions_windows_credential_manager() {
+        assert!(backend_description("nono-trust").contains("Windows Credential Manager"));
+    }
 }
 
 #[cfg(all(test, feature = "test-trust-overrides"))]

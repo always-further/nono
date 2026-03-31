@@ -16,7 +16,7 @@ use colored::Colorize;
 use nono::undo::{MerkleTree, ObjectStore, SnapshotManager};
 use nono::{NonoError, Result};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// A session paired with its change counts (created, modified, deleted).
 type SessionChanges<'a> = (&'a SessionInfo, (usize, usize, usize));
@@ -30,7 +30,8 @@ fn canonical_candidates(path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::with_capacity(2);
 
     // Primary: canonicalize if possible, otherwise use as-is
-    let primary = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let primary =
+        normalize_path_for_compare(&path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
     candidates.push(primary.clone());
 
     // macOS symlink aliases: try both directions
@@ -52,6 +53,68 @@ fn canonical_candidates(path: &Path) -> Vec<PathBuf> {
     }
 
     candidates
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+    let without_verbatim = if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{stripped}")
+    } else if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else {
+        raw.into_owned()
+    };
+
+    let path = Path::new(&without_verbatim);
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => normalized.push(".."),
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(target_os = "windows")]
+fn path_overlaps_filter(stored: &Path, filter: &Path) -> bool {
+    let stored = normalize_path_for_compare(stored);
+    let filter = normalize_path_for_compare(filter);
+    windows_path_starts_with(&stored, &filter) || windows_path_starts_with(&filter, &stored)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_overlaps_filter(stored: &Path, filter: &Path) -> bool {
+    stored.starts_with(filter) || filter.starts_with(stored)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_path_starts_with(path: &Path, prefix: &Path) -> bool {
+    let mut path_components = path.components();
+    let mut prefix_components = prefix.components();
+
+    loop {
+        match (path_components.next(), prefix_components.next()) {
+            (_, None) => return true,
+            (None, Some(_)) => return false,
+            (Some(left), Some(right)) => {
+                let left = left.as_os_str().to_string_lossy();
+                let right = right.as_os_str().to_string_lossy();
+                if !left.eq_ignore_ascii_case(&right) {
+                    return false;
+                }
+            }
+        }
+    }
 }
 
 /// Prefix used for all rollback command output
@@ -88,7 +151,7 @@ fn cmd_list(args: RollbackListArgs) -> Result<()> {
             s.metadata.tracked_paths.iter().any(|stored| {
                 filter_candidates
                     .iter()
-                    .any(|filter| stored.starts_with(filter) || filter.starts_with(stored))
+                    .any(|filter| path_overlaps_filter(stored, filter))
             })
         });
     }
@@ -1398,5 +1461,14 @@ mod tests {
             assert!(result.starts_with("~/"), "Expected ~/... but got: {result}");
             assert!(result.ends_with("dev/project"));
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_overlaps_filter_handles_verbatim_prefix_and_drive_case() {
+        let stored = PathBuf::from(r"C:\Users\Tester\Project");
+        let filter = PathBuf::from(r"\\?\c:\users\tester\project\src");
+
+        assert!(path_overlaps_filter(&stored, &filter));
     }
 }
