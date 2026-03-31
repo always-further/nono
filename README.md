@@ -27,7 +27,7 @@
 </div>
 
 > [!WARNING]
-> This is an early alpha release that has not undergone comprehensive security audits. While we have taken care to implement robust security measures, there may still be undiscovered issues. We do not recommend using this in production until we release a stable version of 1.0.
+> This is an early alpha release that has not undergone comprehensive security audits. While we have taken care to implement robust security measures, there may will be undiscovered issues when major changes are brought in. We do not recommend using this in production until we release a stable version of 1.0. Please do not point a coding agent at the repo and raise large LLM generated issues, we are likely already aware of it and work is in flight or planned. Instead approach in discord and have the courtesy to ask the community if they are aware first.
 
 > [!IMPORTANT]
 > Active development may cause disruptions — if something is broken, it's likely us, not you.
