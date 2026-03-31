@@ -12,6 +12,8 @@ param(
 
     [string]$Manufacturer = "Luke Hinds",
 
+    [string]$ServiceBinaryPath = "",
+
     [switch]$EmitOnly
 )
 
@@ -98,6 +100,15 @@ function Get-ScopeMetadata {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $binaryFullPath = (Resolve-Path -LiteralPath $BinaryPath).Path
+
+$serviceBinaryFullPath = ""
+if ($ServiceBinaryPath -ne "") {
+    if (-not (Test-Path -LiteralPath $ServiceBinaryPath)) {
+        throw "Service binary not found at '$ServiceBinaryPath'."
+    }
+    $serviceBinaryFullPath = (Resolve-Path -LiteralPath $ServiceBinaryPath).Path
+}
+
 $readmePath = Join-Path $repoRoot "README.md"
 $licensePath = Join-Path $repoRoot "LICENSE"
 
@@ -118,6 +129,40 @@ $packageName = "nono-$VersionTag-x86_64-pc-windows-msvc-$($scopeInfo.PackageSuff
 $wxsName = "nono-$($scopeInfo.PackageSuffix).wxs"
 $wxsPath = Join-Path $outputFullPath $wxsName
 $msiPath = Join-Path $outputFullPath $packageName
+
+# Service lifecycle for nono-wfp-service (machine MSI only):
+#   Start="install"   - SCM starts the service after the MSI install sequence completes.
+#   Stop="both"       - SCM stops the service during upgrade (deferred remove) and uninstall.
+#                       MajorUpgrade uses a remove+install cycle; "both" ensures the old
+#                       service is stopped before file replacement and before full uninstall.
+#   Remove="uninstall"- SCM deletes the service registry entry on uninstall only.
+#                       During upgrade, the new version's install re-creates the entry.
+#   Wait="yes"        - Each SCM operation is synchronous; MSI sequence waits for completion.
+$serviceComponentXml = ""
+if ($Scope -eq "machine" -and $serviceBinaryFullPath -ne "") {
+    $serviceComponentXml = @"
+      <Component Id="cmpWfpServiceExe" Guid="*">
+        <File Id="filWfpServiceExe" Source="$serviceBinaryFullPath" KeyPath="yes" />
+        <ServiceInstall
+            Id="svcWfpService"
+            Name="nono-wfp-service"
+            DisplayName="nono WFP Service"
+            Description="nono Windows Filtering Platform backend service"
+            Type="ownProcess"
+            Start="demand"
+            Account="LocalSystem"
+            ErrorControl="normal"
+            Arguments="--service-mode" />
+        <ServiceControl
+            Id="svcCtrlWfpService"
+            Name="nono-wfp-service"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+      </Component>
+"@
+}
 
 $wxsContent = @"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -178,7 +223,7 @@ $($scopeInfo.DirectoryXml)
             System="$($scopeInfo.SystemPath)"
             Value="[INSTALLFOLDER]" />
       </Component>
-    </ComponentGroup>
+$($serviceComponentXml)    </ComponentGroup>
   </Fragment>
 </Wix>
 "@
