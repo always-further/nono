@@ -264,6 +264,23 @@ To replace inherited URL-opening permissions, provide `open_urls` with an explic
 }
 ```
 
+### Linux host compatibility
+
+On Linux, the built-in `default` profile keeps host runtime, sysfs, and shared temp reads out of the base policy. If your tool needs access to paths like `/run`, `/var/run`, `/sys`, or `/tmp`, extend the built-in compatibility preset:
+
+```json
+{
+  "extends": "linux-host-compat",
+  "meta": {
+    "name": "linux-desktop-agent",
+    "description": "Agent with Linux host runtime compatibility"
+  },
+  "workdir": {
+    "access": "readwrite"
+  }
+}
+```
+
 ### Profile with deny overrides
 
 When a deny group blocks a path you need access to, use `override_deny` together with an explicit grant:
