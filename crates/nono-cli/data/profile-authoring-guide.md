@@ -413,8 +413,11 @@ The following variables are expanded in all path fields (`filesystem.*`, `policy
 | `$HOME`            | User's home directory |
 | `$WORKDIR`         | Working directory (from `--workdir` flag or cwd) |
 | `$TMPDIR`          | System temporary directory |
+| `$UID`             | Current user ID |
 | `$XDG_CONFIG_HOME` | XDG config directory (default: `$HOME/.config`) |
 | `$XDG_DATA_HOME`   | XDG data directory (default: `$HOME/.local/share`) |
+| `$XDG_STATE_HOME`  | XDG state directory (default: `$HOME/.local/state`) |
+| `$XDG_CACHE_HOME`  | XDG cache directory (default: `$HOME/.cache`) |
 
 Always use these variables instead of hardcoded absolute paths to keep profiles portable across machines and users.
 

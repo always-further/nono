@@ -330,9 +330,6 @@
           "~/.local/share/man",
           "~/.local/share/bash-completion",
           "~/.local/share/zsh"
-        ],
-        "readwrite": [
-          "~/.local/state"
         ]
       }
     },

@@ -17,6 +17,7 @@ pub use nono_proxy::config::InjectMode;
 
 /// Profile metadata
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct ProfileMeta {
     pub name: String,
@@ -30,6 +31,7 @@ pub struct ProfileMeta {
 
 /// Filesystem configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilesystemConfig {
     /// Directories with read+write access
     #[serde(default)]
@@ -56,6 +58,7 @@ pub struct FilesystemConfig {
 /// These fields provide explicit subtractive/additive composition on top of
 /// inherited groups and existing filesystem configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyPatchConfig {
     /// Group names to remove from the resolved group set.
     #[serde(default)]
@@ -96,6 +99,7 @@ pub struct PolicyPatchConfig {
 /// - `query_param`: Add/replace query parameter (e.g., `?api_key=...`)
 /// - `basic_auth`: HTTP Basic Authentication (credential as `username:password`)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomCredentialDef {
     /// Upstream URL to proxy requests to (e.g., "https://api.telegram.org")
     pub upstream: String,
@@ -558,6 +562,7 @@ where
 
 /// Network configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     /// Block network access (network allowed by default; true = blocked).
     /// Canonical profile key: `block`.
@@ -648,6 +653,7 @@ pub struct SecretsConfig {
 /// Defines hooks that nono will install for the target application.
 /// For example, Claude Code hooks are installed to ~/.claude/hooks/
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookConfig {
     /// Event that triggers the hook (e.g., "PostToolUseFailure")
     pub event: String,
@@ -781,6 +787,7 @@ pub enum WorkdirAccess {
 
 /// Working directory configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkdirConfig {
     /// Access level for the current working directory
     #[serde(default)]
@@ -789,6 +796,7 @@ pub struct WorkdirConfig {
 
 /// Security configuration referencing policy.json groups
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Policy group names to resolve (from policy.json)
     #[serde(default)]
@@ -833,6 +841,7 @@ pub struct SecurityConfig {
 /// as substrings of the full path. Glob patterns are matched against
 /// the filename (last path component).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RollbackConfig {
     /// Patterns to exclude from rollback snapshots.
     /// Added on top of the CLI's base exclusion list.
@@ -850,6 +859,7 @@ pub struct RollbackConfig {
 /// open in the user's browser. Used for OAuth2 login flows and similar
 /// operations where the sandboxed process cannot launch a browser directly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenUrlConfig {
     /// Allowed URL origins (scheme + host, e.g., "https://console.anthropic.com").
     /// The supervisor validates each URL open request against this list.
@@ -896,6 +906,7 @@ where
 
 /// A complete profile definition
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     /// Optional base profile(s) to inherit from (by name).
     /// Accepts either a single string `"extends": "base"` or an array
@@ -1433,10 +1444,12 @@ pub(crate) fn is_valid_profile_name(name: &str) -> bool {
 /// - $HOME: User's home directory
 /// - $XDG_CONFIG_HOME: XDG config directory
 /// - $XDG_DATA_HOME: XDG data directory
+/// - $XDG_STATE_HOME: XDG state directory
+/// - $XDG_CACHE_HOME: XDG cache directory
 /// - $TMPDIR: System temporary directory
 /// - $UID: Current user ID
 ///
-/// If $HOME cannot be determined and the path uses $HOME, $XDG_CONFIG_HOME, or $XDG_DATA_HOME,
+/// If $HOME cannot be determined and the path uses $HOME or XDG variables,
 /// the unexpanded variable is left in place (which will cause the path to not exist).
 pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
     use crate::config;
@@ -1469,24 +1482,35 @@ pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
             PathBuf::from(&home).join(".local").join("share").display()
         )
     });
+    let xdg_state = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
+        format!(
+            "{}",
+            PathBuf::from(&home).join(".local").join("state").display()
+        )
+    });
+    let xdg_cache = std::env::var("XDG_CACHE_HOME")
+        .unwrap_or_else(|_| format!("{}", PathBuf::from(&home).join(".cache").display()));
 
     // Validate XDG paths are absolute
-    if !Path::new(&xdg_config).is_absolute() {
-        return Err(NonoError::EnvVarValidation {
-            var: "XDG_CONFIG_HOME".to_string(),
-            reason: format!("must be an absolute path, got: {}", xdg_config),
-        });
-    }
-    if !Path::new(&xdg_data).is_absolute() {
-        return Err(NonoError::EnvVarValidation {
-            var: "XDG_DATA_HOME".to_string(),
-            reason: format!("must be an absolute path, got: {}", xdg_data),
-        });
+    for (var, val) in [
+        ("XDG_CONFIG_HOME", &xdg_config),
+        ("XDG_DATA_HOME", &xdg_data),
+        ("XDG_STATE_HOME", &xdg_state),
+        ("XDG_CACHE_HOME", &xdg_cache),
+    ] {
+        if !Path::new(val).is_absolute() {
+            return Err(NonoError::EnvVarValidation {
+                var: var.to_string(),
+                reason: format!("must be an absolute path, got: {}", val),
+            });
+        }
     }
 
     let expanded = expanded
         .replace("$HOME", &home)
         .replace("$XDG_CONFIG_HOME", &xdg_config)
+        .replace("$XDG_STATE_HOME", &xdg_state)
+        .replace("$XDG_CACHE_HOME", &xdg_cache)
         .replace("$XDG_DATA_HOME", &xdg_data);
 
     Ok(PathBuf::from(expanded))
@@ -1553,6 +1577,62 @@ mod tests {
         // Restore original HOME
         if let Some(home) = original_home {
             env::set_var("HOME", home);
+        }
+    }
+
+    #[test]
+    fn test_expand_vars_xdg_state_home() {
+        // $XDG_STATE_HOME must be expanded so that profiles and deny rules
+        // can reference it portably. Without this, users cannot write
+        // add_deny_access: ["$XDG_STATE_HOME"] and the variable is treated
+        // as a literal string that matches nothing.
+        let original_home = env::var("HOME").ok();
+        let original_state = env::var("XDG_STATE_HOME").ok();
+
+        env::set_var("HOME", "/home/user");
+        env::set_var("XDG_STATE_HOME", "/custom/state");
+
+        let workdir = PathBuf::from("/projects/myapp");
+        let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/custom/state/history"));
+
+        // Fallback when env var is unset
+        env::remove_var("XDG_STATE_HOME");
+        let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/home/user/.local/state/history"));
+
+        // Restore
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        }
+        if let Some(state) = original_state {
+            env::set_var("XDG_STATE_HOME", state);
+        }
+    }
+
+    #[test]
+    fn test_expand_vars_xdg_cache_home() {
+        let original_home = env::var("HOME").ok();
+        let original_cache = env::var("XDG_CACHE_HOME").ok();
+
+        env::set_var("HOME", "/home/user");
+        env::set_var("XDG_CACHE_HOME", "/custom/cache");
+
+        let workdir = PathBuf::from("/projects/myapp");
+        let expanded = expand_vars("$XDG_CACHE_HOME/pip", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/custom/cache/pip"));
+
+        // Fallback when env var is unset
+        env::remove_var("XDG_CACHE_HOME");
+        let expanded = expand_vars("$XDG_CACHE_HOME/pip", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/home/user/.cache/pip"));
+
+        // Restore
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        }
+        if let Some(cache) = original_cache {
+            env::set_var("XDG_CACHE_HOME", cache);
         }
     }
 
@@ -3369,6 +3449,40 @@ mod tests {
         assert_eq!(
             set.network.network_profile,
             InheritableValue::Set("developer".to_string())
+        );
+    }
+
+    #[test]
+    fn test_unknown_fields_rejected_in_profile() {
+        // A typo like "add_deny_acces" (missing 's') must be caught at parse
+        // time. For a security tool, silently discarding unknown keys means a
+        // single typo can void an entire security policy with no feedback.
+        let json = r#"{
+            "meta": { "name": "typo-test" },
+            "policy": {
+                "add_deny_acces": ["~/.local/state"]
+            }
+        }"#;
+        let result: std::result::Result<Profile, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown field 'add_deny_acces' must be rejected, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn test_unknown_fields_rejected_in_top_level_profile() {
+        // Unknown top-level keys must also be rejected.
+        let json = r#"{
+            "meta": { "name": "top-level-typo" },
+            "polcy": {
+                "add_deny_access": ["~/.local/state"]
+            }
+        }"#;
+        let result: std::result::Result<Profile, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown top-level field 'polcy' must be rejected, not silently ignored"
         );
     }
 

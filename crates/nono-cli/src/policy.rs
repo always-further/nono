@@ -887,9 +887,7 @@ pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> R
                     "Landlock cannot enforce {}. This deny has no effect on Linux.",
                     conflict
                 );
-                if cap.source.is_user_intent() {
-                    fatal_conflicts.push(conflict);
-                }
+                fatal_conflicts.push(conflict);
             }
         }
     }
@@ -1767,7 +1765,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_deny_overlaps_group_overlap_warn_only() {
+    fn test_validate_deny_overlaps_group_overlap_is_fatal() {
         use nono::FsCapability;
 
         let mut caps = CapabilitySet::new();
@@ -1778,10 +1776,14 @@ mod tests {
 
         let deny_paths = vec![PathBuf::from("/tmp/secret")];
 
-        // Group/system overlaps are warning-only. Fatal errors are reserved for
-        // explicit user intent (CLI/profile), where deny-within-allow is likely accidental.
-        validate_deny_overlaps(&deny_paths, &caps)
-            .expect("group overlap should not hard-fail validation");
+        // Group-sourced overlaps must be fatal on Linux — Landlock cannot
+        // enforce deny-within-allow, so silently ignoring the conflict
+        // gives the user a false sense of security.
+        let result = validate_deny_overlaps(&deny_paths, &caps);
+        assert!(
+            result.is_err(),
+            "group-sourced deny overlap must be a hard error on Linux"
+        );
     }
 
     #[test]
@@ -1793,9 +1795,9 @@ mod tests {
         // means the allow wins. Both cases silently disable the deny.
         //
         // We check every group because profiles can
-        // combine arbitrary groups, and validate_deny_overlaps is warn-only
-        // for group-sourced capabilities at runtime. This test is the real
-        // safety net for the embedded policy.
+        // combine arbitrary groups, and validate_deny_overlaps rejects
+        // overlaps at runtime. This test catches regressions in the
+        // embedded policy at compile time.
         //
         // We filter to Linux-applicable groups (platform: None or "linux")
         // and check directly from parsed policy so this catches regressions
@@ -1855,6 +1857,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_user_tools_group_does_not_grant_xdg_state_home() {
+        // ~/.local/state (XDG_STATE_HOME) contains shell history, wireplumber
+        // state, less history, python_history, etc. The user_tools group is
+        // described as "User-local executables, .desktop files, man pages, and
+        // shell completions" — none of which live under ~/.local/state.
+        // Granting readwrite to this entire tree leaks sensitive data and allows
+        // the sandboxed process to tamper with other programs' state.
+        let policy = load_embedded_policy().expect("embedded policy must load");
+        let group = policy
+            .groups
+            .get("user_tools")
+            .expect("user_tools group must exist");
+
+        let allow = group.allow.as_ref().expect("user_tools must have allow");
+
+        let state_home = "~/.local/state";
+        let has_state_rw = allow.readwrite.iter().any(|p| p == state_home);
+        let has_state_w = allow.write.iter().any(|p| p == state_home);
+        assert!(
+            !has_state_rw && !has_state_w,
+            "user_tools must NOT grant write access to {state_home} — \
+             it contains shell history and state of other programs"
+        );
     }
 
     #[test]
