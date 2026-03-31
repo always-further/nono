@@ -10,7 +10,8 @@ mod env_sanitization;
 use crate::windows_wfp_contract::{
     WfpRuntimeActivationRequest, WfpRuntimeActivationResponse, WFP_RUNTIME_PROTOCOL_VERSION,
 };
-use nono::{CapabilitySet, NonoError, Result, Sandbox};
+use nono::supervisor::AuditEntry;
+use nono::{ApprovalBackend, CapabilitySet, NonoError, Result, Sandbox};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Write;
@@ -78,6 +79,27 @@ pub struct SupervisorConfig<'a> {
     pub session_id: &'a str,
     pub requested_features: Vec<&'a str>,
     pub support: nono::WindowsSupervisorSupport,
+    pub approval_backend: &'a dyn ApprovalBackend,
+}
+
+pub struct WindowsSupervisorDenyAllApprovalBackend;
+
+impl ApprovalBackend for WindowsSupervisorDenyAllApprovalBackend {
+    fn request_capability(
+        &self,
+        request: &nono::CapabilityRequest,
+    ) -> Result<nono::ApprovalDecision> {
+        Ok(nono::ApprovalDecision::Denied {
+            reason: format!(
+                "Windows live runtime capability expansion is not attached to generic child processes yet for request {}",
+                request.request_id
+            ),
+        })
+    }
+
+    fn backend_name(&self) -> &str {
+        "windows-preview-deny"
+    }
 }
 
 #[derive(Debug)]
@@ -336,6 +358,7 @@ struct WindowsSupervisorRuntime {
     child_control: Option<nono::SupervisorSocket>,
     started_at: Instant,
     state: WindowsSupervisorLifecycleState,
+    audit_log: Vec<AuditEntry>,
 }
 
 impl WindowsSupervisorRuntime {
@@ -355,6 +378,7 @@ impl WindowsSupervisorRuntime {
             child_control: Some(child_control),
             started_at,
             state: WindowsSupervisorLifecycleState::Initializing,
+            audit_log: Vec::new(),
         };
         runtime.state = WindowsSupervisorLifecycleState::ControlChannelReady;
         Ok(runtime)
@@ -400,10 +424,11 @@ impl WindowsSupervisorRuntime {
     fn startup_failure(&mut self, message: String) -> NonoError {
         self.shutdown();
         NonoError::SandboxInit(format!(
-            "Windows supervised execution failed during {} (session: {}, transport: {}): {}",
+            "Windows supervised execution failed during {} (session: {}, transport: {}, supervisor_audit_entries: {}): {}",
             self.state.label(),
             self.session_id,
             self.transport_name,
+            self.audit_log.len(),
             message
         ))
     }
@@ -411,10 +436,11 @@ impl WindowsSupervisorRuntime {
     fn command_failure(&mut self, message: String) -> NonoError {
         self.shutdown();
         NonoError::CommandExecution(std::io::Error::other(format!(
-            "Windows supervised execution failed during {} (session: {}, transport: {}): {}",
+            "Windows supervised execution failed during {} (session: {}, transport: {}, supervisor_audit_entries: {}): {}",
             self.state.label(),
             self.session_id,
             self.transport_name,
+            self.audit_log.len(),
             message
         )))
     }
@@ -422,6 +448,14 @@ impl WindowsSupervisorRuntime {
     fn shutdown(&mut self) {
         let _ = self.child_control.take();
         self.state = WindowsSupervisorLifecycleState::ShuttingDown;
+    }
+}
+
+impl Drop for WindowsSupervisorRuntime {
+    fn drop(&mut self) {
+        if self.state != WindowsSupervisorLifecycleState::Completed {
+            self.shutdown();
+        }
     }
 }
 
@@ -1953,6 +1987,104 @@ fn initialize_supervisor_control_channel(
     })
 }
 
+#[cfg(test)]
+fn open_windows_supervisor_path(path: &Path, access: &nono::AccessMode) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    match access {
+        nono::AccessMode::Read => {
+            options.read(true);
+        }
+        nono::AccessMode::Write => {
+            options.write(true);
+        }
+        nono::AccessMode::ReadWrite => {
+            options.read(true).write(true);
+        }
+    }
+
+    options.open(path).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Windows supervisor failed to open approved path {}: {}",
+            path.display(),
+            e
+        ))
+    })
+}
+
+#[cfg(test)]
+fn handle_windows_supervisor_message(
+    sock: &mut nono::SupervisorSocket,
+    msg: nono::supervisor::SupervisorMessage,
+    approval_backend: &dyn ApprovalBackend,
+    target_process: nono::BrokerTargetProcess,
+    seen_request_ids: &mut HashSet<String>,
+    audit_log: &mut Vec<AuditEntry>,
+) -> Result<()> {
+    match msg {
+        nono::supervisor::SupervisorMessage::Request(request) => {
+            let started_at = Instant::now();
+            if seen_request_ids.contains(&request.request_id) {
+                let decision = nono::ApprovalDecision::Denied {
+                    reason: "Duplicate request_id rejected (replay detected)".to_string(),
+                };
+                audit_log.push(AuditEntry {
+                    timestamp: SystemTime::now(),
+                    request: request.clone(),
+                    decision: decision.clone(),
+                    backend: approval_backend.backend_name().to_string(),
+                    duration_ms: started_at.elapsed().as_millis() as u64,
+                });
+                return sock.send_response(&nono::supervisor::SupervisorResponse::Decision {
+                    request_id: request.request_id,
+                    decision,
+                    grant: None,
+                });
+            }
+            seen_request_ids.insert(request.request_id.clone());
+
+            let decision = approval_backend
+                .request_capability(&request)
+                .unwrap_or_else(|e| nono::ApprovalDecision::Denied {
+                    reason: format!("Approval backend error: {e}"),
+                });
+
+            let grant = if decision.is_granted() {
+                let file = open_windows_supervisor_path(&request.path, &request.access)?;
+                Some(nono::supervisor::socket::broker_file_handle_to_process(
+                    &file,
+                    target_process,
+                    request.access,
+                )?)
+            } else {
+                None
+            };
+
+            audit_log.push(AuditEntry {
+                timestamp: SystemTime::now(),
+                request: request.clone(),
+                decision: decision.clone(),
+                backend: approval_backend.backend_name().to_string(),
+                duration_ms: started_at.elapsed().as_millis() as u64,
+            });
+
+            sock.send_response(&nono::supervisor::SupervisorResponse::Decision {
+                request_id: request.request_id,
+                decision,
+                grant,
+            })
+        }
+        nono::supervisor::SupervisorMessage::OpenUrl(url_request) => sock
+            .send_response(&nono::supervisor::SupervisorResponse::UrlOpened {
+            request_id: url_request.request_id,
+            success: false,
+            error: Some(
+                "Windows supervised URL opening is not active through the Windows event loop yet"
+                    .to_string(),
+            ),
+        }),
+    }
+}
+
 fn prepare_runtime_hardened_args(resolved_program: &Path, args: &[String]) -> Vec<String> {
     let program_name = resolved_program
         .file_name()
@@ -2461,6 +2593,10 @@ pub fn execute_supervised(
     };
 
     let mut runtime = WindowsSupervisorRuntime::initialize(supervisor)?;
+    tracing::debug!(
+        "Windows supervised approval backend: {}",
+        supervisor.approval_backend.backend_name()
+    );
     let unsupported = supervisor.support.unsupported_feature_labels();
     let supported = supervisor.support.supported_feature_labels();
     if !unsupported.is_empty() {
@@ -2519,6 +2655,38 @@ pub fn execute_supervised(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    struct TestGrantBackend;
+    struct TestDenyBackend;
+
+    impl ApprovalBackend for TestGrantBackend {
+        fn request_capability(
+            &self,
+            _request: &nono::CapabilityRequest,
+        ) -> Result<nono::ApprovalDecision> {
+            Ok(nono::ApprovalDecision::Granted)
+        }
+
+        fn backend_name(&self) -> &str {
+            "test-grant"
+        }
+    }
+
+    impl ApprovalBackend for TestDenyBackend {
+        fn request_capability(
+            &self,
+            _request: &nono::CapabilityRequest,
+        ) -> Result<nono::ApprovalDecision> {
+            Ok(nono::ApprovalDecision::Denied {
+                reason: "test deny".to_string(),
+            })
+        }
+
+        fn backend_name(&self) -> &str {
+            "test-deny"
+        }
+    }
 
     #[test]
     fn test_create_process_containment_job() {
@@ -2566,6 +2734,7 @@ mod tests {
                 runtime_capability_expansion: false,
                 runtime_trust_interception: false,
             }),
+            approval_backend: &TestDenyBackend,
         };
 
         let err = execute_supervised(&config, Some(&supervisor), None)
@@ -2605,6 +2774,7 @@ mod tests {
                 runtime_capability_expansion: false,
                 runtime_trust_interception: false,
             }),
+            approval_backend: &TestDenyBackend,
         };
 
         let exit_code =
@@ -2634,6 +2804,7 @@ mod tests {
                 runtime_capability_expansion: false,
                 runtime_trust_interception: false,
             }),
+            approval_backend: &TestDenyBackend,
         };
 
         let err = execute_supervised(&config, Some(&supervisor), None)
@@ -2647,6 +2818,139 @@ mod tests {
                 || message.contains("The system cannot find the file specified")
         );
         assert!(message.contains("failed during"));
+    }
+
+    #[test]
+    fn test_handle_windows_supervisor_message_grants_brokered_handle_and_audits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowed.txt");
+        std::fs::write(&path, b"hello windows broker").expect("write file");
+        let (mut parent, mut child) =
+            nono::SupervisorSocket::pair().expect("supervisor socket pair");
+        let mut seen_request_ids = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        let request = nono::CapabilityRequest {
+            request_id: "req-1".to_string(),
+            path: path.clone(),
+            access: nono::AccessMode::Read,
+            reason: Some("read test file".to_string()),
+            child_pid: std::process::id(),
+            session_id: "win-803".to_string(),
+        };
+        child
+            .send_message(&nono::supervisor::SupervisorMessage::Request(request))
+            .expect("send request");
+        let msg = parent.recv_message().expect("recv request");
+
+        handle_windows_supervisor_message(
+            &mut parent,
+            msg,
+            &TestGrantBackend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen_request_ids,
+            &mut audit_log,
+        )
+        .expect("handle request");
+
+        let response = child.recv_response().expect("recv response");
+        let raw_handle = match response {
+            nono::supervisor::SupervisorResponse::Decision {
+                request_id,
+                decision,
+                grant,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert!(decision.is_granted());
+                let grant = grant.expect("grant metadata");
+                assert_eq!(
+                    grant.transfer,
+                    nono::ResourceTransferKind::DuplicatedWindowsHandle
+                );
+                grant.raw_handle.expect("raw handle")
+            }
+            other => panic!("unexpected response: {other:?}"),
+        };
+
+        let mut file = unsafe {
+            // SAFETY: The raw handle was duplicated into the current process by
+            // the broker helper above, and this test takes ownership exactly once.
+            <std::fs::File as std::os::windows::io::FromRawHandle>::from_raw_handle(
+                raw_handle as usize as *mut std::ffi::c_void,
+            )
+        };
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .expect("read duplicated file");
+        assert_eq!(text, "hello windows broker");
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].backend, "test-grant");
+        assert!(audit_log[0].decision.is_granted());
+    }
+
+    #[test]
+    fn test_handle_windows_supervisor_message_denies_and_audits() {
+        let (mut parent, mut child) =
+            nono::SupervisorSocket::pair().expect("supervisor socket pair");
+        let mut seen_request_ids = HashSet::new();
+        let mut audit_log = Vec::new();
+
+        child
+            .send_message(&nono::supervisor::SupervisorMessage::Request(
+                nono::CapabilityRequest {
+                    request_id: "req-deny".to_string(),
+                    path: PathBuf::from(r"C:\forbidden.txt"),
+                    access: nono::AccessMode::Read,
+                    reason: None,
+                    child_pid: 7,
+                    session_id: "win-803-deny".to_string(),
+                },
+            ))
+            .expect("send request");
+        let msg = parent.recv_message().expect("recv request");
+
+        handle_windows_supervisor_message(
+            &mut parent,
+            msg,
+            &TestDenyBackend,
+            nono::BrokerTargetProcess::current(),
+            &mut seen_request_ids,
+            &mut audit_log,
+        )
+        .expect("handle denied request");
+
+        match child.recv_response().expect("recv response") {
+            nono::supervisor::SupervisorResponse::Decision {
+                decision, grant, ..
+            } => {
+                assert!(decision.is_denied());
+                assert!(grant.is_none());
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert_eq!(audit_log.len(), 1);
+        assert_eq!(audit_log[0].backend, "test-deny");
+        assert!(audit_log[0].decision.is_denied());
+    }
+
+    #[test]
+    fn test_windows_supervisor_runtime_shutdown_on_drop() {
+        let supervisor = SupervisorConfig {
+            session_id: "drop-session",
+            requested_features: vec!["rollback snapshots"],
+            support: Sandbox::windows_supervisor_support(nono::WindowsSupervisorContext {
+                rollback_snapshots: true,
+                proxy_filtering: false,
+                runtime_capability_expansion: false,
+                runtime_trust_interception: false,
+            }),
+            approval_backend: &TestDenyBackend,
+        };
+
+        let runtime = WindowsSupervisorRuntime::initialize(&supervisor).expect("runtime");
+        let transport = runtime.transport_name().to_string();
+        drop(runtime);
+        assert!(!transport.is_empty());
     }
 
     #[test]

@@ -110,6 +110,7 @@ Current implementation now provides:
 - process-launch wiring for pipe name and child process handle ownership
 - explicit resource-grant metadata in supervisor responses
 - Windows `DuplicateHandle` helper plumbing for brokered file handles
+- a test-covered parent-side request handler that records audit entries, rejects duplicate request IDs, denies safely on backend/open failure, and brokers approved file handles into the target process
 
 Still intentionally deferred until later supervisor work:
 

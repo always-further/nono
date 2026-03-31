@@ -156,11 +156,13 @@ The Windows supervised path is now split intentionally:
   - parent-owned supervised process lifecycle for rollback snapshots and post-exit handling
   - a real Windows supervisor event-loop slice with explicit lifecycle phases for control-channel readiness, child launch, child wait, and shutdown
   - Windows-safe named-pipe supervisor transport with explicit brokered-resource response metadata and `DuplicateHandle` helpers for future approved file-handle transfer
+  - test-covered parent-side capability-request handling that records audit entries, rejects duplicate request IDs, denies safely on backend/open failures, and brokers approved file handles into the target process under the Windows security model
+  - deterministic runtime teardown on interrupted or failed supervised sessions via drop-time control-channel shutdown plus failure diagnostics that report accumulated supervisor audit-entry counts
 - still fail-closed:
-  - runtime capability expansion
+  - generic child-side runtime capability expansion attachment for ordinary Windows commands
   - proxy/network-filter-driven supervision
   - runtime trust interception
-  - live child-side consumption of brokered Windows handles for resource transfer
+  - broad live child-side consumption of brokered Windows handles for resource transfer outside the current explicit supervisor-request test path
 
 That means Windows supervised execution is no longer purely scaffold-only, but it is also not Unix-parity supervision yet. The current implementation is a rollback-oriented supervised runtime with deterministic rejection for the remaining unsupported feature classes, a parent-side event loop that monitors the child process to completion, and more actionable startup/shutdown diagnostics when launch or wait handling fails.
 

@@ -1366,6 +1366,7 @@ impl ExecutionFlags {
 
 #[cfg(target_os = "windows")]
 fn build_supervisor_config<'a>(
+    approval_backend: &'a dyn nono::ApprovalBackend,
     flags: &'a ExecutionFlags,
     supervisor_session_id: &'a str,
 ) -> exec_strategy::SupervisorConfig<'a> {
@@ -1384,6 +1385,7 @@ fn build_supervisor_config<'a>(
         session_id: supervisor_session_id,
         requested_features,
         support,
+        approval_backend,
     }
 }
 
@@ -2551,6 +2553,8 @@ fn execute_sandboxed(
             let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
             #[cfg(not(target_os = "windows"))]
             let approval_backend = terminal_approval::TerminalApproval;
+            #[cfg(target_os = "windows")]
+            let approval_backend = exec_strategy::WindowsSupervisorDenyAllApprovalBackend;
             #[cfg(not(target_os = "windows"))]
             let supervisor_session_id = audit_state
                 .as_ref()
@@ -2592,7 +2596,8 @@ fn execute_sandboxed(
                     )
                 });
             #[cfg(target_os = "windows")]
-            let supervisor_cfg = build_supervisor_config(&flags, &supervisor_session_id);
+            let supervisor_cfg =
+                build_supervisor_config(&approval_backend, &flags, &supervisor_session_id);
 
             #[cfg(not(target_os = "windows"))]
             let trust_interceptor = if flags.trust_interception_active {
