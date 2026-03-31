@@ -92,31 +92,6 @@ jobs:
           tar czvf ../../../nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
           cd ../../..
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
-          if (-not (Test-Path $binary)) {
-            Write-Error "Missing release binary: $binary"
-          }
-          $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
-          $zipPath = Join-Path $PWD $zipName
-          if (Test-Path $zipPath) {
-            Remove-Item -LiteralPath $zipPath -Force
-          }
-          Compress-Archive -LiteralPath $binary -DestinationPath $zipPath
-          .\scripts\build-windows-msi.ps1 `
-            -VersionTag "${{ env.RELEASE_TAG }}" `
-            -BinaryPath $binary `
-            -Scope machine `
-            -OutputDir artifact_staging
-          .\scripts\build-windows-msi.ps1 `
-            -VersionTag "${{ env.RELEASE_TAG }}" `
-            -BinaryPath $binary `
-            -Scope user `
-            -OutputDir artifact_staging
-
       - name: Install cargo-deb
         if: runner.os == 'Linux' && (matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu')
         run: cargo install cargo-deb
@@ -137,7 +112,83 @@ jobs:
           cd crates/nono-cli
           cargo deb --target aarch64-unknown-linux-gnu --no-build --deb-version "$VERSION"
 
+      - name: Check signing secrets (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT)) {
+            Write-Error "WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set. Set these repository secrets before releasing Windows artifacts. See docs/cli/development/windows-signing-guide.md."
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            Write-Error "WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set. Set these repository secrets before releasing Windows artifacts. See docs/cli/development/windows-signing-guide.md."
+            exit 1
+          }
+          Write-Host "Signing secrets present — proceeding to sign."
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          if (-not (Test-Path $binary)) {
+            Write-Error "Missing release binary: $binary"
+            exit 1
+          }
+          .\scripts\build-windows-msi.ps1 `
+            -VersionTag "${{ env.RELEASE_TAG }}" `
+            -BinaryPath $binary `
+            -Scope machine `
+            -OutputDir artifact_staging
+          .\scripts\build-windows-msi.ps1 `
+            -VersionTag "${{ env.RELEASE_TAG }}" `
+            -BinaryPath $binary `
+            -Scope user `
+            -OutputDir artifact_staging
+
+      - name: Sign Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $machineMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-machine.msi"
+          $userMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-user.msi"
+          .\scripts\sign-windows-artifacts.ps1 `
+            -CertBase64 $env:WINDOWS_SIGNING_CERT `
+            -CertPassword $env:WINDOWS_SIGNING_CERT_PASSWORD `
+            -ArtifactPaths @($binary, $machineMsi, $userMsi)
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+
+      - name: Create zip from signed binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
+          $zipPath = Join-Path $PWD $zipName
+          if (Test-Path $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Compress-Archive -LiteralPath $binary -DestinationPath $zipPath
+
+      - name: Prepare upload (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
+          if (-not (Test-Path $zipName)) {
+            Write-Error "Missing zip artifact: $zipName"
+            exit 1
+          }
+          Copy-Item $zipName artifact_staging\
+
       - name: Prepare upload
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p artifact_staging
