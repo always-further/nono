@@ -154,13 +154,14 @@ The Windows supervised path is now split intentionally:
 
 - supported today:
   - parent-owned supervised process lifecycle for rollback snapshots and post-exit handling
+  - a real Windows supervisor event-loop slice with explicit lifecycle phases for control-channel readiness, child launch, child wait, and shutdown
 - still fail-closed:
   - runtime capability expansion
   - proxy/network-filter-driven supervision
   - runtime trust interception
   - Windows handle brokering for resource transfer
 
-That means Windows supervised execution is no longer purely scaffold-only, but it is also not Unix-parity supervision yet. The current implementation is a rollback-oriented supervised runtime with deterministic rejection for the remaining unsupported feature classes.
+That means Windows supervised execution is no longer purely scaffold-only, but it is also not Unix-parity supervision yet. The current implementation is a rollback-oriented supervised runtime with deterministic rejection for the remaining unsupported feature classes, a parent-side event loop that monitors the child process to completion, and more actionable startup/shutdown diagnostics when launch or wait handling fails.
 
 The live Windows launch path is now also shared intentionally across direct and supervised execution for the currently supported subset:
 

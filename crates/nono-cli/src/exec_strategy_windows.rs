@@ -19,7 +19,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, DuplicateTokenEx, SecurityImpersonation, SetTokenInformation,
@@ -35,7 +35,7 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::Threading::{
     CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
-    WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+    WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 pub(crate) use env_sanitization::is_dangerous_env_var;
@@ -166,6 +166,7 @@ const WINDOWS_WFP_BACKEND_BINARY: &str = "nono-wfp-service.exe";
 const WINDOWS_WFP_BACKEND_DRIVER_BINARY: &str = "nono-wfp-driver.sys";
 const WINDOWS_WFP_BACKEND_SERVICE_ARGS: &[&str] = &["--service-mode"];
 const WINDOWS_WFP_RUNTIME_PROBE_ARG: &str = "--probe-runtime-activation";
+const WINDOWS_SUPERVISOR_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowsServiceState {
@@ -257,6 +258,172 @@ struct ProcessContainment {
 }
 
 struct OwnedHandle(HANDLE);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsSupervisorLifecycleState {
+    Initializing,
+    ControlChannelReady,
+    LaunchingChild,
+    WaitingForChild,
+    ShuttingDown,
+    Completed,
+}
+
+impl WindowsSupervisorLifecycleState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Initializing => "initializing",
+            Self::ControlChannelReady => "control-channel-ready",
+            Self::LaunchingChild => "launching-child",
+            Self::WaitingForChild => "waiting-for-child",
+            Self::ShuttingDown => "shutting-down",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+enum WindowsSupervisedChild {
+    Standard(std::process::Child),
+    LowIntegrity {
+        process: OwnedHandle,
+        _thread: OwnedHandle,
+    },
+}
+
+impl WindowsSupervisedChild {
+    fn poll_exit_code(&mut self) -> Result<Option<i32>> {
+        match self {
+            Self::Standard(child) => Ok(child
+                .try_wait()
+                .map_err(NonoError::CommandExecution)?
+                .map(|status| status.code().unwrap_or(1))),
+            Self::LowIntegrity { process, .. } => {
+                let wait_result = unsafe {
+                    // SAFETY: `process.0` is a valid process handle owned by this child wrapper.
+                    WaitForSingleObject(process.0, 0)
+                };
+                if wait_result == 0 {
+                    let mut exit_code = 0u32;
+                    let ok = unsafe {
+                        // SAFETY: `process.0` remains a valid process handle for the duration
+                        // of this query and `exit_code` points to writable memory.
+                        GetExitCodeProcess(process.0, &mut exit_code)
+                    };
+                    if ok == 0 {
+                        return Err(NonoError::SandboxInit(
+                            "Failed to query Windows supervised child exit code".to_string(),
+                        ));
+                    }
+                    Ok(Some(exit_code as i32))
+                } else if wait_result == 0x0000_0102 {
+                    Ok(None)
+                } else {
+                    Err(NonoError::SandboxInit(format!(
+                        "Windows supervisor failed while waiting for child process state: {}",
+                        std::io::Error::last_os_error()
+                    )))
+                }
+            }
+        }
+    }
+}
+
+struct WindowsSupervisorRuntime {
+    session_id: String,
+    requested_features: Vec<String>,
+    transport_name: String,
+    _parent_control: nono::SupervisorSocket,
+    child_control: Option<nono::SupervisorSocket>,
+    started_at: Instant,
+    state: WindowsSupervisorLifecycleState,
+}
+
+impl WindowsSupervisorRuntime {
+    fn initialize(supervisor: &SupervisorConfig<'_>) -> Result<Self> {
+        let started_at = Instant::now();
+        let (parent_control, child_control) = initialize_supervisor_control_channel()?;
+        let transport_name = parent_control.transport_name().to_string();
+        let mut runtime = Self {
+            session_id: supervisor.session_id.to_string(),
+            requested_features: supervisor
+                .requested_features
+                .iter()
+                .map(|feature| (*feature).to_string())
+                .collect(),
+            transport_name,
+            _parent_control: parent_control,
+            child_control: Some(child_control),
+            started_at,
+            state: WindowsSupervisorLifecycleState::Initializing,
+        };
+        runtime.state = WindowsSupervisorLifecycleState::ControlChannelReady;
+        Ok(runtime)
+    }
+
+    fn transport_name(&self) -> &str {
+        self.transport_name.as_str()
+    }
+
+    fn run_child_event_loop(&mut self, child: &mut WindowsSupervisedChild) -> Result<i32> {
+        self.state = WindowsSupervisorLifecycleState::WaitingForChild;
+        tracing::debug!(
+            "Windows supervisor event loop entering wait phase (session: {}, transport: {}, state: {}, features: {})",
+            self.session_id,
+            self.transport_name,
+            self.state.label(),
+            if self.requested_features.is_empty() {
+                "none".to_string()
+            } else {
+                self.requested_features.join(", ")
+            }
+        );
+
+        loop {
+            if let Some(exit_code) = child.poll_exit_code()? {
+                self.state = WindowsSupervisorLifecycleState::ShuttingDown;
+                self.shutdown();
+                self.state = WindowsSupervisorLifecycleState::Completed;
+                tracing::debug!(
+                    "Windows supervisor event loop completed (session: {}, transport: {}, exit_code: {}, elapsed_ms: {})",
+                    self.session_id,
+                    self.transport_name,
+                    exit_code,
+                    self.started_at.elapsed().as_millis()
+                );
+                return Ok(exit_code);
+            }
+
+            std::thread::sleep(WINDOWS_SUPERVISOR_POLL_INTERVAL);
+        }
+    }
+
+    fn startup_failure(&mut self, message: String) -> NonoError {
+        self.shutdown();
+        NonoError::SandboxInit(format!(
+            "Windows supervised execution failed during {} (session: {}, transport: {}): {}",
+            self.state.label(),
+            self.session_id,
+            self.transport_name,
+            message
+        ))
+    }
+
+    fn command_failure(&mut self, message: String) -> NonoError {
+        self.shutdown();
+        NonoError::CommandExecution(std::io::Error::other(format!(
+            "Windows supervised execution failed during {} (session: {}, transport: {}): {}",
+            self.state.label(),
+            self.session_id,
+            self.transport_name,
+            message
+        )))
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.child_control.take();
+        self.state = WindowsSupervisorLifecycleState::ShuttingDown;
+    }
+}
 
 impl OwnedHandle {
     fn raw(&self) -> HANDLE {
@@ -2148,6 +2315,25 @@ fn execute_direct_with_low_integrity(
     containment: &ProcessContainment,
     cmd_args: &[String],
 ) -> Result<i32> {
+    let mut child =
+        spawn_low_integrity_windows_child(config, launch_program, containment, cmd_args)?;
+    let Some(exit_code) = child.poll_exit_code()? else {
+        loop {
+            if let Some(exit_code) = child.poll_exit_code()? {
+                return Ok(exit_code);
+            }
+            std::thread::sleep(WINDOWS_SUPERVISOR_POLL_INTERVAL);
+        }
+    };
+    Ok(exit_code)
+}
+
+fn spawn_low_integrity_windows_child(
+    config: &ExecConfig<'_>,
+    launch_program: &Path,
+    containment: &ProcessContainment,
+    cmd_args: &[String],
+) -> Result<WindowsSupervisedChild> {
     let env_pairs = build_child_env(config);
     let mut environment_block = build_windows_environment_block(&env_pairs);
     let token = create_low_integrity_primary_token()?;
@@ -2205,41 +2391,28 @@ fn execute_direct_with_low_integrity(
 
     let process = OwnedHandle(process_info.hProcess);
     let thread = OwnedHandle(process_info.hThread);
-    let _ = &thread;
 
     apply_process_handle_to_containment(containment, process.raw())?;
-    unsafe {
-        // SAFETY: The process handle is valid until drop.
-        WaitForSingleObject(process.raw(), INFINITE);
-    }
-    let mut exit_code = 1u32;
-    let got_code = unsafe {
-        // SAFETY: The process handle is valid until drop.
-        GetExitCodeProcess(process.raw(), &mut exit_code)
-    };
-    if got_code == 0 {
-        return Err(NonoError::CommandExecution(std::io::Error::other(
-            "Failed to read Windows child exit code",
-        )));
-    }
-
-    Ok(exit_code as i32)
+    Ok(WindowsSupervisedChild::LowIntegrity {
+        process,
+        _thread: thread,
+    })
 }
 
-fn execute_supervised_with_low_integrity(
+fn spawn_supervised_with_low_integrity(
     config: &ExecConfig<'_>,
     launch_program: &Path,
     containment: &ProcessContainment,
-) -> Result<i32> {
+) -> Result<WindowsSupervisedChild> {
     let cmd_args = prepare_runtime_hardened_args(launch_program, &config.command[1..]);
-    execute_direct_with_low_integrity(config, launch_program, containment, &cmd_args)
+    spawn_low_integrity_windows_child(config, launch_program, containment, &cmd_args)
 }
 
-fn execute_supervised_with_standard_token(
+fn spawn_supervised_with_standard_token(
     config: &ExecConfig<'_>,
     launch_program: &Path,
     containment: &ProcessContainment,
-) -> Result<i32> {
+) -> Result<WindowsSupervisedChild> {
     let cmd_args = prepare_runtime_hardened_args(launch_program, &config.command[1..]);
     let mut cmd = Command::new(launch_program);
     cmd.env_clear();
@@ -2248,10 +2421,9 @@ fn execute_supervised_with_standard_token(
         cmd.env(key, value);
     }
     cmd.args(&cmd_args);
-    let mut child = cmd.spawn().map_err(NonoError::CommandExecution)?;
+    let child = cmd.spawn().map_err(NonoError::CommandExecution)?;
     apply_process_containment(containment, &child)?;
-    let status = child.wait().map_err(NonoError::CommandExecution)?;
-    Ok(status.code().unwrap_or(1))
+    Ok(WindowsSupervisedChild::Standard(child))
 }
 
 pub fn execute_direct(config: &ExecConfig<'_>) -> Result<i32> {
@@ -2288,7 +2460,7 @@ pub fn execute_supervised(
         ));
     };
 
-    let (parent_control, _child_control) = initialize_supervisor_control_channel()?;
+    let mut runtime = WindowsSupervisorRuntime::initialize(supervisor)?;
     let unsupported = supervisor.support.unsupported_feature_labels();
     let supported = supervisor.support.supported_feature_labels();
     if !unsupported.is_empty() {
@@ -2298,7 +2470,7 @@ pub fn execute_supervised(
              Supported Windows supervised features currently: {}. \
              This is a preview limitation, not permanent product behavior.",
             supervisor.session_id,
-            parent_control.transport_name(),
+            runtime.transport_name(),
             unsupported.join(", "),
             if supported.is_empty() {
                 "none".to_string()
@@ -2312,10 +2484,11 @@ pub fn execute_supervised(
     let launch_program = prepared.launch_program.as_path();
 
     let containment = create_process_containment()?;
+    runtime.state = WindowsSupervisorLifecycleState::LaunchingChild;
     tracing::debug!(
         "Windows supervised execution starting event loop (session: {}, transport: {}, features: {})",
         supervisor.session_id,
-        parent_control.transport_name(),
+        runtime.transport_name(),
         if supervisor.requested_features.is_empty() {
             "none".to_string()
         } else {
@@ -2323,16 +2496,21 @@ pub fn execute_supervised(
         }
     );
 
-    let exit_code = if should_use_low_integrity_windows_launch(config.caps) {
-        execute_supervised_with_low_integrity(config, launch_program, &containment)?
+    let mut child = if should_use_low_integrity_windows_launch(config.caps) {
+        spawn_supervised_with_low_integrity(config, launch_program, &containment)
     } else {
-        execute_supervised_with_standard_token(config, launch_program, &containment)?
-    };
+        spawn_supervised_with_standard_token(config, launch_program, &containment)
+    }
+    .map_err(|err| runtime.startup_failure(err.to_string()))?;
+
+    let exit_code = runtime
+        .run_child_event_loop(&mut child)
+        .map_err(|err| runtime.command_failure(err.to_string()))?;
 
     tracing::debug!(
         "Windows supervised execution finished cleanly (session: {}, transport: {}, exit_code: {})",
         supervisor.session_id,
-        parent_control.transport_name(),
+        runtime.transport_name(),
         exit_code
     );
     Ok(exit_code)
@@ -2432,6 +2610,43 @@ mod tests {
         let exit_code =
             execute_supervised(&config, Some(&supervisor), None).expect("rollback should run");
         assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn test_execute_supervised_reports_actionable_launch_failure() {
+        let command = vec!["missing-supervised-binary".to_string()];
+        let resolved_program = PathBuf::from(r"C:\definitely-missing\nono-test-missing.exe");
+        let current_dir = std::env::current_dir().expect("cwd");
+        let config = ExecConfig {
+            command: &command,
+            resolved_program: &resolved_program,
+            caps: &CapabilitySet::new(),
+            env_vars: Vec::new(),
+            cap_file: None,
+            current_dir: &current_dir,
+        };
+        let supervisor = SupervisorConfig {
+            session_id: "launch-failure-session",
+            requested_features: vec!["rollback snapshots"],
+            support: Sandbox::windows_supervisor_support(nono::WindowsSupervisorContext {
+                rollback_snapshots: true,
+                proxy_filtering: false,
+                runtime_capability_expansion: false,
+                runtime_trust_interception: false,
+            }),
+        };
+
+        let err = execute_supervised(&config, Some(&supervisor), None)
+            .expect_err("missing binary should fail clearly");
+        let message = err.to_string();
+        assert!(message.contains("launch-failure-session"));
+        assert!(
+            message.contains("transport:")
+                || message.contains("windows-supervisor-")
+                || message.contains("Failed to spawn")
+                || message.contains("The system cannot find the file specified")
+        );
+        assert!(message.contains("failed during"));
     }
 
     #[test]
