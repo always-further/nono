@@ -158,6 +158,7 @@ mod tests {
     fn test_list_builtin() {
         let profiles = list_builtin();
         assert!(profiles.contains(&"default".to_string()));
+        assert!(profiles.contains(&"linux-host-compat".to_string()));
         assert!(profiles.contains(&"claude-code".to_string()));
         assert!(profiles.contains(&"codex".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
@@ -220,7 +221,7 @@ mod tests {
             "deny_shell_configs".to_string(),
             "deny_shell_history".to_string(),
             "homebrew".to_string(),
-            "system_read_linux".to_string(),
+            "system_read_linux_core".to_string(),
             "system_read_macos".to_string(),
             "system_write_linux".to_string(),
             "system_write_macos".to_string(),
@@ -243,6 +244,54 @@ mod tests {
                 def.extends.as_deref(),
                 Some("default"),
                 "embedded profile '{}' should extend default",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_linux_host_compat_profile_groups() {
+        let profile = get_builtin("linux-host-compat").expect("Profile not found");
+        assert!(profile
+            .security
+            .groups
+            .contains(&"linux_runtime_state".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"linux_sysfs_read".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"linux_temp_read".to_string()));
+    }
+
+    #[test]
+    fn test_linux_interactive_profiles_include_sysfs_but_not_runtime_state_or_temp() {
+        for name in ["claude-code", "codex", "opencode", "swival"] {
+            let profile = get_builtin(name).expect("Profile not found");
+            assert!(
+                !profile
+                    .security
+                    .groups
+                    .contains(&"linux_runtime_state".to_string()),
+                "{} should not include linux_runtime_state",
+                name
+            );
+            assert!(
+                profile
+                    .security
+                    .groups
+                    .contains(&"linux_sysfs_read".to_string()),
+                "{} should include linux_sysfs_read",
+                name
+            );
+            assert!(
+                !profile
+                    .security
+                    .groups
+                    .contains(&"linux_temp_read".to_string()),
+                "{} should not include linux_temp_read",
                 name
             );
         }

@@ -1859,7 +1859,7 @@ mod tests {
                 || profile
                     .security
                     .groups
-                    .contains(&"system_read_linux".to_string()),
+                    .contains(&"system_read_linux_core".to_string()),
             "Expected platform system_read group"
         );
 

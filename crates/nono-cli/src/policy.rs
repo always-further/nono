@@ -1967,11 +1967,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_embedded_policy_includes_device_files() {
-        // The system_read_linux group lists /dev/urandom, /dev/null, etc.
+        // The system_read_linux_core group lists /dev/urandom, /dev/null, etc.
         // Verify they survive policy resolution and end up in the capability set.
         let policy = load_embedded_policy().expect("embedded policy");
         let mut caps = CapabilitySet::new();
-        resolve_groups(&policy, &["system_read_linux".to_string()], &mut caps)
+        resolve_groups(&policy, &["system_read_linux_core".to_string()], &mut caps)
             .expect("resolve failed");
 
         let resolved_paths: Vec<PathBuf> = caps
@@ -1983,7 +1983,7 @@ mod tests {
         for device in &["/dev/urandom", "/dev/null", "/dev/zero", "/dev/random"] {
             assert!(
                 resolved_paths.iter().any(|p| p == Path::new(device)),
-                "{} must be included in system_read_linux capabilities, got: {:?}",
+                "{} must be included in system_read_linux_core capabilities, got: {:?}",
                 device,
                 resolved_paths
             );
@@ -2010,12 +2010,12 @@ mod tests {
     }
 
     #[test]
-    fn test_system_read_linux_does_not_grant_bare_etc_or_proc() {
+    fn test_system_read_linux_core_does_not_grant_bare_etc_or_proc() {
         let policy = load_embedded_policy().expect("embedded policy must parse");
         let group = policy
             .groups
-            .get("system_read_linux")
-            .expect("system_read_linux group must exist");
+            .get("system_read_linux_core")
+            .expect("system_read_linux_core group must exist");
         let read_paths = group
             .allow
             .as_ref()
@@ -2024,13 +2024,117 @@ mod tests {
 
         assert!(
             !read_paths.iter().any(|p| p == "/etc"),
-            "system_read_linux must not grant bare '/etc'; use specific paths instead. Found: {:?}",
+            "system_read_linux_core must not grant bare '/etc'; use specific paths instead. Found: {:?}",
             read_paths
         );
         assert!(
             !read_paths.iter().any(|p| p == "/proc"),
-            "system_read_linux must not grant bare '/proc'; use specific paths instead. Found: {:?}",
+            "system_read_linux_core must not grant bare '/proc'; use specific paths instead. Found: {:?}",
             read_paths
+        );
+    }
+
+    #[test]
+    fn test_linux_core_excludes_runtime_state_sysfs_temp_and_nix() {
+        let policy = load_embedded_policy().expect("embedded policy must parse");
+        let group = policy
+            .groups
+            .get("system_read_linux_core")
+            .expect("system_read_linux_core group must exist");
+        let read_paths = group
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+
+        for disallowed in ["/run", "/var/run", "/sys", "/tmp", "/nix"] {
+            assert!(
+                !read_paths.iter().any(|p| p == disallowed),
+                "system_read_linux_core must not include '{}'. Found: {:?}",
+                disallowed,
+                read_paths
+            );
+        }
+    }
+
+    #[test]
+    fn test_linux_compat_groups_expose_expected_paths() {
+        let policy = load_embedded_policy().expect("embedded policy must parse");
+
+        let runtime = policy
+            .groups
+            .get("linux_runtime_state")
+            .expect("linux_runtime_state group must exist");
+        let runtime_paths = runtime
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+        assert!(runtime_paths.iter().any(|p| p == "/run"));
+        assert!(runtime_paths.iter().any(|p| p == "/var/run"));
+
+        let sysfs = policy
+            .groups
+            .get("linux_sysfs_read")
+            .expect("linux_sysfs_read group must exist");
+        let sysfs_paths = sysfs
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+        assert_eq!(sysfs_paths, ["/sys"]);
+
+        let temp = policy
+            .groups
+            .get("linux_temp_read")
+            .expect("linux_temp_read group must exist");
+        let temp_paths = temp
+            .allow
+            .as_ref()
+            .map(|a| a.read.as_slice())
+            .unwrap_or(&[]);
+        assert_eq!(temp_paths, ["/tmp"]);
+    }
+
+    #[test]
+    fn test_default_user_groups_do_not_grant_local_state() {
+        let policy = load_embedded_policy().expect("embedded policy must parse");
+
+        let user_tools = policy
+            .groups
+            .get("user_tools")
+            .expect("user_tools group must exist");
+        let user_tools_allow = user_tools.allow.as_ref().expect("user_tools allow rules");
+        assert!(
+            !user_tools_allow.read.iter().any(|p| p == "~/.local/state"),
+            "user_tools must not grant ~/.local/state"
+        );
+        assert!(
+            !user_tools_allow
+                .readwrite
+                .iter()
+                .any(|p| p == "~/.local/state"),
+            "user_tools must not grant ~/.local/state"
+        );
+
+        let user_caches_linux = policy
+            .groups
+            .get("user_caches_linux")
+            .expect("user_caches_linux group must exist");
+        let user_caches_allow = user_caches_linux
+            .allow
+            .as_ref()
+            .expect("user_caches_linux allow rules");
+        assert!(
+            !user_caches_allow.read.iter().any(|p| p == "~/.local/state"),
+            "user_caches_linux must not grant ~/.local/state"
+        );
+        assert!(
+            !user_caches_allow
+                .readwrite
+                .iter()
+                .any(|p| p == "~/.local/state"),
+            "user_caches_linux must not grant ~/.local/state"
         );
     }
 
