@@ -1,0 +1,109 @@
+---
+title: Windows Installer Strategy
+description: Supported Windows release artifacts, install scopes, and upgrade expectations
+---
+
+# Windows Installer Strategy
+
+This note locks the current Windows installer strategy for `WIN-1201`.
+
+## Supported Release Artifacts
+
+The supported Windows release artifacts are:
+
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+
+Those artifacts are produced by the release workflow today and are the only supported Windows delivery paths for the current native subset.
+
+Not supported as a release path today:
+
+- `MSIX`
+- Windows Store packaging
+- a standalone Windows service installer
+
+Those remain later release-readiness decisions or future stories.
+
+## Why MSI and Zip
+
+The current split is intentional:
+
+- `MSI` is the supported managed install path for standard Windows deployment, `PATH` integration, and Apps & Features uninstall behavior.
+- `zip` is the supported portable path for local tools directories, CI images, and environments where MSI install is undesirable or unavailable.
+
+This gives Windows users one managed installer path and one portable extraction path without multiplying packaging semantics prematurely.
+
+## Install Scope Model
+
+Windows supports two MSI scopes:
+
+### Machine MSI
+
+- artifact: `...-machine.msi`
+- install scope: per-machine
+- install location: `Program Files`
+- `PATH` update: system `PATH`
+- intended use: administrator-managed installs for shared machines or managed environments
+
+### User MSI
+
+- artifact: `...-user.msi`
+- install scope: per-user
+- install location: `%LOCALAPPDATA%\\Programs\\nono`
+- `PATH` update: user `PATH`
+- intended use: non-admin installs and individual developer workstations
+
+### Zip Artifact
+
+- artifact: `...-.zip`
+- install scope: none
+- install location: chosen by the operator
+- `PATH` update: manual
+- intended use: portable installs, CI, local tooling directories, and side-by-side testing
+
+## Upgrade Expectations
+
+The current supported upgrade model is:
+
+- machine MSI upgrades previous machine MSI installs
+- user MSI upgrades previous user MSI installs
+- zip installs are upgraded by replacing the extracted directory manually
+
+The current WiX authoring uses stable per-scope upgrade codes and `MajorUpgrade`, so MSI-to-MSI upgrades are expected to replace older installs within the same scope.
+
+The current strategy does **not** guarantee automatic migration between:
+
+- user MSI and machine MSI
+- MSI and zip installs
+- zip installs across different extraction directories
+
+Those are treated as separate operator-managed install modes.
+
+## Uninstall and Repair Expectations
+
+For the current strategy:
+
+- uninstall is supported through Apps & Features for both MSI scopes
+- zip installs are removed by deleting the extracted directory
+- repair and modify are intentionally not first-class release promises yet
+
+The generated MSI metadata explicitly disables Add/Remove Programs modify and repair UX for now. Validation of uninstall, upgrade, and any future repair expectations belongs to `WIN-1203`.
+
+## Release Messaging Contract
+
+Windows release and support messaging should reflect this strategy:
+
+- MSI and zip are the supported Windows artifact types
+- user and machine MSI scopes are distinct and intentional
+- Windows is still a partial-parity platform until signing and final release validation complete
+- operators should not infer service installation, MSIX support, or cross-scope auto-migration from the existence of the current MSI packages
+
+## Relationship to Later Stories
+
+This strategy intentionally leaves these items to later work:
+
+- `WIN-1202`: signing binaries and installers
+- `WIN-1203`: validating uninstall, upgrade, and repair behavior in practice
+- `WIN-1204`: adding service packaging only if a release-capable Windows service runtime is actually required
+- `WIN-1205`: promoting Windows from partial native subset to first-class supported release target

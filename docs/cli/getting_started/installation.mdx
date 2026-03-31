@@ -32,6 +32,8 @@ Windows is available as a preview build distributed as either:
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi` for per-user installs without elevation
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip` for portable extraction
 
+The supported Windows release paths are the two MSI scopes plus the portable zip. Machine MSI upgrades machine MSI installs, user MSI upgrades user MSI installs, and zip installs are upgraded by replacing the extracted directory manually.
+
 ### MSI install
 
 Administrator-managed install:
@@ -73,6 +75,8 @@ Windows preview currently supports:
 - `nono run -- <command>` for preview-safe direct execution
 
 Windows preview intentionally does not claim full sandbox parity yet. Supported live restricted runs work for the active backend subset, while unsupported flows fail loudly with backend diagnostics. On Windows, `nono shell` and `nono wrap` remain intentionally unsupported live modes.
+
+For more detail on supported artifact types and scope behavior, see the [Windows Installer Strategy](/cli/development/windows-installer-strategy).
 
 ## Building from Source
 

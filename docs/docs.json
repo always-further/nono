@@ -85,6 +85,7 @@
           "cli/development/windows-security-model",
           "cli/development/windows-network-enforcement",
           "cli/development/windows-full-port-roadmap",
+          "cli/development/windows-installer-strategy",
           "cli/development/windows-preview-pilot",
           "cli/development/windows-preview-validation",
           "cli/development/windows-release-candidate-checklist"

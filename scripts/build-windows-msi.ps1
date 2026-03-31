@@ -129,12 +129,12 @@ $wxsContent = @"
       UpgradeCode="$($scopeInfo.UpgradeCode)"
       Scope="$($scopeInfo.PackageScope)">
     <SummaryInformation
-        Description="nono Windows preview installer ($($scopeInfo.ScopeLabel))"
+        Description="nono Windows native installer ($($scopeInfo.ScopeLabel))"
         Manufacturer="$Manufacturer" />
     <MajorUpgrade
         DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
-    <Property Id="ARPCOMMENTS" Value="nono Windows preview installer ($($scopeInfo.ScopeLabel))" />
+    <Property Id="ARPCOMMENTS" Value="nono Windows native installer ($($scopeInfo.ScopeLabel))" />
     <Property Id="ARPCONTACT" Value="$Manufacturer" />
     <Property Id="ARPURLHELP" Value="https://docs.nono.sh/cli/getting_started/installation" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/always-further/nono" />

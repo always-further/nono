@@ -199,6 +199,17 @@ Those paths are absolute and backend-owned, and the rollback root resolves under
 
 Windows trust and keystore diagnostics also now identify the native backend as **Windows Credential Manager** instead of using a generic system-keystore label. That makes trust setup and failure messages match the actual platform implementation.
 
+## Windows Packaging Contract
+
+The current Windows packaging contract is now explicit:
+
+- `machine MSI` and `user MSI` are the supported managed install paths
+- `zip` is the supported portable install path
+- same-scope MSI upgrades are the supported automatic upgrade expectation
+- cross-scope migration and MSI-to-zip migration are operator-managed, not automatic
+
+That packaging strategy is documented separately in the [Windows Installer Strategy](/cli/development/windows-installer-strategy) and is the baseline for later signing and release-validation work.
+
 ## Design Rules
 
 - Do not report Windows support as full until filesystem and network restrictions are truly enforced.

@@ -37,6 +37,7 @@ Confirm:
 - each MSI creates an Apps & Features uninstall entry with the expected install scope
 - the zip contains `nono.exe`
 - `SHA256SUMS.txt` includes the Windows zip and MSI checksums
+- machine and user MSI artifacts match the documented scope strategy in [Windows Installer Strategy](/cli/development/windows-installer-strategy)
 
 ## Runtime Gate
 
@@ -81,10 +82,11 @@ Expected results:
 Validate both user-scope and machine-scope installation behavior:
 
 - install the previous Windows release
-- upgrade to the candidate MSI
+- upgrade to the candidate MSI within the same scope
 - confirm `nono --version` reports the candidate version
 - confirm Apps & Features uninstall removes the expected installation
 - confirm zip-based installs still run without MSI-specific dependencies
+- do not treat MSI-to-zip or cross-scope migration as a supported automatic upgrade path unless later release notes say otherwise
 
 ## Storage and Trust Gate
 

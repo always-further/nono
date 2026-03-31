@@ -13,7 +13,7 @@ Windows preview builds are published as:
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`
 
-The MSI packages install `nono.exe`, `README.md`, and `LICENSE`, add the install directory to `PATH` for the selected scope, and create a standard Apps & Features uninstall entry. Signed installers and MSIX packaging are not part of the preview yet.
+The MSI packages install `nono.exe`, `README.md`, and `LICENSE`, add the install directory to `PATH` for the selected scope, and create a standard Apps & Features uninstall entry. MSI and zip are the supported Windows delivery paths for the current native subset. Signed installers and MSIX packaging are not part of the current release path yet.
 
 ## Install
 
@@ -57,6 +57,8 @@ The preview is for startup, config, dry-run, and direct execution path validatio
 ## Current Packaging Limits
 
 - Apps & Features uninstall is supported through the MSI package.
+- machine MSI upgrades machine MSI installs, and user MSI upgrades user MSI installs.
+- zip installs are operator-managed and upgraded by replacing the extracted directory.
 - Windows service registration is not part of the preview yet.
 - A real Windows service installer requires a service-capable nono runtime mode; the current CLI binary is not a Service Control Manager host.
 
