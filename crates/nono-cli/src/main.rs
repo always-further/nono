@@ -94,7 +94,9 @@ mod tests {
         trust_interception_active,
     };
     use crate::proxy_runtime::{resolve_effective_proxy_settings, EffectiveProxySettings};
-    use crate::sandbox_prepare::{maybe_enable_macos_launch_services, PreparedSandbox};
+    use crate::sandbox_prepare::PreparedSandbox;
+    #[cfg(target_os = "macos")]
+    use crate::sandbox_prepare::maybe_enable_macos_launch_services;
     use crate::startup_runtime::allows_pre_exec_update_check;
     use nono::{AccessMode, CapabilitySet, FsCapability};
 
@@ -197,6 +199,8 @@ mod tests {
             upstream_bypass: Vec::new(),
             listen_ports: Vec::new(),
             capability_elevation: false,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
             allow_launch_services_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
@@ -236,6 +240,8 @@ mod tests {
             upstream_bypass: Vec::new(),
             listen_ports: Vec::new(),
             capability_elevation: false,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
             allow_launch_services_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,

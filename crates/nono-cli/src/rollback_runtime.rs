@@ -123,8 +123,12 @@ fn enforce_rollback_limits(silent: bool) {
     }
 }
 
-pub(crate) fn create_audit_state(audit_disabled: bool) -> Result<Option<AuditState>> {
-    if audit_disabled {
+pub(crate) fn create_audit_state(
+    rollback_requested: bool,
+    rollback_disabled: bool,
+    audit_disabled: bool,
+) -> Result<Option<AuditState>> {
+    if !rollback_requested || rollback_disabled || audit_disabled {
         return Ok(None);
     }
 

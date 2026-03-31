@@ -143,7 +143,11 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
 
     output::print_applying_sandbox(silent);
 
-    let audit_state = create_audit_state(rollback.audit_disabled)?;
+    let audit_state = create_audit_state(
+        rollback.requested,
+        rollback.disabled,
+        rollback.audit_disabled,
+    )?;
     warn_if_rollback_flags_ignored(rollback, silent);
     let rollback_state = initialize_rollback_state(rollback, caps, audit_state.as_ref(), silent)?;
 
