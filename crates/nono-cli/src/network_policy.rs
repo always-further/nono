@@ -8,6 +8,7 @@ use nono::{NonoError, Result};
 use nono_proxy::config::{EndpointRule, InjectMode, ProxyConfig, RouteConfig};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tracing::debug;
 
 // ============================================================================
@@ -222,6 +223,12 @@ pub fn resolve_credentials(
                     ))
                 })?;
             }
+            let resolved_tls_ca = cred
+                .tls_ca
+                .as_deref()
+                .map(|p| resolve_tls_ca_path(p, name))
+                .transpose()?;
+
             routes.push(RouteConfig {
                 prefix: name.clone(),
                 upstream: cred.upstream.clone(),
@@ -234,7 +241,7 @@ pub fn resolve_credentials(
                 query_param_name: cred.query_param_name.clone(),
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
-                tls_ca: cred.tls_ca.clone(),
+                tls_ca: resolved_tls_ca,
             });
         } else if let Some(cred) = policy.credentials.get(name) {
             // Validate env_var against dangerous variable blocklist
@@ -268,6 +275,43 @@ pub fn resolve_credentials(
     }
 
     Ok(routes)
+}
+
+/// Expand and canonicalize a `tls_ca` path.
+///
+/// Handles tilde expansion (`~/…` → home directory) and resolves relative
+/// paths to absolute via `std::fs::canonicalize`, which also verifies the
+/// file exists. Returns an error if the home directory cannot be determined,
+/// or the path does not exist.
+fn resolve_tls_ca_path(raw: &str, credential_name: &str) -> Result<String> {
+    let expanded: PathBuf = if let Some(rest) = raw.strip_prefix("~/") {
+        let home = dirs::home_dir().ok_or_else(|| {
+            NonoError::ConfigParse(format!(
+                "credential '{}': tls_ca path '{}' uses ~ but home directory is unknown",
+                credential_name, raw
+            ))
+        })?;
+        home.join(rest)
+    } else {
+        Path::new(raw).to_path_buf()
+    };
+
+    let canonical = std::fs::canonicalize(&expanded).map_err(|e| {
+        NonoError::ConfigParse(format!(
+            "credential '{}': tls_ca path '{}' (expanded to '{}'): {}",
+            credential_name,
+            raw,
+            expanded.display(),
+            e
+        ))
+    })?;
+
+    canonical.to_str().map(String::from).ok_or_else(|| {
+        NonoError::ConfigParse(format!(
+            "credential '{}': tls_ca path '{}' contains invalid UTF-8",
+            credential_name, raw
+        ))
+    })
 }
 
 /// Build a complete `ProxyConfig` from a resolved network policy.
@@ -841,6 +885,102 @@ mod tests {
             "should mention blocklist, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_resolve_tls_ca_path_absolute() {
+        // Create a temp file to resolve against
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ca_file = dir.path().join("ca.pem");
+        std::fs::write(&ca_file, "fake cert").expect("write");
+
+        let abs = ca_file.to_str().expect("utf8");
+        let resolved = resolve_tls_ca_path(abs, "test-cred").expect("should resolve absolute");
+        // Compare canonical forms (macOS resolves /var → /private/var)
+        let expected = std::fs::canonicalize(&ca_file).expect("canonicalize");
+        assert_eq!(resolved, expected.to_str().expect("utf8"));
+    }
+
+    #[test]
+    fn test_resolve_tls_ca_path_rejects_missing_file() {
+        let result = resolve_tls_ca_path("/nonexistent/path/ca.pem", "test-cred");
+        assert!(result.is_err());
+        let err = result.expect_err("should fail").to_string();
+        assert!(
+            err.contains("tls_ca path") && err.contains("test-cred"),
+            "error should mention tls_ca and credential name, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_resolve_credentials_resolves_tls_ca_path() {
+        use crate::profile::CustomCredentialDef;
+
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ca_file = dir.path().join("custom-ca.pem");
+        std::fs::write(&ca_file, "fake cert").expect("write");
+
+        let mut custom = HashMap::new();
+        custom.insert(
+            "my-api".to_string(),
+            CustomCredentialDef {
+                upstream: "https://api.example.com".to_string(),
+                credential_key: "my_key".to_string(),
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: None,
+                endpoint_rules: vec![],
+                tls_ca: Some(ca_file.to_str().expect("utf8").to_string()),
+            },
+        );
+
+        let routes =
+            resolve_credentials(&policy, &["my-api".to_string()], &custom).expect("should resolve");
+        assert_eq!(routes.len(), 1);
+        // The resolved path should be canonical (absolute)
+        let resolved = routes[0].tls_ca.as_deref().expect("tls_ca should be set");
+        assert!(
+            std::path::Path::new(resolved).is_absolute(),
+            "resolved tls_ca should be absolute, got: {}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn test_resolve_credentials_rejects_missing_tls_ca() {
+        use crate::profile::CustomCredentialDef;
+
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy");
+
+        let mut custom = HashMap::new();
+        custom.insert(
+            "bad-api".to_string(),
+            CustomCredentialDef {
+                upstream: "https://api.example.com".to_string(),
+                credential_key: "my_key".to_string(),
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: None,
+                endpoint_rules: vec![],
+                tls_ca: Some("/does/not/exist/ca.pem".to_string()),
+            },
+        );
+
+        let result = resolve_credentials(&policy, &["bad-api".to_string()], &custom);
+        assert!(result.is_err(), "should fail for missing tls_ca file");
     }
 
     #[test]
