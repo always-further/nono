@@ -694,7 +694,7 @@ fn installation_platform_label() -> Result<&'static str> {
 
 #[cfg(target_os = "windows")]
 fn installation_platform_label() -> Result<&'static str> {
-    Ok("Windows (preview build)")
+    Ok("Windows (native subset)")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

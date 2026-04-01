@@ -136,3 +136,7 @@ The Windows release candidate gate is complete when:
 - upgrade and uninstall behavior are validated
 - the current repair-disabled MSI contract is validated and documented
 - Windows artifact signatures are verified — all three artifacts (`nono.exe`, machine MSI, user MSI) return `SignatureStatus : Valid` via `Get-AuthenticodeSignature`
+
+## Promotion Criteria
+
+Before promoting Windows to a first-class release target, review the draft gates in the [Windows Promotion Criteria](/cli/development/windows-promotion-criteria) document and confirm they are truly satisfied. The RC checklist gates above are the operational pre-release verification; the promotion criteria document is the future-state promotion checklist rather than a declaration that promotion is already complete.

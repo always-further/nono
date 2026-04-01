@@ -27,7 +27,7 @@ use windows_sys::Win32::System::SystemServices::{
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = false;
 const WINDOWS_PREVIEW_DETAILS: &str =
-    "Windows preview build: command execution, setup reporting, basic process containment, launch-time executable policy validation, and a narrow blocked-network path for standalone executables are partially available, but full filesystem and network sandbox enforcement are not implemented yet; full Windows support is planned for a future release.";
+    "Windows native builds support setup, dry-run, direct execution, a documented restricted subset, and partial supervised/runtime enforcement. Full Windows sandbox parity is not complete yet, and unsupported Windows flows fail explicitly.";
 
 pub fn apply(caps: &CapabilitySet) -> Result<()> {
     let _ = caps;
@@ -38,9 +38,8 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
 
 #[must_use]
 pub fn is_supported() -> bool {
-    // Preview availability is not the same as sandbox support. Keep this
-    // aligned with `support_info().is_supported`, and only flip it when
-    // Windows has real, enforced support rather than a compilable scaffold.
+    // Windows subset support is real, but the library-wide `Sandbox::apply`
+    // path is not full parity yet.
     WINDOWS_PREVIEW_SUPPORTED
 }
 
@@ -133,9 +132,9 @@ pub fn validate_preview_entry_point(
                 preview_runtime_status(caps, execution_dir, context)
             {
                 return Err(NonoError::UnsupportedPlatform(format!(
-                    "Windows preview cannot enforce the requested sandbox controls for this live run ({}). \
+                    "Windows cannot enforce the requested sandbox controls for this live run ({}). \
 Use `nono run --dry-run ...` to validate policy, or rerun without those controls. \
-This is a preview limitation, not permanent product behavior.",
+This is a current Windows subset limitation, not a silent fallback.",
                     reasons.join(", ")
                 )));
             }
@@ -1279,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_scaffold_reports_consistent_unsupported_status() {
+    fn support_info_reports_consistent_partial_status() {
         let info = support_info();
         assert!(!is_supported());
         assert!(!info.is_supported);

@@ -1,9 +1,9 @@
 ---
-title: Windows Preview Validation
-description: Validation checklist for Windows preview packaging and runtime behavior
+title: Windows Validation Checklist
+description: Validation checklist for Windows packaging and current native-subset runtime behavior
 ---
 
-Use this checklist before handing a Windows build to a pilot user or marking a release candidate as ready for broader validation.
+Use this checklist before handing a Windows build to a tester or marking a release candidate as ready for broader validation of the current Windows native subset.
 
 ## Packaging Validation
 
@@ -67,11 +67,11 @@ On pull requests or mainline pushes, confirm:
 - `windows-integration.log` is available as an artifact
 - `windows-security.log` is available as an artifact
 
-These logs are the baseline comparison set for pilot bug reports.
+These logs are the baseline comparison set for Windows bug reports.
 
 ## Exit Criteria
 
-The Windows preview is ready for pilot distribution when:
+The Windows build is ready for broader validation when:
 
 - the Windows zip artifact is published successfully
 - local smoke checks pass

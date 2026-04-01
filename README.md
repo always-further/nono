@@ -43,7 +43,7 @@ With nono, you don't have to. nono wraps your agent in a kernel-isolated sandbox
 
 ---
 
-**Platform support:** macOS and Linux are supported today. Windows preview builds are now available for setup, dry-run, and direct execution validation flows.
+**Platform support:** macOS and Linux are supported today. Windows native builds now support a real enforced subset for setup, dry-run, direct execution, blocked-network, and selected supervised flows — see the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation) for the current Windows boundary.
 
 **Homebrew (macOS/Linux)**
 ```bash
@@ -129,10 +129,11 @@ apply(caps);  // Irreversible — kernel-enforced from here on
 
 nono applies OS-level restrictions that cannot be bypassed or escalated from within the sandboxed process. Permissions are defined as capabilities granted before execution -- once the sandbox is applied, it is irreversible. All child processes inherit the same restrictions.
 
-| Platform | Mechanism | Minimum Kernel |
-|----------|-----------|----------------|
+| Platform | Mechanism | Minimum Kernel / Version |
+|----------|-----------|--------------------------|
 | macOS | Seatbelt | 10.5+ |
 | Linux | Landlock | 5.13+ |
+| Windows | WFP + Process Integrity (native subset) | Windows 10 1903+ |
 
 ```bash
 # Grant read to src, write to output — everything else is denied by the kernel

@@ -24,9 +24,9 @@ sudo dpkg -i nono-cli_${VERSION}_${ARCH}.deb
 
 Other distributions are in the process of being packaged. In the meantime, you can use the prebuilt binaries or build from source.
 
-## Windows Preview
+## Windows Native
 
-Windows is available as a preview build distributed as either:
+Windows is available as a native build with a supported enforced subset, distributed as either:
 
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi` for administrator-managed installs
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi` for per-user installs without elevation
@@ -74,7 +74,7 @@ Windows preview currently supports:
 - `nono run --dry-run ...`
 - `nono run -- <command>` for preview-safe direct execution
 
-Windows preview intentionally does not claim full sandbox parity yet. Supported live restricted runs work for the active backend subset, while unsupported flows fail loudly with backend diagnostics. On Windows, `nono shell` and `nono wrap` remain intentionally unsupported live modes.
+Windows enforces a native subset using WFP and process integrity levels. Supported live restricted runs work for the active backend subset, while unsupported flows fail explicitly with backend diagnostics. `nono shell` and `nono wrap` are intentionally unsupported on Windows — these commands require Unix exec/ptrace semantics with no Windows equivalent. Runtime trust interception and delegated open flows are also not supported on Windows.
 
 For more detail on supported artifact types and scope behavior, see the [Windows Installer Strategy](/cli/development/windows-installer-strategy).
 
@@ -88,4 +88,4 @@ See the [Development Guide](/cli/development/index) for instructions on building
 |----------|-----------|--------|
 | Linux (kernel 5.13+) | Landlock LSM | Supported |
 | macOS | Seatbelt (sandbox_init) | Supported |
-| Windows | Preview direct execution and validation flows | Partial |
+| Windows (10 1903+) | WFP + Process Integrity (native subset) | Partial |

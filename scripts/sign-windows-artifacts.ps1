@@ -34,7 +34,7 @@ function Import-SigningCertificate {
     $securePassword = ConvertTo-SecureString $Password -AsPlainText -Force
     $cert = Import-PfxCertificate `
         -FilePath $PfxPath `
-        -CertStoreLocation Cert:\LocalMachine\My `
+        -CertStoreLocation Cert:\CurrentUser\My `
         -Password $securePassword
     return $cert.Thumbprint
 }
@@ -45,7 +45,7 @@ function Remove-SigningCertificate {
         [string]$Thumbprint
     )
 
-    $certPath = "Cert:\LocalMachine\My\$Thumbprint"
+    $certPath = "Cert:\CurrentUser\My\$Thumbprint"
     if (Test-Path -LiteralPath $certPath) {
         Remove-Item -LiteralPath $certPath -Force -ErrorAction SilentlyContinue
     }

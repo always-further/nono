@@ -88,7 +88,8 @@
           "cli/development/windows-installer-strategy",
           "cli/development/windows-preview-pilot",
           "cli/development/windows-preview-validation",
-          "cli/development/windows-release-candidate-checklist"
+          "cli/development/windows-release-candidate-checklist",
+          "cli/development/windows-promotion-criteria"
         ]
       }
     ]

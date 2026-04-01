@@ -7,13 +7,13 @@ This guide is the handoff package for a Windows preview pilot. It covers how to 
 
 ## Artifact
 
-Windows preview builds are published as:
+Windows builds are published as:
 
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`
 - `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`
 
-The MSI packages install `nono.exe`, `README.md`, and `LICENSE`, add the install directory to `PATH` for the selected scope, and create a standard Apps & Features uninstall entry. MSI and zip are the supported Windows delivery paths for the current native subset. Signed installers and MSIX packaging are not part of the current release path yet.
+The MSI packages install `nono.exe`, `README.md`, and `LICENSE`, add the install directory to `PATH` for the selected scope, and create a standard Apps & Features uninstall entry. MSI and zip are the supported Windows delivery paths. Release automation supports Authenticode signing when the required signing secrets are configured. Verify signatures with `Get-AuthenticodeSignature` before deploying.
 
 ## Install
 
@@ -59,10 +59,10 @@ The preview is for startup, config, dry-run, and direct execution path validatio
 - Apps & Features uninstall is supported through the MSI package.
 - machine MSI upgrades machine MSI installs, and user MSI upgrades user MSI installs.
 - zip installs are operator-managed and upgraded by replacing the extracted directory.
-- Windows service registration is not part of the preview yet.
-- A real Windows service installer requires a service-capable nono runtime mode; the current CLI binary is not a Service Control Manager host.
+- The current public MSI contract does not install or manage `nono-wfp-service` by default.
+- Service-capable packaging remains a documented future machine-MSI path rather than a shipped default release behavior.
 
-## Pilot Smoke Checks
+## Windows Smoke Checks
 
 Run these commands after installation:
 
@@ -86,7 +86,7 @@ Those commands should fail loudly with preview-limitation messaging. They must n
 
 ## Debugging Inputs
 
-For pilot triage, capture:
+For Windows triage, capture:
 
 - the exact command line
 - stdout and stderr
@@ -94,4 +94,4 @@ For pilot triage, capture:
 - whether the run was `--dry-run` or live
 - whether a profile or network restriction was requested
 
-In CI, the Windows lane uploads build and smoke logs as artifacts for comparison with local pilot behavior.
+In CI, the Windows lane uploads build and smoke logs as artifacts for comparison with local Windows behavior.

@@ -48,9 +48,9 @@ pub fn print_banner(silent: bool) {
         if !support.is_supported {
             eprintln!(
                 "  {} {}",
-                theme::fg("preview", t.yellow).bold(),
+                theme::fg("windows", t.yellow).bold(),
                 theme::fg(
-                    "Windows sandbox enforcement is partial and still in progress",
+                    "Windows restricted execution supports a native enforced subset; unsupported flows fail explicitly",
                     t.subtext
                 ),
             );
@@ -317,7 +317,10 @@ pub fn print_supervised_info(silent: bool, rollback: bool, proxy_active: bool) {
             eprintln!(
                 "  {} {}",
                 fg("mode", t.subtext),
-                fg(&format!("preview ({})", features.join(", ")), t.subtext,),
+                fg(
+                    &format!("supervised subset ({})", features.join(", ")),
+                    t.subtext,
+                ),
             );
             return;
         }
@@ -393,7 +396,7 @@ fn dry_run_summary(_support: &nono::SupportInfo) -> &'static str {
     #[cfg(target_os = "windows")]
     {
         if !_support.is_supported {
-            return "preview validation only; sandbox enforcement is not implemented on Windows yet";
+            return "dry-run validates the current Windows native subset without claiming full parity";
         }
     }
 

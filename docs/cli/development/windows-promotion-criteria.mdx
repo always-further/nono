@@ -1,0 +1,69 @@
+---
+title: Windows Promotion Criteria
+description: Draft promotion gates for Windows as a first-class nono release target
+---
+
+# Windows Promotion Criteria
+
+This document records the gates that must be satisfied before Windows is listed as a first-class supported platform in nono releases. These gates are a future-state checklist, not a statement that promotion is already complete.
+
+## Gate Summary
+
+| Gate | Requirement | Status |
+|------|-------------|--------|
+| Runtime output is free of misleading preview language | REL-01 | In progress |
+| CI lanes treat Windows identically to macOS and Linux | REL-01 | In progress |
+| Windows listed as supported platform in README and release artifacts | REL-02 | Not yet satisfied |
+| Installation guide reflects final Windows support level | REL-03 | In progress |
+| Product limitations documented as intentional decisions, not gaps | REL-03 | In progress |
+| Formal promotion criteria recorded and reviewed | REL-04 | In progress |
+
+## Gate Details
+
+### REL-01: Runtime output contains no preview language
+
+- [ ] `nono --help` on Windows contains no language describing the platform as preview, experimental, or beta
+- [ ] `nono run --dry-run` on Windows uses final supported-platform wording
+- [x] Supervised mode output on Windows shows `supervised (...)` for the supported subset
+- [ ] library-wide support reporting and runtime behavior are fully aligned for first-class release status
+- [x] CI job names for Windows (`Windows Build`, `Windows Smoke`, `Windows Integration`, `Windows Security`) carry no "preview" qualifier
+
+### REL-02: Windows listed as supported platform in release automation and README
+
+- [ ] README platform support line reflects final Windows release status accurately
+- [x] README Kernel-Enforced Sandbox feature table includes a Windows row
+- [ ] release workflow uploads signed Windows artifacts (`.exe`, machine MSI, user MSI, zip) as first-class release assets alongside macOS and Linux artifacts
+
+### REL-03: Installation guide and README reflect the final Windows release contract
+
+- [ ] Installation guide reflects the final supported release level
+- [x] Installation guide PowerShell example uses a real version placeholder (`vX.Y.Z`)
+- [x] `nono shell` and `nono wrap` limitations are documented as intentional product decisions
+- [ ] release-guide wording matches the final promotion state
+
+### REL-04: Formal promotion criteria documented
+
+- [x] This document exists and is committed to the repository
+- [x] This document is linked from the Windows RC checklist
+- [x] This document is listed in the docs navigation (docs.json)
+- [ ] every gate above is checked off
+
+## What Windows Does Not Support
+
+These are intentional product decisions, not promotion blockers:
+
+| Feature | Decision | Rationale |
+|---------|----------|-----------|
+| `nono shell` live execution | Permanently unsupported on Windows | Requires Unix exec/ptrace semantics; no Windows equivalent |
+| `nono wrap` live execution | Permanently unsupported on Windows | Requires one-way wrap/apply enforcement; no Windows equivalent |
+| Runtime trust interception | Deferred | Requires supervisor parity work beyond current scope |
+| Delegated open/browser flows | Deferred | Not part of current Windows backend |
+
+These limitations are documented in the [Windows Feature Gap Matrix](/cli/development/windows-feature-gap-matrix) and do not affect the supported command set or enforcement guarantees.
+
+## Prior Phase Prerequisites
+
+This promotion depends on earlier release-readiness work:
+
+- **Signing path:** Release workflow and docs must support signed Windows artifacts without silent fallback
+- **Packaging path:** installer, upgrade, uninstall, and any service packaging claims must match what the release workflow actually builds

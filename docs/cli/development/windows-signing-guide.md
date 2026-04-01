@@ -89,7 +89,7 @@ Remove-Item -Path $cert.PSPath -Force
 Signing is performed by `scripts/sign-windows-artifacts.ps1`. The script:
 
 1. Decodes `WINDOWS_SIGNING_CERT` from base64 to a PFX file
-2. Imports the certificate into `Cert:\LocalMachine\My`
+2. Imports the certificate into `Cert:\CurrentUser\My`
 3. Calls `signtool.exe sign /fd sha256 /sha1 <thumbprint> /t http://timestamp.digicert.com <artifact>` for each artifact
 4. Calls `signtool.exe verify /pa <artifact>` to confirm each signature
 5. Removes the certificate from the store and deletes the PFX temp file
