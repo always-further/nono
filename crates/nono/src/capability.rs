@@ -545,6 +545,10 @@ pub struct CapabilitySet {
     /// `sandbox_extension_consume()` tokens can expand the sandbox dynamically.
     /// On Linux, this flag is informational (seccomp-notify is installed separately).
     extensions_enabled: bool,
+    /// Enable macOS Seatbelt denial logging for supervised diagnostics.
+    /// When set, the generated Seatbelt profile emits `(debug deny)` so
+    /// sandboxd records denial events in the unified log.
+    seatbelt_debug_deny: bool,
 }
 
 impl CapabilitySet {
@@ -811,6 +815,11 @@ impl CapabilitySet {
         self.extensions_enabled = enabled;
     }
 
+    /// Enable or disable macOS Seatbelt denial logging.
+    pub fn set_seatbelt_debug_deny(&mut self, enabled: bool) {
+        self.seatbelt_debug_deny = enabled;
+    }
+
     /// Add to allowed commands list
     pub fn add_allowed_command(&mut self, cmd: impl Into<String>) {
         self.allowed_commands.push(cmd.into());
@@ -930,6 +939,12 @@ impl CapabilitySet {
     #[must_use]
     pub fn extensions_enabled(&self) -> bool {
         self.extensions_enabled
+    }
+
+    /// Check whether macOS Seatbelt denial logging is enabled.
+    #[must_use]
+    pub fn seatbelt_debug_deny(&self) -> bool {
+        self.seatbelt_debug_deny
     }
 
     /// Get allowed commands

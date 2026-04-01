@@ -584,6 +584,11 @@ impl PtyProxy {
         self.screen.render_plaintext()
     }
 
+    /// Returns true once the child has emitted any PTY output.
+    pub fn has_observed_output(&self) -> bool {
+        !self.scrollback.is_empty()
+    }
+
     fn attach_replay_bytes(&self) -> Vec<u8> {
         select_attach_replay_bytes(
             self.screen.alternate_screen_active(),

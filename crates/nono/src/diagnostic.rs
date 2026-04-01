@@ -43,6 +43,19 @@ pub struct DenialRecord {
     pub reason: DenialReason,
 }
 
+/// Best-effort sandbox violation recovered from OS-native logging.
+///
+/// On macOS, Seatbelt does not stream deny events back to the supervisor like
+/// Linux seccomp-notify does, so diagnostics can supplement denials with
+/// unified-log records recovered from sandboxd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxViolation {
+    /// Denied operation, such as `file-read-data` or `mach-lookup`.
+    pub operation: String,
+    /// Optional path or resource associated with the violation.
+    pub target: Option<String>,
+}
+
 /// Path-level hint extracted from a command's own error output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedPathHint {
@@ -454,6 +467,7 @@ pub struct DiagnosticFormatter<'a> {
     caps: &'a CapabilitySet,
     mode: DiagnosticMode,
     denials: &'a [DenialRecord],
+    sandbox_violations: &'a [SandboxViolation],
     /// Paths that are write-protected due to trust verification
     protected_paths: &'a [PathBuf],
     /// Primary verdict extracted from the command output.
@@ -480,6 +494,7 @@ impl<'a> DiagnosticFormatter<'a> {
             caps,
             mode: DiagnosticMode::Standard,
             denials: &[],
+            sandbox_violations: &[],
             protected_paths: &[],
             primary_verdict: None,
             blocked_protected_file: None,
@@ -502,6 +517,13 @@ impl<'a> DiagnosticFormatter<'a> {
     #[must_use]
     pub fn with_denials(mut self, denials: &'a [DenialRecord]) -> Self {
         self.denials = denials;
+        self
+    }
+
+    /// Add OS-native sandbox violation records.
+    #[must_use]
+    pub fn with_sandbox_violations(mut self, violations: &'a [SandboxViolation]) -> Self {
+        self.sandbox_violations = violations;
         self
     }
 
@@ -888,7 +910,10 @@ impl<'a> DiagnosticFormatter<'a> {
         }
         lines.push("[nono]".to_string());
 
-        if self.denials.is_empty() && !self.caps.extensions_enabled() {
+        if self.denials.is_empty()
+            && self.sandbox_violations.is_empty()
+            && !self.caps.extensions_enabled()
+        {
             // No denials and no capability expansion (macOS supervised mode).
             // Seatbelt blocks at the kernel level without notifying the supervisor,
             // so we fall back to the standard policy summary with re-run suggestions.
@@ -914,6 +939,26 @@ impl<'a> DiagnosticFormatter<'a> {
                 lines.push("[nono]".to_string());
                 self.format_follow_up_guidance(&mut lines, None);
             }
+            return lines.join("\n");
+        } else if self.denials.is_empty() && !self.sandbox_violations.is_empty() {
+            if let Some(verdict) = primary_verdict.as_ref() {
+                self.format_primary_verdict_guidance(&mut lines, verdict);
+                lines.push("[nono]".to_string());
+            }
+
+            lines.push("[nono] Sandbox denied the following operations:".to_string());
+            for violation in self.sandbox_violations {
+                match &violation.target {
+                    Some(target) => {
+                        lines.push(format!("[nono]   {}  {}", violation.operation, target));
+                    }
+                    None => {
+                        lines.push(format!("[nono]   {}", violation.operation));
+                    }
+                }
+            }
+            lines.push("[nono]".to_string());
+            self.format_follow_up_guidance(&mut lines, None);
             return lines.join("\n");
         } else if self.denials.is_empty() {
             // No denials but expansion is active (Linux supervised mode).
@@ -2499,6 +2544,30 @@ mod tests {
         assert!(output.contains("No access requests were denied"));
         assert!(output.contains("may be unrelated"));
         assert!(!output.contains("--allow <path>"));
+    }
+
+    #[test]
+    fn test_supervised_uses_sandbox_violations_when_available() {
+        let caps = make_test_caps();
+        let violations = vec![
+            SandboxViolation {
+                operation: "file-read-data".to_string(),
+                target: Some("/Users/alice/.ssh/id_rsa".to_string()),
+            },
+            SandboxViolation {
+                operation: "mach-lookup".to_string(),
+                target: Some("com.apple.logd".to_string()),
+            },
+        ];
+        let formatter = DiagnosticFormatter::new(&caps)
+            .with_mode(DiagnosticMode::Supervised)
+            .with_sandbox_violations(&violations);
+        let output = formatter.format_footer(1);
+
+        assert!(output.contains("Sandbox denied the following operations:"));
+        assert!(output.contains("file-read-data  /Users/alice/.ssh/id_rsa"));
+        assert!(output.contains("mach-lookup  com.apple.logd"));
+        assert!(!output.contains("Sandbox policy:"));
     }
 
     #[test]

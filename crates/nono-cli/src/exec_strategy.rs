@@ -34,6 +34,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 pub(crate) use env_sanitization::is_dangerous_env_var;
@@ -239,6 +242,9 @@ pub struct ExecConfig<'a> {
     pub threading: ThreadingContext,
     /// Paths that are write-protected (signed instruction files).
     pub protected_paths: &'a [std::path::PathBuf],
+    /// Optional startup timeout for known interactive CLIs that were launched
+    /// without their recommended built-in profile.
+    pub startup_timeout: Option<StartupTimeoutConfig<'a>>,
     /// Whether runtime capability elevation is enabled.
     /// When true, the child installs seccomp-notify and the parent can grant
     /// capabilities at runtime. On macOS this is currently unused.
@@ -251,6 +257,13 @@ pub struct ExecConfig<'a> {
     /// sends the notify fd; parent expects to receive it.
     #[cfg(target_os = "linux")]
     pub seccomp_proxy_fallback: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct StartupTimeoutConfig<'a> {
+    pub timeout: Duration,
+    pub program: &'a str,
+    pub profile: &'a str,
 }
 
 /// Configuration for supervisor IPC in supervised execution mode.
@@ -616,7 +629,16 @@ pub fn execute_supervised(
             #[cfg(target_os = "linux")]
             let effective_caps: &CapabilitySet = &child_caps;
 
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            let mut child_caps = config.caps.clone();
+            #[cfg(target_os = "macos")]
+            if supervisor.is_some() {
+                child_caps.set_seatbelt_debug_deny(true);
+            }
+            #[cfg(target_os = "macos")]
+            let effective_caps: &CapabilitySet = &child_caps;
+
+            #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
             let effective_caps: &CapabilitySet = config.caps;
 
             // CHILD: Set up PTY, apply sandbox, then exec.
@@ -1006,12 +1028,48 @@ pub fn execute_supervised(
             setup_signal_forwarding(child, pty_proxy.as_ref().map(|p| p.poll_fds().0));
             let _signal_forwarding_guard = SignalForwardingGuard;
 
+            let startup_timeout_completed = if config.startup_timeout.is_some()
+                && pty_proxy.is_none()
+            {
+                let completed = Arc::new(AtomicBool::new(false));
+                if let Some(timeout_cfg) = config.startup_timeout {
+                    let timeout = timeout_cfg.timeout;
+                    let program = timeout_cfg.program.to_string();
+                    let profile = timeout_cfg.profile.to_string();
+                    let completed_flag = Arc::clone(&completed);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(timeout);
+                        if !completed_flag.load(Ordering::SeqCst) {
+                            print_terminal_safe_stderr(&format!(
+                                "[nono] Startup timed out: `{}` did not become ready.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
+                                program,
+                                program,
+                                profile,
+                                profile,
+                                program,
+                            ));
+                            let _ = signal::kill(child, Signal::SIGKILL);
+                        }
+                    });
+                }
+                Some(completed)
+            } else {
+                None
+            };
+
             // NOTE: peer_pid() is NOT called here. For socketpair() created
             // before fork, LOCAL_PEERPID/SO_PEERCRED return the parent's own PID
             // (credentials are captured at creation time, not updated after fork).
             // Socketpairs are inherently secure: anonymous (no filesystem path),
             // only our forked child has the other end. peer_pid() is useful for
             // named sockets (bind/connect), not socketpair+fork.
+
+            #[cfg(target_os = "macos")]
+            let sandbox_log_collector = if supervisor.is_some() {
+                crate::sandbox_log::SandboxLogCollector::start(child.as_raw())
+            } else {
+                None
+            };
 
             // Build initial-set path lookup for seccomp fast-path (Linux)
             // Stores (resolved_path, is_file) to distinguish file vs directory semantics:
@@ -1040,6 +1098,7 @@ pub fn execute_supervised(
                             child,
                             &mut sup_sock,
                             sup_cfg,
+                            config.startup_timeout,
                             seccomp_notify_fd.as_ref(),
                             proxy_notify_fd.as_ref(),
                             &initial_caps,
@@ -1053,14 +1112,20 @@ pub fn execute_supervised(
                             child,
                             &mut sup_sock,
                             sup_cfg,
+                            config.startup_timeout,
                             trust_interceptor,
                             pty_proxy.as_mut(),
                         )?
                     }
                 } else {
-                    let status = wait_for_child_with_pty(child, pty_proxy.as_mut())?;
+                    let status =
+                        wait_for_child_with_pty(child, pty_proxy.as_mut(), config.startup_timeout)?;
                     (status, Vec::new())
                 };
+
+            if let Some(done) = startup_timeout_completed {
+                done.store(true, Ordering::SeqCst);
+            }
 
             let exit_code = match status {
                 WaitStatus::Exited(_, code) => {
@@ -1108,9 +1173,21 @@ pub fn execute_supervised(
             // Print diagnostic footer on non-zero exit or when the PTY
             // output shows a likely sandbox-related issue.
             if should_print_diagnostics {
+                #[cfg(target_os = "macos")]
+                let sandbox_violations = if supervisor.is_some() {
+                    sandbox_log_collector
+                        .map(crate::sandbox_log::SandboxLogCollector::finish)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                #[cfg(not(target_os = "macos"))]
+                let sandbox_violations = Vec::new();
+
                 let mut formatter = DiagnosticFormatter::new(config.caps)
                     .with_mode(mode)
                     .with_denials(&denials)
+                    .with_sandbox_violations(&sandbox_violations)
                     .with_protected_paths(config.protected_paths)
                     .with_error_observation(error_observation)
                     .with_current_dir(config.current_dir);
@@ -1168,11 +1245,13 @@ fn get_max_fd() -> i32 {
 fn wait_for_child_with_pty(
     child: Pid,
     pty: Option<&mut crate::pty_proxy::PtyProxy>,
+    startup_timeout: Option<StartupTimeoutConfig<'_>>,
 ) -> Result<WaitStatus> {
     let pty = match pty {
         Some(pty) => pty,
-        None => return wait_for_child(child),
+        None => return wait_for_child_with_startup_timeout(child, startup_timeout),
     };
+    let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
 
     loop {
         let (master_fd, client_fd, attach_fd, resize_fd) = pty.poll_fds();
@@ -1231,7 +1310,24 @@ fn wait_for_child_with_pty(
         }
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => continue,
+            Ok(WaitStatus::StillAlive) => {
+                if let Some((deadline, timeout_cfg)) = startup_deadline {
+                    if Instant::now() >= deadline && !pty.has_observed_output() {
+                        print_terminal_safe_stderr(&format!(
+                            "[nono] Startup timed out: `{}` produced no terminal output.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
+                            timeout_cfg.program,
+                            timeout_cfg.program,
+                            timeout_cfg.profile,
+                            timeout_cfg.profile,
+                            timeout_cfg.program,
+                        ));
+                        let _ = signal::kill(child, Signal::SIGKILL);
+                        let status = wait_for_child(child)?;
+                        return Ok(status);
+                    }
+                }
+                continue;
+            }
             Ok(WaitStatus::Stopped(_, sig)) => {
                 debug!("Child stopped by signal {}, keeping supervisor alive", sig);
                 continue;
@@ -1249,6 +1345,40 @@ fn wait_for_child_with_pty(
     }
 
     wait_for_child(child)
+}
+
+fn wait_for_child_with_startup_timeout(
+    child: Pid,
+    startup_timeout: Option<StartupTimeoutConfig<'_>>,
+) -> Result<WaitStatus> {
+    let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
+
+    loop {
+        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => {
+                if let Some((deadline, timeout_cfg)) = startup_deadline {
+                    if Instant::now() >= deadline {
+                        print_terminal_safe_stderr(&format!(
+                            "[nono] Startup timed out: `{}` did not become ready.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
+                            timeout_cfg.program,
+                            timeout_cfg.program,
+                            timeout_cfg.profile,
+                            timeout_cfg.profile,
+                            timeout_cfg.program,
+                        ));
+                        let _ = signal::kill(child, Signal::SIGKILL);
+                        return wait_for_child(child);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Ok(status) => return Ok(status),
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(e) => {
+                return Err(NonoError::SandboxInit(format!("waitpid() failed: {}", e)));
+            }
+        }
+    }
 }
 
 /// Wait for child process, handling EINTR from signals.
@@ -1502,12 +1632,14 @@ fn run_supervisor_loop(
     child: Pid,
     sock: &mut SupervisorSocket,
     config: &SupervisorConfig<'_>,
+    startup_timeout: Option<StartupTimeoutConfig<'_>>,
     mut trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
     mut pty: Option<&mut crate::pty_proxy::PtyProxy>,
 ) -> Result<(WaitStatus, Vec<DenialRecord>)> {
     let sock_fd = sock.as_raw_fd();
     let mut denials = Vec::new();
     let mut seen_request_ids = HashSet::new();
+    let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
 
     loop {
         let (pty_master, pty_client, pty_attach, pty_resize) =
@@ -1606,7 +1738,24 @@ fn run_supervisor_loop(
         }
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => continue,
+            Ok(WaitStatus::StillAlive) => {
+                if let Some((deadline, timeout_cfg)) = startup_deadline {
+                    let has_output = pty.as_ref().is_some_and(|p| p.has_observed_output());
+                    if Instant::now() >= deadline && !has_output {
+                        print_terminal_safe_stderr(&format!(
+                            "[nono] Startup timed out: `{}` did not become ready.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
+                            timeout_cfg.program,
+                            timeout_cfg.program,
+                            timeout_cfg.profile,
+                            timeout_cfg.profile,
+                            timeout_cfg.program,
+                        ));
+                        let _ = signal::kill(child, Signal::SIGKILL);
+                        return Ok((wait_for_child(child)?, denials));
+                    }
+                }
+                continue;
+            }
             Ok(WaitStatus::Stopped(_, sig)) => {
                 debug!("Child stopped by signal {}, keeping supervisor alive", sig);
                 continue;
@@ -1657,6 +1806,7 @@ fn run_supervisor_loop(
     child: Pid,
     sock: &mut SupervisorSocket,
     config: &SupervisorConfig<'_>,
+    startup_timeout: Option<StartupTimeoutConfig<'_>>,
     seccomp_fd: Option<&OwnedFd>,
     proxy_seccomp_fd: Option<&OwnedFd>,
     initial_caps: &[supervisor_linux::InitialCapability],
@@ -1670,6 +1820,7 @@ fn run_supervisor_loop(
     let mut denials = Vec::new();
     let mut seen_request_ids = HashSet::new();
     let mut sock_fd_active = true;
+    let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
 
     loop {
         let mut pfds: Vec<libc::pollfd> = vec![libc::pollfd {
@@ -1832,7 +1983,24 @@ fn run_supervisor_loop(
         }
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => continue,
+            Ok(WaitStatus::StillAlive) => {
+                if let Some((deadline, timeout_cfg)) = startup_deadline {
+                    let has_output = pty.as_ref().is_some_and(|p| p.has_observed_output());
+                    if Instant::now() >= deadline && !has_output {
+                        print_terminal_safe_stderr(&format!(
+                            "[nono] Startup timed out: `{}` did not become ready.\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
+                            timeout_cfg.program,
+                            timeout_cfg.program,
+                            timeout_cfg.profile,
+                            timeout_cfg.profile,
+                            timeout_cfg.program,
+                        ));
+                        let _ = signal::kill(child, Signal::SIGTERM);
+                        return Ok((wait_for_child(child)?, denials));
+                    }
+                }
+                continue;
+            }
             Ok(WaitStatus::Stopped(_, sig)) => {
                 debug!("Child stopped by signal {}, keeping supervisor alive", sig);
                 continue;
@@ -3020,6 +3188,7 @@ mod tests {
                     child,
                     &mut sock,
                     &sup_cfg,
+                    None, // no startup timeout
                     None, // no seccomp
                     None, // no proxy seccomp
                     &[],  // no initial caps
@@ -3029,7 +3198,8 @@ mod tests {
 
                 #[cfg(not(target_os = "linux"))]
                 let result = run_supervisor_loop(
-                    child, &mut sock, &sup_cfg, None, // no trust interceptor
+                    child, &mut sock, &sup_cfg, None, // no startup timeout
+                    None, // no trust interceptor
                     None, // no PTY relay
                 );
 
@@ -3115,6 +3285,7 @@ mod tests {
                     child,
                     &mut sock,
                     &sup_cfg,
+                    None, // no startup timeout
                     None, // no openat seccomp
                     None, // no proxy seccomp — V4+ Landlock handles it
                     &[],  // no initial caps

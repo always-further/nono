@@ -4,7 +4,10 @@ use crate::supervised_runtime::{execute_supervised_runtime, SupervisedRuntimeCon
 use crate::{config, exec_strategy, output, sandbox_state};
 use nono::{CapabilitySet, NonoError, Result, Sandbox};
 use std::path::Path;
+use std::time::Duration;
 use tracing::{error, info};
+
+const PROFILE_HINT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
@@ -80,6 +83,13 @@ fn recommended_builtin_profile(program: &Path) -> Option<&'static str> {
     }
 }
 
+fn should_apply_startup_timeout(
+    recommended_profile: Option<&str>,
+    cmd_args: &[impl AsRef<std::ffi::OsStr>],
+) -> bool {
+    recommended_profile.is_some() && cmd_args.is_empty()
+}
+
 pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     let LaunchPlan {
         program,
@@ -117,14 +127,19 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     }
 
     let resolved_program = exec_strategy::resolve_program(&command[0])?;
-    if flags.session.profile_name.is_none() {
-        if let Some(profile) = recommended_builtin_profile(&resolved_program) {
-            let program_name = resolved_program
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(&command[0]);
-            output::print_profile_hint(program_name, profile, flags.silent);
-        }
+    let recommended_profile = if flags.session.profile_name.is_none() {
+        recommended_builtin_profile(&resolved_program)
+    } else {
+        None
+    };
+
+    let recommended_program_name = resolved_program
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&command[0]);
+
+    if let Some(profile) = recommended_profile {
+        output::print_profile_hint(recommended_program_name, profile, flags.silent);
     }
     let cap_file = write_capability_state_file(&caps, &flags.override_deny_paths, flags.silent);
     let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
@@ -222,6 +237,15 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         no_diagnostics: flags.no_diagnostics || flags.silent,
         threading,
         protected_paths: &trust.protected_paths,
+        startup_timeout: if should_apply_startup_timeout(recommended_profile, &cmd_args) {
+            recommended_profile.map(|profile| exec_strategy::StartupTimeoutConfig {
+                timeout: PROFILE_HINT_STARTUP_TIMEOUT,
+                program: recommended_program_name,
+                profile,
+            })
+        } else {
+            None
+        },
         capability_elevation: flags.capability_elevation,
         #[cfg(target_os = "linux")]
         seccomp_proxy_fallback,
@@ -301,7 +325,7 @@ fn write_capability_state_file(
 
 #[cfg(test)]
 mod tests {
-    use super::recommended_builtin_profile;
+    use super::{recommended_builtin_profile, should_apply_startup_timeout};
     use std::path::Path;
 
     #[test]
@@ -319,5 +343,16 @@ mod tests {
     #[test]
     fn recommended_builtin_profile_ignores_unknown_commands() {
         assert_eq!(recommended_builtin_profile(Path::new("/usr/bin/env")), None);
+    }
+
+    #[test]
+    fn startup_timeout_applies_only_to_bare_interactive_profiled_tools() {
+        let no_args: [&str; 0] = [];
+        assert!(should_apply_startup_timeout(Some("claude-code"), &no_args));
+        assert!(!should_apply_startup_timeout(
+            Some("claude-code"),
+            &["--version"]
+        ));
+        assert!(!should_apply_startup_timeout(None, &no_args));
     }
 }
