@@ -200,13 +200,20 @@ impl CredentialStore {
 fn build_tls_connector_with_ca(ca_path: &str) -> Result<tokio_rustls::TlsConnector> {
     let ca_path = std::path::Path::new(ca_path);
 
-    let ca_pem = std::fs::read(ca_path).map_err(|e| {
-        ProxyError::Config(format!(
-            "failed to read CA certificate '{}': {}",
-            ca_path.display(),
-            e
-        ))
-    })?;
+    let ca_pem = Zeroizing::new(std::fs::read(ca_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ProxyError::Config(format!(
+                "CA certificate file not found: '{}'",
+                ca_path.display()
+            ))
+        } else {
+            ProxyError::Config(format!(
+                "failed to read CA certificate '{}': {}",
+                ca_path.display(),
+                e
+            ))
+        }
+    })?);
 
     let mut root_store = rustls::RootCertStore::empty();
 
@@ -385,7 +392,7 @@ AAAAAAAICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
             .expect("should fail for missing file")
             .to_string();
         assert!(
-            err.contains("failed to read CA certificate"),
+            err.contains("CA certificate file not found"),
             "unexpected error: {}",
             err
         );
