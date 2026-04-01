@@ -312,6 +312,9 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
 
     // Start with deny default
     profile.push_str("(deny default)\n");
+    if caps.seatbelt_debug_deny() {
+        profile.push_str("(debug deny)\n");
+    }
 
     // Allow specific process operations needed for execution
     profile.push_str("(allow process-exec*)\n");

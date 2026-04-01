@@ -34,6 +34,7 @@ mod rollback_preflight;
 mod rollback_runtime;
 mod rollback_session;
 mod rollback_ui;
+mod sandbox_log;
 mod sandbox_prepare;
 mod sandbox_state;
 mod session;
@@ -94,9 +95,9 @@ mod tests {
         trust_interception_active,
     };
     use crate::proxy_runtime::{resolve_effective_proxy_settings, EffectiveProxySettings};
-    use crate::sandbox_prepare::PreparedSandbox;
     #[cfg(target_os = "macos")]
     use crate::sandbox_prepare::maybe_enable_macos_launch_services;
+    use crate::sandbox_prepare::PreparedSandbox;
     use crate::startup_runtime::allows_pre_exec_update_check;
     use nono::{AccessMode, CapabilitySet, FsCapability};
 

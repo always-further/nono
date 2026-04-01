@@ -986,6 +986,15 @@ fn format_identity(identity: &trust::SignerIdentity) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        match ENV_LOCK.get_or_init(|| Mutex::new(())).lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 
     #[test]
     fn scan_empty_dir_returns_empty_result() {
@@ -1197,7 +1206,7 @@ mod tests {
 
     #[test]
     fn load_scan_policy_with_trust_override_skips_verification() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Isolate from the real user config dir so a stale trust-policy.json
         // on the developer's machine doesn't interfere with the test.
@@ -1224,7 +1233,7 @@ mod tests {
 
     #[test]
     fn load_scan_policy_skips_policy_verification_without_signed_artifacts() {
-        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let scan_dir = tempfile::tempdir().unwrap();
         let include_pattern = "*.arbitrary";
         let orig_xdg = std::env::var("XDG_CONFIG_HOME").ok();

@@ -507,7 +507,16 @@ const DATA_PROCESSING_PROFILE: &str = r#"{
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned")
+    }
 
     /// Profiles written by `setup --profiles` must be loadable by `load_profile()`.
     ///
@@ -518,6 +527,7 @@ mod tests {
     /// `resolve_user_config_dir()` returning `~/.config`. This test catches that.
     #[test]
     fn test_setup_profiles_loadable_by_name() {
+        let _guard = env_lock();
         let original_home = env::var("HOME").ok();
         let original_xdg = env::var("XDG_CONFIG_HOME").ok();
 
