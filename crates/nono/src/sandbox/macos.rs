@@ -318,13 +318,19 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     profile.push_str("(allow process-exec*)\n");
     profile.push_str("(allow process-fork)\n");
 
-    // Process info: allow self-inspection, then apply mode-based rule for others
-    profile.push_str("(allow process-info* (target self))\n");
+    // Process info: allow self-inspection and same-sandbox inspection for both
+    // Isolated and AllowSameSandbox, matching Linux behaviour where Landlock
+    // cannot distinguish the two. Denying process-info for same-sandbox children
+    // would break health checks via proc_pidinfo() / sysctl(KERN_PROC) that
+    // Node.js modules use to monitor child process state.
+    //
+    // We emit (target self) alongside (target same-sandbox) because Seatbelt's
+    // same-sandbox filter may not subsume self — being explicit ensures the
+    // process can always inspect itself regardless of implementation details.
     match caps.process_info_mode() {
-        crate::capability::ProcessInfoMode::Isolated => {
-            profile.push_str("(deny process-info* (target others))\n");
-        }
-        crate::capability::ProcessInfoMode::AllowSameSandbox => {
+        crate::capability::ProcessInfoMode::Isolated
+        | crate::capability::ProcessInfoMode::AllowSameSandbox => {
+            profile.push_str("(allow process-info* (target self))\n");
             profile.push_str("(allow process-info* (target same-sandbox))\n");
         }
         crate::capability::ProcessInfoMode::AllowAll => {
@@ -365,22 +371,24 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         profile.push_str("(allow ipc-posix-sem*)\n");
     }
 
-    // Signal isolation: (target self) restricts kill() to the calling process's
-    // own PID only. This blocks signals to external processes but also blocks
-    // the parent from signaling forked children via kill(). Terminal-generated
-    // signals (Ctrl+C → SIGINT to foreground process group) are delivered by
-    // the kernel and bypass this restriction, so interactive use is unaffected.
-    // In monitor mode, the parent's signal forwarding handler will get EPERM
-    // when trying to forward to the child — this is tolerated silently.
+    // Signal isolation: both Isolated and AllowSameSandbox emit
+    // (target self) + (target same-sandbox). This matches Linux behaviour
+    // where Landlock's LANDLOCK_SCOPE_SIGNAL scopes to the sandbox domain,
+    // not to the calling process alone — making Isolated and AllowSameSandbox
+    // equivalent.
     //
-    // Note: for AllowSameSandbox we emit both (target self) and (target same-sandbox)
-    // because Seatbelt's same-sandbox filter may not subsume self — being explicit
-    // ensures the process can always signal itself regardless of implementation details.
+    // Emitting only (target self) for Isolated would prevent the sandboxed
+    // process from signaling its own forked children, causing orphan process
+    // accumulation when the parent calls kill(child_pid, SIGTERM) and gets
+    // EPERM. Terminal-generated signals (Ctrl+C → SIGINT) bypass Seatbelt
+    // since they are delivered by the kernel to the foreground process group.
+    //
+    // We emit both (target self) and (target same-sandbox) because Seatbelt's
+    // same-sandbox filter may not subsume self — being explicit ensures the
+    // process can always signal itself regardless of implementation details.
     match caps.signal_mode() {
-        crate::capability::SignalMode::Isolated => {
-            profile.push_str("(allow signal (target self))\n");
-        }
-        crate::capability::SignalMode::AllowSameSandbox => {
+        crate::capability::SignalMode::Isolated
+        | crate::capability::SignalMode::AllowSameSandbox => {
             profile.push_str("(allow signal (target self))\n");
             profile.push_str("(allow signal (target same-sandbox))\n");
         }
@@ -1018,6 +1026,17 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_profile_signal_isolated_allows_same_sandbox() {
+        // Isolated now emits same-sandbox rules (matching Linux behaviour)
+        // to allow signaling child processes that inherited the sandbox.
+        let caps = CapabilitySet::new(); // default = Isolated
+        let profile = generate_profile(&caps).unwrap();
+        assert!(profile.contains("(allow signal (target self))"));
+        assert!(profile.contains("(allow signal (target same-sandbox))"));
+        assert!(!profile.contains("(allow signal)\n"));
+    }
+
+    #[test]
     fn test_generate_profile_signal_allow_same_sandbox() {
         use crate::capability::SignalMode;
         let caps = CapabilitySet::new().set_signal_mode(SignalMode::AllowSameSandbox);
@@ -1029,10 +1048,13 @@ mod tests {
 
     #[test]
     fn test_generate_profile_process_info_isolated() {
+        // Isolated now emits same-sandbox rules (matching Linux behaviour)
+        // instead of denying others, to allow child process health checks.
         let caps = CapabilitySet::new(); // default = Isolated
         let profile = generate_profile(&caps).unwrap();
         assert!(profile.contains("(allow process-info* (target self))"));
-        assert!(profile.contains("(deny process-info* (target others))"));
+        assert!(profile.contains("(allow process-info* (target same-sandbox))"));
+        assert!(!profile.contains("(deny process-info* (target others))"));
     }
 
     #[test]
@@ -1050,8 +1072,9 @@ mod tests {
         use crate::capability::ProcessInfoMode;
         let caps = CapabilitySet::new().set_process_info_mode(ProcessInfoMode::AllowAll);
         let profile = generate_profile(&caps).unwrap();
-        assert!(profile.contains("(allow process-info* (target self))"));
+        // AllowAll emits the wildcard rule only — no redundant (target self)
         assert!(profile.contains("(allow process-info*)\n"));
+        assert!(!profile.contains("(allow process-info* (target self))"));
         assert!(!profile.contains("(deny process-info* (target others))"));
     }
 

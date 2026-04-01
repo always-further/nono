@@ -70,3 +70,7 @@ Do you need rollback, expansion, proxy, or diagnostics?
 ```
 
 For most users running AI agents interactively, the default `nono run` (Supervised mode) is the right choice. Use `nono wrap` when you need a minimal, no-parent execution for scripts or embedding.
+
+## WSL2 Notes
+
+Both execution modes work on WSL2. However, capability expansion is unavailable in Supervised mode due to WSL2's seccomp notify limitation. The proxy-based network filtering in Supervised mode is also blocked by default on WSL2. See [WSL2 Support](/cli/internals/wsl2) for details.

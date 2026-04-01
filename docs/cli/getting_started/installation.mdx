@@ -89,3 +89,11 @@ See the [Development Guide](/cli/development/index) for instructions on building
 | Linux (kernel 5.13+) | Landlock LSM | Supported |
 | macOS | Seatbelt (sandbox_init) | Supported |
 | Windows (10 1903+) | WFP + Process Integrity (native subset) | Partial |
+| Windows (WSL2) | Landlock LSM (via WSL2 kernel) | Supported ([84% feature coverage](/cli/internals/wsl2-feature-matrix)) |
+| Windows (10 1903+) | WFP + Process Integrity (native subset) | Partial |
+
+### WSL2
+
+nono runs inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) using the same Landlock enforcement as native Linux. The WSL2 kernel (6.6) ships with `CONFIG_SECURITY_LANDLOCK=y` enabled by default. Install nono inside your WSL2 distribution using any of the Linux methods above.
+
+See [WSL2 Support](/cli/internals/wsl2) for the full compatibility details and known limitations.

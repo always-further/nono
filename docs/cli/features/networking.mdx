@@ -154,6 +154,63 @@ export NONO_UPSTREAM_BYPASS=git.internal.corp,*.dev.local
 nono run --allow-cwd --network-profile enterprise -- my-agent
 ```
 
+## Endpoint Filtering
+
+When credential injection routes traffic through the reverse proxy, you can further restrict which HTTP method+path combinations are allowed on a per-service basis. This enforces least-privilege at the API level — the agent can reach an allowed domain but only use specific endpoints.
+
+### CLI Usage
+
+Use `--allow-endpoint` to restrict a credential service to specific patterns:
+
+```bash
+# Allow only chat completions through OpenAI
+nono run --allow-cwd --credential openai \
+  --allow-endpoint 'openai:POST:/v1/chat/completions' \
+  -- my-agent
+
+# Allow GitHub issue reads and comment writes, block everything else
+nono run --allow-cwd --credential github \
+  --allow-endpoint 'github:GET:/repos/*/issues/**' \
+  --allow-endpoint 'github:POST:/repos/*/issues/*/comments' \
+  -- my-agent
+```
+
+When any endpoint rules are configured for a service, requests that don't match receive `403 Forbidden` and are logged in the audit trail.
+
+### Profile Configuration
+
+Endpoint rules can also be defined on custom credentials within profiles:
+
+```json
+{
+  "network": {
+    "custom_credentials": {
+      "gitlab": {
+        "upstream": "https://gitlab.example.com",
+        "credential_key": "gitlab_token",
+        "endpoint_rules": [
+          { "method": "GET", "path": "/api/v4/projects/*/merge_requests/**" },
+          { "method": "POST", "path": "/api/v4/projects/*/merge_requests/*/notes" }
+        ]
+      }
+    }
+  }
+}
+```
+
+See [Credential Injection — Custom Credential Definitions](/cli/features/credential-injection#custom-credential-definitions) for the full `custom_credentials` schema.
+
+### Pattern Syntax
+
+Path patterns use standard glob syntax (same as `.gitignore` and nono profile `include` patterns):
+
+| Pattern | Matches |
+|---------|---------|
+| `/v1/chat/completions` | Exact path only |
+| `/repos/*/issues` | One segment wildcard (e.g., `/repos/myrepo/issues`) |
+| `/api/**` | Zero or more segments (e.g., `/api/v1/data/export`) |
+| `*` | Any method (when used as the method field) |
+
 ## Localhost IPC
 
 Use `--open-port` to allow bidirectional localhost TCP on a specific port (connect + listen). This enables IPC between sandboxed processes — for example, an MCP server in one sandbox and an AI agent in another.
@@ -219,6 +276,16 @@ Network filtering uses Seatbelt rules. The sandbox allows only `(remote tcp "loc
 (allow system-socket (socket-domain AF_INET6) (socket-type SOCK_STREAM))
 ```
 
+### WSL2
+
+The WSL2 kernel (6.6) ships with Landlock V3, which does not include TCP network filtering (V4 requires kernel 6.7+). Additionally, the seccomp-based proxy fallback is unavailable due to [WSL2's own seccomp notify listener](https://github.com/microsoft/WSL/issues/9548).
+
+**What works:** `--block-net` (blocks all networking via `SECCOMP_RET_ERRNO`).
+
+**What doesn't work:** Per-port filtering (`--open-port`, `--listen-port`) and proxy-based domain filtering (`--allow-domain`, `--network-profile`, `--credential`). Domain filtering is blocked by default on WSL2 — set `wsl2_proxy_policy: "insecure_proxy"` in your profile's security config to opt in to degraded execution. See [Credential Proxy on WSL2](/cli/internals/wsl2#credential-proxy-on-wsl2) for details.
+
+When Microsoft upgrades the WSL2 kernel to 6.7+, per-port filtering will activate automatically. See [WSL2 Support](/cli/internals/wsl2) for full details.
+
 ## Audit Logging
 
 All proxy decisions are logged via `tracing`:
@@ -239,6 +306,7 @@ nono run -vv --network-profile claude-code --allow-cwd -- my-agent
 - **HTTP/1.1 only** — The CONNECT tunnel passes raw bytes (HTTP/2 works end-to-end), but the reverse proxy mode speaks HTTP/1.1 to upstream
 - **No per-port filtering on macOS** — Seatbelt cannot filter outbound by destination port
 - **Domain filtering requires supervised execution** — The proxy runs in the unsandboxed parent process, so `nono wrap` (Direct mode) is incompatible. Use `nono run` instead.
+- **WSL2: no per-port filtering or domain filtering by default** — See [WSL2 section](#wsl2) above
 
 ## Next Steps
 

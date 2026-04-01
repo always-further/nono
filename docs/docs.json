@@ -66,6 +66,8 @@
           "cli/internals/security-model",
           "cli/internals/landlock",
           "cli/internals/seatbelt",
+          "cli/internals/wsl2",
+          "cli/internals/wsl2-feature-matrix",
           "cli/internals/application",
           "cli/internals/signing",
           "cli/internals/containers"

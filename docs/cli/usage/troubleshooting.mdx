@@ -349,6 +349,46 @@ nono learn --json -- my-app
 
 ---
 
+## WSL2-Specific Issues
+
+### Sandbox initialization: EBUSY on seccomp
+
+**Symptom:** `Sandbox initialization failed` with `EBUSY` when using `--capability-elevation`.
+
+**Cause:** WSL2's init process (PID 1) installs its own seccomp user notification filter. The Linux kernel only allows one notify listener per filter chain, so nono's attempt to install a second returns `EBUSY`.
+
+**Solution:** nono automatically disables capability elevation on WSL2. If you see this error, ensure you're running a recent version. This is tracked in [microsoft/WSL#9548](https://github.com/microsoft/WSL/issues/9548).
+
+### Credential proxy refused on WSL2
+
+**Symptom:** `WSL2: proxy-only network mode cannot be kernel-enforced`
+
+**Cause:** The proxy's network lockdown depends on seccomp notify or Landlock V4, neither of which is available on WSL2.
+
+**Solutions:**
+- Use `--env-credential` instead of `--credential` (env var injection works normally)
+- Opt in to degraded proxy mode with `wsl2_proxy_policy: "insecure_proxy"` in your profile's security config ([details](/cli/internals/wsl2#credential-proxy-on-wsl2))
+
+### Per-port network filtering unavailable
+
+**Symptom:** `--open-port` or `--listen-port` fails on WSL2.
+
+**Cause:** Landlock V4 (kernel 6.7+) is required for TCP port filtering. WSL2 ships kernel 6.6.
+
+**Solution:** Use `--block-net` for full network isolation, or wait for a WSL2 kernel upgrade to 6.7+.
+
+### Verifying WSL2 compatibility
+
+Run `nono setup --check-only` inside WSL2 to see the full feature availability matrix:
+
+```bash
+nono setup --check-only
+```
+
+This reports the detected kernel version, Landlock ABI, WSL2 detection status, and which features are available.
+
+---
+
 ## Getting Help
 
 If you're still stuck:

@@ -359,18 +359,19 @@ fn tokenize_sexp(input: &str) -> Result<Vec<String>> {
 /// outside its own sandbox.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignalMode {
-    /// Signals restricted to the current process only.
+    /// Signals restricted to the current sandbox.
     ///
-    /// On macOS: `(allow signal (target self))` in Seatbelt — restricts
-    /// `kill()` to the calling process's own PID. Forked children within
-    /// the same sandbox are **not** included; the parent cannot signal
-    /// them via `kill()`. Terminal-generated signals (e.g., Ctrl+C
-    /// delivering SIGINT to the foreground process group) are delivered
-    /// by the kernel and bypass the sandbox filter.
+    /// On macOS: emits `(allow signal (target self))` and
+    /// `(allow signal (target same-sandbox))` in Seatbelt — permits
+    /// `kill()` on the process itself and on any child that inherited the
+    /// same sandbox. External processes cannot be signaled. Terminal-
+    /// generated signals (e.g., Ctrl+C delivering SIGINT to the foreground
+    /// process group) are delivered by the kernel and bypass the sandbox.
     ///
-    /// On Linux: best-effort. Landlock V6 `LANDLOCK_SCOPE_SIGNAL` restricts
-    /// signaling to processes in the same sandbox, which is stronger than no
-    /// filtering but not equivalent to "self only".
+    /// On Linux: Landlock V6 `LANDLOCK_SCOPE_SIGNAL` restricts signaling
+    /// to processes in the same sandbox. Landlock cannot distinguish "self
+    /// only" from "same sandbox", so `Isolated` and `AllowSameSandbox`
+    /// produce identical enforcement.
     #[default]
     Isolated,
     /// Signals allowed to child processes in the same sandbox only.
@@ -394,9 +395,14 @@ pub enum SignalMode {
 /// outside its own sandbox.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessInfoMode {
-    /// Process inspection restricted to the current process only.
+    /// Process inspection restricted to the current sandbox.
     ///
-    /// On macOS: emits `(deny process-info* (target others))` in Seatbelt.
+    /// On macOS: emits `(allow process-info* (target self))` and
+    /// `(allow process-info* (target same-sandbox))` in Seatbelt — permits
+    /// inspection of the process itself and children that inherited the
+    /// sandbox, while blocking inspection of external processes.
+    ///
+    /// On Linux: no-op (Landlock does not restrict process inspection).
     #[default]
     Isolated,
     /// Process inspection allowed for child processes in the same sandbox only.

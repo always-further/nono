@@ -94,3 +94,4 @@ When the child exits with a non-zero exit code, nono prints a diagnostic footer 
 ## Limitations
 
 - Capability expansion is Linux-only. macOS supervised mode provides rollback snapshots and diagnostics only.
+- **WSL2**: Capability expansion (`--capability-elevation`) is unavailable. WSL2's init process claims the sole seccomp notify listener, causing `EBUSY` when nono tries to install its own ([microsoft/WSL#9548](https://github.com/microsoft/WSL/issues/9548)). Supervised mode still works for rollback snapshots and diagnostics. See [WSL2 Support](/cli/internals/wsl2#seccomp-user-notification-limitation) for details.
