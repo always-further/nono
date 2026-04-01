@@ -17,6 +17,7 @@ pub use nono_proxy::config::InjectMode;
 
 /// Profile metadata
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct ProfileMeta {
     pub name: String,
@@ -30,6 +31,7 @@ pub struct ProfileMeta {
 
 /// Filesystem configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilesystemConfig {
     /// Directories with read+write access
     #[serde(default)]
@@ -56,6 +58,7 @@ pub struct FilesystemConfig {
 /// These fields provide explicit subtractive/additive composition on top of
 /// inherited groups and existing filesystem configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyPatchConfig {
     /// Group names to remove from the resolved group set.
     #[serde(default)]
@@ -96,6 +99,7 @@ pub struct PolicyPatchConfig {
 /// - `query_param`: Add/replace query parameter (e.g., `?api_key=...`)
 /// - `basic_auth`: HTTP Basic Authentication (credential as `username:password`)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomCredentialDef {
     /// Upstream URL to proxy requests to (e.g., "https://api.telegram.org")
     pub upstream: String,
@@ -138,8 +142,8 @@ pub struct CustomCredentialDef {
     ///
     /// When set, the proxy uses this as the SDK API key env var instead of
     /// deriving it from `credential_key.to_uppercase()`. Required when
-    /// `credential_key` is a URI manager reference (`op://` or
-    /// `apple-password://`).
+    /// `credential_key` is a URI manager reference (`op://`,
+    /// `apple-password://`, or `file://`).
     #[serde(default)]
     pub env_var: Option<String>,
 
@@ -185,6 +189,7 @@ fn is_http_token_char(c: char) -> bool {
 /// - A bare keyring account name (alphanumeric + underscores only)
 /// - A 1Password `op://` URI (validated by `nono::keystore::validate_op_uri`)
 /// - An Apple Passwords `apple-password://` URI
+/// - A `file://` URI pointing to an absolute path (validated by `nono::keystore::validate_file_uri`)
 fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(NonoError::ProfileParse(format!(
@@ -208,12 +213,19 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
                 context_name, e
             ))
         })
+    } else if nono::keystore::is_file_uri(key) {
+        nono::keystore::validate_file_uri(key).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "invalid file:// URI for custom credential '{}': {}",
+                context_name, e
+            ))
+        })
     } else {
         // Validate as keyring account name (alphanumeric + underscore)
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(NonoError::ProfileParse(format!(
                 "credential_key '{}' for custom credential '{}' must contain only \
-                 alphanumeric characters and underscores (or use op:// / apple-password:// URI)",
+                 alphanumeric characters and underscores (or use op:// / apple-password:// / file:// URI)",
                 key, context_name
             )));
         }
@@ -225,7 +237,7 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
 ///
 /// Checks:
 /// - `credential_key` must be alphanumeric + underscores only, or a valid
-///   `op://` / `apple-password://` URI
+///   `op://` / `apple-password://` / `file://` URI
 /// - `upstream` must be HTTPS (or HTTP for loopback only)
 /// - Mode-specific validation:
 ///   - `header`: inject_header must be valid HTTP token, credential_format no CRLF
@@ -240,12 +252,13 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
     // cannot be meaningfully uppercased into an env var name (e.g.,
     // "op://vault/item/field" -> "OP://VAULT/ITEM/FIELD" is nonsensical).
     if (nono::keystore::is_op_uri(&cred.credential_key)
-        || nono::keystore::is_apple_password_uri(&cred.credential_key))
+        || nono::keystore::is_apple_password_uri(&cred.credential_key)
+        || nono::keystore::is_file_uri(&cred.credential_key))
         && cred.env_var.is_none()
     {
         return Err(NonoError::ProfileParse(format!(
             "env_var is required for custom credential '{}' when credential_key is a URI \
-             manager reference (op:// or apple-password://); \
+             manager reference (op://, apple-password://, or file://); \
              set it to the SDK API key env var name (e.g., \"OPENAI_API_KEY\")",
             name
         )));
@@ -452,7 +465,7 @@ fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
 /// Validate env_credentials keys in a profile.
 ///
 /// Keys can be keyring account names, `op://` URIs, `apple-password://` URIs,
-/// or `env://` URIs.
+/// `env://` URIs, or `file://` URIs.
 /// Keyring account names are validated at load time by the keyring crate itself,
 /// but URI entries need structural validation upfront.
 fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
@@ -471,6 +484,10 @@ fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
         } else if nono::keystore::is_env_uri(key) {
             nono::keystore::validate_env_uri(key).map_err(|e| {
                 NonoError::ProfileParse(format!("invalid env:// URI in env_credentials: {}", e))
+            })?;
+        } else if nono::keystore::is_file_uri(key) {
+            nono::keystore::validate_file_uri(key).map_err(|e| {
+                NonoError::ProfileParse(format!("invalid file:// URI in env_credentials: {}", e))
             })?;
         }
         // Validate destination env var name against dangerous blocklist
@@ -558,6 +575,7 @@ where
 
 /// Network configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     /// Block network access (network allowed by default; true = blocked).
     /// Canonical profile key: `block`.
@@ -648,6 +666,7 @@ pub struct SecretsConfig {
 /// Defines hooks that nono will install for the target application.
 /// For example, Claude Code hooks are installed to ~/.claude/hooks/
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookConfig {
     /// Event that triggers the hook (e.g., "PostToolUseFailure")
     pub event: String,
@@ -781,6 +800,7 @@ pub enum WorkdirAccess {
 
 /// Working directory configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkdirConfig {
     /// Access level for the current working directory
     #[serde(default)]
@@ -789,6 +809,7 @@ pub struct WorkdirConfig {
 
 /// Security configuration referencing policy.json groups
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Policy group names to resolve (from policy.json)
     #[serde(default)]
@@ -833,6 +854,7 @@ pub struct SecurityConfig {
 /// as substrings of the full path. Glob patterns are matched against
 /// the filename (last path component).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RollbackConfig {
     /// Patterns to exclude from rollback snapshots.
     /// Added on top of the CLI's base exclusion list.
@@ -850,6 +872,7 @@ pub struct RollbackConfig {
 /// open in the user's browser. Used for OAuth2 login flows and similar
 /// operations where the sandboxed process cannot launch a browser directly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenUrlConfig {
     /// Allowed URL origins (scheme + host, e.g., "https://console.anthropic.com").
     /// The supervisor validates each URL open request against this list.
@@ -896,6 +919,7 @@ where
 
 /// A complete profile definition
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     /// Optional base profile(s) to inherit from (by name).
     /// Accepts either a single string `"extends": "base"` or an array
@@ -1444,10 +1468,13 @@ pub(crate) fn is_valid_profile_name(name: &str) -> bool {
 /// - $HOME: User's home directory
 /// - $XDG_CONFIG_HOME: XDG config directory
 /// - $XDG_DATA_HOME: XDG data directory
+/// - $XDG_STATE_HOME: XDG state directory
+/// - $XDG_CACHE_HOME: XDG cache directory
+/// - $XDG_RUNTIME_DIR: XDG runtime directory (no default; left unexpanded when unset)
 /// - $TMPDIR: System temporary directory
 /// - $UID: Current user ID
 ///
-/// If $HOME cannot be determined and the path uses $HOME, $XDG_CONFIG_HOME, or $XDG_DATA_HOME,
+/// If $HOME cannot be determined and the path uses $HOME or XDG variables,
 /// the unexpanded variable is left in place (which will cause the path to not exist).
 pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
     use crate::config;
@@ -1501,25 +1528,49 @@ pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
             )
         }
     });
+    let xdg_state = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
+        format!(
+            "{}",
+            PathBuf::from(&home).join(".local").join("state").display()
+        )
+    });
+    let xdg_cache = std::env::var("XDG_CACHE_HOME")
+        .unwrap_or_else(|_| format!("{}", PathBuf::from(&home).join(".cache").display()));
+
+    // $XDG_RUNTIME_DIR has no default per the XDG Base Directory spec.
+    // When unset, leave the variable unexpanded so the path won't resolve.
+    let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").ok();
 
     // Validate XDG paths are absolute
-    if !Path::new(&xdg_config).is_absolute() {
-        return Err(NonoError::EnvVarValidation {
-            var: "XDG_CONFIG_HOME".to_string(),
-            reason: format!("must be an absolute path, got: {}", xdg_config),
-        });
+    let mut xdg_vars: Vec<(&str, &str)> = vec![
+        ("XDG_CONFIG_HOME", &xdg_config),
+        ("XDG_DATA_HOME", &xdg_data),
+        ("XDG_STATE_HOME", &xdg_state),
+        ("XDG_CACHE_HOME", &xdg_cache),
+    ];
+    if let Some(ref rt) = xdg_runtime {
+        xdg_vars.push(("XDG_RUNTIME_DIR", rt));
     }
-    if !Path::new(&xdg_data).is_absolute() {
-        return Err(NonoError::EnvVarValidation {
-            var: "XDG_DATA_HOME".to_string(),
-            reason: format!("must be an absolute path, got: {}", xdg_data),
-        });
+    for (var, val) in &xdg_vars {
+        if !Path::new(val).is_absolute() {
+            return Err(NonoError::EnvVarValidation {
+                var: var.to_string(),
+                reason: format!("must be an absolute path, got: {}", val),
+            });
+        }
     }
 
-    let expanded = expanded
+    let mut expanded = expanded
         .replace("$HOME", &home)
         .replace("$XDG_CONFIG_HOME", &xdg_config)
+        .replace("$XDG_STATE_HOME", &xdg_state)
+        .replace("$XDG_CACHE_HOME", &xdg_cache)
         .replace("$XDG_DATA_HOME", &xdg_data);
+
+    // Only expand $XDG_RUNTIME_DIR when set; leave literal otherwise
+    if let Some(ref rt) = xdg_runtime {
+        expanded = expanded.replace("$XDG_RUNTIME_DIR", rt);
+    }
 
     Ok(PathBuf::from(expanded))
 }
@@ -1595,6 +1646,88 @@ mod tests {
         // Restore original HOME
         if let Some(home) = original_home {
             env::set_var("HOME", home);
+        }
+    }
+
+    #[test]
+    fn test_expand_vars_xdg_state_home() {
+        // $XDG_STATE_HOME must be expanded so that profiles and deny rules
+        // can reference it portably. Without this, users cannot write
+        // add_deny_access: ["$XDG_STATE_HOME"] and the variable is treated
+        // as a literal string that matches nothing.
+        let original_home = env::var("HOME").ok();
+        let original_state = env::var("XDG_STATE_HOME").ok();
+
+        env::set_var("HOME", "/home/user");
+        env::set_var("XDG_STATE_HOME", "/custom/state");
+
+        let workdir = PathBuf::from("/projects/myapp");
+        let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/custom/state/history"));
+
+        // Fallback when env var is unset
+        env::remove_var("XDG_STATE_HOME");
+        let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/home/user/.local/state/history"));
+
+        // Restore
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        }
+        if let Some(state) = original_state {
+            env::set_var("XDG_STATE_HOME", state);
+        }
+    }
+
+    #[test]
+    fn test_expand_vars_xdg_cache_home() {
+        let original_home = env::var("HOME").ok();
+        let original_cache = env::var("XDG_CACHE_HOME").ok();
+
+        env::set_var("HOME", "/home/user");
+        env::set_var("XDG_CACHE_HOME", "/custom/cache");
+
+        let workdir = PathBuf::from("/projects/myapp");
+        let expanded = expand_vars("$XDG_CACHE_HOME/pip", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/custom/cache/pip"));
+
+        // Fallback when env var is unset
+        env::remove_var("XDG_CACHE_HOME");
+        let expanded = expand_vars("$XDG_CACHE_HOME/pip", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/home/user/.cache/pip"));
+
+        // Restore
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        }
+        if let Some(cache) = original_cache {
+            env::set_var("XDG_CACHE_HOME", cache);
+        }
+    }
+
+    #[test]
+    fn test_expand_vars_xdg_runtime_dir() {
+        let original_runtime = env::var("XDG_RUNTIME_DIR").ok();
+
+        env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+
+        let workdir = PathBuf::from("/projects/myapp");
+        let expanded = expand_vars("$XDG_RUNTIME_DIR/pulse", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/run/user/1000/pulse"));
+
+        // When unset, $XDG_RUNTIME_DIR has no default per the spec — the
+        // variable should be left unexpanded so the path won't resolve.
+        env::remove_var("XDG_RUNTIME_DIR");
+        let expanded = expand_vars("$XDG_RUNTIME_DIR/pulse", &workdir).expect("valid env");
+        assert_eq!(
+            expanded,
+            PathBuf::from("$XDG_RUNTIME_DIR/pulse"),
+            "unset XDG_RUNTIME_DIR should leave variable unexpanded"
+        );
+
+        // Restore
+        if let Some(runtime) = original_runtime {
+            env::set_var("XDG_RUNTIME_DIR", runtime);
         }
     }
 
@@ -1848,7 +1981,7 @@ mod tests {
                 || profile
                     .security
                     .groups
-                    .contains(&"system_read_linux".to_string())
+                    .contains(&"system_read_linux_core".to_string())
                 || profile
                     .security
                     .groups
@@ -3486,6 +3619,40 @@ mod tests {
     }
 
     #[test]
+    fn test_unknown_fields_rejected_in_profile() {
+        // A typo like "add_deny_acces" (missing 's') must be caught at parse
+        // time. For a security tool, silently discarding unknown keys means a
+        // single typo can void an entire security policy with no feedback.
+        let json = r#"{
+            "meta": { "name": "typo-test" },
+            "policy": {
+                "add_deny_acces": ["~/.local/state"]
+            }
+        }"#;
+        let result: std::result::Result<Profile, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown field 'add_deny_acces' must be rejected, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn test_unknown_fields_rejected_in_top_level_profile() {
+        // Unknown top-level keys must also be rejected.
+        let json = r#"{
+            "meta": { "name": "top-level-typo" },
+            "polcy": {
+                "add_deny_access": ["~/.local/state"]
+            }
+        }"#;
+        let result: std::result::Result<Profile, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown top-level field 'polcy' must be rejected, not silently ignored"
+        );
+    }
+
+    #[test]
     fn test_policy_patch_deserialization() {
         let profile: Profile = serde_json::from_str(
             r#"{
@@ -3855,5 +4022,162 @@ mod tests {
                 result.expect_err("already checked is_ok")
             );
         }
+    }
+
+    // ============================================================================
+    // file:// credential key validation tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_custom_credential_file_uri_accepted() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "file:///run/secrets/api-token".to_string(),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            endpoint_rules: vec![],
+            env_var: Some("EXAMPLE_API_KEY".to_string()),
+        };
+        assert!(
+            validate_custom_credential("example", &cred).is_ok(),
+            "file:// URI with env_var should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_credential_file_uri_requires_env_var() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "file:///run/secrets/api-token".to_string(),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            endpoint_rules: vec![],
+            env_var: None,
+        };
+        let result = validate_custom_credential("example", &cred);
+        let err = result.expect_err("file:// URI without env_var should be rejected");
+        assert!(
+            err.to_string().contains("env_var is required"),
+            "error should mention env_var is required, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_credential_file_uri_invalid_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "file://relative/path".to_string(),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            endpoint_rules: vec![],
+            env_var: Some("EXAMPLE_API_KEY".to_string()),
+        };
+        let result = validate_custom_credential("example", &cred);
+        let err = result.expect_err("file:// URI with relative path should be rejected");
+        assert!(
+            err.to_string().contains("file://"),
+            "error should mention file://, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_credential_file_uri_traversal_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "file:///run/secrets/../../../etc/shadow".to_string(),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            endpoint_rules: vec![],
+            env_var: Some("EXAMPLE_API_KEY".to_string()),
+        };
+        let result = validate_custom_credential("example", &cred);
+        assert!(
+            result.is_err(),
+            "file:// URI with path traversal should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_env_credentials_accepts_file_uri() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "file:///run/secrets/api-token": "API_TOKEN"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        assert!(
+            validate_env_credential_keys(&profile).is_ok(),
+            "valid file:// URI in env_credentials should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_env_credentials_rejects_invalid_file_uri() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "file://relative/path": "API_TOKEN"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        let err = validate_env_credential_keys(&profile).expect_err("should reject");
+        assert!(
+            err.to_string().contains("file://"),
+            "error should mention file://, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_profile_json_with_file_uri_custom_credential_parses() {
+        // End-to-end: parse a profile JSON with a file:// custom credential
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("file-cred.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "file-cred-test" },
+                "network": {
+                    "custom_credentials": {
+                        "my_service": {
+                            "upstream": "https://api.example.com",
+                            "credential_key": "file:///run/secrets/api-token",
+                            "env_var": "MY_API_KEY"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write profile");
+
+        let profile = parse_profile_file(&profile_path).expect("profile should parse");
+        let cred = profile
+            .network
+            .custom_credentials
+            .get("my_service")
+            .expect("my_service credential should exist");
+        assert_eq!(cred.credential_key, "file:///run/secrets/api-token");
+        assert_eq!(cred.env_var, Some("MY_API_KEY".to_string()));
     }
 }

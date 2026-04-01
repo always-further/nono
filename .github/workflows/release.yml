@@ -254,17 +254,6 @@ jobs:
             artifacts/*.deb
             artifacts/SHA256SUMS.txt
 
-  docker:
-    name: Publish Docker Image
-    needs: release
-    if: ${{ !contains(github.event.inputs.tag || github.ref_name, 'alpha') && !contains(github.event.inputs.tag || github.ref_name, 'beta') && !contains(github.event.inputs.tag || github.ref_name, 'rc') }}
-    uses: ./.github/workflows/image-build.yml
-    with:
-      ref: ${{ github.event.inputs.tag || github.ref_name }}
-      version: ${{ github.event.inputs.tag || github.ref_name }}
-      push: true
-    secrets: inherit
-
   publish-crates:
     name: Publish to crates.io
     needs: release

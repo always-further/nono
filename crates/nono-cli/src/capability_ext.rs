@@ -854,6 +854,7 @@ mod tests {
                         "read_file": ["{}"]
                     }},
                     "policy": {{
+                        "exclude_groups": ["system_read_linux", "system_write_linux"],
                         "add_deny_access": ["{}"]
                     }}
                 }}"#,
@@ -899,6 +900,7 @@ mod tests {
                         "read_file": ["{}"]
                     }},
                     "policy": {{
+                        "exclude_groups": ["system_read_linux", "system_write_linux"],
                         "add_deny_access": ["{}"]
                     }}
                 }}"#,

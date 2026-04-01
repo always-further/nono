@@ -1026,19 +1026,17 @@ pub(crate) fn load_public_key_bytes(key_id: &str) -> Result<Vec<u8>> {
         other => other,
     })?;
 
-    base64_decode(&b64)
+    base64_decode(b64.as_str())
         .map_err(|e| nono::NonoError::KeystoreAccess(format!("corrupt public key data: {e}")))
 }
 
 pub(crate) fn load_signing_key(key_id: &str) -> Result<trust::KeyPair> {
-    let pkcs8_b64 = Zeroizing::new(trust_keystore::load_secret(TRUST_SERVICE, key_id).map_err(
-        |e| match e {
-            nono::NonoError::SecretNotFound(_) => nono::NonoError::SecretNotFound(format!(
-                "signing key '{key_id}' not found in keystore (run 'nono trust keygen' first)"
-            )),
-            other => other,
-        },
-    )?);
+    let pkcs8_b64 = trust_keystore::load_secret(TRUST_SERVICE, key_id).map_err(|e| match e {
+        nono::NonoError::SecretNotFound(_) => nono::NonoError::SecretNotFound(format!(
+            "signing key '{key_id}' not found in keystore (run 'nono trust keygen' first)"
+        )),
+        other => other,
+    })?;
 
     let pkcs8_bytes = Zeroizing::new(base64_decode(pkcs8_b64.as_str()).map_err(|e| {
         nono::NonoError::KeystoreAccess(format!("corrupt key data in keystore: {e}"))

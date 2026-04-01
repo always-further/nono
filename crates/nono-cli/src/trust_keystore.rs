@@ -5,10 +5,9 @@
 //! avoids interactive keychain prompts on local machines and in CI.
 
 use nono::{NonoError, Result};
-#[cfg(all(unix, feature = "test-trust-overrides"))]
-use std::os::unix::fs::PermissionsExt;
 #[cfg(feature = "test-trust-overrides")]
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// Test-only override for trust key storage.
 #[cfg(feature = "test-trust-overrides")]
@@ -65,7 +64,7 @@ impl TrustKeyStore {
         }
     }
 
-    fn load(&self, service: &str, account: &str) -> Result<String> {
+    fn load(&self, service: &str, account: &str) -> Result<Zeroizing<String>> {
         match self {
             Self::System => {
                 let entry = keyring::Entry::new(service, account).map_err(|e| {
@@ -74,31 +73,32 @@ impl TrustKeyStore {
                         system_keystore_label()
                     ))
                 })?;
-                entry.get_password().map_err(|e| match e {
-                    keyring::Error::NoEntry => NonoError::SecretNotFound(format!(
-                        "key '{account}' not found in {}",
-                        system_keystore_label()
-                    )),
-                    other => NonoError::KeystoreAccess(format!(
-                        "failed to load key '{account}' from {}: {other}",
-                        system_keystore_label()
-                    )),
-                })
+                entry
+                    .get_password()
+                    .map(Zeroizing::new)
+                    .map_err(|e| match e {
+                        keyring::Error::NoEntry => NonoError::SecretNotFound(format!(
+                            "key '{account}' not found in {}",
+                            system_keystore_label()
+                        )),
+                        other => NonoError::KeystoreAccess(format!(
+                            "failed to load key '{account}' from {}: {other}",
+                            system_keystore_label()
+                        )),
+                    })
             }
             #[cfg(feature = "test-trust-overrides")]
             Self::File(root) => {
                 let path = file_path(root, service, account);
-                std::fs::read_to_string(&path).map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        NonoError::SecretNotFound(format!(
-                            "key '{account}' not found in test keystore"
-                        ))
-                    } else {
-                        NonoError::KeystoreAccess(format!(
-                            "failed to load key '{account}' from {}: {e}",
-                            path.display()
-                        ))
-                    }
+                nono::load_secret_file(&path).map_err(|e| match e {
+                    NonoError::SecretNotFound(_) => NonoError::SecretNotFound(format!(
+                        "key '{account}' not found in test keystore"
+                    )),
+                    NonoError::KeystoreAccess(_) => NonoError::KeystoreAccess(format!(
+                        "failed to load key '{account}' from {}",
+                        path.display()
+                    )),
+                    other => other,
                 })
             }
         }
@@ -123,33 +123,13 @@ impl TrustKeyStore {
             #[cfg(feature = "test-trust-overrides")]
             Self::File(root) => {
                 let path = file_path(root, service, account);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        NonoError::KeystoreAccess(format!(
-                            "failed to create test keystore directory {}: {e}",
-                            parent.display()
-                        ))
-                    })?;
-                }
-
-                std::fs::write(&path, secret).map_err(|e| {
-                    NonoError::KeystoreAccess(format!(
-                        "failed to store key '{account}' at {}: {e}",
+                nono::store_secret_file(&path, secret).map_err(|e| match e {
+                    NonoError::KeystoreAccess(_) => NonoError::KeystoreAccess(format!(
+                        "failed to store key '{account}' at {}",
                         path.display()
-                    ))
-                })?;
-
-                #[cfg(unix)]
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
-                    |e| {
-                        NonoError::KeystoreAccess(format!(
-                            "failed to secure test keystore file {}: {e}",
-                            path.display()
-                        ))
-                    },
-                )?;
-
-                Ok(())
+                    )),
+                    other => other,
+                })
             }
         }
     }
@@ -200,7 +180,7 @@ pub(crate) fn contains_secret(service: &str, account: &str) -> Result<bool> {
     TrustKeyStore::selected().contains(service, account)
 }
 
-pub(crate) fn load_secret(service: &str, account: &str) -> Result<String> {
+pub(crate) fn load_secret(service: &str, account: &str) -> Result<Zeroizing<String>> {
     TrustKeyStore::selected().load(service, account)
 }
 
@@ -239,7 +219,7 @@ mod tests {
             Ok(loaded) => loaded,
             Err(e) => panic!("failed to load test secret: {e}"),
         };
-        assert_eq!(loaded, "secret-value");
+        assert_eq!(loaded.as_str(), "secret-value");
     }
 
     #[test]
@@ -279,7 +259,7 @@ mod tests {
             Err(e) => panic!("failed to load service-b secret: {e}"),
         };
 
-        assert_eq!(a, "secret-a");
-        assert_eq!(b, "secret-b");
+        assert_eq!(a.as_str(), "secret-a");
+        assert_eq!(b.as_str(), "secret-b");
     }
 }

@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.26.1] - 2026-03-31
+
+### Bug Fixes
+
+- *(learn)* Make Enter actually skip profile save prompt (closes #431)
+
+- *(proxy)* Use lossy UTF-8 decoding for percent-encoded paths
+
+- *(proxy)* Percent-decode paths before endpoint rule matching
+
+
+### CI/CD
+
+- *(workflows)* Decouple image build from release workflow
+
+
+### Dependencies
+
+- *(deps)* Bump docker/setup-buildx-action from 3.12.0 to 4.0.0
+
+- *(deps)* Bump toml from 1.0.6+spec-1.1.0 to 1.0.7+spec-1.1.0
+
+- *(deps)* Bump docker/setup-qemu-action from 3.7.0 to 4.0.0
+
+- *(deps)* Bump docker/build-push-action from 6.19.2 to 7.0.0
+
+- *(deps)* Bump docker/login-action from 3.7.0 to 4.0.0
+
+- *(deps)* Bump sigstore/cosign-installer from 3.10.1 to 4.1.1
+
+
+### Miscellaneous
+
+- Add DCO sign-off requirement to CLAUDE.md
+
 ## [0.26.0] - 2026-03-30
 
 ### Bug Fixes

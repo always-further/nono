@@ -432,10 +432,7 @@ fn offer_save_profile(result: &learn::LearnResult, command: &[String]) -> Result
         })?;
 
     eprintln!();
-    eprint!(
-        "Save as profile? Enter a name (or press Enter to skip) [{}]: ",
-        cmd_name
-    );
+    eprint!("Save as profile? Enter a name (or press Enter to skip): ");
 
     let mut input = String::new();
     std::io::stdin()
@@ -443,7 +440,12 @@ fn offer_save_profile(result: &learn::LearnResult, command: &[String]) -> Result
         .map_err(|e| NonoError::LearnError(format!("Failed to read input: {}", e)))?;
 
     let input = input.trim();
-    let profile_name = if input.is_empty() { cmd_name } else { input };
+
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let profile_name = input;
 
     // Validate profile name: alphanumeric, hyphens, underscores only
     if !profile_name

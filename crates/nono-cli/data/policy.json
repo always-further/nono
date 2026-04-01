@@ -183,8 +183,8 @@
         "/tmp": "/private/tmp"
       }
     },
-    "system_read_linux": {
-      "description": "Linux system paths required for executables to function",
+    "system_read_linux_core": {
+      "description": "Linux core system paths required for normal CLI execution",
       "platform": "linux",
       "allow": {
         "read": [
@@ -245,12 +245,35 @@
           "/proc/stat",
           "/proc/loadavg",
           "/proc/version",
-          "/proc/filesystems",
-          "/sys",
+          "/proc/filesystems"
+        ]
+      }
+    },
+    "linux_runtime_state": {
+      "description": "Linux runtime state paths for host session and service integration",
+      "platform": "linux",
+      "allow": {
+        "read": [
           "/run",
-          "/var/run",
-          "/tmp",
-          "/nix"
+          "/var/run"
+        ]
+      }
+    },
+    "linux_sysfs_read": {
+      "description": "Linux sysfs paths for kernel and device state inspection",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "/sys"
+        ]
+      }
+    },
+    "linux_temp_read": {
+      "description": "Linux shared temporary directory read access",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "/tmp"
         ]
       }
     },
@@ -310,14 +333,11 @@
       }
     },
     "user_caches_linux": {
-      "description": "User cache and log directories for Linux programs (XDG)",
+      "description": "User cache directories for Linux programs (XDG)",
       "platform": "linux",
       "allow": {
         "readwrite": [
           "~/.cache"
-        ],
-        "read": [
-          "~/.local/state"
         ]
       }
     },
@@ -339,9 +359,6 @@
           "~/.local/share/man",
           "~/.local/share/bash-completion",
           "~/.local/share/zsh"
-        ],
-        "readwrite": [
-          "~/.local/state"
         ]
       }
     },
@@ -578,7 +595,7 @@
           "deny_shell_history",
           "deny_shell_configs",
           "system_read_macos",
-          "system_read_linux",
+          "system_read_linux_core",
           "system_read_windows",
           "system_write_macos",
           "system_write_linux",
@@ -587,6 +604,27 @@
           "dangerous_commands",
           "dangerous_commands_macos",
           "dangerous_commands_linux"
+        ],
+        "signal_mode": "isolated"
+      },
+      "filesystem": {},
+      "network": { "block": false },
+      "workdir": { "access": "none" },
+      "interactive": false
+    },
+    "linux-host-compat": {
+      "extends": "default",
+      "meta": {
+        "name": "linux-host-compat",
+        "version": "1.0.0",
+        "description": "Linux compatibility profile for host runtime, sysfs, and temp access",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": [
+          "linux_runtime_state",
+          "linux_sysfs_read",
+          "linux_temp_read"
         ],
         "signal_mode": "isolated"
       },
@@ -614,6 +652,7 @@
           "python_runtime",
           "vscode_macos",
           "vscode_linux",
+          "linux_sysfs_read",
           "nix_runtime",
           "git_config",
           "unlink_protection"
@@ -661,6 +700,7 @@
           "node_runtime",
           "rust_runtime",
           "python_runtime",
+          "linux_sysfs_read",
           "nix_runtime",
           "git_config",
           "unlink_protection"
@@ -718,7 +758,7 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "opencode_linux", "git_config", "unlink_protection"],
+        "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "opencode_linux", "linux_sysfs_read", "git_config", "unlink_protection"],
         "signal_mode": "isolated"
       },
       "filesystem": {
@@ -820,6 +860,7 @@
           "node_runtime",
           "user_caches_macos",
           "user_caches_linux",
+          "linux_sysfs_read",
           "git_config",
           "unlink_protection"
         ],

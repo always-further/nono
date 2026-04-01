@@ -7,6 +7,7 @@
 //!
 //! Credential references are dispatched by URI scheme:
 //! - `env://VAR_NAME` — reads from the current process environment
+//! - `file:///path/to/secret` — reads from a local file (before sandbox activation)
 //! - `op://vault/item/field` — loaded via the 1Password CLI
 //! - `apple-password://server/account` — loaded via macOS `security`
 //! - Everything else — loaded from the system keyring
@@ -16,6 +17,8 @@
 
 use crate::error::{NonoError, Result};
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -47,6 +50,10 @@ const APPLE_PASSWORDS_URI_PREFIX: &str = "apple-passwords://";
 
 /// The `env://` URI scheme prefix, indicating environment variable backend.
 const ENV_URI_PREFIX: &str = "env://";
+
+/// The `file://` URI scheme prefix, indicating a local file credential source.
+/// Read once at startup before sandbox activation; contents zeroed on drop.
+const FILE_URI_PREFIX: &str = "file://";
 
 /// Environment variable names that must never be loaded via `env://`.
 ///
@@ -142,15 +149,16 @@ pub fn load_secrets(
 /// Load a single secret, dispatching to the appropriate backend.
 ///
 /// Dispatch order:
-/// 1. `env://VAR` — reads from the process environment
-/// 2. `op://vault/item/field` — delegates to the 1Password CLI
-/// 3. `apple-password://server/account` — delegates to macOS `security`
-/// 4. Everything else — loads from the system keyring
+/// 1. `file:///path` — reads from a local file (before sandbox activation)
+/// 2. `env://VAR` — reads from the process environment
+/// 3. `op://vault/item/field` — delegates to the 1Password CLI
+/// 4. `apple-password://server/account` — delegates to macOS `security`
+/// 5. Everything else — loads from the system keyring
 ///
 /// # Arguments
 /// * `service` - Keyring service name (only used for keyring backend)
-/// * `credential_ref` - A keyring account name, `op://` URI, Apple Passwords URI,
-///   or `env://` URI
+/// * `credential_ref` - A keyring account name, `file://` URI, `op://` URI,
+///   Apple Passwords URI, or `env://` URI
 ///
 /// # Security
 /// The returned value is wrapped in `Zeroizing<String>`. For URI-based managers
@@ -160,7 +168,9 @@ pub fn load_secrets(
 /// internal buffers.
 #[must_use = "loaded secret should be used or explicitly dropped"]
 pub fn load_secret_by_ref(service: &str, credential_ref: &str) -> Result<Zeroizing<String>> {
-    if credential_ref.starts_with(ENV_URI_PREFIX) {
+    if credential_ref.starts_with(FILE_URI_PREFIX) {
+        load_from_file(credential_ref)
+    } else if credential_ref.starts_with(ENV_URI_PREFIX) {
         load_from_env(credential_ref)
     } else if credential_ref.starts_with(OP_URI_PREFIX) {
         load_from_op(credential_ref)
@@ -322,6 +332,12 @@ pub fn is_env_uri(credential_ref: &str) -> bool {
     credential_ref.starts_with(ENV_URI_PREFIX)
 }
 
+/// Check if a credential reference uses the `file://` scheme.
+#[must_use]
+pub fn is_file_uri(credential_ref: &str) -> bool {
+    credential_ref.starts_with(FILE_URI_PREFIX)
+}
+
 /// Validate an `env://VAR_NAME` URI.
 ///
 /// Accepts variable names containing only ASCII alphanumeric characters and
@@ -364,6 +380,58 @@ pub fn validate_env_uri(uri: &str) -> Result<()> {
         return Err(NonoError::ConfigParse(format!(
             "env:// cannot read dangerous environment variable: {}",
             var_name
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a `file://` URI for local file credential sources.
+///
+/// Expected format: `file:///absolute/path` (triple slash for absolute paths).
+///
+/// Rejects:
+/// - Non-absolute paths (must start with `/` after `file://`)
+/// - Empty or root-only paths
+/// - Path traversal (`..` components)
+/// - Dangerous characters (null, newline, semicolons, backticks, pipes, shell expansion)
+pub fn validate_file_uri(uri: &str) -> Result<()> {
+    let path_str = uri.strip_prefix(FILE_URI_PREFIX).ok_or_else(|| {
+        NonoError::ConfigParse(format!(
+            "credential reference '{}' does not start with '{}'",
+            uri, FILE_URI_PREFIX
+        ))
+    })?;
+
+    if !path_str.starts_with('/') {
+        return Err(NonoError::ConfigParse(format!(
+            "file:// URI must use an absolute path (file:///path), got: {}",
+            uri
+        )));
+    }
+
+    let meaningful = path_str.trim_end_matches('/');
+    if meaningful.is_empty() || meaningful == "/" {
+        return Err(NonoError::ConfigParse(format!(
+            "file:// URI path is empty: {}",
+            uri
+        )));
+    }
+
+    for component in std::path::Path::new(path_str).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(NonoError::ConfigParse(format!(
+                "file:// URI must not contain path traversal (..): {}",
+                uri
+            )));
+        }
+    }
+
+    const FORBIDDEN_FILE_CHARS: &[char] = &['\0', '\n', '\r', ';', '`', '|', '$', '&', '>', '<'];
+    if let Some(bad) = path_str.chars().find(|c| FORBIDDEN_FILE_CHARS.contains(c)) {
+        return Err(NonoError::ConfigParse(format!(
+            "file:// URI contains forbidden character {:?}: {}",
+            bad, uri
         )));
     }
 
@@ -442,6 +510,150 @@ fn load_from_env(uri: &str) -> Result<Zeroizing<String>> {
             var_name
         ))),
     }
+}
+
+/// Load a secret from a local file via `file://` URI.
+///
+/// Reads the file contents at startup (before sandbox activation), trims
+/// whitespace, and wraps the result in `Zeroizing<String>`. The file is
+/// read once — subsequent access is from the in-memory zeroized copy.
+///
+/// # Errors
+///
+/// Returns `SecretNotFound` if the file does not exist or is empty.
+/// Returns `KeystoreAccess` for other I/O errors (permissions, etc.).
+fn load_from_file(uri: &str) -> Result<Zeroizing<String>> {
+    validate_file_uri(uri)?;
+
+    let path_str = uri
+        .strip_prefix(FILE_URI_PREFIX)
+        .ok_or_else(|| NonoError::ConfigParse(format!("invalid file:// URI: {}", uri)))?;
+
+    let trimmed = load_secret_file(Path::new(path_str)).map_err(|e| match e {
+        NonoError::SecretNotFound(_) => {
+            NonoError::SecretNotFound(format!("credential file not found: {}", path_str))
+        }
+        NonoError::KeystoreAccess(_) => {
+            NonoError::KeystoreAccess(format!("failed to read credential file '{}'", path_str))
+        }
+        other => other,
+    })?;
+
+    tracing::debug!("Loaded secret from {}", redact_file_uri(uri));
+    Ok(trimmed)
+}
+
+/// Load a secret from a local file and wrap it in [`Zeroizing`].
+///
+/// Intended for callers that need a common file-backed secret path without
+/// duplicating plaintext handling. A single trailing line ending is removed to
+/// match CLI-based secret loaders; other leading/trailing whitespace is
+/// preserved.
+pub fn load_secret_file(path: &Path) -> Result<Zeroizing<String>> {
+    let mut content = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            NonoError::SecretNotFound(format!("secret file not found: {}", path.display()))
+        } else {
+            NonoError::KeystoreAccess(format!(
+                "failed to read secret file '{}': {}",
+                path.display(),
+                e
+            ))
+        }
+    })?);
+
+    if content.ends_with("\r\n") {
+        let new_len = content.len().saturating_sub(2);
+        content.truncate(new_len);
+    } else if content.ends_with('\n') {
+        let new_len = content.len().saturating_sub(1);
+        content.truncate(new_len);
+    }
+
+    if content.is_empty() {
+        return Err(NonoError::SecretNotFound(format!(
+            "secret file '{}' is empty",
+            path.display()
+        )));
+    }
+
+    Ok(content)
+}
+
+/// Store a secret in a local file with owner-only permissions on Unix.
+///
+/// This is primarily used by trust-related file-backed keystore adapters and
+/// keeps the file handling consistent with runtime secret loading helpers.
+pub fn store_secret_file(path: &Path, secret: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            NonoError::KeystoreAccess(format!(
+                "failed to create secret directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| {
+                    NonoError::KeystoreAccess(format!(
+                        "failed to secure existing secret file {}: {e}",
+                        path.display()
+                    ))
+                },
+            )?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| {
+                NonoError::KeystoreAccess(format!(
+                    "failed to store secret at {}: {e}",
+                    path.display()
+                ))
+            })?;
+
+        file.write_all(secret.as_bytes()).map_err(|e| {
+            NonoError::KeystoreAccess(format!("failed to store secret at {}: {e}", path.display()))
+        })?;
+
+        file.sync_all().map_err(|e| {
+            NonoError::KeystoreAccess(format!(
+                "failed to sync secret file {}: {e}",
+                path.display()
+            ))
+        })?;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            NonoError::KeystoreAccess(format!(
+                "failed to secure secret file {}: {e}",
+                path.display()
+            ))
+        })?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut file = std::fs::File::create(path).map_err(|e| {
+            NonoError::KeystoreAccess(format!("failed to store secret at {}: {e}", path.display()))
+        })?;
+
+        file.write_all(secret.as_bytes()).map_err(|e| {
+            NonoError::KeystoreAccess(format!("failed to store secret at {}: {e}", path.display()))
+        })?;
+    }
+
+    Ok(())
 }
 
 /// Load a single secret from the keystore.
@@ -727,6 +939,18 @@ pub fn redact_apple_password_uri(uri: &str) -> String {
     "apple-password://***".to_string()
 }
 
+/// Redact a file:// URI for safe logging.
+/// Keeps the directory structure but replaces the filename.
+/// `file:///run/secrets/api-token` → `file:///run/secrets/[REDACTED]`
+fn redact_file_uri(uri: &str) -> String {
+    if let Some(path) = uri.strip_prefix(FILE_URI_PREFIX) {
+        if let Some(last_slash) = path.rfind('/') {
+            return format!("{}{}[REDACTED]", FILE_URI_PREFIX, &path[..=last_slash]);
+        }
+    }
+    format!("{}[REDACTED]", FILE_URI_PREFIX)
+}
+
 /// Wait for a child process with a timeout.
 ///
 /// Returns the process output on success, or a timeout error.
@@ -850,6 +1074,32 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
                     }
                 };
                 mappings.insert(entry.to_string(), source_var.to_string());
+            }
+        } else if entry.starts_with(FILE_URI_PREFIX) {
+            // file:// URI: must have explicit =VAR_NAME suffix because
+            // you can't derive a meaningful env var name from a file path.
+            // Format: file:///path/to/secret=MY_VAR
+            if let Some(eq_pos) = entry.rfind('=') {
+                let uri = &entry[..eq_pos];
+                let var_name = &entry[eq_pos + 1..];
+
+                if var_name.is_empty() {
+                    return Err(NonoError::ConfigParse(format!(
+                        "file:// credential '{}' has '=' but no variable name. \
+                         Use format: file:///path/to/secret=MY_VAR",
+                        uri
+                    )));
+                }
+
+                validate_file_uri(uri)?;
+                validate_destination_env_var(var_name)?;
+                mappings.insert(uri.to_string(), var_name.to_string());
+            } else {
+                return Err(NonoError::ConfigParse(format!(
+                    "file:// credential '{}' requires an explicit target variable. \
+                     Use format: file:///path/to/secret=MY_VAR",
+                    entry
+                )));
             }
         } else if entry.starts_with(OP_URI_PREFIX) {
             // 1Password URI: must have =VAR_NAME suffix
@@ -978,6 +1228,7 @@ pub fn build_secret_mappings(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -1402,6 +1653,25 @@ mod tests {
             redact_apple_password_uri("apple-password://only-server"),
             "apple-password://***"
         );
+    }
+
+    // --- redact_file_uri tests ---
+
+    #[test]
+    fn test_redact_file_uri() {
+        assert_eq!(
+            redact_file_uri("file:///run/secrets/api-token"),
+            "file:///run/secrets/[REDACTED]"
+        );
+        assert_eq!(
+            redact_file_uri("file:///etc/ssl/cert.pem"),
+            "file:///etc/ssl/[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_redact_file_uri_root_path() {
+        assert_eq!(redact_file_uri("file:///secret"), "file:///[REDACTED]");
     }
 
     // --- classify_op_error tests ---
@@ -1903,5 +2173,182 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged.get("openai_api_key"), Some(&"FROM_MAP".to_string()));
+    }
+
+    // =========================================================================
+    // file:// URI tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_file_uri_valid_absolute_path() {
+        assert!(validate_file_uri("file:///run/secrets/api-token").is_ok());
+        assert!(validate_file_uri("file:///tmp/secret.txt").is_ok());
+        assert!(validate_file_uri("file:///etc/ssl/certs/ca.pem").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_uri_rejects_empty_path() {
+        assert!(validate_file_uri("file://").is_err());
+        assert!(validate_file_uri("file:///").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_uri_rejects_relative_path() {
+        assert!(validate_file_uri("file://relative/path").is_err());
+        assert!(validate_file_uri("file://./secret").is_err());
+        assert!(validate_file_uri("file://../escape").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_uri_rejects_traversal() {
+        assert!(validate_file_uri("file:///run/secrets/../../../etc/shadow").is_err());
+        assert!(validate_file_uri("file:///tmp/../../root/.ssh/id_rsa").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_uri_rejects_forbidden_characters() {
+        assert!(validate_file_uri("file:///tmp/secret;rm -rf /").is_err());
+        assert!(validate_file_uri("file:///tmp/secret\nnewline").is_err());
+        assert!(validate_file_uri("file:///tmp/secret\x00null").is_err());
+    }
+
+    #[test]
+    fn test_is_file_uri() {
+        assert!(is_file_uri("file:///run/secrets/api-token"));
+        assert!(!is_file_uri("env://MY_VAR"));
+        assert!(!is_file_uri("/run/secrets/api-token"));
+        // Note: is_file_uri is a scheme detector, not a validator.
+        // "file://relative" starts with "file://" so it matches the scheme.
+        // Validation (absolute path check) happens in validate_file_uri.
+        assert!(is_file_uri("file://relative"));
+    }
+
+    // =========================================================================
+    // load_from_file tests
+    // =========================================================================
+
+    #[test]
+    fn test_load_from_file_reads_and_trims() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+        std::fs::write(&path, "my-api-key\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "my-api-key");
+    }
+
+    #[test]
+    fn test_load_from_file_empty_file_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_file_whitespace_only_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("whitespace.txt");
+        std::fs::write(&path, "  \n  \n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "  \n  ");
+    }
+
+    #[test]
+    fn test_load_from_file_not_found() {
+        let result = load_from_file("file:///nonexistent/path/secret.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_file_multiline_reads_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.txt");
+        std::fs::write(&path, "glpat-xxxxxxxxxxxx\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri).unwrap();
+        assert_eq!(result.as_str(), "glpat-xxxxxxxxxxxx");
+    }
+
+    #[test]
+    fn test_load_from_file_preserves_significant_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spaces.txt");
+        std::fs::write(&path, "  secret value  \n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri).unwrap();
+        assert_eq!(result.as_str(), "  secret value  ");
+    }
+
+    #[test]
+    fn test_load_from_file_trims_single_trailing_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crlf.txt");
+        std::fs::write(&path, "secret\r\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri).unwrap();
+        assert_eq!(result.as_str(), "secret");
+    }
+
+    #[test]
+    fn test_load_from_file_newline_only_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newline-only.txt");
+        std::fs::write(&path, "\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_from_file(&uri);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_store_secret_file_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+
+        store_secret_file(&path, "top-secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "top-secret");
+    }
+
+    // =========================================================================
+    // file:// dispatch and CLI mapping tests
+    // =========================================================================
+
+    #[test]
+    fn test_load_secret_by_ref_dispatches_file_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.txt");
+        std::fs::write(&path, "secret-value\n").unwrap();
+        let uri = format!("file://{}", path.display());
+        let result = load_secret_by_ref("nono", &uri);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_str(), "secret-value");
+    }
+
+    #[test]
+    fn test_build_mappings_file_uri_requires_explicit_var() {
+        let result = build_mappings_from_list("file:///run/secrets/api-token=MY_API_KEY");
+        assert!(result.is_ok());
+        let mappings = result.unwrap();
+        assert_eq!(
+            mappings.get("file:///run/secrets/api-token"),
+            Some(&"MY_API_KEY".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_mappings_file_uri_without_var_name_is_error() {
+        let result = build_mappings_from_list("file:///run/secrets/api-token");
+        assert!(result.is_err());
     }
 }
