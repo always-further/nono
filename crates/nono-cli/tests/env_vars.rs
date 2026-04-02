@@ -106,6 +106,28 @@ fn try_add_and_remove_windows_firewall_rule(program: &std::path::Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn host_can_prepare_managed_windows_runtime_root(seed_dir: &std::path::Path) -> bool {
+    let probe = seed_dir.join("label-probe");
+    if let Err(err) = std::fs::create_dir_all(&probe) {
+        eprintln!(
+            "skipping managed runtime-root test because {} could not be created: {err}",
+            probe.display()
+        );
+        return false;
+    }
+
+    if try_set_low_integrity_label(&probe) {
+        true
+    } else {
+        eprintln!(
+            "skipping managed runtime-root test because the host could not prepare a low-integrity directory inside {}",
+            seed_dir.display()
+        );
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn expected_windows_runtime_root(seed_dir: &std::path::Path) -> std::path::PathBuf {
     let low_root = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
@@ -912,9 +934,7 @@ fn windows_run_block_net_blocks_probe_connection_through_cmd_host() {
 #[test]
 fn windows_run_prefers_managed_low_integrity_runtime_root_inside_allowlist() {
     let dir = tempfile::tempdir().expect("tmpdir");
-    let probe = dir.path().join("label-probe");
-    std::fs::create_dir_all(&probe).expect("mkdir probe");
-    if !try_set_low_integrity_label(&probe) {
+    if !host_can_prepare_managed_windows_runtime_root(dir.path()) {
         return;
     }
 
@@ -1337,6 +1357,10 @@ fn windows_run_allows_cmd_write_into_redirected_tmp_runtime_dir() {
 #[test]
 fn windows_run_ignores_unverified_localappdata_override_when_runtime_root_is_verified() {
     let dir = tempfile::tempdir().expect("tmpdir");
+    if !host_can_prepare_managed_windows_runtime_root(dir.path()) {
+        return;
+    }
+
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
     let fake_localappdata = dir.path().join("fake-localappdata");
@@ -1362,6 +1386,12 @@ fn windows_run_ignores_unverified_localappdata_override_when_runtime_root_is_ver
         .expect("failed to run nono");
 
     let text = combined_output(&output);
+    if output_has_windows_access_denied(&text) {
+        eprintln!(
+            "skipping LOCALAPPDATA override runtime-root test because the restricted Windows child could not write to the managed runtime root on this host:\n{text}"
+        );
+        return;
+    }
     assert!(
         output.status.success(),
         "Windows preview should keep using the verified runtime root inside the writable allowlist, output:\n{text}"
