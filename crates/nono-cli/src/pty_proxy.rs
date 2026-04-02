@@ -24,7 +24,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -59,6 +59,12 @@ enum AttachedClient {
     Terminal { read_fd: RawFd, write_fd: RawFd },
     /// Reattached client over the session Unix socket.
     Socket(OwnedFd),
+}
+
+enum ReadFdOutcome {
+    Data(usize),
+    Eof,
+    Retry,
 }
 
 impl AttachedClient {
@@ -270,7 +276,13 @@ impl PtyProxy {
     /// Restores terminal settings and drops the client connection.
     pub fn detach(&mut self) -> bool {
         let mut detached_terminal = false;
+        let mut detached_client_kind = None;
         if let Some(client) = self.client.take() {
+            detached_client_kind = Some(if client.is_terminal() {
+                "terminal"
+            } else {
+                "socket"
+            });
             if client.is_terminal() {
                 detached_terminal = true;
                 self.restore_terminal();
@@ -280,7 +292,16 @@ impl PtyProxy {
         self.pending_detach_match_len = 0;
         self.pending_detach_escape.clear();
         self.persist_attachment_state(crate::session::SessionAttachment::Detached);
-        debug!("PTY proxy detached");
+        match detached_client_kind {
+            Some(kind) => info!(
+                "PTY proxy detached {kind} client for session {}",
+                self.session_id
+            ),
+            None => debug!(
+                "PTY proxy detach requested with no active client for session {}",
+                self.session_id
+            ),
+        }
         detached_terminal
     }
 
@@ -351,6 +372,19 @@ impl PtyProxy {
                 }
                 self.write_debug_capture();
                 let replay = self.attach_replay_bytes();
+                let (rows, cols) = self.screen.size();
+                let (cursor_row, cursor_col) = self.screen.cursor_position();
+                info!(
+                    "PTY proxy preparing attach replay for session {}: replay_bytes={}, scrollback_bytes={}, alt_screen={}, rows={}, cols={}, cursor_row={}, cursor_col={}",
+                    self.session_id,
+                    replay.len(),
+                    self.scrollback.len(),
+                    self.screen.alternate_screen_active(),
+                    rows,
+                    cols,
+                    cursor_row,
+                    cursor_col
+                );
                 if !replay.is_empty() && stream.write_all(&replay).is_err() {
                     debug!("PTY proxy: failed to replay scrollback to attached client");
                 }
@@ -362,7 +396,10 @@ impl PtyProxy {
                 self.client = Some(AttachedClient::socket(socket));
                 self.resize_notifier = Some(supervisor_resize);
                 self.persist_attachment_state(crate::session::SessionAttachment::Attached);
-                debug!("PTY proxy: client attached via socket");
+                info!(
+                    "PTY proxy attached socket client for session {}",
+                    self.session_id
+                );
                 true
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
@@ -398,26 +435,25 @@ impl PtyProxy {
             .map(|c| (c.write_fd(), c.is_terminal()));
 
         let mut buf = [0u8; 4096];
-        let n = unsafe {
-            libc::read(
-                self.master.as_raw_fd(),
-                buf.as_mut_ptr().cast::<libc::c_void>(),
-                buf.len(),
-            )
+        let n = match read_fd_once(self.master.as_raw_fd(), &mut buf) {
+            Ok(ReadFdOutcome::Data(n)) => n,
+            Ok(ReadFdOutcome::Eof) => return false,
+            Ok(ReadFdOutcome::Retry) => return true,
+            Err(err) => {
+                debug!("PTY proxy: failed reading PTY master: {}", err);
+                return false;
+            }
         };
 
-        if n <= 0 {
-            return n == -1
-                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
-        }
-
-        self.record_output(&buf[..n as usize]);
+        self.record_output(&buf[..n]);
 
         if let Some((write_fd, is_terminal)) = client {
-            if write_all_fd(write_fd, &buf[..n as usize]).is_err() && !is_terminal {
-                // Socket client disconnected
-                self.detach();
-                return true;
+            if let Err(err) = write_all_fd(write_fd, &buf[..n]) {
+                if !is_terminal {
+                    debug!("PTY proxy: attached socket client disconnected: {}", err);
+                    self.detach();
+                    return true;
+                }
             }
         }
 
@@ -434,19 +470,29 @@ impl PtyProxy {
         };
 
         let mut buf = [0u8; 4096];
-        let n = unsafe { libc::read(client.0, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
-
-        if n <= 0 {
-            if n == 0 && !client.1 {
-                // Socket client disconnected
-                self.detach();
-                return true;
+        let n = match read_fd_once(client.0, &mut buf) {
+            Ok(ReadFdOutcome::Data(n)) => n,
+            Ok(ReadFdOutcome::Eof) => {
+                if !client.1 {
+                    // Socket client disconnected
+                    self.detach();
+                    return true;
+                }
+                return false;
             }
-            return n == -1
-                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
-        }
+            Ok(ReadFdOutcome::Retry) => return true,
+            Err(err) => {
+                if !client.1 {
+                    debug!("PTY proxy: attached socket client read failed: {}", err);
+                    self.detach();
+                    return true;
+                }
+                debug!("PTY proxy: terminal input read failed: {}", err);
+                return false;
+            }
+        };
 
-        let forwarded = self.filter_client_input(&buf[..n as usize]);
+        let forwarded = self.filter_client_input(&buf[..n]);
         if !forwarded.is_empty() && write_all_fd(self.master.as_raw_fd(), &forwarded).is_err() {
             return false;
         }
@@ -479,10 +525,10 @@ impl PtyProxy {
 
     /// Re-enter raw mode and redraw the current PTY screen after a prompt.
     pub fn resume_terminal_after_prompt(&mut self) {
-        if self
+        if !self
             .client
             .as_ref()
-            .is_none_or(|client| !client.is_terminal())
+            .is_some_and(AttachedClient::is_terminal)
         {
             return;
         }
@@ -585,6 +631,7 @@ impl PtyProxy {
             return;
         }
 
+        let first_output = self.scrollback.is_empty();
         self.screen.apply_bytes(bytes);
 
         if bytes.len() >= SCROLLBACK_LIMIT_BYTES {
@@ -594,6 +641,13 @@ impl PtyProxy {
                     .iter()
                     .copied(),
             );
+            if first_output {
+                info!(
+                    "PTY proxy observed first PTY output for session {} ({} bytes, screen snapshot saturated)",
+                    self.session_id,
+                    bytes.len()
+                );
+            }
             return;
         }
 
@@ -606,6 +660,13 @@ impl PtyProxy {
             let _ = self.scrollback.pop_front();
         }
         self.scrollback.extend(bytes.iter().copied());
+        if first_output {
+            info!(
+                "PTY proxy observed first PTY output for session {} ({} bytes)",
+                self.session_id,
+                bytes.len()
+            );
+        }
     }
 
     fn scrollback_snapshot(&self) -> Vec<u8> {
@@ -630,6 +691,7 @@ impl PtyProxy {
             self.screen.alternate_screen_active(),
             self.scrollback.iter().copied().collect(),
             self.scrollback_snapshot(),
+            self.screen.render_plaintext(),
         )
     }
 
@@ -689,6 +751,10 @@ impl PtyProxy {
                 self.pending_detach_match_len += 1;
                 if self.pending_detach_match_len == self.detach_sequence.len() {
                     self.detach_requested = true;
+                    info!(
+                        "PTY proxy in-band detach sequence matched for session {}",
+                        self.session_id
+                    );
                     self.pending_detach_match_len = 0;
                 }
                 continue;
@@ -749,6 +815,10 @@ impl PtyProxy {
                 if self.pending_detach_match_len == self.detach_sequence.len() {
                     self.pending_detach_match_len = 0;
                     self.detach_requested = true;
+                    info!(
+                        "PTY proxy in-band detach sequence matched for session {}",
+                        self.session_id
+                    );
                 }
             }
             EnhancedKeyMatch::Invalid => self.flush_pending_detach_escape(forwarded),
@@ -897,13 +967,20 @@ fn select_attach_replay_bytes(
     alternate_screen_active: bool,
     raw_scrollback: Vec<u8>,
     rendered_snapshot: Vec<u8>,
+    rendered_plaintext: String,
 ) -> Vec<u8> {
     if alternate_screen_active {
-        if rendered_snapshot.is_empty() {
+        if raw_scrollback.is_empty() {
+            rendered_snapshot
+        } else if rendered_plaintext.trim().is_empty() {
             raw_scrollback
         } else {
-            rendered_snapshot
+            let mut replay = raw_scrollback;
+            replay.extend_from_slice(&rendered_snapshot);
+            replay
         }
+    } else if rendered_snapshot.is_empty() || rendered_plaintext.trim().is_empty() {
+        raw_scrollback
     } else {
         rendered_snapshot
     }
@@ -1349,11 +1426,71 @@ fn write_all_fd(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
         let err = std::io::Error::last_os_error();
         match err.kind() {
             std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock => wait_for_fd_writable(fd)?,
             _ => return Err(err),
         }
     }
 
     Ok(())
+}
+
+fn read_fd_once(fd: RawFd, buf: &mut [u8]) -> std::io::Result<ReadFdOutcome> {
+    loop {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        if n > 0 {
+            return Ok(ReadFdOutcome::Data(n as usize));
+        }
+        if n == 0 {
+            return Ok(ReadFdOutcome::Eof);
+        }
+
+        let err = std::io::Error::last_os_error();
+        match err.kind() {
+            std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock => return Ok(ReadFdOutcome::Retry),
+            _ => return Err(err),
+        }
+    }
+}
+
+fn wait_for_fd_writable(fd: RawFd) -> std::io::Result<()> {
+    loop {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, -1) };
+        if ret > 0 {
+            if pfd.revents & libc::POLLOUT != 0 {
+                return Ok(());
+            }
+            if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            continue;
+        }
+        if ret == 0 {
+            continue;
+        }
+
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(err);
+    }
+}
+
+fn is_socket_disconnect(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 /// Connect to a running session's attach socket.
@@ -1549,17 +1686,28 @@ fn run_attach_loop(
                     )));
                 }
                 if warmup_pfd.revents & libc::POLLIN != 0 {
-                    let n = unsafe {
-                        libc::read(sock_fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
-                    };
-                    if n <= 0 {
-                        break;
-                    }
-                    if write_all_fd(libc::STDOUT_FILENO, &buf[..n as usize]).is_err() {
-                        break;
+                    match read_fd_once(sock_fd, &mut buf) {
+                        Ok(ReadFdOutcome::Data(n)) => {
+                            if let Err(err) = write_all_fd(libc::STDOUT_FILENO, &buf[..n]) {
+                                return Err(NonoError::SandboxInit(format!(
+                                    "attach stdout write failed: {}",
+                                    err
+                                )));
+                            }
+                        }
+                        Ok(ReadFdOutcome::Eof) => break,
+                        Ok(ReadFdOutcome::Retry) => continue,
+                        Err(err) if is_socket_disconnect(&err) => break,
+                        Err(err) => {
+                            return Err(NonoError::SandboxInit(format!(
+                                "attach socket read failed: {}",
+                                err
+                            )));
+                        }
                     }
                 }
                 if warmup_pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                    info!("PTY attach client observed attach socket close during warm-up");
                     break;
                 }
                 continue;
@@ -1582,35 +1730,68 @@ fn run_attach_loop(
 
         // stdin → socket (user input)
         if pfds[0].revents & libc::POLLIN != 0 {
-            let n = unsafe {
-                libc::read(
-                    libc::STDIN_FILENO,
-                    buf.as_mut_ptr().cast::<libc::c_void>(),
-                    buf.len(),
-                )
-            };
-            if n <= 0 {
-                break;
-            }
-            if write_all_fd(sock_fd, &buf[..n as usize]).is_err() {
-                break;
+            match read_fd_once(libc::STDIN_FILENO, &mut buf) {
+                Ok(ReadFdOutcome::Data(n)) => {
+                    if let Err(err) = write_all_fd(sock_fd, &buf[..n]) {
+                        if is_socket_disconnect(&err) {
+                            info!("PTY attach client socket disconnected while writing stdin");
+                            break;
+                        }
+                        return Err(NonoError::SandboxInit(format!(
+                            "attach socket write failed: {}",
+                            err
+                        )));
+                    }
+                }
+                Ok(ReadFdOutcome::Eof) => {
+                    info!("PTY attach client stdin reached EOF");
+                    break;
+                }
+                Ok(ReadFdOutcome::Retry) => continue,
+                Err(err) => {
+                    return Err(NonoError::SandboxInit(format!(
+                        "attach stdin read failed: {}",
+                        err
+                    )));
+                }
             }
         }
 
         // socket → stdout (child output)
         if pfds[1].revents & libc::POLLIN != 0 {
-            let n =
-                unsafe { libc::read(sock_fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
-            if n <= 0 {
-                break;
-            }
-            if write_all_fd(libc::STDOUT_FILENO, &buf[..n as usize]).is_err() {
-                break;
+            match read_fd_once(sock_fd, &mut buf) {
+                Ok(ReadFdOutcome::Data(n)) => {
+                    if let Err(err) = write_all_fd(libc::STDOUT_FILENO, &buf[..n]) {
+                        return Err(NonoError::SandboxInit(format!(
+                            "attach stdout write failed: {}",
+                            err
+                        )));
+                    }
+                }
+                Ok(ReadFdOutcome::Eof) => {
+                    info!("PTY attach client observed attach socket EOF");
+                    break;
+                }
+                Ok(ReadFdOutcome::Retry) => continue,
+                Err(err) if is_socket_disconnect(&err) => {
+                    info!(
+                        "PTY attach client observed attach socket disconnect: {}",
+                        err
+                    );
+                    break;
+                }
+                Err(err) => {
+                    return Err(NonoError::SandboxInit(format!(
+                        "attach socket read failed: {}",
+                        err
+                    )));
+                }
             }
         }
 
         // Connection closed
         if pfds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            info!("PTY attach client observed POLLHUP/POLLERR on attach socket");
             break;
         }
     }
@@ -1622,13 +1803,17 @@ fn run_attach_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        select_attach_replay_bytes, terminal_restore_escape, PtyProxy, ScreenState,
-        DEFAULT_DETACH_SEQUENCE,
+        read_fd_once, select_attach_replay_bytes, terminal_restore_escape, write_all_fd, PtyProxy,
+        ReadFdOutcome, ScreenState, DEFAULT_DETACH_SEQUENCE,
     };
     use nix::libc;
     use std::collections::VecDeque;
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::net::UnixListener;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::Duration;
 
     fn build_test_proxy(sequence: &[u8]) -> PtyProxy {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -1681,19 +1866,40 @@ mod tests {
 
     #[test]
     fn attach_replay_uses_rendered_snapshot_for_alternate_screen() {
-        let replay = select_attach_replay_bytes(true, b"raw".to_vec(), b"rendered".to_vec());
-        assert_eq!(replay, b"rendered");
+        let replay = select_attach_replay_bytes(
+            true,
+            b"raw".to_vec(),
+            b"rendered".to_vec(),
+            "visible text".to_string(),
+        );
+        assert_eq!(replay, b"rawrendered");
     }
 
     #[test]
     fn attach_replay_uses_rendered_snapshot_for_normal_screen() {
-        let replay = select_attach_replay_bytes(false, b"raw".to_vec(), b"rendered".to_vec());
+        let replay = select_attach_replay_bytes(
+            false,
+            b"raw".to_vec(),
+            b"rendered".to_vec(),
+            "visible text".to_string(),
+        );
         assert_eq!(replay, b"rendered");
     }
 
     #[test]
     fn attach_replay_falls_back_to_raw_if_alternate_snapshot_is_empty() {
-        let replay = select_attach_replay_bytes(true, b"raw".to_vec(), Vec::new());
+        let replay = select_attach_replay_bytes(true, b"raw".to_vec(), Vec::new(), "".to_string());
+        assert_eq!(replay, b"raw");
+    }
+
+    #[test]
+    fn attach_replay_falls_back_to_raw_if_alternate_plaintext_is_blank() {
+        let replay = select_attach_replay_bytes(
+            true,
+            b"raw".to_vec(),
+            b"rendered".to_vec(),
+            "   ".to_string(),
+        );
         assert_eq!(replay, b"raw");
     }
 
@@ -1820,5 +2026,42 @@ mod tests {
         let forwarded = proxy.filter_client_input(b"\x1b[27;5;93~d");
         assert!(forwarded.is_empty());
         assert!(proxy.take_detach_request());
+    }
+
+    #[test]
+    fn read_fd_once_returns_retry_for_nonblocking_would_block() {
+        let (reader, _writer) = UnixStream::pair().expect("socket pair");
+        assert!(super::set_nonblocking(reader.as_raw_fd()));
+
+        let mut buf = [0u8; 8];
+        let result = read_fd_once(reader.as_raw_fd(), &mut buf).expect("read should not fail");
+        assert!(matches!(result, ReadFdOutcome::Retry));
+    }
+
+    #[test]
+    fn write_all_fd_retries_after_would_block() {
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair");
+        assert!(super::set_nonblocking(writer.as_raw_fd()));
+
+        let fill_buf = vec![b'x'; 8192];
+        loop {
+            match writer.write(&fill_buf) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) => panic!("failed to fill socket buffer: {err}"),
+            }
+        }
+
+        let reader_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let mut reader = reader;
+            let mut drained = vec![0u8; 16 * 1024];
+            let _ = reader.read(&mut drained);
+            thread::sleep(Duration::from_millis(100));
+        });
+
+        write_all_fd(writer.as_raw_fd(), b"ok").expect("write_all_fd should retry");
+        reader_thread.join().expect("reader thread");
     }
 }

@@ -1,5 +1,10 @@
 use crate::cli::{Cli, Commands};
 use crate::{config, theme};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::EnvFilter;
 
 pub(crate) fn normalize_legacy_flag_env_vars() {
@@ -80,10 +85,35 @@ pub(crate) fn init_theme(cli: &Cli) {
 }
 
 pub(crate) fn init_tracing(cli: &Cli) {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_filter(cli))
-        .with_target(false)
-        .init();
+    match cli.log_file.as_deref() {
+        Some(path) => match SharedFileMakeWriter::new(path) {
+            Ok(writer) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(tracing_filter(cli))
+                    .with_target(false)
+                    .with_ansi(false)
+                    .with_writer(writer)
+                    .init();
+            }
+            Err(err) => {
+                eprintln!(
+                    "nono: failed to open log file {}: {}; falling back to stderr",
+                    path.display(),
+                    err
+                );
+                tracing_subscriber::fmt()
+                    .with_env_filter(tracing_filter(cli))
+                    .with_target(false)
+                    .init();
+            }
+        },
+        None => {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_filter(cli))
+                .with_target(false)
+                .init();
+        }
+    }
 }
 
 fn copy_legacy_env_var(old: &str, new: &str) {
@@ -138,5 +168,81 @@ fn cli_verbosity(cli: &Cli) -> u8 {
         | Commands::Policy(_)
         | Commands::Profile(_)
         | Commands::OpenUrlHelper(_) => 0,
+    }
+}
+
+#[derive(Clone)]
+struct SharedFileMakeWriter {
+    file: Arc<Mutex<File>>,
+}
+
+struct SharedFileWriter {
+    file: Arc<Mutex<File>>,
+}
+
+impl SharedFileMakeWriter {
+    fn new(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: Arc::new(Mutex::new(file)),
+        })
+    }
+}
+
+impl<'a> MakeWriter<'a> for SharedFileMakeWriter {
+    type Writer = SharedFileWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SharedFileWriter {
+            file: Arc::clone(&self.file),
+        }
+    }
+}
+
+impl Write for SharedFileWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut guard = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("log file mutex poisoned"))?;
+        guard.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut guard = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("log file mutex poisoned"))?;
+        guard.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedFileMakeWriter;
+    use std::io::{Read, Write};
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[test]
+    fn shared_file_make_writer_appends_output() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let log_path = temp_dir.path().join("nono.log");
+        let writer = SharedFileMakeWriter::new(&log_path).expect("create writer");
+
+        let mut first = writer.make_writer();
+        let mut second = writer.make_writer();
+        first.write_all(b"first line\n").expect("first write");
+        second.write_all(b"second line\n").expect("second write");
+        first.flush().expect("first flush");
+        second.flush().expect("second flush");
+
+        let mut contents = String::new();
+        std::fs::File::open(&log_path)
+            .expect("open log")
+            .read_to_string(&mut contents)
+            .expect("read log");
+
+        assert!(contents.contains("first line"));
+        assert!(contents.contains("second line"));
     }
 }

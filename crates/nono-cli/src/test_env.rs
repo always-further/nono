@@ -6,6 +6,7 @@
 ///
 /// See <https://github.com/always-further/nono/issues/567> for the plan to
 /// eliminate env var mutation from tests entirely.
+#[allow(dead_code)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Restores a set of environment variables when dropped.

@@ -1347,7 +1347,14 @@ fn wait_for_child_with_pty(
         if pause_requested {
             pty.sync_current_terminal_winsize();
         }
-        if (pause_requested || pty.take_detach_request()) && detach_client_for_session(pty) {
+        let in_band_detach_requested = pty.take_detach_request();
+        if pause_requested {
+            info!("PTY detach requested via SIGUSR1 control signal");
+        }
+        if in_band_detach_requested {
+            info!("PTY detach requested via in-band key sequence");
+        }
+        if (pause_requested || in_band_detach_requested) && detach_client_for_session(pty) {
             restore_terminal_after_detach();
         }
 
@@ -1769,7 +1776,14 @@ fn run_supervisor_loop(
                 p.sync_current_terminal_winsize();
             }
         }
-        if pause_requested || pty.as_mut().is_some_and(|p| p.take_detach_request()) {
+        let in_band_detach_requested = pty.as_mut().is_some_and(|p| p.take_detach_request());
+        if pause_requested {
+            info!("PTY detach requested via SIGUSR1 control signal");
+        }
+        if in_band_detach_requested {
+            info!("PTY detach requested via in-band key sequence");
+        }
+        if pause_requested || in_band_detach_requested {
             if let Some(ref mut p) = pty {
                 if detach_client_for_session(p) {
                     restore_terminal_after_detach();
@@ -2019,7 +2033,14 @@ fn run_supervisor_loop(
                 p.sync_current_terminal_winsize();
             }
         }
-        if pause_requested || pty.as_mut().is_some_and(|p| p.take_detach_request()) {
+        let in_band_detach_requested = pty.as_mut().is_some_and(|p| p.take_detach_request());
+        if pause_requested {
+            info!("PTY detach requested via SIGUSR1 control signal");
+        }
+        if in_band_detach_requested {
+            info!("PTY detach requested via in-band key sequence");
+        }
+        if pause_requested || in_band_detach_requested {
             if let Some(ref mut p) = pty {
                 if detach_client_for_session(p) {
                     restore_terminal_after_detach();
