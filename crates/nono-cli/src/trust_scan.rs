@@ -1224,6 +1224,7 @@ mod tests {
 
     #[test]
     fn load_scan_policy_skips_policy_verification_without_signed_artifacts() {
+        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
         let scan_dir = tempfile::tempdir().unwrap();
         let include_pattern = "*.arbitrary";
         let orig_xdg = std::env::var("XDG_CONFIG_HOME").ok();

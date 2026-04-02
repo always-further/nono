@@ -1620,6 +1620,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars() {
+        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
         // Save original HOME to restore after test (avoid polluting other parallel tests)
         let original_home = env::var("HOME").ok();
 
@@ -1671,6 +1672,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_cache_home() {
+        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
         let original_home = env::var("HOME").ok();
         let original_cache = env::var("XDG_CACHE_HOME").ok();
 
@@ -1697,6 +1699,7 @@ mod tests {
 
     #[test]
     fn test_expand_vars_xdg_runtime_dir() {
+        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
         let original_runtime = env::var("XDG_RUNTIME_DIR").ok();
 
         env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
@@ -1723,6 +1726,7 @@ mod tests {
 
     #[test]
     fn test_resolve_user_config_dir_uses_valid_absolute_xdg() {
+        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
         let tmp = tempdir().expect("tmpdir");
         env::set_var("XDG_CONFIG_HOME", tmp.path());
         let resolved = resolve_user_config_dir().expect("resolve user config dir");
@@ -1735,6 +1739,7 @@ mod tests {
 
     #[test]
     fn test_resolve_user_config_dir_falls_back_on_relative_xdg() {
+        let _guard = crate::test_env::ENV_LOCK.lock().unwrap();
         let expected_home = home_dir().expect("home dir");
         env::set_var("XDG_CONFIG_HOME", "relative/path");
 
