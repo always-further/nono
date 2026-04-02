@@ -2805,6 +2805,32 @@ mod tests {
     use super::*;
     use std::io::Read;
 
+    struct EnvVarRestoreGuard {
+        saved: Vec<(String, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvVarRestoreGuard {
+        fn capture(keys: &[&str]) -> Self {
+            Self {
+                saved: keys
+                    .iter()
+                    .map(|key| ((*key).to_string(), std::env::var_os(key)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvVarRestoreGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(&key, value),
+                    None => std::env::remove_var(&key),
+                }
+            }
+        }
+    }
+
     struct TestGrantBackend;
     struct TestDenyBackend;
 
@@ -3302,6 +3328,15 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_runtime_hardened_args_does_not_duplicate_existing_cmd_disable_autorun() {
+        let args = vec!["/d".to_string(), "/c".to_string(), "echo".to_string()];
+        let hardened =
+            prepare_runtime_hardened_args(Path::new("C:\\Windows\\System32\\cmd.exe"), &args);
+
+        assert_eq!(hardened, args);
+    }
+
+    #[test]
     fn test_prepare_runtime_hardened_args_injects_powershell_safety_flags() {
         let args = vec!["-Command".to_string(), "Get-Content inside.txt".to_string()];
         let hardened = prepare_runtime_hardened_args(
@@ -3316,6 +3351,23 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_runtime_hardened_args_does_not_duplicate_existing_powershell_safety_flags() {
+        let args = vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-NoLogo".to_string(),
+            "-Command".to_string(),
+            "Get-ChildItem".to_string(),
+        ];
+        let hardened = prepare_runtime_hardened_args(
+            Path::new("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+            &args,
+        );
+
+        assert_eq!(hardened, args);
+    }
+
+    #[test]
     fn test_prepare_runtime_hardened_args_injects_cscript_safety_flags() {
         let args = vec!["copy.vbs".to_string(), "source.txt".to_string()];
         let hardened =
@@ -3324,6 +3376,115 @@ mod tests {
         assert!(hardened.contains(&"//NoLogo".to_string()));
         assert!(hardened.contains(&"//B".to_string()));
         assert!(hardened.ends_with(&args));
+    }
+
+    #[test]
+    fn test_build_child_env_filters_dangerous_host_vars_and_keeps_explicit_overrides() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .expect("env lock");
+        let _restore = EnvVarRestoreGuard::capture(&[
+            "LD_PRELOAD",
+            "PATH",
+            "HOME",
+            "SAFE_KEEP",
+            "EXPLICIT_ONLY",
+        ]);
+
+        std::env::set_var("LD_PRELOAD", "dangerous-host-value");
+        std::env::set_var("PATH", r"C:\Windows\System32");
+        std::env::set_var("HOME", r"C:\Users\Host");
+        std::env::set_var("SAFE_KEEP", "host-safe");
+        std::env::remove_var("EXPLICIT_ONLY");
+
+        let cap_file = PathBuf::from(r"C:\temp\nono-cap-state.json");
+        let command = vec!["cmd".to_string(), "/c".to_string(), "echo".to_string()];
+        let current_dir = PathBuf::from(r"C:\workspace");
+        let config = ExecConfig {
+            command: &command,
+            resolved_program: Path::new(r"C:\Windows\System32\cmd.exe"),
+            caps: &CapabilitySet::new(),
+            env_vars: vec![
+                ("PATH", r"C:\sandbox\bin"),
+                ("EXPLICIT_ONLY", "from-explicit"),
+                ("HOME", r"C:\sandbox\home"),
+            ],
+            cap_file: Some(&cap_file),
+            current_dir: &current_dir,
+        };
+
+        let env_pairs = build_child_env(&config);
+
+        assert!(
+            !env_pairs.iter().any(|(key, _)| key == "LD_PRELOAD"),
+            "dangerous host env vars should be filtered out"
+        );
+        assert!(
+            env_pairs
+                .iter()
+                .any(|(key, value)| key == "SAFE_KEEP" && value == "host-safe"),
+            "safe host env vars should be preserved"
+        );
+        assert!(
+            env_pairs
+                .iter()
+                .any(|(key, value)| key == "PATH" && value == r"C:\sandbox\bin"),
+            "explicit PATH should be appended for the child"
+        );
+        assert!(
+            env_pairs
+                .iter()
+                .any(|(key, value)| key == "HOME" && value == r"C:\sandbox\home"),
+            "explicit HOME should be appended for the child"
+        );
+        assert!(
+            env_pairs
+                .iter()
+                .any(|(key, value)| key == "EXPLICIT_ONLY" && value == "from-explicit"),
+            "explicit-only env vars should be injected"
+        );
+        assert!(
+            env_pairs.iter().any(|(key, value)| {
+                key == "NONO_CAP_FILE" && value == r"C:\temp\nono-cap-state.json"
+            }),
+            "cap file should always be exposed to the child when configured"
+        );
+    }
+
+    #[test]
+    fn test_build_child_env_skips_host_value_when_explicit_override_matches_case_insensitively() {
+        let _guard = crate::config::test_env_lock()
+            .lock()
+            .expect("env lock");
+        let _restore = EnvVarRestoreGuard::capture(&["Path"]);
+
+        std::env::set_var("Path", r"C:\host\bin");
+
+        let command = vec!["cmd".to_string(), "/c".to_string(), "echo".to_string()];
+        let current_dir = PathBuf::from(r"C:\workspace");
+        let config = ExecConfig {
+            command: &command,
+            resolved_program: Path::new(r"C:\Windows\System32\cmd.exe"),
+            caps: &CapabilitySet::new(),
+            env_vars: vec![("PATH", r"C:\sandbox\bin")],
+            cap_file: None,
+            current_dir: &current_dir,
+        };
+
+        let env_pairs = build_child_env(&config);
+
+        assert!(
+            !env_pairs
+                .iter()
+                .any(|(key, value)| key == "Path" && value == r"C:\host\bin"),
+            "host value should be skipped when an explicit override is present"
+        );
+        assert!(
+            env_pairs
+                .iter()
+                .any(|(key, value)| key == "PATH" && value == r"C:\sandbox\bin"),
+            "explicit override should be present in the child env"
+        );
     }
 
     #[test]
