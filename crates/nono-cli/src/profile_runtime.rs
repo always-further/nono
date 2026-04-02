@@ -152,7 +152,7 @@ pub(crate) fn prepare_profile(
             .unwrap_or_default(),
         credentials: loaded_profile
             .as_ref()
-            .map(|profile| profile.network.credentials.clone())
+            .and_then(|profile| profile.network.credentials.clone())
             .unwrap_or_default(),
         custom_credentials: loaded_profile
             .as_ref()
