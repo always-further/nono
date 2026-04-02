@@ -189,6 +189,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_query_path_existing_symlink_canonicalizes() {
         // Use a test-local symlink so the behavior is exercised on any Unix

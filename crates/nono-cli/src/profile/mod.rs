@@ -979,49 +979,45 @@ pub struct Profile {
     pub skipdirs: Vec<String>,
 }
 
-impl<'de> Deserialize<'de> for Profile {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct ProfileSerde {
-            /// Optional JSON Schema URI for editor tooling. Parsed and ignored.
-            #[serde(rename = "$schema", default)]
-            _schema: Option<String>,
-            #[serde(default, deserialize_with = "deserialize_extends")]
-            extends: Option<Vec<String>>,
-            #[serde(default)]
-            meta: ProfileMeta,
-            #[serde(default)]
-            security: SecurityConfig,
-            #[serde(default)]
-            filesystem: FilesystemConfig,
-            #[serde(default)]
-            policy: PolicyPatchConfig,
-            #[serde(default)]
-            network: NetworkConfig,
-            #[serde(default, alias = "secrets")]
-            env_credentials: SecretsConfig,
-            #[serde(default)]
-            workdir: WorkdirConfig,
-            #[serde(default)]
-            hooks: HooksConfig,
-            #[serde(default, alias = "undo")]
-            rollback: RollbackConfig,
-            #[serde(default)]
-            open_urls: Option<OpenUrlConfig>,
-            #[serde(default)]
-            allow_launch_services: Option<bool>,
-            #[serde(default)]
-            interactive: bool,
-            #[serde(default)]
-            skipdirs: Vec<String>,
-        }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileDeserialize {
+    /// Optional JSON Schema URI for editor tooling. Parsed and ignored.
+    #[serde(rename = "$schema", default)]
+    _schema: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_extends")]
+    extends: Option<Vec<String>>,
+    #[serde(default)]
+    meta: ProfileMeta,
+    #[serde(default)]
+    security: SecurityConfig,
+    #[serde(default)]
+    filesystem: FilesystemConfig,
+    #[serde(default)]
+    policy: PolicyPatchConfig,
+    #[serde(default)]
+    network: NetworkConfig,
+    #[serde(default, alias = "secrets")]
+    env_credentials: SecretsConfig,
+    #[serde(default)]
+    workdir: WorkdirConfig,
+    #[serde(default)]
+    hooks: HooksConfig,
+    #[serde(default, alias = "undo")]
+    rollback: RollbackConfig,
+    #[serde(default)]
+    open_urls: Option<OpenUrlConfig>,
+    #[serde(default)]
+    allow_launch_services: Option<bool>,
+    #[serde(default)]
+    interactive: bool,
+    #[serde(default)]
+    skipdirs: Vec<String>,
+}
 
-        let raw = ProfileSerde::deserialize(deserializer)?;
-        Ok(Self {
+impl From<ProfileDeserialize> for Profile {
+    fn from(raw: ProfileDeserialize) -> Self {
+        Self {
             extends: raw.extends,
             meta: raw.meta,
             security: raw.security,
@@ -1036,7 +1032,17 @@ impl<'de> Deserialize<'de> for Profile {
             allow_launch_services: raw.allow_launch_services,
             interactive: raw.interactive,
             skipdirs: raw.skipdirs,
-        })
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Profile {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = ProfileDeserialize::deserialize(deserializer)?;
+        Ok(raw.into())
     }
 }
 

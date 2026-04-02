@@ -7,3 +7,35 @@
 /// See <https://github.com/always-further/nono/issues/567> for the plan to
 /// eliminate env var mutation from tests entirely.
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Restores a set of environment variables when dropped.
+pub struct EnvVarGuard {
+    original: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvVarGuard {
+    #[must_use]
+    pub fn set_all(vars: &[(&'static str, &str)]) -> Self {
+        let original = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+
+        for (key, value) in vars {
+            std::env::set_var(key, value);
+        }
+
+        Self { original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.original.iter().rev() {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
