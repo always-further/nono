@@ -406,14 +406,23 @@
         ]
       }
     },
-    "homebrew": {
-      "description": "Homebrew installation paths",
+    "homebrew_macos": {
+      "description": "Homebrew installation paths on macOS",
       "platform": "macos",
       "allow": {
         "read": [
           "/opt/homebrew",
           "/usr/local/Cellar",
           "/usr/local/opt"
+        ]
+      }
+    },
+    "homebrew_linux": {
+      "description": "Homebrew (Linuxbrew) installation paths on Linux",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "/home/linuxbrew/.linuxbrew"
         ]
       }
     },
@@ -590,7 +599,8 @@
           "system_write_macos",
           "system_write_linux",
           "user_tools",
-          "homebrew",
+          "homebrew_macos",
+          "homebrew_linux",
           "dangerous_commands",
           "dangerous_commands_macos",
           "dangerous_commands_linux"
