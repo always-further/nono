@@ -31,6 +31,18 @@ Result:
 
 - Windows can only be called first-class supported after `Sandbox::support_info()` and `Sandbox::apply()` tell the same story as the CLI.
 
+Code change summary:
+
+- promote the core Windows sandbox implementation from a CLI-only/live-run path to a real library-supported path
+- replace the current library `UnsupportedPlatform` apply behavior with support-aligned Windows execution
+- move support reporting, runtime validation, and tests so they all describe one Windows contract instead of separate library and CLI stories
+
+Design impact:
+
+- best long-term architectural clarity: one Windows support contract at the library, CLI, docs, and release layers
+- fewer future support ambiguities for embedders and maintainers
+- higher implementation cost now, because backend/library alignment must be real before promotion is honest
+
 Primary code touch points:
 
 - [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs)
@@ -82,6 +94,19 @@ Definition:
 Result:
 
 - Windows can be called first-class supported at the CLI/release level while the library remains intentionally narrower.
+
+Code change summary:
+
+- keep the current Windows CLI/runtime behavior as the promoted product boundary
+- leave the library support boundary narrower and explicitly partial
+- split support messaging so setup/help/release/docs can describe CLI support without reusing the library support label as the whole product truth
+
+Design impact:
+
+- fastest path to product-level Windows promotion on the supported command surface
+- preserves the current implementation shape with less backend churn
+- creates an ongoing two-layer support model: CLI supported, library partial
+- requires continuous documentation and review discipline so those two claims do not drift or get conflated
 
 Primary code touch points:
 
@@ -145,3 +170,34 @@ Remaining PR comments on `#555` fall into these buckets:
 - valid follow-up, not merge-blocking:
   - the named-pipe pair implementation could become a single duplex named pipe later, but that is an architectural improvement rather than a correctness issue for this slice
   - request-field error construction can stay lean and allocation-aware without changing the service contract
+
+## CI Attachment Note For Maintainers
+
+The repo workflow configuration in [.github/workflows/ci.yml](C:/Users/omack/Nono/.github/workflows/ci.yml) is set to run the full CI suite on `pull_request` events targeting `main`, including:
+
+- `Test`
+- `Windows Build`
+- `Windows Smoke`
+- `Windows Integration`
+- `Windows Security`
+- `Windows Regression`
+- `Windows Packaging`
+- `Rustfmt`
+- `Verify FFI Header`
+- `Clippy`
+- `Integration Tests`
+- `Cargo Audit`
+- `Docs Checks`
+
+However, on the current fork PR head (`0b16b3d`, checked on April 1, 2026), GitHub only attached these lightweight checks:
+
+- `DCO`
+- `Conventional Commit Title`
+
+That means the missing full CI is not explained by the workflow trigger itself. The likely causes are repository Actions policy for fork PRs, required-approval rules for fork workflows, or some other GitHub-side restriction that prevents the full `pull_request` workflow from attaching to this fork head.
+
+Maintainer follow-up:
+
+1. Confirm whether the repository intentionally suppresses full Actions runs for external fork PRs.
+2. If yes, note that PR `#555` is only getting lightweight policy checks on the fork head and needs maintainer-side workflow approval or an internal branch mirror to exercise full CI.
+3. If no, treat the absence of the CI jobs above as an infrastructure/configuration issue rather than a code failure in this PR.
