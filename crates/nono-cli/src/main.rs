@@ -2256,6 +2256,10 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .and_then(|p| p.security.wsl2_proxy_policy)
         .unwrap_or_default();
     let profile_workdir_access = loaded_profile.as_ref().map(|p| p.workdir.access.clone());
+    let profile_sets_workdir = matches!(
+        profile_workdir_access,
+        Some(WorkdirAccess::Read | WorkdirAccess::Write | WorkdirAccess::ReadWrite)
+    );
     let profile_rollback_patterns = loaded_profile
         .as_ref()
         .map(|p| p.rollback.exclude_patterns.clone())
@@ -2556,9 +2560,12 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
 
         // Only auto-add if CWD is not already covered with sufficient access
         if !caps.path_covered_with_access(&cwd_canonical, access) {
-            if args.allow_cwd {
-                // --allow-cwd: add without prompting
-                info!("Auto-including CWD with {} access (--allow-cwd)", access);
+            if args.allow_cwd || profile_sets_workdir {
+                // --allow-cwd or profile workdir.access: add without prompting
+                info!(
+                    "Auto-including CWD with {} access (--allow-cwd or profile)",
+                    access
+                );
                 let cap = FsCapability::new_dir(workdir.clone(), access)?;
                 caps.add_fs(cap);
             } else if silent {
