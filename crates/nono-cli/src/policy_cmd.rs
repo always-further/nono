@@ -2039,7 +2039,11 @@ fn resolve_to_manifest(
         manifest::NetworkMode::Blocked
     } else if prof.network.resolved_network_profile().is_some()
         || !prof.network.allow_domain.is_empty()
-        || !prof.network.credentials.is_empty()
+        || prof
+            .network
+            .credentials
+            .as_ref()
+            .is_some_and(|c| !c.is_empty())
         || !prof.network.custom_credentials.is_empty()
     {
         manifest::NetworkMode::Proxy
