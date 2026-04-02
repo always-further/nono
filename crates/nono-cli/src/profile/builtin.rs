@@ -19,6 +19,7 @@ pub fn list_builtin() -> Vec<String> {
 mod tests {
     use super::*;
     use crate::profile::WorkdirAccess;
+    use std::env;
 
     #[test]
     fn test_get_builtin_claude_code() {
@@ -314,6 +315,22 @@ mod tests {
         use crate::capability_ext::CapabilitySetExt;
         use tempfile::tempdir;
 
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let original_home = env::var("HOME").ok();
+        let original_xdg_config = env::var("XDG_CONFIG_HOME").ok();
+        let original_xdg_data = env::var("XDG_DATA_HOME").ok();
+        let original_xdg_state = env::var("XDG_STATE_HOME").ok();
+        let original_xdg_cache = env::var("XDG_CACHE_HOME").ok();
+
+        env::set_var("HOME", "/home/nono-test");
+        env::set_var("XDG_CONFIG_HOME", "/home/nono-test/.config");
+        env::set_var("XDG_DATA_HOME", "/home/nono-test/.local/share");
+        env::set_var("XDG_STATE_HOME", "/home/nono-test/.local/state");
+        env::set_var("XDG_CACHE_HOME", "/home/nono-test/.cache");
+
         let workdir = tempdir().expect("tmpdir");
         let args = crate::cli::SandboxArgs::default();
 
@@ -342,6 +359,27 @@ mod tests {
                 name,
                 mode,
             );
+        }
+
+        match original_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        match original_xdg_config {
+            Some(value) => env::set_var("XDG_CONFIG_HOME", value),
+            None => env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match original_xdg_data {
+            Some(value) => env::set_var("XDG_DATA_HOME", value),
+            None => env::remove_var("XDG_DATA_HOME"),
+        }
+        match original_xdg_state {
+            Some(value) => env::set_var("XDG_STATE_HOME", value),
+            None => env::remove_var("XDG_STATE_HOME"),
+        }
+        match original_xdg_cache {
+            Some(value) => env::set_var("XDG_CACHE_HOME", value),
+            None => env::remove_var("XDG_CACHE_HOME"),
         }
     }
 }

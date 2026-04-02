@@ -932,8 +932,7 @@ where
 }
 
 /// A complete profile definition
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Profile {
     /// Optional base profile(s) to inherit from (by name).
     /// Accepts either a single string `"extends": "base"` or an array
@@ -978,6 +977,67 @@ pub struct Profile {
     /// Treated like built-in heavy directories (for example `target`).
     #[serde(default)]
     pub skipdirs: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for Profile {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ProfileSerde {
+            /// Optional JSON Schema URI for editor tooling. Parsed and ignored.
+            #[serde(rename = "$schema", default)]
+            _schema: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_extends")]
+            extends: Option<Vec<String>>,
+            #[serde(default)]
+            meta: ProfileMeta,
+            #[serde(default)]
+            security: SecurityConfig,
+            #[serde(default)]
+            filesystem: FilesystemConfig,
+            #[serde(default)]
+            policy: PolicyPatchConfig,
+            #[serde(default)]
+            network: NetworkConfig,
+            #[serde(default, alias = "secrets")]
+            env_credentials: SecretsConfig,
+            #[serde(default)]
+            workdir: WorkdirConfig,
+            #[serde(default)]
+            hooks: HooksConfig,
+            #[serde(default, alias = "undo")]
+            rollback: RollbackConfig,
+            #[serde(default)]
+            open_urls: Option<OpenUrlConfig>,
+            #[serde(default)]
+            allow_launch_services: Option<bool>,
+            #[serde(default)]
+            interactive: bool,
+            #[serde(default)]
+            skipdirs: Vec<String>,
+        }
+
+        let raw = ProfileSerde::deserialize(deserializer)?;
+        Ok(Self {
+            extends: raw.extends,
+            meta: raw.meta,
+            security: raw.security,
+            filesystem: raw.filesystem,
+            policy: raw.policy,
+            network: raw.network,
+            env_credentials: raw.env_credentials,
+            workdir: raw.workdir,
+            hooks: raw.hooks,
+            rollback: raw.rollback,
+            open_urls: raw.open_urls,
+            allow_launch_services: raw.allow_launch_services,
+            interactive: raw.interactive,
+            skipdirs: raw.skipdirs,
+        })
+    }
 }
 
 /// Check whether a profile name is loaded from a user file rather than the built-in set.
@@ -3607,6 +3667,19 @@ mod tests {
             set.network.network_profile,
             InheritableValue::Set("developer".to_string())
         );
+    }
+
+    #[test]
+    fn test_top_level_schema_field_allowed_in_profile() {
+        let profile: Profile = serde_json::from_str(
+            r#"{
+                "$schema": "https://nono.dev/schemas/nono-profile.schema.json",
+                "meta": { "name": "schema-ok" }
+            }"#,
+        )
+        .expect("top-level $schema must be accepted");
+
+        assert_eq!(profile.meta.name, "schema-ok");
     }
 
     #[test]
