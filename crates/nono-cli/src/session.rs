@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", allow(dead_code))]
+
 //! Session registry for the nono capability runtime.
 //!
 //! Each `nono run` or `nono shell` invocation in supervised mode creates a session
@@ -497,15 +499,24 @@ enum ProcessLiveness {
 
 /// Check if a PID is currently running (signal 0 check).
 fn pid_liveness(pid: u32) -> ProcessLiveness {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
 
-    let nix_pid = Pid::from_raw(pid as i32);
-    match kill(nix_pid, None) {
-        Ok(()) => ProcessLiveness::Running,
-        Err(nix::errno::Errno::ESRCH) => ProcessLiveness::NotRunning,
-        Err(nix::errno::Errno::EPERM) => ProcessLiveness::RunningNoPermission,
-        _ => ProcessLiveness::Running,
+        let nix_pid = Pid::from_raw(pid as i32);
+        match kill(nix_pid, None) {
+            Ok(()) => ProcessLiveness::Running,
+            Err(nix::errno::Errno::ESRCH) => ProcessLiveness::NotRunning,
+            Err(nix::errno::Errno::EPERM) => ProcessLiveness::RunningNoPermission,
+            _ => ProcessLiveness::Running,
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        ProcessLiveness::NotRunning
     }
 }
 
@@ -551,6 +562,11 @@ pub fn get_process_start_time(pid: u32) -> Option<u64> {
 pub fn get_process_start_time(pid: u32) -> Option<u64> {
     let info = proc_bsd_info(pid)?;
     Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn get_process_start_time(_pid: u32) -> Option<u64> {
+    None
 }
 
 /// Get the current process's start time (for recording in session state).
@@ -603,6 +619,21 @@ fn create_temp_session_file(path: &Path) -> Result<(PathBuf, File)> {
             path.display()
         ))
     })?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(|e| NonoError::ConfigWrite {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(parent, perms).map_err(|e| NonoError::ConfigWrite {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+    }
     validate_sessions_dir(parent)?;
 
     for _ in 0..16 {
@@ -838,6 +869,12 @@ mod tests {
 
     #[test]
     fn test_update_session_file() {
+        #[cfg(target_os = "windows")]
+        let dir = tempfile::Builder::new()
+            .prefix("nono-session-update-")
+            .tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("tempdir");
+        #[cfg(not(target_os = "windows"))]
         let dir = tempdir().expect("tempdir");
         #[cfg(unix)]
         make_private_dir(dir.path());
@@ -920,6 +957,7 @@ mod tests {
         assert_eq!(loaded.exit_code, Some(-1));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn test_get_current_process_start_time() {
         let start = get_process_start_time(std::process::id());

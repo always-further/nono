@@ -562,8 +562,8 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     if !caps.tcp_connect_ports().is_empty() || !caps.tcp_bind_ports().is_empty() {
         return Err(NonoError::NetworkFilterUnsupported {
             platform: "macOS".to_string(),
-            reason: "Seatbelt cannot filter by TCP port. Use --allow-proxy for host-level \
-                     filtering or ProxyOnly mode instead."
+            reason: "Seatbelt cannot filter by TCP port. Use --allow-domain for host-level \
+                     filtering (routed through the proxy) or ProxyOnly mode instead."
                 .to_string(),
         });
     }

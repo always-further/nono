@@ -9,6 +9,62 @@
 ### Features
 
 - *(windows)* Expand the native filesystem subset to accept exact-file grants, write-only directory rules, Windows-aware path comparisons, and policy-preprocessed `override_deny`
+
+## [0.29.0] - 2026-04-03
+
+### Bug Fixes
+
+- *(proxy)* Don't factor seatbelt for port lockdown
+
+- *(pty_proxy)* Improve write retry test reliability with deadline-based polling
+
+- *(pty_proxy)* Remove timeout from test recv to prevent race condition
+
+- *(test)* Resolve race condition and cache key uniqueness
+
+
+### Build
+
+- *(deps)* Sort wait-timeout in Cargo.lock and fix credentials resolution
+
+
+### Documentation
+
+- *(cli)* Add `--detached` and `--name` flag documentation
+
+- Document supervised session lifecycle and runtime workflows
+
+
+### Features
+
+- *(cli)* Add manifest support and improve sandbox preparation
+
+- *(rollback)* Add configurable rollback destination support
+
+- *(pty,session,supervisor)* Enhance PTY attach/detach and socket utilities
+
+- *(pty_proxy)* Improve logging and error handling for attach/detach
+
+- *(exec_strategy)* Replace startup timeout thread with interactive prompt
+
+- *(diagnostic)* Add macOS sandbox violation logging and startup timeouts
+
+- *(rollback)* Condition audit state creation on rollback request flags
+
+- *(pty_proxy)* Disable keyboard enhancement modes on terminal restore
+
+- *(pty_proxy)* Improve enhanced key detection and multi-key sequences
+
+- *(pty_proxy)* Support enhanced CSI u key sequences in detach detection
+
+- *(runtime)* Harden supervised child dumpability and fd passing
+
+- *(runtime)* Land supervised sessions and diagnostics stack
+
+
+### Refactoring
+
+- *(output)* Consolidate leading break logic in print_terminal_block
 ## [0.28.0] - 2026-04-03
 
 ### Bug Fixes

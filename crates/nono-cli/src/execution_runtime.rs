@@ -1,20 +1,47 @@
-use crate::launch_runtime::{select_threading_context, LaunchPlan};
+#[cfg(not(target_os = "windows"))]
+use crate::launch_runtime::select_threading_context;
+use crate::launch_runtime::LaunchPlan;
 use crate::proxy_runtime::start_proxy_runtime;
 use crate::supervised_runtime::{execute_supervised_runtime, SupervisedRuntimeContext};
 use crate::{config, exec_strategy, output, sandbox_state};
 use nono::{CapabilitySet, NonoError, Result, Sandbox};
 use std::path::Path;
+#[cfg(not(target_os = "windows"))]
 use std::time::Duration;
 use tracing::{error, info};
 
+#[cfg(not(target_os = "windows"))]
 const PROFILE_HINT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
     caps: &CapabilitySet,
+    #[cfg(target_os = "windows")] current_dir: &Path,
     silent: bool,
 ) -> Result<()> {
     if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
+        #[cfg(target_os = "windows")]
+        {
+            let support = Sandbox::support_info();
+            if !support.is_supported {
+                let preview = Sandbox::preview_runtime_status(
+                    caps,
+                    current_dir,
+                    nono::WindowsPreviewContext {
+                        has_deny_override_policy: false,
+                    },
+                );
+                info!("Windows runtime status: {:?}", preview);
+                if !silent {
+                    output::print_warning(
+                        "Windows restricted execution is running with backend-owned Windows process containment plus the current supported command surface for filesystem policy; blocked-network and other enforcement-dependent flows require current backend readiness, and unsupported Windows restrictions still fail closed with backend diagnostics",
+                    );
+                    eprintln!();
+                }
+                return Ok(());
+            }
+        }
+
         output::print_applying_sandbox(silent);
 
         #[cfg(target_os = "linux")]
@@ -32,6 +59,26 @@ fn apply_pre_fork_sandbox(
         output::print_sandbox_active(silent);
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn validate_windows_preview_direct_execution(
+    flags: &crate::launch_runtime::ExecutionFlags,
+    caps: &CapabilitySet,
+) -> Result<()> {
+    let support = Sandbox::support_info();
+    if support.is_supported {
+        return Ok(());
+    }
+
+    Sandbox::validate_windows_preview_entry_point(
+        nono::WindowsPreviewEntryPoint::RunDirect,
+        caps,
+        &flags.workdir,
+        nono::WindowsPreviewContext {
+            has_deny_override_policy: !flags.override_deny_paths.is_empty(),
+        },
+    )
 }
 
 fn cleanup_capability_state_file(cap_file_path: &std::path::Path) {
@@ -54,7 +101,7 @@ fn next_capability_state_file_path() -> std::path::PathBuf {
 
 pub(crate) fn execution_start_dir(
     workdir: &std::path::Path,
-    caps: &CapabilitySet,
+    _caps: &CapabilitySet,
 ) -> Result<std::path::PathBuf> {
     let workdir_canonical =
         workdir
@@ -64,7 +111,13 @@ pub(crate) fn execution_start_dir(
                 source: e,
             })?;
 
-    if caps.path_covered(&workdir_canonical) {
+    #[cfg(target_os = "windows")]
+    {
+        Ok(workdir_canonical)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if _caps.path_covered(&workdir_canonical) {
         Ok(workdir_canonical)
     } else {
         Ok(std::path::PathBuf::from("/"))
@@ -83,6 +136,7 @@ fn recommended_builtin_profile(program: &Path) -> Option<&'static str> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn should_apply_startup_timeout(
     recommended_profile: Option<&str>,
     cmd_args: &[impl AsRef<std::ffi::OsStr>],
@@ -142,7 +196,10 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         output::print_profile_hint(recommended_program_name, profile, flags.silent);
     }
     let cap_file = write_capability_state_file(&caps, &flags.override_deny_paths, flags.silent);
-    let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let cap_file_path = cap_file
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
     for secret in &loaded_secrets {
         if exec_strategy::is_dangerous_env_var(&secret.env_var) {
@@ -164,7 +221,18 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     let proxy_handle = active_proxy.handle;
 
     let current_dir = execution_start_dir(&flags.workdir, &caps)?;
-    apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
+    #[cfg(target_os = "windows")]
+    if matches!(strategy, exec_strategy::ExecStrategy::Direct) {
+        validate_windows_preview_direct_execution(&flags, &caps)?;
+    }
+
+    apply_pre_fork_sandbox(
+        strategy,
+        &caps,
+        #[cfg(target_os = "windows")]
+        &current_dir,
+        flags.silent,
+    )?;
 
     let mut env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()
@@ -174,6 +242,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         env_vars.push((key.as_str(), value.as_str()));
     }
 
+    #[cfg(not(target_os = "windows"))]
     let threading = select_threading_context(
         !loaded_secrets.is_empty(),
         proxy.active,
@@ -181,10 +250,14 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         trust.interception_active,
     );
 
+    #[cfg(not(target_os = "windows"))]
     info!(
         "Executing with strategy: {:?}, threading: {:?}",
         strategy, threading
     );
+
+    #[cfg(target_os = "windows")]
+    info!("Executing with strategy: {:?}", strategy);
 
     #[cfg(target_os = "linux")]
     let seccomp_proxy_fallback = {
@@ -227,12 +300,13 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         }
     };
 
+    #[cfg(not(target_os = "windows"))]
     let config = exec_strategy::ExecConfig {
         command: &command,
         resolved_program: &resolved_program,
         caps: &caps,
         env_vars,
-        cap_file: &cap_file_path,
+        cap_file: cap_file.as_deref(),
         current_dir: &current_dir,
         no_diagnostics: flags.no_diagnostics || flags.silent,
         threading,
@@ -250,6 +324,15 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         #[cfg(target_os = "linux")]
         seccomp_proxy_fallback,
     };
+    #[cfg(target_os = "windows")]
+    let config = exec_strategy::ExecConfig {
+        command: &command,
+        resolved_program: &resolved_program,
+        caps: &caps,
+        env_vars,
+        cap_file: cap_file.as_deref(),
+        current_dir: &current_dir,
+    };
 
     match strategy {
         exec_strategy::ExecStrategy::Direct => {
@@ -261,6 +344,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 config: &config,
                 caps: &caps,
                 command: &command,
+                capability_elevation: flags.capability_elevation,
                 session,
                 rollback,
                 trust,
@@ -325,7 +409,9 @@ fn write_capability_state_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{recommended_builtin_profile, should_apply_startup_timeout};
+    use super::recommended_builtin_profile;
+    #[cfg(not(target_os = "windows"))]
+    use super::should_apply_startup_timeout;
     use std::path::Path;
 
     #[test]
@@ -345,6 +431,7 @@ mod tests {
         assert_eq!(recommended_builtin_profile(Path::new("/usr/bin/env")), None);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn startup_timeout_applies_only_to_bare_interactive_profiled_tools() {
         let no_args: [&str; 0] = [];

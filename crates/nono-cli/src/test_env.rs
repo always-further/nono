@@ -9,6 +9,13 @@
 #[allow(dead_code)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+pub fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    match ENV_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// Restores a set of environment variables when dropped.
 pub struct EnvVarGuard {
     original: Vec<(&'static str, Option<String>)>,

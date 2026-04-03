@@ -63,6 +63,13 @@ const ROOT_HELP_TEMPLATE: &str = "\
   why        Check why a path or network operation would be allowed or denied
 
 \x1b[1mSESSION MANAGEMENT\x1b[0m
+  ps         List running or detached sandbox sessions
+  stop       Stop a running sandbox session
+  detach     Detach from an interactive runtime session
+  attach     Attach to a detached runtime session
+  logs       View runtime session event logs
+  inspect    Show detailed runtime session state
+  prune      Clean up old runtime session files
   rollback   Manage rollback sessions (browse, restore, cleanup)
   audit      View audit trail of sandboxed commands
   trust      Manage file trust and attestation
