@@ -86,6 +86,7 @@ function Invoke-LoggedCommand {
 $smokeTests = @(
     @{ Package = "nono-cli"; Filter = "test_root_help_mentions_windows_restricted_execution_surface" },
     @{ Package = "nono-cli"; Filter = "windows_setup_check_only_reports_live_profile_subset" },
+    @{ Package = "nono-cli"; Filter = "windows_setup_check_only_reports_unified_support_status" },
     @{ Package = "nono-cli"; Filter = "windows_run_executes_basic_command" },
     @{ Package = "nono-cli"; Filter = "windows_run_live_default_profile_executes_command" },
     @{ Package = "nono-cli"; Filter = "windows_shell_help_reports_documented_limitation" },
@@ -120,7 +121,6 @@ $regressionTests = @(
     @{ Package = "nono"; Filter = "low_integrity_compatible_dir_matches_localappdata_temp_low" },
     @{ Package = "nono-cli"; Filter = "windows_protected_path_check_handles_verbatim_prefix_and_case_insensitive_drive_letters" },
     @{ Package = "nono-cli"; Filter = "windows_path_overlaps_filter_handles_verbatim_prefix_and_drive_case" },
-    @{ Package = "nono-cli"; Filter = "test_validate_windows_preview_direct_execution_allows_override_deny_when_policy_is_supported" },
     @{ Package = "nono-cli"; Filter = "windows_run_prefers_managed_low_integrity_runtime_root_inside_allowlist" },
     @{ Package = "nono-cli"; Filter = "windows_run_ignores_unverified_localappdata_override_when_runtime_root_is_verified" },
     @{ Package = "nono-cli"; Filter = "windows_run_redirects_temp_vars_into_writable_allowlist" },
