@@ -26,7 +26,7 @@ use windows_sys::Win32::System::SystemServices::{
 
 const WINDOWS_PREVIEW_SUPPORTED: bool = false;
 const WINDOWS_PREVIEW_DETAILS: &str =
-    "Windows native builds support setup, dry-run, direct execution, the current restricted-execution command surface, and partial supervised/runtime enforcement. Full Windows sandbox parity is not complete yet, and unsupported Windows flows fail explicitly.";
+    "Windows native CLI builds support setup, dry-run, direct execution, the current restricted-execution command surface, and partial supervised/runtime enforcement. The library-wide `Sandbox::apply()` contract remains partial on Windows until backend/library parity is implemented, and unsupported Windows flows fail explicitly.";
 
 pub fn apply(caps: &CapabilitySet) -> Result<()> {
     let _ = caps;
@@ -37,8 +37,9 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
 
 #[must_use]
 pub fn is_supported() -> bool {
-    // Windows subset support is real, but the library-wide `Sandbox::apply`
-    // path is not full parity yet.
+    // The Windows CLI surface is real, but the embedded library `Sandbox::apply`
+    // contract intentionally remains partial until backend/library parity is
+    // implemented.
     WINDOWS_PREVIEW_SUPPORTED
 }
 
@@ -1176,7 +1177,7 @@ pub fn runtime_state_dir(policy: &WindowsFilesystemPolicy, current_dir: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NetworkMode};
+    use crate::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, IpcMode, NetworkMode};
     use std::process::Command;
     use tempfile::tempdir;
 
@@ -1240,13 +1241,100 @@ mod tests {
     }
 
     #[test]
-    fn support_info_reports_consistent_partial_status() {
+    fn support_info_reports_supported_status_for_promoted_subset_contract() {
         let info = support_info();
-        assert!(!is_supported());
-        assert!(!info.is_supported);
-        assert_eq!(info.status, SupportStatus::Partial);
+        assert!(is_supported());
+        assert!(info.is_supported);
+        assert_eq!(info.status, SupportStatus::Supported);
         assert_eq!(info.platform, "windows");
-        assert_eq!(info.details, WINDOWS_PREVIEW_DETAILS);
+        // details string must be non-empty and not mention "partial"
+        assert!(!info.details.is_empty());
+        assert!(!info.details.to_ascii_lowercase().contains("partial"));
+    }
+
+    #[test]
+    fn apply_accepts_minimal_supported_windows_subset() {
+        let dir = tempdir().expect("tempdir");
+        let caps = CapabilitySet::new()
+            .allow_path(dir.path(), AccessMode::Read)
+            .expect("allow path");
+        assert!(apply(&caps).is_ok());
+    }
+
+    #[test]
+    fn apply_accepts_network_blocked_capability_set() {
+        let caps = CapabilitySet::new().set_network_mode(NetworkMode::Blocked);
+        assert!(apply(&caps).is_ok());
+    }
+
+    #[test]
+    fn apply_rejects_unsupported_single_file_grant() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
+        let err = apply(&caps).expect_err("single-file grant must be rejected");
+        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
+        // message must be explicit, not generic
+        let msg = err.to_string();
+        assert!(
+            msg.contains("single-file") || msg.contains("SingleFile"),
+            "expected named error message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn apply_rejects_unsupported_write_only_directory_grant() {
+        let dir = tempdir().expect("tempdir");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Write).expect("dir cap"));
+        let err = apply(&caps).expect_err("write-only directory grant must be rejected");
+        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
+    }
+
+    #[test]
+    fn apply_rejects_unsupported_proxy_with_ports() {
+        let mut caps = CapabilitySet::new();
+        caps.add_tcp_bind_port(8080);
+        let err = apply(&caps).expect_err("port bind allowlist must be rejected");
+        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
+    }
+
+    #[test]
+    fn apply_rejects_capability_expansion_shape() {
+        let caps = CapabilitySet::new().enable_extensions();
+        let err = apply(&caps).expect_err("extensions_enabled must be rejected");
+        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
+    }
+
+    #[test]
+    fn apply_rejects_non_default_ipc_mode() {
+        let caps = CapabilitySet::new().set_ipc_mode(IpcMode::Full);
+        let err = apply(&caps).expect_err("non-default IPC mode must be rejected");
+        assert!(matches!(err, NonoError::UnsupportedPlatform(_)));
+    }
+
+    #[test]
+    fn apply_error_message_remains_explicit_for_unsupported_subset() {
+        // The error must name the specific unsupported feature, not emit a generic string
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&file, AccessMode::Read).expect("file cap"));
+        let err = apply(&caps).expect_err("must reject");
+        let msg = err.to_string();
+        // Must not be the old generic stub message
+        assert!(
+            !msg.contains("library-wide `Sandbox::apply()` contract remains partial"),
+            "error is still the old stub: {msg}"
+        );
+        // Must contain a recognizable feature name
+        assert!(
+            msg.contains("single-file") || msg.contains("not support"),
+            "expected named feature in error, got: {msg}"
+        );
     }
 
     #[test]
