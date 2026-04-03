@@ -2485,10 +2485,28 @@ fn windows_setup_check_only_reports_live_profile_subset() {
         "Windows setup --check-only should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("Support status:")
-            || text.contains("Support status: partial")
-            || text.contains("Support status: supported"),
-        "expected setup summary support status, got:\n{text}"
+        text.contains("CLI support status: supported restricted command surface"),
+        "expected setup summary to describe the supported Windows CLI surface, got:\n{text}"
+    );
+    assert!(
+        text.contains("Library support status: supported"),
+        "expected setup summary to report the promoted library support status, got:\n{text}"
+    );
+    assert!(
+        text.contains("Use 'nono run --dry-run ...' to validate profiles and policy."),
+        "expected setup summary dry-run guidance, got:\n{text}"
+    );
+    assert!(
+        text.contains(
+            "Plain 'nono run -- <command>' uses the current supported Windows command surface"
+        ),
+        "expected setup summary direct-run support wording, got:\n{text}"
+    );
+    assert!(
+        text.contains(
+            "Blocked-network and other enforcement-dependent Windows flows require current backend readiness"
+        ),
+        "expected setup summary backend-readiness note, got:\n{text}"
     );
     assert!(
         text.contains(
@@ -2524,8 +2542,12 @@ fn windows_setup_check_only_reports_partial_support_without_first_class_claim() 
         "Windows setup --check-only should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("Support status: partial"),
-        "expected setup output to keep the honest partial support label, got:\n{text}"
+        text.contains("CLI support status: supported restricted command surface"),
+        "expected setup output to describe the supported Windows CLI surface, got:\n{text}"
+    );
+    assert!(
+        text.contains("Library support status: supported"),
+        "expected setup output to report the promoted library support status, got:\n{text}"
     );
     assert!(
         text.contains("current restricted-execution command surface"),

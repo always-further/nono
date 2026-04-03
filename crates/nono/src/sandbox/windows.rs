@@ -88,9 +88,6 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
 
 #[must_use]
 pub fn is_supported() -> bool {
-    // The Windows CLI surface is real, but the embedded library `Sandbox::apply`
-    // contract intentionally remains partial until backend/library parity is
-    // implemented.
     WINDOWS_PREVIEW_SUPPORTED
 }
 
