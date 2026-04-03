@@ -189,19 +189,22 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_query_path_existing_symlink_canonicalizes() {
-        // For an existing path through a symlink, canonicalization should
-        // resolve it to match cap.resolved.
-        // /tmp exists on macOS and resolves to /private/tmp
-        if !Path::new("/private/tmp").exists() {
-            return; // Skip on non-macOS
-        }
+        // Use a test-local symlink so the behavior is exercised on any Unix
+        // platform instead of assuming a macOS-specific /tmp layout.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir_all(&real_dir).expect("create real dir");
+        let link_dir = dir.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create symlink");
+        let resolved = real_dir.canonicalize().expect("canonicalize real dir");
 
         let mut caps = CapabilitySet::new();
         caps.add_fs(FsCapability {
-            original: PathBuf::from("/tmp"),
-            resolved: PathBuf::from("/private/tmp"),
+            original: link_dir.clone(),
+            resolved,
             access: AccessMode::Read,
             is_file: false,
             source: CapabilitySource::User,
@@ -209,8 +212,7 @@ mod tests {
 
         let ctx = QueryContext::new(caps);
 
-        // /tmp itself exists and canonicalizes to /private/tmp
-        let result = ctx.query_path(Path::new("/tmp"), AccessMode::Read);
+        let result = ctx.query_path(&link_dir, AccessMode::Read);
         assert!(
             matches!(result, QueryResult::Allowed(_)),
             "existing symlink path should canonicalize and match resolved"

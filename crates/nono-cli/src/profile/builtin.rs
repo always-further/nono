@@ -314,7 +314,25 @@ mod tests {
         use crate::capability_ext::CapabilitySetExt;
         use tempfile::tempdir;
 
-        let workdir = tempdir().unwrap_or_else(|e| panic!("tmpdir: {e}"));
+        let _guard = crate::test_env::lock_env();
+        #[cfg(target_os = "windows")]
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("HOME", r"C:\Users\nono-test"),
+            ("XDG_CONFIG_HOME", r"C:\Users\nono-test\.config"),
+            ("XDG_DATA_HOME", r"C:\Users\nono-test\.local\share"),
+            ("XDG_STATE_HOME", r"C:\Users\nono-test\.local\state"),
+            ("XDG_CACHE_HOME", r"C:\Users\nono-test\.cache"),
+        ]);
+        #[cfg(not(target_os = "windows"))]
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("HOME", "/home/nono-test"),
+            ("XDG_CONFIG_HOME", "/home/nono-test/.config"),
+            ("XDG_DATA_HOME", "/home/nono-test/.local/share"),
+            ("XDG_STATE_HOME", "/home/nono-test/.local/state"),
+            ("XDG_CACHE_HOME", "/home/nono-test/.cache"),
+        ]);
+
+        let workdir = tempdir().expect("tmpdir");
         let args = crate::cli::SandboxArgs::default();
 
         let profiles = list_builtin();

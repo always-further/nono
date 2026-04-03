@@ -9,6 +9,111 @@
 ### Features
 
 - *(windows)* Expand the native filesystem subset to accept exact-file grants, write-only directory rules, Windows-aware path comparisons, and policy-preprocessed `override_deny`
+## [0.27.0] - 2026-04-02
+
+### Bug Fixes
+
+- *(test)* Use real temp directories for env_nono_allow_comma_separated
+
+- *(proxy)* Strip port suffix from allow_domain entries in proxy host filter
+
+- Tighten manifest round-trip fidelity and wire proxy from --config
+
+- *(test)* Use portable paths in manifest round-trip test
+
+- Harden --config flag conflicts and error handling
+
+- *(macos)* Align Seatbelt signal isolation with Linux Landlock behaviour
+
+- Gate deny-overlap test to Linux only
+
+- Harden deny-overlap validation, reject unknown profile fields, narrow user_tools scope
+
+
+### Dependencies
+
+- *(deps)* Bump tracing-subscriber from 0.3.22 to 0.3.23
+
+- *(deps)* Bump ureq from 3.2.0 to 3.3.0
+
+
+### Documentation
+
+- Replace mention of --supervised with --capability-elevation in README
+
+- Address review feedback on wsl2 cross-references
+
+- Add WSL2 cross-references to feature docs and fix discoverability
+
+- Move endpoint filtering from credential injection to networking page
+
+- *(keystore)* Update module docs for file:// scheme and add redaction
+
+
+### Features
+
+- *(policy)* Check credentials Option with is_some_and instead of field access
+
+- *(proxy)* Block CONNECT to credential upstreams and smart NO_PROXY
+
+- *(sandbox)* Add allow_domain ports to Landlock ConnectTcp rules
+
+- *(profile)* Allow child to override inherited credentials to empty
+
+- *(schema)* Allow additionalProperties for forward-compatible evolution
+
+- *(cli)* Add `nono policy show --format manifest` for profile-to-manifest compilation
+
+- *(cli)* Wire up --config manifest path in prepare_sandbox
+
+- *(cli)* Add conflicts_with to --config flag
+
+- *(manifest)* Add typify codegen, manifest module, and CapabilitySet conversion
+
+- *(schema)* Add capability manifest JSON Schema
+
+- *(proxy)* Auto-detect credential format from inject_header
+
+- *(keystore)* Preserve significant whitespace in secret files
+
+- *(profile)* Accept file:// credential keys in custom_credentials
+
+- *(keystore)* Wire file:// into credential dispatch and CLI mappings
+
+- *(keystore)* Add load_from_file() for file:// credential source
+
+- *(keystore)* Add file:// URI validation for local file credentials
+
+- *(policy)* Split linux system groups for granular host compatibility
+
+- Add $XDG_RUNTIME_DIR to variable expansion
+
+
+### Refactoring
+
+- Deduplicate path expansion and fs grant construction
+
+- *(keystore)* Extract file-backed secret helpers
+
+
+### Testing
+
+- *(env_vars)* Use as_str() for contains() calls
+
+- *(env_vars)* Replace to_str() with display().to_string()
+
+- *(profile,trust_scan)* Add env lock guards to fix test isolation
+
+- *(cli)* Add global env lock for parallel test isolation
+
+- *(cli)* Add integration tests for --config manifest flag
+
+- *(profile)* Add endpoint_rules field to credential test fixtures
+
+
+### Revert
+
+- Keep ~/.local/state in user_tools, defer to #546
 
 ## [0.26.1] - 2026-03-31
 
