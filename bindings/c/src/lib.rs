@@ -92,6 +92,7 @@ pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
             NonoErrorCode::ErrIo
         }
         nono::NonoError::ConfigParse(_)
+        | nono::NonoError::AttachBusy
         | nono::NonoError::ConfigWrite { .. }
         | nono::NonoError::ConfigRead { .. } => NonoErrorCode::ErrConfigParse,
         nono::NonoError::ProfileNotFound(_)

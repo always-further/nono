@@ -7,9 +7,10 @@ use crate::cli::{AttachArgs, DetachArgs, InspectArgs, LogsArgs, PruneArgs, PsArg
 use crate::session::{self, SessionAttachment, SessionRecord, SessionStatus};
 use colored::Colorize;
 use nono::{NonoError, Result};
+use std::collections::VecDeque;
+use std::io::{BufRead, Seek, SeekFrom};
+use std::path::Path;
 use tracing::debug;
-
-const ATTACH_BUSY_MESSAGE: &str = "Session already has an active attached client";
 
 /// Refuse to run if we're inside a nono sandbox.
 ///
@@ -54,7 +55,7 @@ pub fn run_ps(args: &PsArgs) -> Result<()> {
 
     // Table header
     println!(
-        "{:<10} {:<12} {:<10} {:<10} {:<8} {:<10} {:<14} COMMAND",
+        "{:<16} {:<12} {:<10} {:<10} {:<8} {:<10} {:<14} COMMAND",
         "SESSION", "NAME", "STATUS", "ATTACH", "PID", "UPTIME", "PROFILE"
     );
 
@@ -85,7 +86,7 @@ pub fn run_ps(args: &PsArgs) -> Result<()> {
         let command = truncate_command(&session.command, 40);
 
         println!(
-            "{:<10} {:<12} {:<10} {:<10} {:<8} {:<10} {:<14} {}",
+            "{:<16} {:<12} {:<10} {:<10} {:<8} {:<10} {:<14} {}",
             session.session_id, name, status, attach, pid, uptime, profile, command
         );
     }
@@ -184,35 +185,7 @@ pub fn run_detach(args: &DetachArgs) -> Result<()> {
         )));
     }
 
-    // Send SIGUSR1 to the supervisor. The supervisor's signal handler sets
-    // an atomic flag; the poll loop checks it, detaches the PTY client, and
-    // restores the local terminal without stopping the session.
-    let sup_pid = nix::unistd::Pid::from_raw(record.supervisor_pid as i32);
-    nix::sys::signal::kill(sup_pid, nix::sys::signal::Signal::SIGUSR1)
-        .map_err(|e| NonoError::ConfigParse(format!("Failed to send SIGUSR1: {}", e)))?;
-
-    // Wait for the supervisor to acknowledge detach by updating attachment state.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        if !session::is_process_alive(record.supervisor_pid, record.started_epoch) {
-            return Err(NonoError::ConfigParse(format!(
-                "Session {} supervisor (PID {}) exited before detach completed",
-                record.session_id, record.supervisor_pid
-            )));
-        }
-        if let Ok(updated) = session::load_session(&record.session_id) {
-            if updated.attachment == SessionAttachment::Detached {
-                break;
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(NonoError::ConfigParse(format!(
-                "Timed out waiting for session {} to detach",
-                record.session_id
-            )));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    crate::pty_proxy::request_session_detach(&record.session_id)?;
 
     eprintln!("Detached session {}.", record.session_id);
     Ok(())
@@ -255,7 +228,7 @@ pub fn run_attach(args: &AttachArgs) -> Result<()> {
     }
 
     match crate::pty_proxy::attach_to_session(&record.session_id) {
-        Err(NonoError::ConfigParse(msg)) if msg == ATTACH_BUSY_MESSAGE => {
+        Err(NonoError::AttachBusy) => {
             eprintln!(
                 "[nono] Session {} already has an active attached client.",
                 record.session_id
@@ -268,12 +241,20 @@ pub fn run_attach(args: &AttachArgs) -> Result<()> {
 
 /// Dispatch `nono logs` — placeholder for Step 3.
 pub fn run_logs(args: &LogsArgs) -> Result<()> {
-    let _record = session::load_session(&args.session)?;
-    eprintln!(
-        "Event logging not yet implemented. Session {} found.",
-        _record.session_id
-    );
-    Ok(())
+    let record = session::load_session(&args.session)?;
+    let events_path = session::session_events_path(&record.session_id)?;
+
+    if !events_path.exists() {
+        eprintln!("No event log recorded for session {}.", record.session_id);
+        return Ok(());
+    }
+
+    if args.follow {
+        follow_event_log(&events_path, args.tail, args.json)
+    } else {
+        let lines = read_event_log_lines(&events_path, args.tail)?;
+        print_event_log_lines(&lines, args.json)
+    }
 }
 
 /// Dispatch `nono inspect` — placeholder for Step 4.
@@ -408,6 +389,94 @@ fn truncate_command(command: &[String], max_len: usize) -> String {
         full
     } else {
         format!("{}...", &full[..max_len.saturating_sub(3)])
+    }
+}
+
+fn read_event_log_lines(path: &Path, tail: Option<usize>) -> Result<Vec<String>> {
+    let file = std::fs::File::open(path).map_err(|e| NonoError::ConfigRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let reader = std::io::BufReader::new(file);
+
+    if let Some(limit) = tail {
+        let mut lines = VecDeque::with_capacity(limit.min(256));
+        for line in reader.lines() {
+            let line = line.map_err(|e| NonoError::ConfigRead {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            if lines.len() == limit {
+                let _ = lines.pop_front();
+            }
+            lines.push_back(line);
+        }
+        Ok(lines.into_iter().collect())
+    } else {
+        reader
+            .lines()
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|e| NonoError::ConfigRead {
+                path: path.to_path_buf(),
+                source: e,
+            })
+    }
+}
+
+fn print_event_log_lines(lines: &[String], as_json: bool) -> Result<()> {
+    if as_json {
+        let values: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .unwrap_or_else(|_| serde_json::Value::String(line.clone()))
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&values)
+            .map_err(|e| NonoError::ConfigParse(format!("JSON serialization failed: {e}")))?;
+        println!("{json}");
+    } else {
+        for line in lines {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+fn follow_event_log(path: &Path, tail: Option<usize>, as_json: bool) -> Result<()> {
+    let initial_lines = read_event_log_lines(path, tail)?;
+    if as_json {
+        for line in &initial_lines {
+            println!("{line}");
+        }
+    } else {
+        print_event_log_lines(&initial_lines, false)?;
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|e| NonoError::ConfigRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    file.seek(SeekFrom::End(0))
+        .map_err(|e| NonoError::ConfigRead {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+    let mut reader = std::io::BufReader::new(file);
+
+    loop {
+        let mut line = String::new();
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|e| NonoError::ConfigRead {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+        if bytes == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            continue;
+        }
+        print!("{}", line);
     }
 }
 

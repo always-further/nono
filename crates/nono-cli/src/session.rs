@@ -109,6 +109,77 @@ impl Drop for SessionGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
+const PROC_PIDTBSDINFO: i32 = 3;
+#[cfg(target_os = "macos")]
+const SSTOP: u32 = 4;
+#[cfg(target_os = "macos")]
+const PROC_BSD_INFO_SIZE: usize = 136;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcBsdInfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    _reserved: u32,
+    pbi_comm: [u8; 16],
+    pbi_name: [u8; 32],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+
+#[cfg(target_os = "macos")]
+const _: [(); PROC_BSD_INFO_SIZE] = [(); std::mem::size_of::<ProcBsdInfo>()];
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn proc_pidinfo(
+        pid: i32,
+        flavor: i32,
+        arg: u64,
+        buffer: *mut std::ffi::c_void,
+        buffersize: i32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn proc_bsd_info(pid: u32) -> Option<ProcBsdInfo> {
+    use std::mem;
+
+    let mut info: ProcBsdInfo = unsafe { mem::zeroed() };
+    let size = mem::size_of::<ProcBsdInfo>() as i32;
+    let ret = unsafe {
+        proc_pidinfo(
+            pid as i32,
+            PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut std::ffi::c_void,
+            size,
+        )
+    };
+    if ret == size {
+        Some(info)
+    } else {
+        None
+    }
+}
+
 fn reconcile_session_record(record: &mut SessionRecord) -> bool {
     let original_status = record.status.clone();
     let original_exit_code = record.exit_code;
@@ -214,12 +285,15 @@ fn validate_sessions_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Generate a 6-character hex session ID.
+/// Generate a 16-character hex session ID.
 pub fn generate_session_id() -> String {
     use rand::RngExt;
     let mut rng = rand::rng();
-    let bytes: [u8; 3] = rng.random();
-    format!("{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2])
+    let bytes: [u8; 8] = rng.random();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]
+    )
 }
 
 /// Generate a random two-word name (adjective-noun) for unnamed sessions.
@@ -404,59 +478,7 @@ fn is_process_stopped(pid: u32) -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        use std::mem;
-
-        #[repr(C)]
-        struct ProcBsdInfo {
-            pbi_flags: u32,
-            pbi_status: u32,
-            pbi_xstatus: u32,
-            pbi_pid: u32,
-            pbi_ppid: u32,
-            pbi_uid: u32,
-            pbi_gid: u32,
-            pbi_ruid: u32,
-            pbi_rgid: u32,
-            pbi_svuid: u32,
-            pbi_svgid: u32,
-            _reserved: u32,
-            pbi_comm: [u8; 16],
-            pbi_name: [u8; 32],
-            pbi_nfiles: u32,
-            pbi_pgid: u32,
-            pbi_pjobc: u32,
-            e_tdev: u32,
-            e_tpgid: u32,
-            pbi_nice: i32,
-            pbi_start_tvsec: u64,
-            pbi_start_tvusec: u64,
-        }
-
-        const PROC_PIDTBSDINFO: i32 = 3;
-        const SSTOP: u32 = 4;
-
-        extern "C" {
-            fn proc_pidinfo(
-                pid: i32,
-                flavor: i32,
-                arg: u64,
-                buffer: *mut std::ffi::c_void,
-                buffersize: i32,
-            ) -> i32;
-        }
-
-        let mut info: ProcBsdInfo = unsafe { mem::zeroed() };
-        let size = mem::size_of::<ProcBsdInfo>() as i32;
-        let ret = unsafe {
-            proc_pidinfo(
-                pid as i32,
-                PROC_PIDTBSDINFO,
-                0,
-                &mut info as *mut _ as *mut std::ffi::c_void,
-                size,
-            )
-        };
-        ret > 0 && info.pbi_status == SSTOP
+        proc_bsd_info(pid).is_some_and(|info| info.pbi_status == SSTOP)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -527,66 +549,7 @@ pub fn get_process_start_time(pid: u32) -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 pub fn get_process_start_time(pid: u32) -> Option<u64> {
-    use std::mem;
-
-    // Use PROC_PIDTBSDINFO to get the process start time directly.
-    // This is more reliable than PROC_PIDTASKINFO for start time.
-    #[repr(C)]
-    struct ProcBsdInfo {
-        pbi_flags: u32,
-        pbi_status: u32,
-        pbi_xstatus: u32,
-        pbi_pid: u32,
-        pbi_ppid: u32,
-        pbi_uid: u32,
-        pbi_gid: u32,
-        pbi_ruid: u32,
-        pbi_rgid: u32,
-        pbi_svuid: u32,
-        pbi_svgid: u32,
-        _reserved: u32,
-        pbi_comm: [u8; 16],
-        pbi_name: [u8; 32],
-        pbi_nfiles: u32,
-        pbi_pgid: u32,
-        pbi_pjobc: u32,
-        e_tdev: u32,
-        e_tpgid: u32,
-        pbi_nice: i32,
-        pbi_start_tvsec: u64,
-        pbi_start_tvusec: u64,
-    }
-
-    const PROC_PIDTBSDINFO: i32 = 3;
-
-    extern "C" {
-        fn proc_pidinfo(
-            pid: i32,
-            flavor: i32,
-            arg: u64,
-            buffer: *mut std::ffi::c_void,
-            buffersize: i32,
-        ) -> i32;
-    }
-
-    let mut info: ProcBsdInfo = unsafe { mem::zeroed() };
-    let size = mem::size_of::<ProcBsdInfo>() as i32;
-
-    let ret = unsafe {
-        proc_pidinfo(
-            pid as i32,
-            PROC_PIDTBSDINFO,
-            0,
-            &mut info as *mut _ as *mut std::ffi::c_void,
-            size,
-        )
-    };
-
-    if ret <= 0 {
-        return None;
-    }
-
-    // Combine seconds and microseconds into a single u64
+    let info = proc_bsd_info(pid)?;
     Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
@@ -626,6 +589,11 @@ pub(crate) fn session_file_path(session_id: &str) -> Result<PathBuf> {
 pub(crate) fn session_socket_path(session_id: &str) -> Result<PathBuf> {
     validate_session_id(session_id)?;
     Ok(ensure_sessions_dir()?.join(format!("{session_id}.sock")))
+}
+
+pub(crate) fn session_events_path(session_id: &str) -> Result<PathBuf> {
+    validate_session_id(session_id)?;
+    Ok(sessions_dir()?.join(format!("{session_id}.events.ndjson")))
 }
 
 fn create_temp_session_file(path: &Path) -> Result<(PathBuf, File)> {
@@ -707,7 +675,9 @@ fn write_session_file(path: &Path, record: &SessionRecord) -> Result<()> {
         .map_err(|e| NonoError::ConfigWrite {
             path: path.to_path_buf(),
             source: e,
-        })
+        })?;
+    sync_file(&file, path)?;
+    sync_parent_dir(path)
 }
 
 /// Update a session file using write-to-temp + rename for atomicity.
@@ -722,11 +692,41 @@ fn update_session_file(path: &Path, record: &SessionRecord) -> Result<()> {
             path: tmp_path.clone(),
             source: e,
         })?;
+    sync_file(&file, &tmp_path)?;
 
     std::fs::rename(&tmp_path, path).map_err(|e| NonoError::ConfigWrite {
         path: path.to_path_buf(),
         source: e,
+    })?;
+    sync_parent_dir(path)
+}
+
+fn sync_file(file: &File, path: &Path) -> Result<()> {
+    file.sync_all().map_err(|e| NonoError::ConfigWrite {
+        path: path.to_path_buf(),
+        source: e,
     })
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    let dir = File::open(parent).map_err(|e| NonoError::ConfigWrite {
+        path: parent.to_path_buf(),
+        source: e,
+    })?;
+    dir.sync_all().map_err(|e| NonoError::ConfigWrite {
+        path: parent.to_path_buf(),
+        source: e,
+    })
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Load a session record from a JSON file.
@@ -874,7 +874,7 @@ mod tests {
     #[test]
     fn test_generate_session_id_length() {
         let id = generate_session_id();
-        assert_eq!(id.len(), 6);
+        assert_eq!(id.len(), 16);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

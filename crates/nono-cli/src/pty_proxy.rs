@@ -17,12 +17,14 @@
 
 use nix::libc;
 use nix::pty::{openpty, OpenptyResult, Winsize};
+use nix::sys::signal::{self, SigHandler, Signal};
 use nono::{NonoError, Result};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -39,11 +41,16 @@ const MAX_ENHANCED_KEY_SEQUENCE_LEN: usize = 32;
 const ATTACH_ACK_OK: u8 = 0;
 const ATTACH_ACK_BUSY: u8 = 1;
 const ATTACH_ACK_DENIED: u8 = 2;
+const ATTACH_REQUEST_ATTACH: u8 = 0;
+const ATTACH_REQUEST_DETACH: u8 = 1;
 const ATTACH_SCREEN_ENTER_ESCAPE: &[u8] =
     b"\x1b[0m\x1b(B\x1b)B\x0f\x1b[r\x1b[?6l\x1b[?1049h\x1b[?25h\x1b[2J\x1b[H";
 const TERMINAL_RESTORE_ESCAPE: &[u8] = b"\x1b[<u\x1b[>0n\x1b[>1n\x1b[>2n\x1b[>3n\x1b[>4n\x1b[>6n\x1b[>7n\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l\x1b[?1049l\x1b[?25h";
 const TERMINAL_RESTORE_AND_CLEAR_ESCAPE: &[u8] =
     b"\x1b[<u\x1b[>0n\x1b[>1n\x1b[>2n\x1b[>3n\x1b[>4n\x1b[>6n\x1b[>7n\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[?1049l\x1b[?25h\x1b[2J\x1b[H";
+
+static ATTACH_RESIZE_PIPE_READ: AtomicI32 = AtomicI32::new(-1);
+static ATTACH_RESIZE_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 
 /// PTY pair with the attach socket path.
 pub struct PtyPair {
@@ -187,18 +194,39 @@ pub fn open_pty() -> Result<PtyPair> {
 ///
 /// # Safety
 /// Must be called in the child process after fork. The slave_fd must be valid.
+unsafe fn child_setup_pty_fatal(message: &[u8]) -> ! {
+    let _ = libc::write(
+        libc::STDERR_FILENO,
+        message.as_ptr().cast::<libc::c_void>(),
+        message.len(),
+    );
+    libc::_exit(126);
+}
+
+/// # Safety
+/// Must be called in the child process after fork. The slave_fd must be valid.
 pub unsafe fn setup_child_pty(slave_fd: RawFd) {
     // Create a new session so the child can acquire a controlling terminal.
-    libc::setsid();
+    if libc::setsid() < 0 {
+        child_setup_pty_fatal(b"nono: setsid() failed while configuring child PTY\n");
+    }
 
     // Set the slave as the controlling terminal (TIOCSCTTY).
     // The arg 0 means "don't steal if another process has it".
-    libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0);
+    if libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+        child_setup_pty_fatal(b"nono: ioctl(TIOCSCTTY) failed while configuring child PTY\n");
+    }
 
     // Redirect stdin/stdout/stderr to the slave PTY
-    libc::dup2(slave_fd, libc::STDIN_FILENO);
-    libc::dup2(slave_fd, libc::STDOUT_FILENO);
-    libc::dup2(slave_fd, libc::STDERR_FILENO);
+    if libc::dup2(slave_fd, libc::STDIN_FILENO) < 0 {
+        child_setup_pty_fatal(b"nono: dup2(stdin) failed while configuring child PTY\n");
+    }
+    if libc::dup2(slave_fd, libc::STDOUT_FILENO) < 0 {
+        child_setup_pty_fatal(b"nono: dup2(stdout) failed while configuring child PTY\n");
+    }
+    if libc::dup2(slave_fd, libc::STDERR_FILENO) < 0 {
+        child_setup_pty_fatal(b"nono: dup2(stderr) failed while configuring child PTY\n");
+    }
 
     // Close the original slave fd if it's not one of 0/1/2
     if slave_fd > 2 {
@@ -311,12 +339,6 @@ impl PtyProxy {
     pub fn try_accept(&mut self) -> bool {
         match self.attach_listener.accept() {
             Ok((mut stream, _addr)) => {
-                if self.client.is_some() {
-                    let _ = stream.write_all(&[ATTACH_ACK_BUSY]);
-                    debug!("PTY proxy: rejected attach while another client is active");
-                    return false;
-                }
-
                 if let Err(e) = authenticate_attach_peer(stream.as_raw_fd()) {
                     warn!(
                         "PTY proxy: rejected unauthorized attach for {}: {}",
@@ -327,19 +349,57 @@ impl PtyProxy {
                 }
 
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                let mut handshake = [0u8; ATTACH_HANDSHAKE_LEN];
-                match stream.read_exact(&mut handshake) {
-                    Ok(()) => {
-                        if let Some(winsize) = decode_attach_handshake(&handshake) {
-                            let _ = self.apply_winsize(&winsize);
-                        } else {
-                            debug!("PTY proxy: invalid attach handshake");
-                            let _ = stream.write_all(&[ATTACH_ACK_DENIED]);
+                let mut request_kind = [0u8; 1];
+                match stream.read_exact(&mut request_kind) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        debug!("PTY proxy: failed to read attach request kind: {}", e);
+                        let _ = stream.write_all(&[ATTACH_ACK_DENIED]);
+                        return false;
+                    }
+                }
+
+                match request_kind[0] {
+                    ATTACH_REQUEST_ATTACH => {
+                        if self.client.is_some() {
+                            let _ = stream.write_all(&[ATTACH_ACK_BUSY]);
+                            debug!("PTY proxy: rejected attach while another client is active");
                             return false;
                         }
+
+                        let mut handshake = [0u8; ATTACH_HANDSHAKE_LEN];
+                        match stream.read_exact(&mut handshake) {
+                            Ok(()) => {
+                                if let Some(winsize) = decode_attach_handshake(&handshake) {
+                                    let _ = self.apply_winsize(&winsize);
+                                } else {
+                                    debug!("PTY proxy: invalid attach handshake");
+                                    let _ = stream.write_all(&[ATTACH_ACK_DENIED]);
+                                    return false;
+                                }
+                            }
+                            Err(e) => {
+                                debug!("PTY proxy: failed to read attach handshake: {}", e);
+                                let _ = stream.write_all(&[ATTACH_ACK_DENIED]);
+                                return false;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        debug!("PTY proxy: failed to read attach handshake: {}", e);
+                    ATTACH_REQUEST_DETACH => {
+                        let detached_terminal = self.detach();
+                        if detached_terminal {
+                            write_detach_terminal_reset(libc::STDOUT_FILENO);
+                            write_detach_notice(libc::STDERR_FILENO);
+                        }
+                        let _ = stream.write_all(&[ATTACH_ACK_OK]);
+                        info!(
+                            "PTY detach requested via attach control socket for session {}",
+                            self.session_id
+                        );
+                        return false;
+                    }
+                    other => {
+                        debug!("PTY proxy: invalid attach request kind: {}", other);
                         let _ = stream.write_all(&[ATTACH_ACK_DENIED]);
                         return false;
                     }
@@ -427,7 +487,8 @@ impl PtyProxy {
 
     /// Proxy data from the PTY master to the attached client (child → user).
     ///
-    /// Returns false if the client disconnected.
+    /// Returns false if the PTY master became unavailable.
+    #[must_use = "false indicates the PTY master is no longer usable"]
     pub fn proxy_master_to_client(&mut self) -> bool {
         let client = self
             .client
@@ -449,7 +510,14 @@ impl PtyProxy {
 
         if let Some((write_fd, is_terminal)) = client {
             if let Err(err) = write_all_fd(write_fd, &buf[..n]) {
-                if !is_terminal {
+                if is_terminal {
+                    warn!(
+                        "PTY proxy: terminal output write failed for session {}: {}; detaching terminal client",
+                        self.session_id, err
+                    );
+                    self.detach();
+                    return true;
+                } else {
                     debug!("PTY proxy: attached socket client disconnected: {}", err);
                     self.detach();
                     return true;
@@ -462,7 +530,8 @@ impl PtyProxy {
 
     /// Proxy data from the attached client to the PTY master (user → child).
     ///
-    /// Returns false if the client disconnected.
+    /// Returns false if the PTY master became unavailable.
+    #[must_use = "false indicates the PTY master is no longer usable"]
     pub fn proxy_client_to_master(&mut self) -> bool {
         let client = match self.client.as_ref() {
             Some(c) => (c.read_fd(), c.is_terminal()),
@@ -473,28 +542,43 @@ impl PtyProxy {
         let n = match read_fd_once(client.0, &mut buf) {
             Ok(ReadFdOutcome::Data(n)) => n,
             Ok(ReadFdOutcome::Eof) => {
-                if !client.1 {
-                    // Socket client disconnected
-                    self.detach();
-                    return true;
+                if client.1 {
+                    info!(
+                        "PTY proxy observed terminal stdin EOF for session {}; detaching terminal client",
+                        self.session_id
+                    );
+                } else {
+                    debug!("PTY proxy: attached socket client closed input");
                 }
-                return false;
+                self.detach();
+                return true;
             }
             Ok(ReadFdOutcome::Retry) => return true,
             Err(err) => {
-                if !client.1 {
+                if client.1 {
+                    warn!(
+                        "PTY proxy: terminal input read failed for session {}: {}; detaching terminal client",
+                        self.session_id, err
+                    );
+                    self.detach();
+                    return true;
+                } else {
                     debug!("PTY proxy: attached socket client read failed: {}", err);
                     self.detach();
                     return true;
                 }
-                debug!("PTY proxy: terminal input read failed: {}", err);
-                return false;
             }
         };
 
         let forwarded = self.filter_client_input(&buf[..n]);
-        if !forwarded.is_empty() && write_all_fd(self.master.as_raw_fd(), &forwarded).is_err() {
-            return false;
+        if !forwarded.is_empty() {
+            if let Err(err) = write_all_fd(self.master.as_raw_fd(), &forwarded) {
+                warn!(
+                    "PTY proxy: failed forwarding client input to PTY master for session {}: {}",
+                    self.session_id, err
+                );
+                return false;
+            }
         }
 
         true
@@ -656,8 +740,8 @@ impl PtyProxy {
             .len()
             .saturating_add(bytes.len())
             .saturating_sub(SCROLLBACK_LIMIT_BYTES);
-        for _ in 0..overflow {
-            let _ = self.scrollback.pop_front();
+        if overflow > 0 {
+            drop(self.scrollback.drain(..overflow));
         }
         self.scrollback.extend(bytes.iter().copied());
         if first_output {
@@ -1051,63 +1135,21 @@ fn bind_attach_listener(attach_path: &Path) -> Result<UnixListener> {
 }
 
 fn authenticate_attach_peer(sock_fd: RawFd) -> Result<()> {
-    let current_uid = unsafe { libc::geteuid() };
-    let peer_uid = peer_uid(sock_fd)?;
-    if peer_uid == current_uid {
-        Ok(())
-    } else {
+    let current_uid = unsafe { libc::geteuid() } as u32;
+    let peer = nono::supervisor::socket::peer_credentials(sock_fd)?;
+    if peer.uid != current_uid {
         Err(NonoError::ConfigParse(format!(
             "attach peer uid {} does not match current uid {}",
-            peer_uid, current_uid
+            peer.uid, current_uid
         )))
+    } else if !nono::supervisor::socket::peer_in_same_user_namespace(peer.pid)? {
+        Err(NonoError::ConfigParse(format!(
+            "attach peer pid {} is not in the current user namespace",
+            peer.pid
+        )))
+    } else {
+        Ok(())
     }
-}
-
-#[cfg(target_os = "linux")]
-fn peer_uid(sock_fd: RawFd) -> Result<libc::uid_t> {
-    let mut peer_cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let ret = unsafe {
-        libc::getsockopt(
-            sock_fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut peer_cred as *mut libc::ucred).cast(),
-            &mut len,
-        )
-    };
-    if ret != 0 {
-        return Err(NonoError::SandboxInit(format!(
-            "Failed to read attach peer credentials: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(peer_cred.uid)
-}
-
-#[cfg(target_os = "macos")]
-fn peer_uid(sock_fd: RawFd) -> Result<libc::uid_t> {
-    let mut uid: libc::uid_t = 0;
-    let mut gid: libc::gid_t = 0;
-    let ret = unsafe { libc::getpeereid(sock_fd, &mut uid, &mut gid) };
-    if ret != 0 {
-        return Err(NonoError::SandboxInit(format!(
-            "Failed to read attach peer credentials: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(uid)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn peer_uid(_sock_fd: RawFd) -> Result<libc::uid_t> {
-    Err(NonoError::SandboxInit(
-        "Attach peer credential checks are unsupported on this platform".to_string(),
-    ))
 }
 
 impl Drop for PtyProxy {
@@ -1206,12 +1248,15 @@ fn drain_socket_replay(sock_fd: RawFd) {
 }
 
 fn encode_attach_handshake(winsize: Option<Winsize>) -> [u8; ATTACH_HANDSHAKE_LEN] {
-    let ws = winsize.unwrap_or(Winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    });
+    let ws = match winsize {
+        Some(ws) => ws,
+        None => Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    };
 
     let mut buf = [0u8; ATTACH_HANDSHAKE_LEN];
     buf[..4].copy_from_slice(&ATTACH_HANDSHAKE_MAGIC);
@@ -1255,6 +1300,9 @@ fn decode_resize_message(buf: &[u8; RESIZE_MESSAGE_LEN]) -> Option<Winsize> {
 }
 
 fn send_attach_handshake(stream: &mut UnixStream) -> Result<()> {
+    stream
+        .write_all(&[ATTACH_REQUEST_ATTACH])
+        .map_err(|e| NonoError::ConfigParse(format!("Failed to send attach request: {}", e)))?;
     let handshake = encode_attach_handshake(get_terminal_winsize());
     stream
         .write_all(&handshake)
@@ -1270,106 +1318,11 @@ fn send_attach_resize(socket: &UnixDatagram, winsize: Winsize) -> Result<()> {
 }
 
 fn recv_fd_over_stream(stream: &UnixStream) -> Result<OwnedFd> {
-    use libc::{
-        c_void, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR, CMSG_SPACE,
-    };
-
-    let mut data = [0u8; 1];
-    let mut iov = iovec {
-        iov_base: data.as_mut_ptr().cast::<c_void>(),
-        iov_len: 1,
-    };
-    let cmsg_space = unsafe { CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
-    let mut cmsg_buf = vec![0u8; cmsg_space];
-    let mut msg: msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov as *mut iovec;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr().cast::<c_void>();
-    msg.msg_controllen = cmsg_space as _;
-
-    let received = unsafe { recvmsg(stream.as_raw_fd(), &mut msg, 0) };
-    if received <= 0 {
-        return Err(NonoError::SandboxInit(format!(
-            "Failed to receive attach control fd: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    if (msg.msg_flags & libc::MSG_CTRUNC) != 0 {
-        return Err(NonoError::SandboxInit(
-            "Attach control fd ancillary data was truncated".to_string(),
-        ));
-    }
-
-    let expected_len = unsafe { CMSG_LEN(std::mem::size_of::<RawFd>() as u32) } as usize;
-    let mut cmsg = unsafe { CMSG_FIRSTHDR(&msg as *const msghdr as *mut msghdr) };
-    while !cmsg.is_null() {
-        let header = unsafe { &*cmsg };
-        if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
-            if (header.cmsg_len as usize) < expected_len {
-                return Err(NonoError::SandboxInit(
-                    "Attach control fd ancillary data too small".to_string(),
-                ));
-            }
-            let mut fd: RawFd = -1;
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    CMSG_DATA(cmsg),
-                    (&mut fd as *mut RawFd).cast::<u8>(),
-                    std::mem::size_of::<RawFd>(),
-                );
-            }
-            if fd < 0 {
-                return Err(NonoError::SandboxInit(
-                    "Received invalid attach control fd".to_string(),
-                ));
-            }
-            return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
-        }
-        cmsg = unsafe { CMSG_NXTHDR(&msg as *const msghdr as *mut msghdr, cmsg) };
-    }
-
-    Err(NonoError::SandboxInit(
-        "No attach control fd received".to_string(),
-    ))
+    nono::supervisor::socket::recv_fd_via_socket(stream.as_raw_fd())
 }
 
 fn send_fd_over_stream(stream: &UnixStream, fd: RawFd) -> Result<()> {
-    use libc::{c_void, cmsghdr, iovec, msghdr, sendmsg, CMSG_DATA, CMSG_LEN, CMSG_SPACE};
-
-    let data = [0u8; 1];
-    let iov = iovec {
-        iov_base: data.as_ptr().cast::<c_void>() as *mut c_void,
-        iov_len: 1,
-    };
-    let cmsg_space = unsafe { CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
-    let mut cmsg_buf = vec![0u8; cmsg_space];
-    let mut msg: msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = (&iov as *const iovec).cast_mut();
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr().cast::<c_void>();
-    msg.msg_controllen = cmsg_space as _;
-
-    let cmsg: &mut cmsghdr = unsafe { &mut *(cmsg_buf.as_mut_ptr().cast::<cmsghdr>()) };
-    cmsg.cmsg_level = libc::SOL_SOCKET;
-    cmsg.cmsg_type = libc::SCM_RIGHTS;
-    cmsg.cmsg_len = unsafe { CMSG_LEN(std::mem::size_of::<RawFd>() as u32) } as _;
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            (&fd as *const RawFd).cast::<u8>(),
-            CMSG_DATA(cmsg),
-            std::mem::size_of::<RawFd>(),
-        );
-    }
-
-    let sent = unsafe { sendmsg(stream.as_raw_fd(), &msg, 0) };
-    if sent < 0 {
-        return Err(NonoError::SandboxInit(format!(
-            "Failed to send attach control fd: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-
-    Ok(())
+    nono::supervisor::socket::send_fd_via_socket(stream.as_raw_fd(), fd)
 }
 
 fn recv_attach_resize_socket(stream: &UnixStream) -> Result<Option<UnixDatagram>> {
@@ -1403,6 +1356,13 @@ pub(crate) fn write_detach_terminal_reset(fd: RawFd) {
     let esc = terminal_restore_escape(true);
     unsafe {
         libc::write(fd, esc.as_ptr().cast(), esc.len());
+    }
+}
+
+pub(crate) fn write_detach_notice(fd: RawFd) {
+    unsafe {
+        let msg = b"\r\n[nono] Session detached.\r\n";
+        libc::write(fd, msg.as_ptr().cast(), msg.len());
     }
 }
 
@@ -1517,6 +1477,28 @@ pub fn connect_to_session(session_id: &str) -> Result<UnixStream> {
     Ok(stream)
 }
 
+pub fn request_session_detach(session_id: &str) -> Result<()> {
+    let sock_path = crate::session::session_socket_path(session_id)?;
+
+    if !sock_path.exists() {
+        return Err(NonoError::ConfigParse(format!(
+            "Session {} has no attach socket (not a PTY session or already exited)",
+            session_id
+        )));
+    }
+
+    let mut stream = UnixStream::connect(&sock_path).map_err(|e| {
+        NonoError::ConfigParse(format!(
+            "Failed to connect to session {} attach socket: {}",
+            session_id, e
+        ))
+    })?;
+    stream
+        .write_all(&[ATTACH_REQUEST_DETACH])
+        .map_err(|e| NonoError::ConfigParse(format!("Failed to send detach request: {}", e)))?;
+    wait_for_detach_ready(stream.as_raw_fd(), 1000)
+}
+
 /// Wait for the supervisor to accept an attach socket.
 pub fn wait_for_attach_ready(sock_fd: RawFd, timeout_ms: i32) -> Result<()> {
     let mut pfd = libc::pollfd {
@@ -1552,15 +1534,157 @@ pub fn wait_for_attach_ready(sock_fd: RawFd, timeout_ms: i32) -> Result<()> {
 
     match ack[0] {
         ATTACH_ACK_OK => Ok(()),
-        ATTACH_ACK_BUSY => Err(NonoError::ConfigParse(
-            "Session already has an active attached client".to_string(),
-        )),
+        ATTACH_ACK_BUSY => Err(NonoError::AttachBusy),
         ATTACH_ACK_DENIED => Err(NonoError::ConfigParse(
             "Session attach was rejected by supervisor".to_string(),
         )),
         _ => Err(NonoError::ConfigParse(
             "Received invalid attach acknowledgement from supervisor".to_string(),
         )),
+    }
+}
+
+fn wait_for_detach_ready(sock_fd: RawFd, timeout_ms: i32) -> Result<()> {
+    let mut pfd = libc::pollfd {
+        fd: sock_fd,
+        events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+        revents: 0,
+    };
+
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    if ret < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "poll() error waiting for detach acknowledgement: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if ret == 0 {
+        return Err(NonoError::ConfigParse(
+            "Timed out waiting for session detach acknowledgement".to_string(),
+        ));
+    }
+
+    let mut ack = [0u8; 1];
+    let n = unsafe { libc::read(sock_fd, ack.as_mut_ptr().cast::<libc::c_void>(), ack.len()) };
+    if n != 1 {
+        return Err(NonoError::ConfigParse(
+            "Failed to confirm session detach acknowledgement".to_string(),
+        ));
+    }
+
+    match ack[0] {
+        ATTACH_ACK_OK => Ok(()),
+        ATTACH_ACK_DENIED => Err(NonoError::ConfigParse(
+            "Session detach was rejected by supervisor".to_string(),
+        )),
+        _ => Err(NonoError::ConfigParse(
+            "Received invalid detach acknowledgement from supervisor".to_string(),
+        )),
+    }
+}
+
+fn create_attach_resize_pipe() -> i32 {
+    let mut fds = [0i32; 2];
+    let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if ret != 0 {
+        return -1;
+    }
+    unsafe {
+        libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    ATTACH_RESIZE_PIPE_READ.store(fds[0], Ordering::SeqCst);
+    ATTACH_RESIZE_PIPE_WRITE.store(fds[1], Ordering::SeqCst);
+    fds[0]
+}
+
+fn close_attach_resize_pipe() {
+    let read_fd = ATTACH_RESIZE_PIPE_READ.swap(-1, Ordering::SeqCst);
+    let write_fd = ATTACH_RESIZE_PIPE_WRITE.swap(-1, Ordering::SeqCst);
+    if read_fd >= 0 {
+        unsafe {
+            libc::close(read_fd);
+        }
+    }
+    if write_fd >= 0 {
+        unsafe {
+            libc::close(write_fd);
+        }
+    }
+}
+
+fn drain_attach_resize_pipe() {
+    let read_fd = ATTACH_RESIZE_PIPE_READ.load(Ordering::SeqCst);
+    if read_fd < 0 {
+        return;
+    }
+
+    let mut buf = [0u8; 16];
+    loop {
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            continue;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        break;
+    }
+}
+
+extern "C" fn forward_attach_resize_signal(sig: libc::c_int) {
+    if sig != libc::SIGWINCH {
+        return;
+    }
+    let write_fd = ATTACH_RESIZE_PIPE_WRITE.load(Ordering::SeqCst);
+    if write_fd >= 0 {
+        unsafe {
+            libc::write(write_fd, b"R".as_ptr().cast(), 1);
+        }
+    }
+}
+
+struct AttachResizeSignalGuard {
+    previous_handler: SigHandler,
+}
+
+impl AttachResizeSignalGuard {
+    fn install() -> Result<Self> {
+        let read_fd = create_attach_resize_pipe();
+        if read_fd < 0 {
+            return Err(NonoError::SandboxInit(
+                "Failed to create attach resize pipe".to_string(),
+            ));
+        }
+
+        let previous_handler = unsafe {
+            signal::signal(
+                Signal::SIGWINCH,
+                SigHandler::Handler(forward_attach_resize_signal),
+            )
+        }
+        .map_err(|e| {
+            close_attach_resize_pipe();
+            NonoError::SandboxInit(format!("Failed to install attach SIGWINCH handler: {e}"))
+        })?;
+
+        Ok(Self { previous_handler })
+    }
+
+    fn read_fd(&self) -> RawFd {
+        ATTACH_RESIZE_PIPE_READ.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for AttachResizeSignalGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = signal::signal(Signal::SIGWINCH, self.previous_handler);
+        }
+        close_attach_resize_pipe();
     }
 }
 
@@ -1635,6 +1759,11 @@ fn run_attach_loop(
     resize_socket: Option<&UnixDatagram>,
     stdin_delay: Option<Duration>,
 ) -> Result<()> {
+    let resize_signal_guard = if resize_socket.is_some() {
+        Some(AttachResizeSignalGuard::install()?)
+    } else {
+        None
+    };
     let mut pfds = [
         libc::pollfd {
             fd: libc::STDIN_FILENO,
@@ -1646,6 +1775,13 @@ fn run_attach_loop(
             events: libc::POLLIN,
             revents: 0,
         },
+        libc::pollfd {
+            fd: resize_signal_guard
+                .as_ref()
+                .map_or(-1, AttachResizeSignalGuard::read_fd),
+            events: libc::POLLIN,
+            revents: 0,
+        },
     ];
 
     let mut buf = [0u8; 4096];
@@ -1653,18 +1789,6 @@ fn run_attach_loop(
     let mut last_winsize = get_terminal_winsize();
 
     loop {
-        if let Some(socket) = resize_socket {
-            if let Some(winsize) = get_terminal_winsize() {
-                let changed = last_winsize
-                    .map(|last| last.ws_row != winsize.ws_row || last.ws_col != winsize.ws_col)
-                    .unwrap_or(true);
-                if changed {
-                    let _ = send_attach_resize(socket, winsize);
-                    last_winsize = Some(winsize);
-                }
-            }
-        }
-
         if let Some(deadline) = stdin_deadline {
             if std::time::Instant::now() < deadline {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -1715,7 +1839,7 @@ fn run_attach_loop(
         }
 
         // SAFETY: pfds is a valid array on the stack
-        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 2, 250) };
+        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 250) };
 
         if ret < 0 {
             let err = std::io::Error::last_os_error();
@@ -1794,6 +1918,21 @@ fn run_attach_loop(
             info!("PTY attach client observed POLLHUP/POLLERR on attach socket");
             break;
         }
+
+        if pfds[2].revents & libc::POLLIN != 0 {
+            drain_attach_resize_pipe();
+            if let Some(socket) = resize_socket {
+                if let Some(winsize) = get_terminal_winsize() {
+                    let changed = last_winsize
+                        .map(|last| last.ws_row != winsize.ws_row || last.ws_col != winsize.ws_col)
+                        .unwrap_or(true);
+                    if changed {
+                        let _ = send_attach_resize(socket, winsize);
+                        last_winsize = Some(winsize);
+                    }
+                }
+            }
+        }
     }
 
     eprintln!("\n[nono] Detached from session.");
@@ -1803,25 +1942,22 @@ fn run_attach_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        read_fd_once, select_attach_replay_bytes, terminal_restore_escape, write_all_fd, PtyProxy,
-        ReadFdOutcome, ScreenState, DEFAULT_DETACH_SEQUENCE,
+        read_fd_once, select_attach_replay_bytes, terminal_restore_escape, write_all_fd,
+        AttachedClient, PtyProxy, ReadFdOutcome, ScreenState, DEFAULT_DETACH_SEQUENCE,
     };
     use nix::libc;
     use std::collections::VecDeque;
     use std::io::{Read, Write};
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
     use std::os::unix::net::UnixListener;
     use std::os::unix::net::UnixStream;
     use std::thread;
     use std::time::Duration;
 
-    fn build_test_proxy(sequence: &[u8]) -> PtyProxy {
+    fn build_test_proxy_with_master(master: OwnedFd, sequence: &[u8]) -> PtyProxy {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let attach_path = temp_dir.path().join("attach.sock");
         let attach_listener = UnixListener::bind(&attach_path).expect("bind attach socket");
-        let dup_fd = unsafe { libc::dup(libc::STDIN_FILENO) };
-        assert!(dup_fd >= 0);
-        let master = unsafe { OwnedFd::from_raw_fd(dup_fd) };
 
         PtyProxy {
             master,
@@ -1838,6 +1974,13 @@ mod tests {
             pending_detach_escape: Vec::new(),
             detach_requested: false,
         }
+    }
+
+    fn build_test_proxy(sequence: &[u8]) -> PtyProxy {
+        let dup_fd = unsafe { libc::dup(libc::STDIN_FILENO) };
+        assert!(dup_fd >= 0);
+        let master = unsafe { OwnedFd::from_raw_fd(dup_fd) };
+        build_test_proxy_with_master(master, sequence)
     }
 
     #[test]
@@ -2063,5 +2206,33 @@ mod tests {
 
         write_all_fd(writer.as_raw_fd(), b"ok").expect("write_all_fd should retry");
         reader_thread.join().expect("reader thread");
+    }
+
+    #[test]
+    fn proxy_client_to_master_detaches_terminal_on_eof() {
+        let mut proxy = build_test_proxy(&DEFAULT_DETACH_SEQUENCE);
+        let (reader, writer) = UnixStream::pair().expect("socket pair");
+        proxy.client = Some(AttachedClient::terminal(
+            reader.as_raw_fd(),
+            libc::STDOUT_FILENO,
+        ));
+
+        drop(writer);
+
+        assert!(proxy.proxy_client_to_master());
+        assert!(proxy.client.is_none());
+    }
+
+    #[test]
+    fn proxy_master_to_client_detaches_terminal_on_write_error() {
+        let (master_reader, mut master_writer) = UnixStream::pair().expect("socket pair");
+        let master = unsafe { OwnedFd::from_raw_fd(master_reader.into_raw_fd()) };
+        let mut proxy = build_test_proxy_with_master(master, &DEFAULT_DETACH_SEQUENCE);
+        proxy.client = Some(AttachedClient::terminal(libc::STDIN_FILENO, -1));
+
+        master_writer.write_all(b"hello").expect("write PTY output");
+
+        assert!(proxy.proxy_master_to_client());
+        assert!(proxy.client.is_none());
     }
 }

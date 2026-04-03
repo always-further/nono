@@ -11,12 +11,11 @@ use crate::{
 };
 use colored::Colorize;
 use nono::{CapabilitySet, Result};
-use std::cell::RefCell;
 
 struct SessionRuntimeState {
     started: String,
     short_session_id: String,
-    session_guard: RefCell<Option<session::SessionGuard>>,
+    session_guard: Option<session::SessionGuard>,
     pty_pair: Option<pty_proxy::PtyPair>,
 }
 
@@ -123,7 +122,7 @@ fn create_session_runtime_state(
     Ok(SessionRuntimeState {
         started,
         short_session_id,
-        session_guard: RefCell::new(session_guard),
+        session_guard,
         pty_pair,
     })
 }
@@ -181,28 +180,29 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     let SessionRuntimeState {
         started,
         short_session_id,
-        session_guard,
+        mut session_guard,
         pty_pair,
     } = session_runtime;
-    let on_fork = |child_pid: u32| {
-        if let Some(ref mut guard) = *session_guard.borrow_mut() {
-            guard.set_child_pid(child_pid);
-        }
-    };
 
     if !session.detached_start {
         output::finish_status_line_for_handoff(silent);
     }
 
-    let exit_code = exec_strategy::execute_supervised(
-        config,
-        Some(&supervisor_cfg),
-        trust_interceptor,
-        Some(&on_fork),
-        pty_pair,
-        Some(&short_session_id),
-    )?;
-    let mut session_guard = session_guard.into_inner();
+    let exit_code = {
+        let mut on_fork = |child_pid: u32| {
+            if let Some(ref mut guard) = session_guard {
+                guard.set_child_pid(child_pid);
+            }
+        };
+        exec_strategy::execute_supervised(
+            config,
+            Some(&supervisor_cfg),
+            trust_interceptor,
+            Some(&mut on_fork),
+            pty_pair,
+            Some(&short_session_id),
+        )?
+    };
     if let Some(ref mut guard) = session_guard {
         guard.set_exited(exit_code);
     }

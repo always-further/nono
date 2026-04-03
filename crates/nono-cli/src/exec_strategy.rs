@@ -155,65 +155,6 @@ fn prompt_startup_termination(timeout_cfg: StartupTimeoutConfig<'_>, has_output:
     affirmative
 }
 
-#[cfg(target_os = "linux")]
-fn send_fd_over_raw_socket(sock_fd: RawFd, fd_to_send: RawFd) -> std::io::Result<()> {
-    let mut data = [0u8; 1];
-    let mut iov = libc::iovec {
-        iov_base: data.as_mut_ptr().cast::<libc::c_void>(),
-        iov_len: data.len(),
-    };
-    // SAFETY: `CMSG_SPACE` and `CMSG_LEN` are pure libc size calculations for
-    // one `RawFd` ancillary payload; they do not dereference pointers.
-    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
-    let expected_cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) } as usize;
-
-    if cmsg_space > 64 {
-        return Err(std::io::Error::other(
-            "unexpected ancillary buffer size for raw fd send",
-        ));
-    }
-
-    let mut cmsg_buf = [0u8; 64];
-    // SAFETY: `zeroed()` is valid for `msghdr`; all fields are plain integers
-    // or pointers that will be initialized before the syscall.
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov as *mut libc::iovec;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = cmsg_space as _;
-
-    // SAFETY: `msg` points to valid stack-owned ancillary storage sized by
-    // `cmsg_space`, so `CMSG_FIRSTHDR` may compute the first header pointer.
-    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg as *const libc::msghdr as *mut libc::msghdr) };
-    if cmsg.is_null() {
-        return Err(std::io::Error::other(
-            "missing ancillary header for raw fd send",
-        ));
-    }
-
-    // SAFETY: `cmsg` points into `cmsg_buf`, which is large enough for one
-    // `SCM_RIGHTS` header and payload. We write exactly one `RawFd`.
-    unsafe {
-        (*cmsg).cmsg_level = libc::SOL_SOCKET;
-        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = expected_cmsg_len as _;
-        std::ptr::copy_nonoverlapping(
-            (&fd_to_send as *const RawFd).cast::<u8>(),
-            libc::CMSG_DATA(cmsg),
-            std::mem::size_of::<RawFd>(),
-        );
-    }
-
-    // SAFETY: `sock_fd` is an inherited Unix domain socket fd, and `msg`
-    // references stack memory that remains valid for the duration of `sendmsg`.
-    let sent = unsafe { libc::sendmsg(sock_fd, &msg, 0) };
-    if sent < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    Ok(())
-}
-
 /// Linux procfs context for resolving child-relative procfs paths in the supervisor.
 ///
 /// `/proc/self/...` must refer to the sandboxed child process, not the unsandboxed
@@ -459,7 +400,7 @@ pub fn execute_supervised(
     config: &ExecConfig<'_>,
     supervisor: Option<&SupervisorConfig<'_>>,
     trust_interceptor: Option<crate::trust_intercept::TrustInterceptor>,
-    on_fork: Option<&dyn Fn(u32)>,
+    on_fork: Option<&mut dyn FnMut(u32)>,
     pty_pair: Option<crate::pty_proxy::PtyPair>,
     pty_session_id: Option<&str>,
 ) -> Result<i32> {
@@ -819,7 +760,10 @@ pub fn execute_supervised(
                     if let Some(fd) = child_sock_fd {
                         match nono::sandbox::install_seccomp_notify() {
                             Ok(notify_fd) => {
-                                if let Err(e) = send_fd_over_raw_socket(fd, notify_fd.as_raw_fd()) {
+                                if let Err(e) = nono::supervisor::socket::send_fd_via_socket(
+                                    fd,
+                                    notify_fd.as_raw_fd(),
+                                ) {
                                     let detail = format!(
                                         "nono: failed to send seccomp notify fd to supervisor: {}\n",
                                         e
@@ -876,9 +820,10 @@ pub fn execute_supervised(
                     if let Some(fd) = child_sock_fd {
                         match nono::sandbox::install_seccomp_proxy_filter(has_bind) {
                             Ok(proxy_notify_fd) => {
-                                if let Err(e) =
-                                    send_fd_over_raw_socket(fd, proxy_notify_fd.as_raw_fd())
-                                {
+                                if let Err(e) = nono::supervisor::socket::send_fd_via_socket(
+                                    fd,
+                                    proxy_notify_fd.as_raw_fd(),
+                                ) {
                                     let detail = format!(
                                         "nono: failed to send proxy seccomp notify fd: {}\n",
                                         e
@@ -1323,17 +1268,15 @@ fn wait_for_child_with_pty(
         let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 4, 200) };
 
         if ret > 0 {
-            if pfds[0].revents & libc::POLLIN != 0 {
-                pty.proxy_master_to_client();
-            }
-            if pfds[1].revents & libc::POLLIN != 0 {
-                pty.proxy_client_to_master();
-            }
-            if pfds[2].revents & libc::POLLIN != 0 {
-                pty.try_accept();
-            }
-            if pfds[3].revents & libc::POLLIN != 0 {
-                pty.apply_resize_update();
+            if !handle_pty_poll_events(
+                pty,
+                pfds[0].revents,
+                pfds[1].revents,
+                pfds[2].revents,
+                pfds[3].revents,
+                "PTY wait loop",
+            ) {
+                break;
             }
         } else if ret < 0 {
             let err = std::io::Error::last_os_error();
@@ -1348,15 +1291,7 @@ fn wait_for_child_with_pty(
             pty.sync_current_terminal_winsize();
         }
         let in_band_detach_requested = pty.take_detach_request();
-        if pause_requested {
-            info!("PTY detach requested via SIGUSR1 control signal");
-        }
-        if in_band_detach_requested {
-            info!("PTY detach requested via in-band key sequence");
-        }
-        if (pause_requested || in_band_detach_requested) && detach_client_for_session(pty) {
-            restore_terminal_after_detach();
-        }
+        handle_pty_detach_request(Some(pty), pause_requested, in_band_detach_requested);
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {
@@ -1596,9 +1531,47 @@ fn detach_client_for_session(pty: &mut crate::pty_proxy::PtyProxy) -> bool {
 
 fn restore_terminal_after_detach() {
     crate::pty_proxy::write_detach_terminal_reset(libc::STDOUT_FILENO);
-    unsafe {
-        let msg = b"\r\n[nono] Session detached.\r\n";
-        libc::write(libc::STDERR_FILENO, msg.as_ptr().cast(), msg.len());
+    crate::pty_proxy::write_detach_notice(libc::STDERR_FILENO);
+}
+
+fn handle_pty_poll_events(
+    pty: &mut crate::pty_proxy::PtyProxy,
+    master_revents: libc::c_short,
+    client_revents: libc::c_short,
+    attach_revents: libc::c_short,
+    resize_revents: libc::c_short,
+    loop_name: &str,
+) -> bool {
+    if master_revents & libc::POLLIN != 0 && !pty.proxy_master_to_client() {
+        debug!("Stopping {loop_name} after PTY master relay failure");
+        return false;
+    }
+    if client_revents & libc::POLLIN != 0 && !pty.proxy_client_to_master() {
+        debug!("Stopping {loop_name} after PTY client relay failure");
+        return false;
+    }
+    if attach_revents & libc::POLLIN != 0 {
+        pty.try_accept();
+    }
+    if resize_revents & libc::POLLIN != 0 {
+        pty.apply_resize_update();
+    }
+    true
+}
+
+fn handle_pty_detach_request(
+    pty: Option<&mut crate::pty_proxy::PtyProxy>,
+    pause_requested: bool,
+    in_band_detach_requested: bool,
+) {
+    if pause_requested {
+        info!("PTY detach requested via SIGUSR1 control signal");
+    }
+    if in_band_detach_requested {
+        info!("PTY detach requested via in-band key sequence");
+    }
+    if (pause_requested || in_band_detach_requested) && pty.is_some_and(detach_client_for_session) {
+        restore_terminal_after_detach();
     }
 }
 
@@ -1749,17 +1722,15 @@ fn run_supervisor_loop(
             }
 
             if let Some(ref mut p) = pty {
-                if pfds[1].revents & libc::POLLIN != 0 {
-                    p.proxy_master_to_client();
-                }
-                if pfds[2].revents & libc::POLLIN != 0 {
-                    p.proxy_client_to_master();
-                }
-                if pfds[3].revents & libc::POLLIN != 0 {
-                    p.try_accept();
-                }
-                if pfds[4].revents & libc::POLLIN != 0 {
-                    p.apply_resize_update();
+                if !handle_pty_poll_events(
+                    p,
+                    pfds[1].revents,
+                    pfds[2].revents,
+                    pfds[3].revents,
+                    pfds[4].revents,
+                    "supervisor loop",
+                ) {
+                    break;
                 }
             }
         } else if ret < 0 {
@@ -1777,19 +1748,11 @@ fn run_supervisor_loop(
             }
         }
         let in_band_detach_requested = pty.as_mut().is_some_and(|p| p.take_detach_request());
-        if pause_requested {
-            info!("PTY detach requested via SIGUSR1 control signal");
-        }
-        if in_band_detach_requested {
-            info!("PTY detach requested via in-band key sequence");
-        }
-        if pause_requested || in_band_detach_requested {
-            if let Some(ref mut p) = pty {
-                if detach_client_for_session(p) {
-                    restore_terminal_after_detach();
-                }
-            }
-        }
+        handle_pty_detach_request(
+            pty.as_deref_mut(),
+            pause_requested,
+            in_band_detach_requested,
+        );
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {
@@ -2003,17 +1966,15 @@ fn run_supervisor_loop(
                 }
 
                 if let Some(ref mut p) = pty {
-                    if pfds[pty_base_idx].revents & libc::POLLIN != 0 {
-                        p.proxy_master_to_client();
-                    }
-                    if pfds[pty_base_idx + 1].revents & libc::POLLIN != 0 {
-                        p.proxy_client_to_master();
-                    }
-                    if pfds[pty_base_idx + 2].revents & libc::POLLIN != 0 {
-                        p.try_accept();
-                    }
-                    if pfds[pty_base_idx + 3].revents & libc::POLLIN != 0 {
-                        p.apply_resize_update();
+                    if !handle_pty_poll_events(
+                        p,
+                        pfds[pty_base_idx].revents,
+                        pfds[pty_base_idx + 1].revents,
+                        pfds[pty_base_idx + 2].revents,
+                        pfds[pty_base_idx + 3].revents,
+                        "supervisor loop",
+                    ) {
+                        break;
                     }
                 }
             }
@@ -2034,19 +1995,11 @@ fn run_supervisor_loop(
             }
         }
         let in_band_detach_requested = pty.as_mut().is_some_and(|p| p.take_detach_request());
-        if pause_requested {
-            info!("PTY detach requested via SIGUSR1 control signal");
-        }
-        if in_band_detach_requested {
-            info!("PTY detach requested via in-band key sequence");
-        }
-        if pause_requested || in_band_detach_requested {
-            if let Some(ref mut p) = pty {
-                if detach_client_for_session(p) {
-                    restore_terminal_after_detach();
-                }
-            }
-        }
+        handle_pty_detach_request(
+            pty.as_deref_mut(),
+            pause_requested,
+            in_band_detach_requested,
+        );
 
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {

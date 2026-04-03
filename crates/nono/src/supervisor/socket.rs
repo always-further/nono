@@ -21,6 +21,14 @@ const LENGTH_PREFIX_SIZE: usize = 4;
 
 /// Maximum message size: 64 KiB (prevents memory exhaustion from malicious messages)
 const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
+const SCM_RIGHTS_BUFFER_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCredentials {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
 
 /// A Unix domain socket for supervisor IPC.
 ///
@@ -159,53 +167,7 @@ impl SupervisorSocket {
     ///
     /// Used by the supervisor to pass an opened fd for a granted path.
     pub fn send_fd(&self, fd: RawFd) -> Result<()> {
-        use libc::{c_void, cmsghdr, iovec, msghdr, sendmsg, CMSG_DATA, CMSG_LEN, CMSG_SPACE};
-        use std::mem;
-
-        let data: [u8; 1] = [0]; // Dummy byte (required for ancillary data)
-        let iov = iovec {
-            iov_base: data.as_ptr() as *mut c_void,
-            iov_len: 1,
-        };
-
-        // Ancillary data buffer for one fd
-        let cmsg_space = unsafe { CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize;
-        let mut cmsg_buf = vec![0u8; cmsg_space];
-
-        let mut msg: msghdr = unsafe { mem::zeroed() };
-        msg.msg_iov = &iov as *const iovec as *mut iovec;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cmsg_buf.as_mut_ptr() as *mut c_void;
-        msg.msg_controllen = cmsg_space as _;
-
-        // SAFETY: We're writing to the cmsg buffer we allocated, within its bounds.
-        // The buffer size was calculated with CMSG_SPACE for exactly one RawFd.
-        let cmsg: &mut cmsghdr = unsafe { &mut *(cmsg_buf.as_mut_ptr().cast::<cmsghdr>()) };
-        cmsg.cmsg_level = libc::SOL_SOCKET;
-        cmsg.cmsg_type = libc::SCM_RIGHTS;
-        cmsg.cmsg_len = unsafe { CMSG_LEN(mem::size_of::<RawFd>() as u32) } as _;
-
-        // SAFETY: CMSG_DATA returns a pointer into the cmsg buffer, which we own.
-        // We write exactly one RawFd, which matches CMSG_LEN.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                &fd as *const RawFd as *const u8,
-                CMSG_DATA(cmsg),
-                mem::size_of::<RawFd>(),
-            );
-        }
-
-        // SAFETY: msg is fully initialized with valid iov and cmsg data.
-        // The socket fd is valid (from self.stream).
-        let sent = unsafe { sendmsg(self.stream.as_raw_fd(), &msg, 0) };
-        if sent < 0 {
-            return Err(NonoError::SandboxInit(format!(
-                "Failed to send fd via SCM_RIGHTS: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        Ok(())
+        send_fd_via_socket(self.stream.as_raw_fd(), fd)
     }
 
     /// Receive a file descriptor from the peer via `SCM_RIGHTS`.
@@ -213,158 +175,17 @@ impl SupervisorSocket {
     /// Used by the child to receive an opened fd for a granted path.
     /// Returns an `OwnedFd` that the caller is responsible for.
     pub fn recv_fd(&self) -> Result<OwnedFd> {
-        use libc::{
-            c_void, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR,
-            CMSG_SPACE,
-        };
-        use std::mem;
-
-        let mut data: [u8; 1] = [0];
-        let mut iov = iovec {
-            iov_base: data.as_mut_ptr() as *mut c_void,
-            iov_len: 1,
-        };
-
-        let cmsg_space = unsafe { CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize;
-        let mut cmsg_buf = vec![0u8; cmsg_space];
-
-        let mut msg: msghdr = unsafe { mem::zeroed() };
-        msg.msg_iov = &mut iov as *mut iovec;
-        msg.msg_iovlen = 1;
-        msg.msg_control = cmsg_buf.as_mut_ptr() as *mut c_void;
-        msg.msg_controllen = cmsg_space as _;
-
-        // SAFETY: msg is fully initialized with valid iov and cmsg buffers.
-        let received = unsafe { recvmsg(self.stream.as_raw_fd(), &mut msg, 0) };
-        if received < 0 {
-            return Err(NonoError::SandboxInit(format!(
-                "Failed to receive fd via SCM_RIGHTS: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        if received == 0 {
-            return Err(NonoError::SandboxInit(
-                "Supervisor socket closed while waiting for SCM_RIGHTS".to_string(),
-            ));
-        }
-        if (msg.msg_flags & libc::MSG_CTRUNC) != 0 {
-            return Err(NonoError::SandboxInit(
-                "SCM_RIGHTS ancillary data was truncated".to_string(),
-            ));
-        }
-
-        // Extract the first SCM_RIGHTS fd from ancillary data.
-        let expected_len = unsafe { CMSG_LEN(mem::size_of::<RawFd>() as u32) } as usize;
-        let mut cmsg = unsafe { CMSG_FIRSTHDR(&msg as *const msghdr as *mut msghdr) };
-        while !cmsg.is_null() {
-            let header = unsafe { &*cmsg };
-            if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
-                if (header.cmsg_len as usize) < expected_len {
-                    return Err(NonoError::SandboxInit(
-                        "SCM_RIGHTS ancillary data too small".to_string(),
-                    ));
-                }
-
-                let mut fd: RawFd = -1;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        CMSG_DATA(cmsg),
-                        &mut fd as *mut RawFd as *mut u8,
-                        mem::size_of::<RawFd>(),
-                    );
-                }
-
-                if fd < 0 {
-                    return Err(NonoError::SandboxInit(
-                        "Received invalid fd from SCM_RIGHTS".to_string(),
-                    ));
-                }
-
-                // SAFETY: The fd was just received via SCM_RIGHTS and validated as non-negative.
-                // We take ownership so it will be properly closed.
-                return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
-            }
-            cmsg = unsafe { CMSG_NXTHDR(&msg as *const msghdr as *mut msghdr, cmsg) };
-        }
-
-        Err(NonoError::SandboxInit(
-            "No SCM_RIGHTS data in received message".to_string(),
-        ))
+        recv_fd_via_socket(self.stream.as_raw_fd())
     }
 
     /// Authenticate the peer using platform-specific mechanisms.
     ///
     /// On Linux, uses `SO_PEERCRED` to get the peer's PID/UID/GID.
-    /// On macOS, uses `LOCAL_PEERPID` to get the peer's PID.
+    /// On macOS, combines `LOCAL_PEERPID` and `getpeereid`.
     ///
     /// Returns the peer's PID.
     pub fn peer_pid(&self) -> Result<u32> {
-        #[cfg(target_os = "linux")]
-        {
-            use libc::{getsockopt, socklen_t, ucred, SOL_SOCKET, SO_PEERCRED};
-            use std::mem;
-
-            let mut cred: ucred = unsafe { mem::zeroed() };
-            let mut len = mem::size_of::<ucred>() as socklen_t;
-
-            // SAFETY: getsockopt with SO_PEERCRED writes a ucred struct.
-            // We provide a valid buffer and length.
-            let ret = unsafe {
-                getsockopt(
-                    self.stream.as_raw_fd(),
-                    SOL_SOCKET,
-                    SO_PEERCRED,
-                    &mut cred as *mut ucred as *mut libc::c_void,
-                    &mut len,
-                )
-            };
-            if ret < 0 {
-                return Err(NonoError::SandboxInit(format!(
-                    "SO_PEERCRED failed: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            // pid_t is i32, cast to u32 (valid PIDs are always positive)
-            Ok(cred.pid as u32)
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            use libc::{getsockopt, socklen_t};
-            use std::mem;
-
-            // LOCAL_PEERPID = 0x002 on macOS
-            const LOCAL_PEERPID: libc::c_int = 0x002;
-
-            let mut pid: libc::pid_t = 0;
-            let mut len = mem::size_of::<libc::pid_t>() as socklen_t;
-
-            // SAFETY: getsockopt with LOCAL_PEERPID writes a pid_t.
-            // We provide a valid buffer and length.
-            let ret = unsafe {
-                getsockopt(
-                    self.stream.as_raw_fd(),
-                    0, // SOL_LOCAL = 0 on macOS
-                    LOCAL_PEERPID,
-                    &mut pid as *mut libc::pid_t as *mut libc::c_void,
-                    &mut len,
-                )
-            };
-            if ret < 0 {
-                return Err(NonoError::SandboxInit(format!(
-                    "LOCAL_PEERPID failed: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            Ok(pid as u32)
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            Err(NonoError::UnsupportedPlatform(
-                "Peer credential lookup not supported on this platform".to_string(),
-            ))
-        }
+        Ok(peer_credentials(self.stream.as_raw_fd())?.pid)
     }
 
     /// Set a read timeout on the socket.
@@ -413,6 +234,246 @@ impl SupervisorSocket {
             .map_err(|e| NonoError::SandboxInit(format!("Failed to read message payload: {e}")))?;
         Ok(payload)
     }
+}
+
+#[doc(hidden)]
+pub fn send_fd_via_socket(sock_fd: RawFd, fd: RawFd) -> Result<()> {
+    let mut data = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: data.as_mut_ptr().cast::<libc::c_void>(),
+        iov_len: data.len(),
+    };
+    // SAFETY: `CMSG_SPACE` and `CMSG_LEN` are pure libc size calculations.
+    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    let expected_cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) } as usize;
+
+    if cmsg_space > SCM_RIGHTS_BUFFER_CAPACITY {
+        return Err(NonoError::SandboxInit(
+            "Unexpected ancillary buffer size for SCM_RIGHTS send".to_string(),
+        ));
+    }
+
+    let mut cmsg_buf = [0u8; SCM_RIGHTS_BUFFER_CAPACITY];
+    // SAFETY: `msghdr` is plain old data and will be fully initialized below.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov as *mut libc::iovec;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr().cast::<libc::c_void>();
+    msg.msg_controllen = cmsg_space as _;
+
+    // SAFETY: `msg` references `cmsg_buf`, which is large enough for one header.
+    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg as *const libc::msghdr as *mut libc::msghdr) };
+    if cmsg.is_null() {
+        return Err(NonoError::SandboxInit(
+            "Missing ancillary header for SCM_RIGHTS send".to_string(),
+        ));
+    }
+
+    // SAFETY: `cmsg` points into `cmsg_buf`, which is sized for exactly one fd payload.
+    unsafe {
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = expected_cmsg_len as _;
+        std::ptr::copy_nonoverlapping(
+            (&fd as *const RawFd).cast::<u8>(),
+            libc::CMSG_DATA(cmsg),
+            std::mem::size_of::<RawFd>(),
+        );
+    }
+
+    // SAFETY: `sock_fd` is a valid Unix socket and `msg` points to live stack buffers.
+    let sent = unsafe { libc::sendmsg(sock_fd, &msg, 0) };
+    if sent < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to send fd via SCM_RIGHTS: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn recv_fd_via_socket(sock_fd: RawFd) -> Result<OwnedFd> {
+    let mut data = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: data.as_mut_ptr().cast::<libc::c_void>(),
+        iov_len: data.len(),
+    };
+    // SAFETY: `CMSG_SPACE` and `CMSG_LEN` are pure libc size calculations.
+    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    let expected_cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) } as usize;
+
+    if cmsg_space > SCM_RIGHTS_BUFFER_CAPACITY {
+        return Err(NonoError::SandboxInit(
+            "Unexpected ancillary buffer size for SCM_RIGHTS receive".to_string(),
+        ));
+    }
+
+    let mut cmsg_buf = [0u8; SCM_RIGHTS_BUFFER_CAPACITY];
+    // SAFETY: `msghdr` is plain old data and will be fully initialized below.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov as *mut libc::iovec;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr().cast::<libc::c_void>();
+    msg.msg_controllen = cmsg_space as _;
+
+    // SAFETY: `sock_fd` is a valid Unix socket and `msg` references stack buffers.
+    let received = unsafe { libc::recvmsg(sock_fd, &mut msg, 0) };
+    if received < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "Failed to receive fd via SCM_RIGHTS: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if received == 0 {
+        return Err(NonoError::SandboxInit(
+            "Socket closed while waiting for SCM_RIGHTS".to_string(),
+        ));
+    }
+    if (msg.msg_flags & libc::MSG_CTRUNC) != 0 {
+        return Err(NonoError::SandboxInit(
+            "SCM_RIGHTS ancillary data was truncated".to_string(),
+        ));
+    }
+
+    // SAFETY: `msg` references `cmsg_buf`, which still lives on the stack here.
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg as *const libc::msghdr as *mut libc::msghdr) };
+    while !cmsg.is_null() {
+        // SAFETY: `cmsg` was returned by libc and points into `cmsg_buf`.
+        let header = unsafe { &*cmsg };
+        if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+            if (header.cmsg_len as usize) < expected_cmsg_len {
+                return Err(NonoError::SandboxInit(
+                    "SCM_RIGHTS ancillary data too small".to_string(),
+                ));
+            }
+
+            let mut fd: RawFd = -1;
+            // SAFETY: `CMSG_DATA(cmsg)` points at the fd payload for this header.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    libc::CMSG_DATA(cmsg),
+                    (&mut fd as *mut RawFd).cast::<u8>(),
+                    std::mem::size_of::<RawFd>(),
+                );
+            }
+            if fd < 0 {
+                return Err(NonoError::SandboxInit(
+                    "Received invalid fd from SCM_RIGHTS".to_string(),
+                ));
+            }
+
+            // SAFETY: The fd was just received via SCM_RIGHTS and validated.
+            return Ok(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+        // SAFETY: `msg` and `cmsg` still point into the same live ancillary buffer.
+        cmsg = unsafe { libc::CMSG_NXTHDR(&msg as *const libc::msghdr as *mut libc::msghdr, cmsg) };
+    }
+
+    Err(NonoError::SandboxInit(
+        "No SCM_RIGHTS data in received message".to_string(),
+    ))
+}
+
+#[doc(hidden)]
+pub fn peer_credentials(sock_fd: RawFd) -> Result<PeerCredentials> {
+    #[cfg(target_os = "linux")]
+    {
+        use libc::{getsockopt, socklen_t, ucred, SOL_SOCKET, SO_PEERCRED};
+
+        // SAFETY: `ucred` is plain old data and will be written by `getsockopt`.
+        let mut cred: ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<ucred>() as socklen_t;
+        let ret = unsafe {
+            getsockopt(
+                sock_fd,
+                SOL_SOCKET,
+                SO_PEERCRED,
+                &mut cred as *mut ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if ret < 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "SO_PEERCRED failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        return Ok(PeerCredentials {
+            pid: cred.pid as u32,
+            uid: cred.uid,
+            gid: cred.gid,
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use libc::{getsockopt, socklen_t};
+
+        const LOCAL_PEERPID: libc::c_int = 0x002;
+
+        let mut pid: libc::pid_t = 0;
+        let mut pid_len = std::mem::size_of::<libc::pid_t>() as socklen_t;
+        let ret = unsafe {
+            getsockopt(
+                sock_fd,
+                0,
+                LOCAL_PEERPID,
+                &mut pid as *mut libc::pid_t as *mut libc::c_void,
+                &mut pid_len,
+            )
+        };
+        if ret < 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "LOCAL_PEERPID failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let ret = unsafe { libc::getpeereid(sock_fd, &mut uid, &mut gid) };
+        if ret != 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "getpeereid failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        Ok(PeerCredentials {
+            pid: pid as u32,
+            uid,
+            gid,
+        })
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(NonoError::UnsupportedPlatform(
+            "Peer credential lookup not supported on this platform".to_string(),
+        ))
+    }
+}
+
+#[doc(hidden)]
+#[cfg(target_os = "linux")]
+pub fn peer_in_same_user_namespace(peer_pid: u32) -> Result<bool> {
+    let current_ns = std::fs::read_link("/proc/self/ns/user").map_err(|e| {
+        NonoError::SandboxInit(format!("Failed to read current user namespace: {e}"))
+    })?;
+    let peer_ns = std::fs::read_link(format!("/proc/{peer_pid}/ns/user")).map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to read user namespace for peer pid {peer_pid}: {e}"
+        ))
+    })?;
+    Ok(current_ns == peer_ns)
+}
+
+#[doc(hidden)]
+#[cfg(not(target_os = "linux"))]
+pub fn peer_in_same_user_namespace(_peer_pid: u32) -> Result<bool> {
+    Ok(true)
 }
 
 /// Bind a Unix socket with restrictive permissions from creation time.

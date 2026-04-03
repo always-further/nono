@@ -140,6 +140,9 @@ pub enum NonoError {
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 
+    #[error("Session already has an active attached client")]
+    AttachBusy,
+
     // Trust/attestation errors
     #[error("Trust verification failed for {path}: {reason}")]
     TrustVerification { path: String, reason: String },
