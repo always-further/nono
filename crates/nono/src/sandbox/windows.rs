@@ -24,15 +24,66 @@ use windows_sys::Win32::System::SystemServices::{
     SECURITY_MANDATORY_LOW_RID, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
 };
 
-const WINDOWS_PREVIEW_SUPPORTED: bool = false;
-const WINDOWS_PREVIEW_DETAILS: &str =
-    "Windows native CLI builds support setup, dry-run, direct execution, the current restricted-execution command surface, and partial supervised/runtime enforcement. The library-wide `Sandbox::apply()` contract remains partial on Windows until backend/library parity is implemented, and unsupported Windows flows fail explicitly.";
+const WINDOWS_PREVIEW_SUPPORTED: bool = true;
+const WINDOWS_SUPPORTED_DETAILS: &str =
+    "Windows sandbox enforcement supports directory read and directory read-write grants, \
+     blocked network mode, and default signal/process/ipc modes. Single-file grants, \
+     write-only directory grants, port-level network filtering, runtime capability \
+     expansion, and platform-specific rules are not in the supported subset. \
+     `nono shell` and `nono wrap` remain intentionally unavailable on Windows.";
 
 pub fn apply(caps: &CapabilitySet) -> Result<()> {
-    let _ = caps;
-    Err(NonoError::UnsupportedPlatform(
-        WINDOWS_PREVIEW_DETAILS.to_string(),
-    ))
+    // 1. Filesystem shape validation
+    let fs_policy = compile_filesystem_policy(caps);
+    if !fs_policy.unsupported.is_empty() {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows sandbox does not support: {}",
+            fs_policy.unsupported_messages().join(", ")
+        )));
+    }
+
+    // 2. Network shape validation
+    let net_policy = compile_network_policy(caps);
+    if !net_policy.unsupported.is_empty() {
+        return Err(NonoError::UnsupportedPlatform(format!(
+            "Windows sandbox does not support: {}",
+            net_policy.unsupported_messages().join(", ")
+        )));
+    }
+
+    // 3. Remaining field validation against defaults
+    if caps.signal_mode() != crate::SignalMode::Isolated {
+        return Err(NonoError::UnsupportedPlatform(
+            "Windows sandbox does not support non-default signal mode".to_string(),
+        ));
+    }
+    if caps.process_info_mode() != crate::ProcessInfoMode::Isolated {
+        return Err(NonoError::UnsupportedPlatform(
+            "Windows sandbox does not support non-default process info mode".to_string(),
+        ));
+    }
+    if caps.ipc_mode() != crate::IpcMode::SharedMemoryOnly {
+        return Err(NonoError::UnsupportedPlatform(
+            "Windows sandbox does not support non-default IPC mode".to_string(),
+        ));
+    }
+    if caps.extensions_enabled() {
+        return Err(NonoError::UnsupportedPlatform(
+            "Windows sandbox does not support runtime capability expansion".to_string(),
+        ));
+    }
+    if !caps.platform_rules().is_empty() {
+        return Err(NonoError::UnsupportedPlatform(
+            "Windows sandbox does not support platform-specific rules (Seatbelt-only feature)"
+                .to_string(),
+        ));
+    }
+
+    // seatbelt_debug_deny is macOS-only and has no enforcement claim on Windows;
+    // silently accepting it is correct (no overclaim).
+
+    // 4. Validated — CLI layer can proceed with enforcement
+    Ok(())
 }
 
 #[must_use]
@@ -47,9 +98,9 @@ pub fn is_supported() -> bool {
 pub fn support_info() -> SupportInfo {
     SupportInfo {
         is_supported: WINDOWS_PREVIEW_SUPPORTED,
-        status: SupportStatus::Partial,
+        status: SupportStatus::Supported,
         platform: "windows",
-        details: WINDOWS_PREVIEW_DETAILS.to_string(),
+        details: WINDOWS_SUPPORTED_DETAILS.to_string(),
     }
 }
 

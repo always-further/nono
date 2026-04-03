@@ -186,7 +186,11 @@ impl SetupRunner {
         let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
         let storage = windows_storage_layout()?;
         println!("  * Platform: {}", info.platform);
-        println!("  * Support status: {}", info.status_label());
+        println!(
+            "  * CLI support status: {}",
+            windows_cli_support_status_label()
+        );
+        println!("  * Library support status: {}", info.status_label());
         println!("  * {}", info.details);
         println!(
             "  * User config root: {}",
@@ -737,7 +741,8 @@ fn print_shell_help_body() {
 fn print_check_only_summary() {
     let info = nono::Sandbox::support_info();
     let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
-    println!("Support status: {}", info.status_label());
+    println!("CLI support status: {}", windows_cli_support_status_label());
+    println!("Library support status: {}", info.status_label());
     println!("{}", info.details);
     if let Ok(storage) = windows_storage_layout() {
         println!("User config root: {}", storage.user_config_root.display());
@@ -751,6 +756,11 @@ fn print_check_only_summary() {
     println!("Blocked-network and other enforcement-dependent Windows flows require current backend readiness; check the WFP readiness lines above before treating them as available.");
     println!("Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows; use their --dry-run forms to inspect policy.");
     println!("Run 'nono run --help' to inspect the current command surface.");
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cli_support_status_label() -> &'static str {
+    "supported restricted command surface"
 }
 
 #[cfg(target_os = "windows")]
