@@ -432,7 +432,7 @@ fn env_conflict_allow_net_and_block_net() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_dry_run_reports_preview_validation_without_enforcement_claims() {
+fn windows_dry_run_reports_sandbox_validation() {
     let output = nono_bin()
         .args([
             "run",
@@ -462,12 +462,12 @@ fn windows_dry_run_reports_preview_validation_without_enforcement_claims() {
         "expected command preview in dry-run output, got:\n{text}"
     );
     assert!(
-        text.contains("current Windows command surface without claiming full parity"),
-        "expected preview-validation wording in dry-run output, got:\n{text}"
+        text.contains("sandbox would be applied with above capabilities"),
+        "expected cross-platform dry-run wording, got:\n{text}"
     );
     assert!(
-        !text.contains("sandbox would be applied"),
-        "dry-run must not imply enforcement on Windows preview, got:\n{text}"
+        !text.contains("without claiming full parity"),
+        "dry-run must not use old preview wording, got:\n{text}"
     );
 }
 
@@ -489,10 +489,12 @@ fn windows_run_executes_basic_command() {
         "expected child stdout from cmd /c echo hello, got:\n{text}"
     );
     assert!(
-        text.contains(
-            "current supported command surface for filesystem and blocked-network policy"
-        ),
-        "expected current Windows supported-subset warning in output, got:\n{text}"
+        text.contains("active"),
+        "expected sandbox-active indicator in output, got:\n{text}"
+    );
+    assert!(
+        !text.contains("Windows restricted execution"),
+        "Windows run must not use old preview wording, got:\n{text}"
     );
 }
 
@@ -531,7 +533,7 @@ fn windows_run_allows_file_grants_in_preview_live_run() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_run_allows_supported_directory_allowlist_in_preview_live_run() {
+fn windows_run_allows_supported_directory_allowlist_in_live_run() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
@@ -564,10 +566,12 @@ fn windows_run_allows_supported_directory_allowlist_in_preview_live_run() {
         "expected child cwd in output, got:\n{text}"
     );
     assert!(
-        text.contains(
-            "current supported command surface for filesystem and blocked-network policy"
-        ),
-        "expected updated Windows preview warning, got:\n{text}"
+        text.contains("active"),
+        "expected sandbox-active indicator in output, got:\n{text}"
+    );
+    assert!(
+        !text.contains("Windows restricted execution"),
+        "Windows directory allowlist run must not use old preview wording, got:\n{text}"
     );
 }
 
