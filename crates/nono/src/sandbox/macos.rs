@@ -45,6 +45,9 @@ const EXT_CLASS_READ: &str = "com.apple.app-sandbox.read";
 /// Extension class for read+write access
 const EXT_CLASS_READ_WRITE: &str = "com.apple.app-sandbox.read-write";
 
+/// Extension class for execute access
+const EXT_CLASS_EXECUTE: &str = "com.apple.app-sandbox.execute";
+
 /// Issue a sandbox extension token for a path.
 ///
 /// Called by the unsandboxed supervisor to create a token that a sandboxed
@@ -55,7 +58,7 @@ const EXT_CLASS_READ_WRITE: &str = "com.apple.app-sandbox.read-write";
 ///
 /// # Arguments
 /// * `path` - The filesystem path to grant access to
-/// * `access` - The access mode (Read -> read-only token, Write/ReadWrite -> read-write token)
+/// * `access` - The access mode (Read -> read-only token, Write/ReadWrite -> read-write token, Execute -> execute token)
 ///
 /// # Errors
 /// Returns an error if the path contains null bytes or if the kernel rejects the request.
@@ -63,6 +66,7 @@ pub fn extension_issue_file(path: &Path, access: AccessMode) -> Result<String> {
     let class = match access {
         AccessMode::Read => EXT_CLASS_READ,
         AccessMode::Write | AccessMode::ReadWrite => EXT_CLASS_READ_WRITE,
+        AccessMode::Execute => EXT_CLASS_EXECUTE,
     };
 
     let class_c = CString::new(class)
@@ -464,9 +468,24 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         profile.push_str("(debug deny)\n");
     }
 
-    // Allow specific process operations needed for execution
-    profile.push_str("(allow process-exec*)\n");
+    // Allow specific process operations needed for process management
     profile.push_str("(allow process-fork)\n");
+
+    // Process execution: scoped to paths with Execute access.
+    // This prevents executing arbitrary binaries outside the granted execute paths.
+    for cap in caps.fs_capabilities() {
+        if matches!(
+            cap.access,
+            AccessMode::Execute
+                | AccessMode::ReadWrite
+                | AccessMode::ReadExecute
+                | AccessMode::ReadWriteExecute
+        ) {
+            for filter in path_filters_for_cap(cap)? {
+                profile.push_str(&format!("(allow process-exec ({}))\n", filter));
+            }
+        }
+    }
 
     // Process info: allow self-inspection and same-sandbox inspection for both
     // Isolated and AllowSameSandbox, matching Linux behaviour where Landlock
@@ -580,11 +599,18 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         ));
     }
 
-    // Allow mapping executables into memory, restricted to readable paths.
+    // Allow mapping executables into memory, restricted to paths with Read or Execute access.
     // This prevents loading arbitrary shared libraries via DYLD_INSERT_LIBRARIES
-    // from paths outside the sandbox's read set.
+    // from paths outside the sandbox's read/execute set.
     for cap in caps.fs_capabilities() {
-        if matches!(cap.access, AccessMode::Read | AccessMode::ReadWrite) {
+        if matches!(
+            cap.access,
+            AccessMode::Read
+                | AccessMode::ReadWrite
+                | AccessMode::Execute
+                | AccessMode::ReadExecute
+                | AccessMode::ReadWriteExecute
+        ) {
             for filter in path_filters_for_cap(cap)? {
                 profile.push_str(&format!("(allow file-map-executable ({}))\n", filter));
             }
@@ -610,13 +636,16 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // (e.g. /tmp vs /private/tmp) so Seatbelt allows traversing symlinks.
     for cap in caps.fs_capabilities() {
         match cap.access {
-            AccessMode::Read | AccessMode::ReadWrite => {
+            AccessMode::Read
+            | AccessMode::ReadWrite
+            | AccessMode::ReadExecute
+            | AccessMode::ReadWriteExecute => {
                 for filter in path_filters_for_cap(cap)? {
                     profile.push_str(&format!("(allow file-read* ({}))\n", filter));
                 }
             }
-            AccessMode::Write => {
-                // Write-only doesn't need read access
+            AccessMode::Write | AccessMode::Execute => {
+                // Write-only or Execute-only doesn't need read access
             }
         }
     }
@@ -630,6 +659,7 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         profile.push_str("(allow file-read* (extension \"com.apple.app-sandbox.read\"))\n");
         profile.push_str("(allow file-read* (extension \"com.apple.app-sandbox.read-write\"))\n");
         profile.push_str("(allow file-write* (extension \"com.apple.app-sandbox.read-write\"))\n");
+        profile.push_str("(allow process-exec (extension \"com.apple.app-sandbox.execute\"))\n");
     }
 
     // SECURITY: Platform deny rules are placed BETWEEN read and write rules.
@@ -649,13 +679,13 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // Emits rules for both original and resolved paths when they differ.
     for cap in caps.fs_capabilities() {
         match cap.access {
-            AccessMode::Write | AccessMode::ReadWrite => {
+            AccessMode::Write | AccessMode::ReadWrite | AccessMode::ReadWriteExecute => {
                 for filter in path_filters_for_cap(cap)? {
                     profile.push_str(&format!("(allow file-write* ({}))\n", filter));
                 }
             }
-            AccessMode::Read => {
-                // Read-only doesn't need write access
+            AccessMode::Read | AccessMode::Execute | AccessMode::ReadExecute => {
+                // Read-only or Execute-only doesn't need write access
             }
         }
     }

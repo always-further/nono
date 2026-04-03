@@ -529,6 +529,26 @@ impl CapabilitySetExt for CapabilitySet {
         // fs-grant sugar.
         add_cli_unix_socket_caps(&mut caps, args, &protected_roots, false)?;
 
+        // Execute permissions (directory and single file). Standardized to
+        // ReadExecute since execve(2) requires reading the binary header.
+        for path in &args.execute {
+            validate_requested_dir(path, "CLI", &protected_roots, false)?;
+            if let Some(cap) =
+                try_new_dir(path, AccessMode::ReadExecute, "Skipping non-existent path")?
+            {
+                caps.add_fs(cap);
+            }
+        }
+
+        for path in &args.execute_file {
+            validate_requested_file(path, "CLI", &protected_roots, false)?;
+            if let Some(cap) =
+                try_new_file(path, AccessMode::ReadExecute, "Skipping non-existent file")?
+            {
+                caps.add_fs(cap);
+            }
+        }
+
         apply_cli_network_mode(&mut caps, args);
 
         // Localhost IPC ports
@@ -823,6 +843,46 @@ impl CapabilitySetExt for CapabilitySet {
             }
         }
 
+        // execute, readexecute, readwriteexecute (directories or files)
+        for path_template in &fs.execute {
+            let path = expand_vars(path_template, workdir)?;
+            let label = format!("Profile path '{}' does not exist, skipping", path_template);
+            if let Some(mut cap) = if path.is_dir() {
+                try_new_dir(&path, AccessMode::Execute, &label)?
+            } else {
+                try_new_file(&path, AccessMode::Execute, &label)?
+            } {
+                cap.source = CapabilitySource::Profile;
+                caps.add_fs(cap);
+            }
+        }
+
+        for path_template in &fs.readexecute {
+            let path = expand_vars(path_template, workdir)?;
+            let label = format!("Profile path '{}' does not exist, skipping", path_template);
+            if let Some(mut cap) = if path.is_dir() {
+                try_new_dir(&path, AccessMode::ReadExecute, &label)?
+            } else {
+                try_new_file(&path, AccessMode::ReadExecute, &label)?
+            } {
+                cap.source = CapabilitySource::Profile;
+                caps.add_fs(cap);
+            }
+        }
+
+        for path_template in &fs.readwriteexecute {
+            let path = expand_vars(path_template, workdir)?;
+            let label = format!("Profile path '{}' does not exist, skipping", path_template);
+            if let Some(mut cap) = if path.is_dir() {
+                try_new_dir(&path, AccessMode::ReadWriteExecute, &label)?
+            } else {
+                try_new_file(&path, AccessMode::ReadWriteExecute, &label)?
+            } {
+                cap.source = CapabilitySource::Profile;
+                caps.add_fs(cap);
+            }
+        }
+
         // Policy patch additions
         apply_profile_dir_allows(
             &profile.policy.add_allow_readwrite,
@@ -850,6 +910,30 @@ impl CapabilitySetExt for CapabilitySet {
             &mut caps,
             "Profile policy path",
             allow_parent_of_protected,
+        )?;
+        apply_profile_dir_allows(
+            &profile.policy.add_allow_execute,
+            AccessMode::Execute,
+            workdir,
+            &protected_roots,
+            &mut caps,
+            "Profile policy path",
+        )?;
+        apply_profile_dir_allows(
+            &profile.policy.add_allow_readexecute,
+            AccessMode::ReadExecute,
+            workdir,
+            &protected_roots,
+            &mut caps,
+            "Profile policy path",
+        )?;
+        apply_profile_dir_allows(
+            &profile.policy.add_allow_readwriteexecute,
+            AccessMode::ReadWriteExecute,
+            workdir,
+            &protected_roots,
+            &mut caps,
+            "Profile policy path",
         )?;
 
         for path_template in &profile.policy.add_deny_access {
@@ -1068,6 +1152,25 @@ fn add_cli_overrides(
 
     // AF_UNIX socket capabilities from CLI overrides.
     add_cli_unix_socket_caps(caps, args, &protected_roots, allow_parent_of_protected)?;
+
+    // Execute permissions (directory and single file). Standardized to
+    // ReadExecute since execve(2) requires reading the binary header.
+    for path in &args.execute {
+        validate_requested_dir(path, "CLI", &protected_roots, allow_parent_of_protected)?;
+        if let Some(cap) = try_new_dir(path, AccessMode::ReadExecute, "Skipping non-existent path")?
+        {
+            caps.add_fs(cap);
+        }
+    }
+
+    for path in &args.execute_file {
+        validate_requested_file(path, "CLI", &protected_roots, allow_parent_of_protected)?;
+        if let Some(cap) =
+            try_new_file(path, AccessMode::ReadExecute, "Skipping non-existent file")?
+        {
+            caps.add_fs(cap);
+        }
+    }
 
     // CLI network flags override profile network settings.
     apply_cli_network_mode(caps, args);
