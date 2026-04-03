@@ -133,6 +133,15 @@ pub struct RouteConfig {
     /// (backward compatible).
     #[serde(default)]
     pub endpoint_rules: Vec<EndpointRule>,
+
+    /// Optional path to a PEM-encoded CA certificate file for upstream TLS.
+    ///
+    /// When set, the proxy trusts this CA in addition to the system roots
+    /// when connecting to the upstream for this route. This is required for
+    /// upstreams that use self-signed or private CA certificates (e.g.,
+    /// Kubernetes API servers).
+    #[serde(default)]
+    pub tls_ca: Option<String>,
 }
 
 /// An HTTP method+path access rule for reverse proxy endpoint filtering.
@@ -537,6 +546,25 @@ mod tests {
         }"#;
         let route: RouteConfig = serde_json::from_str(json).unwrap();
         assert!(route.endpoint_rules.is_empty());
+        assert!(route.tls_ca.is_none());
+    }
+
+    #[test]
+    fn test_tls_ca_serde_roundtrip() {
+        let json = r#"{
+            "prefix": "/k8s",
+            "upstream": "https://kubernetes.local:6443",
+            "tls_ca": "/run/secrets/k8s-ca.crt"
+        }"#;
+        let route: RouteConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(route.tls_ca.as_deref(), Some("/run/secrets/k8s-ca.crt"));
+
+        let serialized = serde_json::to_string(&route).unwrap();
+        let deserialized: RouteConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            deserialized.tls_ca.as_deref(),
+            Some("/run/secrets/k8s-ca.crt")
+        );
     }
 
     #[test]

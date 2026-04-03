@@ -561,6 +561,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             }],
             ..Default::default()
         };
@@ -601,6 +602,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None, // No explicit env_var — should fall back to uppercase
                 endpoint_rules: vec![],
+                tls_ca: None,
             }],
             ..Default::default()
         };
@@ -650,6 +652,7 @@ mod tests {
                 query_param_name: None,
                 env_var: Some("OPENAI_API_KEY".to_string()),
                 endpoint_rules: vec![],
+                tls_ca: None,
             }],
             ..Default::default()
         };
@@ -705,6 +708,7 @@ mod tests {
                     query_param_name: None,
                     env_var: None,
                     endpoint_rules: vec![],
+                    tls_ca: None,
                 },
                 crate::config::RouteConfig {
                     prefix: "github".to_string(),
@@ -718,6 +722,7 @@ mod tests {
                     query_param_name: None,
                     env_var: Some("GITHUB_TOKEN".to_string()),
                     endpoint_rules: vec![],
+                    tls_ca: None,
                 },
             ],
             ..Default::default()

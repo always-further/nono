@@ -234,6 +234,13 @@ pub fn resolve_credentials(
                 query_param_name: cred.query_param_name.clone(),
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
+                tls_ca: cred
+                    .tls_ca
+                    .as_deref()
+                    .map(|p| {
+                        crate::policy::expand_path(p).map(|pb| pb.to_string_lossy().into_owned())
+                    })
+                    .transpose()?,
             });
         } else if let Some(cred) = policy.credentials.get(name) {
             // Validate env_var against dangerous variable blocklist
@@ -260,6 +267,7 @@ pub fn resolve_credentials(
                 query_param_name: None,
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
+                tls_ca: None, // Built-in credentials don't support custom CAs
             });
         }
         // We already validated existence above, so this else branch won't be hit
@@ -446,6 +454,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -481,6 +490,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -512,6 +522,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -553,6 +564,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -630,6 +642,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -658,6 +671,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -686,6 +700,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -719,6 +734,7 @@ mod tests {
                 query_param_name: None,
                 env_var: Some("OPENAI_API_KEY".to_string()),
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -826,6 +842,7 @@ mod tests {
                 query_param_name: None,
                 env_var: Some("LD_PRELOAD".to_string()),
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 

@@ -35,6 +35,7 @@ globset.workspace = true
 hyper-rustls = { version = "0.27", features = ["http1", "ring", "webpki-tokio"] }
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
 webpki-roots = "1"
 
 [dev-dependencies]

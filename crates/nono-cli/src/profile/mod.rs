@@ -151,6 +151,18 @@ pub struct CustomCredentialDef {
     /// When non-empty, only matching method+path combinations are allowed.
     #[serde(default)]
     pub endpoint_rules: Vec<nono_proxy::config::EndpointRule>,
+
+    /// Optional path to a PEM-encoded CA certificate file for upstream TLS.
+    ///
+    /// When set, the proxy trusts this CA in addition to the system roots
+    /// when connecting to the upstream for this route. Required for upstreams
+    /// with self-signed or private CA certificates (e.g., Kubernetes API servers).
+    ///
+    /// Supports absolute paths and tilde (`~/…`) expansion. Relative paths
+    /// resolve against the working directory; prefer absolute paths to avoid
+    /// ambiguity.
+    #[serde(default)]
+    pub tls_ca: Option<String>,
 }
 
 fn default_inject_header() -> String {
@@ -2155,6 +2167,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         }
     }
 
@@ -2314,6 +2327,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -2331,6 +2345,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("missing path_pattern should be rejected");
@@ -2350,6 +2365,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("pattern without {} should be rejected");
@@ -2369,6 +2385,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -2386,6 +2403,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("replacement without {} should be rejected");
@@ -2405,6 +2423,7 @@ mod tests {
             query_param_name: Some("key".to_string()),
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         assert!(validate_custom_credential("google_maps", &cred).is_ok());
     }
@@ -2422,6 +2441,7 @@ mod tests {
             query_param_name: None, // Missing required field
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("missing query_param_name should be rejected");
@@ -2441,6 +2461,7 @@ mod tests {
             query_param_name: Some("".to_string()), // Empty
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("empty query_param_name should be rejected");
@@ -2460,6 +2481,7 @@ mod tests {
             query_param_name: None,
             env_var: None,
             endpoint_rules: vec![],
+            tls_ca: None,
         };
         // BasicAuth mode doesn't require additional fields
         // Credential value is expected to be "username:password" format
@@ -2780,6 +2802,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -2797,6 +2820,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -2932,6 +2956,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -2949,6 +2974,7 @@ mod tests {
                 query_param_name: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                tls_ca: None,
             },
         );
 
@@ -4111,6 +4137,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         assert!(
             validate_custom_credential("example", &cred).is_ok(),
@@ -4131,6 +4158,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: None,
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI without env_var should be rejected");
@@ -4154,6 +4182,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI with relative path should be rejected");
@@ -4177,6 +4206,7 @@ mod tests {
             query_param_name: None,
             endpoint_rules: vec![],
             env_var: Some("EXAMPLE_API_KEY".to_string()),
+            tls_ca: None,
         };
         let result = validate_custom_credential("example", &cred);
         assert!(

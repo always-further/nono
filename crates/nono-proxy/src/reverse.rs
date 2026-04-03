@@ -192,12 +192,15 @@ pub async fn handle_reverse_proxy(
         Vec::new()
     };
 
-    // Connect to upstream over TLS using pre-resolved addresses
+    // Connect to upstream over TLS using pre-resolved addresses.
+    // Use the per-route TLS connector (with custom CA) if configured,
+    // otherwise fall back to the shared default connector.
+    let connector = cred.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
     let upstream_result = connect_upstream_tls(
         &upstream_host,
         upstream_port,
         &check.resolved_addrs,
-        ctx.tls_connector,
+        connector,
     )
     .await;
     let mut tls_stream = match upstream_result {
