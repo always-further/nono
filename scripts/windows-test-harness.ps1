@@ -154,7 +154,21 @@ foreach ($activeSuite in $suites) {
             Invoke-TestList -LogFile "windows-integration.log" -Tests $integrationTests
         }
         "security" {
-            Invoke-TestList -LogFile "windows-security.log" -Tests $securityTests
+            $wfpFilters = @(
+                "windows_run_block_net_blocks_probe_connection",
+                "windows_run_block_net_cleans_up_promoted_wfp_filters_after_exit"
+            )
+            $nonWfpTests = $securityTests | Where-Object { $_.Filter -notin $wfpFilters }
+            $wfpTests = $securityTests | Where-Object { $_.Filter -in $wfpFilters }
+
+            Invoke-TestList -LogFile "windows-security.log" -Tests $nonWfpTests
+
+            if ($env:NONO_CI_HAS_WFP -eq 'true') {
+                Invoke-TestList -LogFile "windows-security.log" -Tests $wfpTests
+            } else {
+                $msg = "SKIPPED: WFP tests require elevated runner (NONO_CI_HAS_WFP not set)"
+                $msg | Tee-Object -FilePath (Join-Path $LogDir "windows-security.log") -Append
+            }
         }
         "regression" {
             Invoke-TestList -LogFile "windows-regression.log" -Tests $regressionTests
