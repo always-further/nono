@@ -27,8 +27,6 @@ use std::collections::HashSet;
 use std::ffi::{CString, OsStr};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::os::fd::FromRawFd;
-#[cfg(target_os = "linux")]
-use std::os::fd::RawFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;

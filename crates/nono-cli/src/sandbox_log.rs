@@ -133,9 +133,11 @@ impl SandboxLogCollector {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub struct SandboxLogCollector;
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 impl SandboxLogCollector {
     #[must_use]
     pub fn start(_child_pid: i32) -> Option<Self> {

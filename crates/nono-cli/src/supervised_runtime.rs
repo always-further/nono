@@ -146,6 +146,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         rollback.requested,
         rollback.disabled,
         rollback.audit_disabled,
+        rollback.destination.as_ref(),
     )?;
     warn_if_rollback_flags_ignored(rollback, silent);
     let rollback_state = initialize_rollback_state(rollback, caps, audit_state.as_ref(), silent)?;

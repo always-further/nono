@@ -127,6 +127,7 @@ pub(crate) fn create_audit_state(
     rollback_requested: bool,
     rollback_disabled: bool,
     audit_disabled: bool,
+    rollback_destination: Option<&PathBuf>,
 ) -> Result<Option<AuditState>> {
     if !rollback_requested || rollback_disabled || audit_disabled {
         return Ok(None);
@@ -138,8 +139,14 @@ pub(crate) fn create_audit_state(
         std::process::id()
     );
 
-    let home = dirs::home_dir().ok_or(nono::NonoError::HomeNotFound)?;
-    let session_dir = home.join(".nono").join("rollbacks").join(&session_id);
+    let rollback_root = match rollback_destination {
+        Some(path) => path.clone(),
+        None => {
+            let home = dirs::home_dir().ok_or(nono::NonoError::HomeNotFound)?;
+            home.join(".nono").join("rollbacks")
+        }
+    };
+    let session_dir = rollback_root.join(&session_id);
     std::fs::create_dir_all(&session_dir).map_err(|e| {
         nono::NonoError::Snapshot(format!(
             "Failed to create session directory {}: {}",

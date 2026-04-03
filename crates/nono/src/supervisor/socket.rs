@@ -400,11 +400,11 @@ pub fn peer_credentials(sock_fd: RawFd) -> Result<PeerCredentials> {
                 std::io::Error::last_os_error()
             )));
         }
-        return Ok(PeerCredentials {
+        Ok(PeerCredentials {
             pid: cred.pid as u32,
             uid: cred.uid,
             gid: cred.gid,
-        });
+        })
     }
 
     #[cfg(target_os = "macos")]
