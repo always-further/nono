@@ -2204,7 +2204,7 @@ mod tests {
             let mut drained = vec![0u8; 16 * 1024];
             let _ = reader.read(&mut drained);
             let _ = drained_tx.send(());
-            let _ = release_rx.recv_timeout(Duration::from_secs(1));
+            let _ = release_rx.recv();
         });
 
         write_all_fd(writer.as_raw_fd(), b"ok").expect("write_all_fd should retry");
