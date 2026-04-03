@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f7d1df81fa623d1039cb5ac2fcf499d3129e903e91962150a5296c08c6e1b97b # shrinks to (profile_json, groups, workdir_access, network_block, extra_blocked) = (Object {"meta": Object {"name": String("proptest-generated"), "description": String("auto")}, "security": Object {"groups": Array []}, "workdir": Object {"access": String("none")}}, [], "none", false, [])

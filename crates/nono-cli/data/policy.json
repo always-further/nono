@@ -492,7 +492,9 @@
         "read": [
           "$HOME/.gitconfig",
           "$HOME/.gitignore_global",
-          "$HOME/.config/git/ignore"
+          "$HOME/.config/git/config",
+          "$HOME/.config/git/ignore",
+          "$HOME/.config/git/attributes"
         ]
       }
     },
