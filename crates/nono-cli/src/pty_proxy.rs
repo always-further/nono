@@ -2185,8 +2185,7 @@ mod tests {
     fn write_all_fd_retries_after_would_block() {
         let (reader, mut writer) = UnixStream::pair().expect("socket pair");
         assert!(super::set_nonblocking(writer.as_raw_fd()));
-        let (drained_tx, drained_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
 
         let fill_buf = vec![b'x'; 8192];
         loop {
@@ -2201,17 +2200,48 @@ mod tests {
         let reader_thread = thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
             let mut reader = reader;
-            let mut drained = vec![0u8; 16 * 1024];
-            let _ = reader.read(&mut drained);
-            let _ = drained_tx.send(());
-            let _ = release_rx.recv();
+            reader
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("set read timeout");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut buf = [0u8; 16 * 1024];
+            let mut saw_ok = false;
+
+            while std::time::Instant::now() < deadline {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if buf[..n].windows(2).any(|window| window == b"ok") {
+                            saw_ok = true;
+                            break;
+                        }
+                    }
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        continue;
+                    }
+                    Err(err) => {
+                        let _ = result_tx.send(Err(format!("reader failed: {err}")));
+                        return;
+                    }
+                }
+            }
+
+            let _ = result_tx.send(if saw_ok {
+                Ok(())
+            } else {
+                Err("reader never observed retried write".to_string())
+            });
         });
 
         write_all_fd(writer.as_raw_fd(), b"ok").expect("write_all_fd should retry");
-        drained_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("reader should drain buffer before closing");
-        let _ = release_tx.send(());
+        match result_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => panic!("{err}"),
+            Err(err) => panic!("reader thread timed out: {err}"),
+        }
         reader_thread.join().expect("reader thread");
     }
 
