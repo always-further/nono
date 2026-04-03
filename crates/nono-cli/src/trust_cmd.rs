@@ -1408,8 +1408,13 @@ mod tests {
 
         let expected = b"public key bytes";
         let encoded = base64_encode(expected);
-        store_public_key_cache("default", &encoded).unwrap();
-        let loaded = load_public_key_bytes("default").unwrap();
+        let key_id = "test-cache-key";
+        store_public_key_cache(key_id, &encoded).unwrap();
+        assert_eq!(
+            load_public_key_cache(key_id).unwrap(),
+            Some(encoded.clone())
+        );
+        let loaded = load_public_key_bytes(key_id).unwrap();
 
         assert_eq!(loaded, expected);
     }

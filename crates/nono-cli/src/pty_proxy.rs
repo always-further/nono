@@ -2185,6 +2185,7 @@ mod tests {
     fn write_all_fd_retries_after_would_block() {
         let (reader, mut writer) = UnixStream::pair().expect("socket pair");
         assert!(super::set_nonblocking(writer.as_raw_fd()));
+        let (drained_tx, drained_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
 
         let fill_buf = vec![b'x'; 8192];
@@ -2202,10 +2203,14 @@ mod tests {
             let mut reader = reader;
             let mut drained = vec![0u8; 16 * 1024];
             let _ = reader.read(&mut drained);
+            let _ = drained_tx.send(());
             let _ = release_rx.recv_timeout(Duration::from_secs(1));
         });
 
         write_all_fd(writer.as_raw_fd(), b"ok").expect("write_all_fd should retry");
+        drained_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader should drain buffer before closing");
         let _ = release_tx.send(());
         reader_thread.join().expect("reader thread");
     }
