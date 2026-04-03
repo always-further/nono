@@ -434,6 +434,7 @@ mod tests {
                 path_replacement: None,
                 query_param_name: None,
                 endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
+                tls_connector: None,
             },
         );
         let store = CredentialStore { credentials };
@@ -463,6 +464,7 @@ mod tests {
                 path_replacement: None,
                 query_param_name: None,
                 endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
+                tls_connector: None,
             },
         );
         let store = CredentialStore { credentials };

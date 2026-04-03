@@ -2484,6 +2484,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
                         path: r.path.to_string(),
                     })
                     .collect(),
+                tls_ca: None,
             };
             manifest_custom_credentials.insert(cred.name.to_string(), custom_def);
         }
