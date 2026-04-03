@@ -1662,6 +1662,9 @@ fn access_str(access: AccessMode) -> &'static str {
         AccessMode::Read => "read",
         AccessMode::Write => "write",
         AccessMode::ReadWrite => "read+write",
+        AccessMode::Execute => "execute",
+        AccessMode::ReadExecute => "read+execute",
+        AccessMode::ReadWriteExecute => "read+write+execute",
     }
 }
 

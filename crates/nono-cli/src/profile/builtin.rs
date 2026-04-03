@@ -197,11 +197,11 @@ mod tests {
         assert!(profile.interactive);
         assert!(profile
             .filesystem
-            .allow
+            .readwriteexecute
             .contains(&"$HOME/.opencode".to_string()));
         assert!(profile
             .filesystem
-            .allow
+            .readwriteexecute
             .contains(&"$HOME/.local/share/opentui".to_string()));
     }
 

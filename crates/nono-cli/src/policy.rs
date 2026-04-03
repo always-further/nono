@@ -69,6 +69,15 @@ pub struct AllowOps {
     /// Paths granted read+write access
     #[serde(default)]
     pub readwrite: Vec<String>,
+    /// Paths granted execute access
+    #[serde(default)]
+    pub execute: Vec<String>,
+    /// Paths granted read+execute access
+    #[serde(default)]
+    pub readexecute: Vec<String>,
+    /// Paths granted read+write+execute access
+    #[serde(default)]
+    pub readwriteexecute: Vec<String>,
 }
 
 /// Deny operations nested under `deny`
@@ -407,6 +416,15 @@ fn resolve_single_group(
         }
         for path_str in &allow.readwrite {
             add_fs_capability(group_name, path_str, AccessMode::ReadWrite, &source, caps)?;
+        }
+        for path_str in &allow.execute {
+            add_fs_capability(path_str, AccessMode::Execute, &source, caps)?;
+        }
+        for path_str in &allow.readexecute {
+            add_fs_capability(path_str, AccessMode::ReadExecute, &source, caps)?;
+        }
+        for path_str in &allow.readwriteexecute {
+            add_fs_capability(path_str, AccessMode::ReadWriteExecute, &source, caps)?;
         }
     }
 
@@ -943,6 +961,7 @@ pub fn apply_deny_overrides(
         // Seatbelt allow rules for only the first grant's access mode.
         let mut grant_has_read = false;
         let mut grant_has_write = false;
+        let mut grant_has_execute = false;
         for cap in caps.fs_capabilities() {
             if !cap.source.is_user_intent() {
                 continue;
@@ -960,10 +979,20 @@ pub fn apply_deny_overrides(
                         grant_has_read = true;
                         grant_has_write = true;
                     }
+                    AccessMode::Execute => grant_has_execute = true,
+                    AccessMode::ReadExecute => {
+                        grant_has_read = true;
+                        grant_has_execute = true;
+                    }
+                    AccessMode::ReadWriteExecute => {
+                        grant_has_read = true;
+                        grant_has_write = true;
+                        grant_has_execute = true;
+                    }
                 }
             }
         }
-        if !grant_has_read && !grant_has_write {
+        if !grant_has_read && !grant_has_write && !grant_has_execute {
             return Err(NonoError::SandboxInit(format!(
                 "override_deny '{}' has no matching grant. \
                  Add a filesystem allow (--allow, --read, --write, or profile filesystem/policy) \

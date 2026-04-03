@@ -54,6 +54,12 @@ pub enum AccessMode {
     Write,
     /// Read and write access
     ReadWrite,
+    /// Execute access
+    Execute,
+    /// Read and execute access
+    ReadExecute,
+    /// Read, write, and execute access
+    ReadWriteExecute,
 }
 
 impl AccessMode {
@@ -63,10 +69,20 @@ impl AccessMode {
     /// Read contains only Read. Write contains only Write.
     #[must_use]
     pub fn contains(self, required: AccessMode) -> bool {
-        match self {
-            AccessMode::ReadWrite => true,
-            AccessMode::Read => required == AccessMode::Read,
-            AccessMode::Write => required == AccessMode::Write,
+        match (self, required) {
+            (AccessMode::ReadWriteExecute, _) => true,
+            (AccessMode::ReadWrite, AccessMode::ReadWrite | AccessMode::Read | AccessMode::Write) => {
+                true
+            }
+            (AccessMode::ReadExecute, AccessMode::ReadExecute | AccessMode::Read | AccessMode::Execute) => {
+                true
+            }
+            (AccessMode::ReadWrite, _) => false,
+            (AccessMode::ReadExecute, _) => false,
+            (AccessMode::Write, AccessMode::Write) => true,
+            (AccessMode::Read, AccessMode::Read) => true,
+            (AccessMode::Execute, AccessMode::Execute) => true,
+            _ => self == required,
         }
     }
 }
@@ -77,6 +93,9 @@ impl std::fmt::Display for AccessMode {
             AccessMode::Read => write!(f, "read"),
             AccessMode::Write => write!(f, "write"),
             AccessMode::ReadWrite => write!(f, "read+write"),
+            AccessMode::Execute => write!(f, "execute"),
+            AccessMode::ReadExecute => write!(f, "read+execute"),
+            AccessMode::ReadWriteExecute => write!(f, "read+write+execute"),
         }
     }
 }
@@ -1341,12 +1360,23 @@ impl CapabilitySet {
                     cap.access == AccessMode::ReadWrite && existing.access != AccessMode::ReadWrite
                 };
 
-                // Merge complementary access modes (Read + Write = ReadWrite).
-                // When two entries from the same source category have different
-                // non-ReadWrite modes, upgrade the kept entry to ReadWrite.
+                // Merge complementary access modes.
                 let merged_access = match (existing.access, cap.access) {
+                    (AccessMode::ReadWriteExecute, _) | (_, AccessMode::ReadWriteExecute) => {
+                        Some(AccessMode::ReadWriteExecute)
+                    }
                     (AccessMode::Read, AccessMode::Write)
                     | (AccessMode::Write, AccessMode::Read) => Some(AccessMode::ReadWrite),
+                    (AccessMode::Read, AccessMode::Execute)
+                    | (AccessMode::Execute, AccessMode::Read) => Some(AccessMode::ReadExecute),
+                    (AccessMode::ReadWrite, AccessMode::Execute)
+                    | (AccessMode::Execute, AccessMode::ReadWrite)
+                    | (AccessMode::ReadWrite, AccessMode::ReadExecute)
+                    | (AccessMode::ReadExecute, AccessMode::ReadWrite)
+                    | (AccessMode::ReadExecute, AccessMode::Write)
+                    | (AccessMode::Write, AccessMode::ReadExecute) => {
+                        Some(AccessMode::ReadWriteExecute)
+                    }
                     _ => None,
                 };
 

@@ -224,6 +224,9 @@ fn format_access_badge(access: &AccessMode) -> String {
         AccessMode::Read => theme::badge("  r  ", t.green, BADGE_FG_DARK),
         AccessMode::Write => theme::badge("  w  ", t.yellow, BADGE_FG_DARK),
         AccessMode::ReadWrite => theme::badge(" r+w ", t.brand, BADGE_FG_DARK),
+        AccessMode::Execute => theme::badge("  e  ", t.brand, BADGE_FG_DARK),
+        AccessMode::ReadExecute => theme::badge(" r+e ", t.brand, BADGE_FG_DARK),
+        AccessMode::ReadWriteExecute => theme::badge("r+w+e", t.brand, BADGE_FG_DARK),
     }
 }
 
@@ -243,6 +246,9 @@ fn format_access_inline(access: &AccessMode) -> colored::ColoredString {
         AccessMode::Read => theme::fg("read", t.green),
         AccessMode::Write => theme::fg("write", t.yellow),
         AccessMode::ReadWrite => theme::fg("read+write", t.brand),
+        AccessMode::Execute => theme::fg("execute", t.brand),
+        AccessMode::ReadExecute => theme::fg("read+execute", t.brand),
+        AccessMode::ReadWriteExecute => theme::fg("read+write+execute", t.brand),
     }
 }
 
