@@ -384,12 +384,16 @@ fn manifest_proxy_mode_not_downgraded_to_blocked() {
     {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !output.status.success(),
-            "expected Windows proxy manifest execution path to fail closed, stderr: {stderr}"
+            output.status.success(),
+            "expected Windows proxy manifest dry-run validation to succeed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
-            "expected current Windows command-surface failure, got: {stderr}"
+            stderr.contains("Capabilities:"),
+            "expected capability summary in Windows proxy manifest dry-run output, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("dry-run sandbox would be applied with above capabilities"),
+            "expected cross-platform dry-run wording in Windows proxy manifest output, got: {stderr}"
         );
     }
 
@@ -456,12 +460,16 @@ fn manifest_credentials_accepted_in_config() {
     {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !output.status.success(),
-            "expected Windows credential manifest execution path to fail closed, stderr: {stderr}"
+            output.status.success(),
+            "expected Windows credential manifest dry-run validation to succeed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
-            "expected current Windows command-surface failure, got: {stderr}"
+            stderr.contains("Capabilities:"),
+            "expected capability summary in Windows credential manifest dry-run output, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("dry-run sandbox would be applied with above capabilities"),
+            "expected cross-platform dry-run wording in Windows credential manifest output, got: {stderr}"
         );
     }
 }
@@ -516,12 +524,16 @@ fn manifest_credential_env_var_accepted_and_round_trips() {
     {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !output.status.success(),
-            "expected Windows env-var manifest execution path to fail closed, stderr: {stderr}"
+            output.status.success(),
+            "expected Windows env-var manifest dry-run validation to succeed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
-            "expected current Windows command-surface failure, got: {stderr}"
+            stderr.contains("Capabilities:"),
+            "expected capability summary in Windows env-var manifest dry-run output, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("dry-run sandbox would be applied with above capabilities"),
+            "expected cross-platform dry-run wording in Windows env-var manifest output, got: {stderr}"
         );
     }
 }
@@ -672,12 +684,16 @@ fn rollback_enabled_with_supervised_is_accepted() {
     {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !output.status.success(),
-            "expected Windows supervised manifest execution path to fail closed, stderr: {stderr}"
+            output.status.success(),
+            "expected Windows supervised manifest dry-run validation to succeed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
-            "expected current Windows command-surface failure, got: {stderr}"
+            stderr.contains("Capabilities:"),
+            "expected capability summary in Windows supervised manifest dry-run output, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("dry-run sandbox would be applied with above capabilities"),
+            "expected cross-platform dry-run wording in Windows supervised manifest output, got: {stderr}"
         );
     }
 }

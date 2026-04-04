@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", allow(dead_code))]
+
 use crate::cli::RunArgs;
 use crate::config;
 use crate::proxy_runtime::prepare_proxy_launch_options;
@@ -139,6 +141,16 @@ pub(crate) fn prepare_run_launch_plan(
 
     let mut prepared = prepare_sandbox(&args, silent)?;
     validate_rollback_destination(run_args.rollback_dest.as_ref(), &prepared)?;
+
+    #[cfg(target_os = "windows")]
+    nono::Sandbox::validate_windows_preview_entry_point(
+        nono::WindowsPreviewEntryPoint::RunDirect,
+        &prepared.caps,
+        &resolve_requested_workdir(args.workdir.as_ref()),
+        nono::WindowsPreviewContext {
+            has_deny_override_policy: !prepared.override_deny_paths.is_empty(),
+        },
+    )?;
 
     if prepared.allow_launch_services_active {
         print_allow_launch_services_warning(silent);

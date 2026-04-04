@@ -793,12 +793,27 @@ fn load_session_file(path: &Path) -> Result<SessionRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "windows"))]
     use tempfile::tempdir;
+    use tempfile::TempDir;
 
     #[cfg(unix)]
     fn make_private_dir(path: &Path) {
         let perms = std::fs::Permissions::from_mode(0o700);
         std::fs::set_permissions(path, perms).expect("chmod 700");
+    }
+
+    #[cfg(target_os = "windows")]
+    fn temp_session_test_dir(prefix: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("tempdir")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn temp_session_test_dir(_prefix: &str) -> TempDir {
+        tempdir().expect("tempdir")
     }
 
     #[test]
@@ -840,7 +855,7 @@ mod tests {
 
     #[test]
     fn test_write_and_load_session_file() {
-        let dir = tempdir().expect("tempdir");
+        let dir = temp_session_test_dir("nono-session-write-load-");
         let path = dir.path().join("test.json");
 
         let record = SessionRecord {
@@ -869,13 +884,7 @@ mod tests {
 
     #[test]
     fn test_update_session_file() {
-        #[cfg(target_os = "windows")]
-        let dir = tempfile::Builder::new()
-            .prefix("nono-session-update-")
-            .tempdir_in(std::env::current_dir().expect("current dir"))
-            .expect("tempdir");
-        #[cfg(not(target_os = "windows"))]
-        let dir = tempdir().expect("tempdir");
+        let dir = temp_session_test_dir("nono-session-update-");
         #[cfg(unix)]
         make_private_dir(dir.path());
         let path = dir.path().join("update.json");
@@ -917,7 +926,7 @@ mod tests {
 
     #[test]
     fn test_session_guard_drop_marks_exited() {
-        let dir = tempdir().expect("tempdir");
+        let dir = temp_session_test_dir("nono-session-guard-");
         #[cfg(unix)]
         make_private_dir(dir.path());
         let path = dir.path().join("sessions");
@@ -1000,7 +1009,7 @@ mod tests {
 
     #[test]
     fn test_load_session_prefix_match() {
-        let dir = tempdir().expect("tempdir");
+        let dir = temp_session_test_dir("nono-session-prefix-");
         let sessions_path = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions_path).expect("mkdir");
 

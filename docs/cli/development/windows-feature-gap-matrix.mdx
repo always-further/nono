@@ -40,5 +40,7 @@ Status labels:
 ## Current Guidance
 
 - The current Windows command surface is intended for startup, config, setup, dry-run, direct command-path validation, blocked-network and selected port-policy enforcement, and a narrow live-run filesystem subset.
+- Treat that Windows CLI/release command surface as the supported product boundary.
+- Keep the embedded library `Sandbox::apply()` contract explicitly partial on Windows until backend/library parity work lands.
 - If a command would require unsupported Windows enforcement, it should fail loudly rather than report success.
 - Windows supervisor plumbing is now a real supported path for the active rollback-oriented supervised subset; later work extends broader capability expansion and trust flows on top of the same transport.

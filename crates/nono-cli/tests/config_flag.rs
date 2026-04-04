@@ -62,12 +62,20 @@ fn config_with_valid_manifest_is_accepted() {
     {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !output.status.success(),
-            "expected Windows manifest execution path to fail closed, stderr: {stderr}"
+            output.status.success(),
+            "expected Windows manifest dry-run to succeed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
-            "expected current Windows command-surface failure, got: {stderr}"
+            stderr.contains("Capabilities:"),
+            "expected capability summary in Windows manifest dry-run output, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("dry-run sandbox would be applied with above capabilities"),
+            "expected cross-platform dry-run wording in Windows manifest output, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains("dry-run validates the current Windows command surface"),
+            "manifest dry-run should not regress to stale Windows-specific wording, got: {stderr}"
         );
     }
 }

@@ -14,7 +14,7 @@ use nono::{NonoError, Result};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 // ============================================================================
 // Environment variable validation
@@ -111,8 +111,7 @@ pub fn user_state_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> &'static Mutex<()> {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    ENV_LOCK.get_or_init(|| Mutex::new(()))
+    &crate::test_env::ENV_LOCK
 }
 
 /// Legacy Windows state directory used by earlier preview builds.
@@ -246,6 +245,9 @@ mod tests {
 
     #[test]
     fn test_check_sensitive_path() {
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         assert!(check_sensitive_path("~/.ssh")
             .expect("should not fail")
             .is_some());
@@ -267,6 +269,9 @@ mod tests {
 
     #[test]
     fn test_check_sensitive_path_component_wise() {
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // ~/.sshevil must NOT match ~/.ssh (component-wise comparison)
         let home = validated_home().expect("HOME must be set");
         let evil_path = format!("{}/.sshevil", home);

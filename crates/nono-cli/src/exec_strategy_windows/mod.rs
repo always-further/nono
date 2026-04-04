@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Windows execution strategy placeholder.
 //!
 //! WIN-101 needs the CLI to compile on Windows without pulling in the Unix

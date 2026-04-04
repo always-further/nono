@@ -522,12 +522,18 @@ fn windows_run_allows_file_grants_in_preview_live_run() {
 
     let text = combined_output(&output);
     assert!(
-        output.status.success(),
-        "Windows file grants should succeed in live preview runs, output:\n{text}"
+        !output.status.success(),
+        "Windows single-file grants should fail closed under the current filesystem subset, output:\n{text}"
     );
     assert!(
-        text.contains("hello from file grant"),
-        "expected child output from file-grant read, got:\n{text}"
+        text.contains(
+            "Platform not supported: Windows cannot enforce the requested sandbox controls for this live run"
+        ),
+        "expected explicit unsupported-subset failure for Windows single-file grants, got:\n{text}"
+    );
+    assert!(
+        text.contains("(single-file grants)"),
+        "expected single-file grant limitation detail, got:\n{text}"
     );
 }
 
@@ -566,8 +572,8 @@ fn windows_run_allows_supported_directory_allowlist_in_live_run() {
         "expected child cwd in output, got:\n{text}"
     );
     assert!(
-        text.contains("active"),
-        "expected sandbox-active indicator in output, got:\n{text}"
+        text.contains("Applying sandbox..."),
+        "expected sandbox application progress in output, got:\n{text}"
     );
     assert!(
         !text.contains("Windows restricted execution"),
@@ -2314,18 +2320,45 @@ fn windows_root_help_reports_supported_command_surface_without_full_parity_claim
         "Windows root help should succeed, output:\n{text}"
     );
     assert!(
-        text.contains("Windows restricted execution plus explicit command-surface limitations."),
+        text.contains(
+            "A capability-based shell for running untrusted AI agents and processes with OS-enforced isolation."
+        ),
         "expected root help to describe the current Windows command surface, got:\n{text}"
     );
     assert!(
-        text.contains(
-            "Unsupported Windows flows fail closed instead of implying full sandbox parity."
-        ),
+        text.contains("Unsupported flows fail closed instead of implying full sandbox parity."),
         "expected root help to avoid implying full Windows parity, got:\n{text}"
     );
     assert!(
         !text.contains("first-class supported"),
         "root help must not claim first-class Windows support yet, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_run_help_reports_supported_command_surface_and_backend_readiness() {
+    let output = nono_bin()
+        .args(["run", "--help"])
+        .output()
+        .expect("failed to run nono run --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows run help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("current supported command surface with backend-owned"),
+        "expected run help to describe the current supported Windows surface, got:\n{text}"
+    );
+    assert!(
+        text.contains("enforcement-dependent flows require current Windows"),
+        "expected run help to mention backend readiness for enforcement-dependent flows, got:\n{text}"
+    );
+    assert!(
+        !text.contains("first-class supported"),
+        "run help must not imply first-class Windows support yet, got:\n{text}"
     );
 }
 
@@ -2465,12 +2498,15 @@ fn windows_run_live_codex_profile_fails_intentionally_with_backend_reason() {
         "unsupported Windows codex profile run should fail closed, output:\n{text}"
     );
     assert!(
-        text.contains("cannot enforce the requested sandbox controls"),
+        text.contains(
+            "Platform not supported: Windows cannot enforce the requested sandbox controls for this live run"
+        ),
         "expected explicit backend enforcement failure, got:\n{text}"
     );
     assert!(
         text.contains("execution directory outside supported allowlist")
-            || text.contains("platform-specific sandbox rules"),
+            && text.contains("platform-specific sandbox rules")
+            && text.contains("single-file grants"),
         "expected backend-owned unsupported reason details, got:\n{text}"
     );
 }
@@ -2516,15 +2552,11 @@ fn windows_setup_check_only_reports_live_profile_subset() {
         text.contains(
             "Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows"
         ),
-        "expected explicit shell/wrap limitation note in setup output, got:\n{text}"
+        "expected explicit shell/wrap limitation note in setup summary, got:\n{text}"
     );
     assert!(
         text.contains("User state root:"),
         "expected Windows storage layout in setup summary, got:\n{text}"
-    );
-    assert!(
-        text.contains("Supported profile-backed restrictions run live"),
-        "expected live profile subset wording in setup output, got:\n{text}"
     );
     assert!(
         !text.contains("Live profile enforcement is still preview-only on Windows."),
@@ -2560,6 +2592,168 @@ fn windows_setup_check_only_reports_unified_support_status() {
     assert!(
         !text.contains("restricted command surface"),
         "setup output must not use old CLI support label, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_root_help_reports_session_management_as_unsupported_surface() {
+    let output = nono_bin()
+        .args(["--help"])
+        .output()
+        .expect("failed to run nono --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows root help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("ps         Inspect the unsupported Windows session-management surface"),
+        "expected root help to mark ps as unsupported on Windows, got:\n{text}"
+    );
+    assert!(
+        text.contains("attach     Inspect the unsupported Windows session-management surface"),
+        "expected root help to mark attach as unsupported on Windows, got:\n{text}"
+    );
+    assert!(
+        text.contains("detach     Inspect the unsupported Windows session-management surface"),
+        "expected root help to mark detach as unsupported on Windows, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_attach_help_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["attach", "--help"])
+        .output()
+        .expect("failed to run nono attach --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows attach help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("`nono attach` is intentionally unavailable on Windows."),
+        "expected documented Windows attach limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("PTY/socket session transport"),
+        "expected explicit detached-session transport limitation in attach help, got:\n{text}"
+    );
+    assert!(
+        !text.contains("Attach by session ID"),
+        "Windows attach help should not show Unix attach examples, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_detach_help_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["detach", "--help"])
+        .output()
+        .expect("failed to run nono detach --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows detach help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("`nono detach` is intentionally unavailable on Windows."),
+        "expected documented Windows detach limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("PTY-backed detachable runtime sessions are not available on Windows"),
+        "expected explicit PTY limitation in detach help, got:\n{text}"
+    );
+    assert!(
+        !text.contains("Ctrl-] then d"),
+        "Windows detach help should not show in-band detach examples, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_logs_help_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["logs", "--help"])
+        .output()
+        .expect("failed to run nono logs --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows logs help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("`nono logs` is intentionally unavailable on Windows."),
+        "expected documented Windows logs limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("event-log inspection"),
+        "expected explicit session event-log limitation in logs help, got:\n{text}"
+    );
+    assert!(
+        !text.contains("# View recent events"),
+        "Windows logs help should not show Unix logs example blocks, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_inspect_help_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["inspect", "--help"])
+        .output()
+        .expect("failed to run nono inspect --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows inspect help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("`nono inspect` is intentionally unavailable on Windows."),
+        "expected documented Windows inspect limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("Detailed runtime session inspection"),
+        "expected explicit session inspection limitation in help output, got:\n{text}"
+    );
+    assert!(
+        !text.contains("# Inspect a session"),
+        "Windows inspect help should not show Unix inspect example blocks, got:\n{text}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_prune_help_reports_documented_limitation() {
+    let output = nono_bin()
+        .args(["prune", "--help"])
+        .output()
+        .expect("failed to run nono prune --help");
+
+    let text = combined_output(&output);
+    assert!(
+        output.status.success(),
+        "Windows prune help should succeed, output:\n{text}"
+    );
+    assert!(
+        text.contains("`nono prune` is intentionally unavailable on Windows."),
+        "expected documented Windows prune limitation in help output, got:\n{text}"
+    );
+    assert!(
+        text.contains("Runtime session file cleanup"),
+        "expected explicit session cleanup limitation in help output, got:\n{text}"
+    );
+    assert!(
+        !text.contains("Remove sessions older than 7 days"),
+        "Windows prune help should not show Unix prune examples, got:\n{text}"
     );
 }
 

@@ -314,7 +314,252 @@ pub(super) fn build_child_env(config: &ExecConfig<'_>) -> Vec<(String, String)> 
         env_pairs.push(((*key).to_string(), (*value).to_string()));
     }
 
+    append_windows_runtime_env(&mut env_pairs, config);
+
     env_pairs
+}
+
+fn append_windows_runtime_env(env_pairs: &mut Vec<(String, String)>, config: &ExecConfig<'_>) {
+    env_pairs.push((
+        "PATH".to_string(),
+        r"C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\".to_string(),
+    ));
+    env_pairs.push((
+        "PATHEXT".to_string(),
+        ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC".to_string(),
+    ));
+    env_pairs.push((
+        "COMSPEC".to_string(),
+        r"C:\Windows\System32\cmd.exe".to_string(),
+    ));
+    env_pairs.push(("SystemRoot".to_string(), r"C:\Windows".to_string()));
+    env_pairs.push(("windir".to_string(), r"C:\Windows".to_string()));
+    env_pairs.push(("SystemDrive".to_string(), "C:".to_string()));
+    env_pairs.push((
+        "NoDefaultCurrentDirectoryInExePath".to_string(),
+        "1".to_string(),
+    ));
+
+    let Some(runtime_root) = choose_windows_runtime_root(config) else {
+        return;
+    };
+
+    let runtime_dirs = [
+        ("TMP", runtime_root.join("tmp")),
+        ("TEMP", runtime_root.join("tmp")),
+        ("TMPDIR", runtime_root.join("tmp")),
+        ("APPDATA", runtime_root.join("roaming")),
+        ("LOCALAPPDATA", runtime_root.join("local")),
+        ("HOME", runtime_root.join("home")),
+        ("USERPROFILE", runtime_root.join("home")),
+        ("XDG_CONFIG_HOME", runtime_root.join("config")),
+        ("XDG_CACHE_HOME", runtime_root.join("cache")),
+        ("XDG_DATA_HOME", runtime_root.join("data")),
+        ("XDG_STATE_HOME", runtime_root.join("state")),
+        ("PROGRAMDATA", runtime_root.join("programdata")),
+        ("ALLUSERSPROFILE", runtime_root.join("programdata")),
+        ("PUBLIC", runtime_root.join("public")),
+        ("ProgramFiles", runtime_root.join("programfiles")),
+        ("ProgramFiles(x86)", runtime_root.join("programfiles-x86")),
+        ("ProgramW6432", runtime_root.join("programfiles-w6432")),
+        (
+            "CommonProgramFiles",
+            runtime_root.join("common-programfiles"),
+        ),
+        (
+            "CommonProgramFiles(x86)",
+            runtime_root.join("common-programfiles-x86"),
+        ),
+        (
+            "CommonProgramW6432",
+            runtime_root.join("common-programfiles-w6432"),
+        ),
+        ("OneDrive", runtime_root.join("onedrive")),
+        ("OneDriveConsumer", runtime_root.join("onedrive-consumer")),
+        (
+            "OneDriveCommercial",
+            runtime_root.join("onedrive-commercial"),
+        ),
+        ("INETCACHE", runtime_root.join("inetcache")),
+        ("INETCOOKIES", runtime_root.join("inetcookies")),
+        ("INETHISTORY", runtime_root.join("inethistory")),
+        ("PSModulePath", runtime_root.join("psmodules")),
+        (
+            "PSModuleAnalysisCachePath",
+            runtime_root
+                .join("psmodule-cache")
+                .join("ModuleAnalysisCache"),
+        ),
+        ("CARGO_HOME", runtime_root.join("cargo")),
+        ("RUSTUP_HOME", runtime_root.join("rustup")),
+        ("DOTNET_CLI_HOME", runtime_root.join("dotnet")),
+        (
+            "NUGET_PACKAGES",
+            runtime_root.join("nuget").join("packages"),
+        ),
+        (
+            "NUGET_HTTP_CACHE_PATH",
+            runtime_root.join("nuget").join("http-cache"),
+        ),
+        (
+            "NUGET_PLUGINS_CACHE_PATH",
+            runtime_root.join("nuget").join("plugins-cache"),
+        ),
+        (
+            "ChocolateyInstall",
+            runtime_root.join("chocolatey").join("install"),
+        ),
+        (
+            "ChocolateyToolsLocation",
+            runtime_root.join("chocolatey").join("tools"),
+        ),
+        ("VCPKG_ROOT", runtime_root.join("vcpkg")),
+        ("NPM_CONFIG_CACHE", runtime_root.join("npm").join("cache")),
+        (
+            "NPM_CONFIG_USERCONFIG",
+            runtime_root.join("npm").join("config").join("npmrc"),
+        ),
+        ("YARN_CACHE_FOLDER", runtime_root.join("yarn").join("cache")),
+        ("PIP_CACHE_DIR", runtime_root.join("pip").join("cache")),
+        (
+            "PIP_CONFIG_FILE",
+            runtime_root.join("pip").join("config").join("pip.ini"),
+        ),
+        (
+            "PIP_BUILD_TRACKER",
+            runtime_root.join("pip").join("build-tracker"),
+        ),
+        (
+            "PYTHONPYCACHEPREFIX",
+            runtime_root.join("python").join("pycache"),
+        ),
+        (
+            "PYTHONUSERBASE",
+            runtime_root.join("python").join("userbase"),
+        ),
+        ("GOCACHE", runtime_root.join("go").join("cache")),
+        ("GOMODCACHE", runtime_root.join("go").join("modcache")),
+        ("GOPATH", runtime_root.join("go").join("path")),
+        ("HISTFILE", runtime_root.join("history").join("shell")),
+        ("LESSHISTFILE", runtime_root.join("history").join("less")),
+        (
+            "NODE_REPL_HISTORY",
+            runtime_root.join("history").join("node-repl"),
+        ),
+        (
+            "PYTHONHISTFILE",
+            runtime_root.join("history").join("python"),
+        ),
+        (
+            "SQLITE_HISTORY",
+            runtime_root.join("history").join("sqlite"),
+        ),
+        ("IPYTHONDIR", runtime_root.join("ipython")),
+        ("GEM_HOME", runtime_root.join("ruby").join("gems")),
+        ("GEM_PATH", runtime_root.join("ruby").join("gems-path")),
+        ("BUNDLE_USER_HOME", runtime_root.join("bundle").join("home")),
+        (
+            "BUNDLE_USER_CACHE",
+            runtime_root.join("bundle").join("cache"),
+        ),
+        (
+            "BUNDLE_USER_CONFIG",
+            runtime_root.join("bundle").join("config"),
+        ),
+        (
+            "BUNDLE_APP_CONFIG",
+            runtime_root.join("bundle").join("app-config"),
+        ),
+        ("COMPOSER_HOME", runtime_root.join("composer").join("home")),
+        (
+            "COMPOSER_CACHE_DIR",
+            runtime_root.join("composer").join("cache"),
+        ),
+        ("GRADLE_USER_HOME", runtime_root.join("gradle")),
+        ("MAVEN_USER_HOME", runtime_root.join("maven")),
+        (
+            "RIPGREP_CONFIG_PATH",
+            runtime_root.join("ripgrep").join("ripgreprc"),
+        ),
+        (
+            "AWS_SHARED_CREDENTIALS_FILE",
+            runtime_root.join("aws").join("credentials"),
+        ),
+        ("AWS_CONFIG_FILE", runtime_root.join("aws").join("config")),
+        ("AZURE_CONFIG_DIR", runtime_root.join("azure")),
+        ("KUBECONFIG", runtime_root.join("kube").join("config")),
+        ("DOCKER_CONFIG", runtime_root.join("docker")),
+        ("CLOUDSDK_CONFIG", runtime_root.join("gcloud")),
+        ("GIT_CONFIG_GLOBAL", runtime_root.join("git").join("config")),
+        ("GNUPGHOME", runtime_root.join("gnupg")),
+        (
+            "TF_CLI_CONFIG_FILE",
+            runtime_root.join("terraform").join("terraform.rc"),
+        ),
+        ("TF_DATA_DIR", runtime_root.join("terraform").join("data")),
+    ];
+
+    for (_, path) in &runtime_dirs {
+        let dir = if path.extension().is_some() {
+            path.parent().unwrap_or(path)
+        } else {
+            path.as_path()
+        };
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    for (key, path) in runtime_dirs {
+        env_pairs.push((key.to_string(), path.to_string_lossy().into_owned()));
+    }
+}
+
+fn choose_windows_runtime_root(config: &ExecConfig<'_>) -> Option<std::path::PathBuf> {
+    let policy = Sandbox::windows_filesystem_policy(config.caps);
+    let preferred = policy.preferred_runtime_dir(config.current_dir)?;
+
+    if Sandbox::windows_supports_direct_writable_dir(&preferred) {
+        return Some(preferred.join(".nono-runtime"));
+    }
+
+    let managed = preferred.join(".nono-runtime-low");
+    if prepare_low_integrity_runtime_root(&managed) {
+        return Some(managed);
+    }
+
+    let low_root = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .map(|local| local.join("Temp").join("Low"))?;
+    let fallback = low_root
+        .join("nono")
+        .join(sanitize_windows_runtime_label(&preferred));
+    if prepare_low_integrity_runtime_root(&fallback) {
+        return Some(fallback);
+    }
+
+    None
+}
+
+fn sanitize_windows_runtime_label(path: &Path) -> String {
+    path.to_string_lossy().replace(['\\', '/', ':'], "_")
+}
+
+fn prepare_low_integrity_runtime_root(path: &Path) -> bool {
+    if std::fs::create_dir_all(path).is_err() {
+        return false;
+    }
+    if Sandbox::windows_supports_direct_writable_dir(path) {
+        return true;
+    }
+
+    let Ok(output) = Command::new("icacls")
+        .arg(path)
+        .args(["/setintegritylevel", "(OI)(CI)L"])
+        .output()
+    else {
+        return false;
+    };
+
+    output.status.success() && Sandbox::windows_supports_direct_writable_dir(path)
 }
 
 pub(super) fn build_windows_environment_block(env_pairs: &[(String, String)]) -> Vec<u16> {
@@ -372,7 +617,21 @@ pub(super) fn quote_windows_arg(arg: &str) -> String {
     quoted
 }
 
+fn normalize_windows_launch_path(path: &Path) -> std::path::PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+
+    if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{stripped}"));
+    }
+    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        return std::path::PathBuf::from(stripped);
+    }
+
+    path.to_path_buf()
+}
+
 pub(super) fn build_command_line(resolved_program: &Path, args: &[String]) -> Vec<u16> {
+    let resolved_program = normalize_windows_launch_path(resolved_program);
     let mut command_line = quote_windows_arg(&resolved_program.to_string_lossy());
     for arg in args {
         command_line.push(' ');
@@ -504,14 +763,15 @@ pub(super) fn spawn_low_integrity_windows_child(
     let env_pairs = build_child_env(config);
     let mut environment_block = build_windows_environment_block(&env_pairs);
     let token = create_low_integrity_primary_token()?;
+    let launch_program = normalize_windows_launch_path(launch_program);
+    let current_dir = normalize_windows_launch_path(config.current_dir);
     let application_name: Vec<u16> = launch_program
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let mut command_line = build_command_line(launch_program, cmd_args);
-    let current_dir: Vec<u16> = config
-        .current_dir
+    let mut command_line = build_command_line(&launch_program, cmd_args);
+    let current_dir: Vec<u16> = current_dir
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -596,14 +856,15 @@ pub(super) fn spawn_windows_child_with_current_token(
 ) -> Result<WindowsSupervisedChild> {
     let env_pairs = build_child_env(config);
     let mut environment_block = build_windows_environment_block(&env_pairs);
+    let launch_program = normalize_windows_launch_path(launch_program);
+    let current_dir = normalize_windows_launch_path(config.current_dir);
     let application_name: Vec<u16> = launch_program
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let mut command_line = build_command_line(launch_program, cmd_args);
-    let current_dir: Vec<u16> = config
-        .current_dir
+    let mut command_line = build_command_line(&launch_program, cmd_args);
+    let current_dir: Vec<u16> = current_dir
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::info;
 
 fn collect_missing_cli_requested_paths(args: &SandboxArgs) -> Vec<String> {
     let mut missing = Vec::new();
@@ -86,7 +86,16 @@ fn finalize_prepared_sandbox(
     output::print_abi_info(silent);
 
     if !Sandbox::is_supported() {
-        return Err(NonoError::SandboxInit(Sandbox::support_info().details));
+        #[cfg(target_os = "windows")]
+        {
+            info!("{}", Sandbox::support_info().details);
+            return Ok(prepared);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            return Err(NonoError::SandboxInit(Sandbox::support_info().details));
+        }
     }
 
     info!("{}", Sandbox::support_info().details);

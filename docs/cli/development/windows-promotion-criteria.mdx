@@ -91,6 +91,6 @@ This promotion depends on earlier release-readiness work:
 
 [![CI](https://github.com/always-further/nono/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/always-further/nono/actions/workflows/ci.yml)
 
-Pinned green CI run (first successful run on main after Phase 3 landed): **[View run](PENDING — fetch manually via: gh run list --workflow=ci.yml --branch=main --status=success --limit=1)**
+Pinned green CI run (latest successful `main` run as of 2026-04-03): **[View run](https://github.com/always-further/nono/actions/runs/23958496490)**
 
 WIN-1706 is closed under the full aligned contract — not just the CLI-surface contract. `Sandbox::apply()` validates capability sets and returns `Ok(())` for the supported Windows subset; `is_supported()`, `support_info()`, and `apply()` describe the same contract. The CLI/library support split is gone. `nono shell` and `nono wrap` remain intentionally unavailable on Windows as documented product decisions. The regression harness and CI Windows lanes assert the aligned contract and pass without "partial" language. All four phases (PR-A through PR-D) are complete.

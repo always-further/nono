@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", allow(dead_code))]
+
 //! CLI output styling for nono
 //!
 //! All colors are drawn from the active theme via `theme::current()`.
@@ -43,7 +45,6 @@ pub fn print_banner(silent: bool) {
         theme::fg("nono", t.brand).bold(),
         theme::fg(&format!("v{version}"), t.subtext),
     );
-
 }
 
 // ---------------------------------------------------------------------------

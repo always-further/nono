@@ -97,6 +97,7 @@
           "cli/development/windows-preview-validation",
           "cli/development/windows-release-candidate-checklist",
           "cli/development/windows-win-1706-decision-package",
+          "cli/development/windows-win-1706-option-1-workstream",
           "cli/development/windows-promotion-criteria"
         ]
       }

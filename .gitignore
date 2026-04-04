@@ -9,6 +9,8 @@
 # misc
 proj/
 build_notes/
+docs/presentations/
+docs/cli/development/
 
 
 # Library tests

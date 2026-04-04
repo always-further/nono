@@ -289,12 +289,16 @@ fn test_show_format_manifest_round_trip() {
     {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !output.status.success(),
-            "expected Windows manifest round-trip to fail closed, stderr: {stderr}"
+            output.status.success(),
+            "expected Windows manifest round-trip dry-run validation to succeed, stderr: {stderr}"
         );
         assert!(
-            stderr.contains("Windows native builds support setup, dry-run, direct execution"),
-            "expected current Windows command-surface failure, got: {stderr}"
+            stderr.contains("Capabilities:"),
+            "expected capability summary in Windows manifest round-trip dry-run output, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("dry-run sandbox would be applied with above capabilities"),
+            "expected cross-platform dry-run wording in Windows manifest round-trip output, got: {stderr}"
         );
     }
 }
