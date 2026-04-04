@@ -769,7 +769,9 @@
           "$HOME/.config/opencode",
           "$HOME/.cache/opencode",
           "$HOME/.local/share/opencode",
-          "$HOME/.local/share/opentui"
+          "$HOME/.local/share/opentui",
+          "$HOME/.local/state/opencode",
+          "$TMPDIR"
         ]
       },
       "network": { "block": false },
