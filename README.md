@@ -31,7 +31,7 @@
 
 ---
 
-nono wraps your AI agent in a kernel-isolated sandbox in seconds -- with API key protection, destructive action guardrails, and full snapshot/rollback built in. No hypervisor. No infra needed, single binary, zero latency, flexible, fast and adaptable to a developers workflow or an at scale agent fleet in production.
+nono wraps any AI agent or process in a kernel-isolated sandbox in seconds. No hypervisor. No infrastructure required. A single binary, zero added latency, and flexible enough to fit a solo developer's workflow or a fleet of agents running at scale in production.
 
 **Platform support:** macOS, Linux, and [WSL2](https://nono.sh/docs/cli/internals/wsl2). Native Windows coming soon.
 
@@ -64,16 +64,17 @@ Other options in the [Installation Guide](https://docs.nono.sh/cli/getting_start
 
 ```bash
 # Any CLI agent -- just put your command after --
-nono run --profile claude-code -- claude
-nono run --profile codex -- codex
-nono run --profile opencode -- opencode
+$ nono run --profile claude-code -- claude
 
-# Run policy profiles for full list
- nono policy profiles
+# or with tmux style multiplexer and atomic snapshots
+$ nono run --detached --profile claude-code --rollback -- claude
+Started detached session 7a6a652f7273fe60.
+Attach with: nono attach 7a6a652f7273fe60
 
 # Any given command
-nono run --allow-cwd -- python3 my_agent.py
+nono run -- python3 my_agent.py
 nono run --read /data -- npx @modelcontextprotocol/server-filesystem /data
+nono run --profile codex -- codex
 ```
 
 Built-in profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [Codex](https://docs.nono.sh/cli/clients/codex), [OpenCode](https://docs.nono.sh/cli/clients/opencode), [OpenClaw](https://docs.nono.sh/cli/clients/openclaw), and [Swival](https://docs.nono.sh/cli/clients/swival) -- or [define your own](https://docs.nono.sh/cli/features/profiles-groups).
