@@ -438,13 +438,6 @@ Two limitations matter:
 
 That means the Linux and macOS models remain the reference design for full kernel-enforced sandbox behavior, while Windows is an intentionally explicit restricted command surface with fail-closed diagnostics where parity is not yet credible.
 
-There is also a current support-contract split to keep in mind:
-
-- the CLI now exposes a real Windows restricted-execution command surface for setup, dry-run, direct execution, blocked-network, and selected supervised flows
-- the library-wide `Sandbox::apply()` support contract still reports Windows as partial rather than first-class supported
-
-That split is intentional until the library/runtime boundary is aligned. It prevents release and support messaging from overstating Windows as a full peer to Linux or macOS before the lower-level support contract says the same thing.
-
 ## Summary
 
 The architecture optimizes for three properties simultaneously:
