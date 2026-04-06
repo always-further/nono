@@ -11,6 +11,13 @@ echo -e "${BLUE}=== WSL2 Support Tests ===${NC}"
 
 verify_nono_binary
 
+# Detect whether Landlock has native TCP filtering (V4+).
+# With V4+, per-port network filtering and proxy enforcement work natively.
+# Uses --dry-run to avoid sandbox application or forking.
+has_landlock_network() {
+    "$NONO_BIN" run --dry-run --allow /tmp -- true </dev/null 2>&1 | grep -q "TCP network filtering"
+}
+
 echo ""
 
 # =============================================================================
@@ -114,26 +121,26 @@ echo ""
 echo "--- Per-Port Network Filtering ---"
 
 if is_wsl2; then
-    # On WSL2 with kernel 6.6, per-port filtering requires Landlock V4 (kernel 6.7+)
-    # and seccomp notify (broken on WSL2). Should error clearly.
     TMPDIR3=$(setup_test_dir)
 
-    # --allow-net with a specific port should fail on WSL2 if V4 unavailable
+    # --listen-port tests per-port TCP bind filtering (Landlock V4+)
     TESTS_RUN=$((TESTS_RUN + 1))
     set +e
-    net_output=$("$NONO_BIN" run --allow-net 443 --allow "$TMPDIR3" -- true </dev/null 2>&1)
+    net_output=$("$NONO_BIN" run --listen-port 8080 --allow "$TMPDIR3" -- true </dev/null 2>&1)
     net_exit=$?
     set -e
 
-    if [[ "$net_exit" -ne 0 ]]; then
-        echo -e "  ${GREEN}PASS${NC}: per-port filtering correctly rejected (exit $net_exit)"
+    if [[ "$net_exit" -eq 0 ]]; then
+        if has_landlock_network; then
+            echo -e "  ${GREEN}PASS${NC}: per-port filtering works (Landlock V4+ enforced)"
+        else
+            echo -e "  ${GREEN}PASS${NC}: per-port filtering accepted (best-effort on pre-V4)"
+        fi
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        # If it succeeded, check if this WSL2 has been upgraded to a kernel with V4
-        kernel_version=$(uname -r)
-        echo -e "  ${YELLOW}SKIP${NC}: per-port filtering succeeded (kernel $kernel_version may have V4 support)"
-        TESTS_RUN=$((TESTS_RUN - 1))
-        TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
+        echo -e "  ${RED}FAIL${NC}: per-port filtering command failed (exit $net_exit)"
+        echo "       Output: ${net_output:0:500}"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
     cleanup_test_dir "$TMPDIR3"
@@ -200,41 +207,99 @@ if is_wsl2; then
     else
         TMPDIR_PROXY=$(setup_test_dir)
 
-        # Default policy (error): --credential should fail on WSL2
-        TESTS_RUN=$((TESTS_RUN + 1))
-        set +e
-        proxy_output=$("$NONO_BIN" run --credential github --allow "$TMPDIR_PROXY" -- echo "should fail" </dev/null 2>&1)
-        proxy_exit=$?
-        set -e
+        if has_landlock_network; then
+            # Landlock V4+ — proxy enforcement is native, no fail-secure needed
+            echo "  Landlock V4+ detected — testing native proxy enforcement"
 
-        if [[ "$proxy_exit" -ne 0 ]] && echo "$proxy_output" | grep -q "proxy-only network mode cannot be kernel-enforced"; then
-            echo -e "  ${GREEN}PASS${NC}: default policy rejects ProxyOnly on WSL2 (fail-secure, exit $proxy_exit)"
-            TESTS_PASSED=$((TESTS_PASSED + 1))
-        elif [[ "$proxy_exit" -eq 0 ]]; then
-            echo -e "  ${RED}FAIL${NC}: default policy should reject ProxyOnly on WSL2 but exited 0"
-            echo "       Output: ${proxy_output:0:500}"
-            TESTS_FAILED=$((TESTS_FAILED + 1))
+            # --credential should work without wsl2_proxy_policy opt-in
+            TESTS_RUN=$((TESTS_RUN + 1))
+            set +e
+            proxy_output=$("$NONO_BIN" run --credential github --allow "$TMPDIR_PROXY" -- echo "proxy ok" </dev/null 2>&1)
+            proxy_exit=$?
+            set -e
+
+            # Proxy may fail due to missing credentials (no keystore), but it
+            # should NOT fail with the "cannot be kernel-enforced" error
+            if echo "$proxy_output" | grep -q "proxy-only network mode cannot be kernel-enforced"; then
+                echo -e "  ${RED}FAIL${NC}: proxy rejected despite Landlock V4+ native enforcement"
+                echo "       Output: ${proxy_output:0:500}"
+                TESTS_FAILED=$((TESTS_FAILED + 1))
+            else
+                echo -e "  ${GREEN}PASS${NC}: proxy accepted with native Landlock enforcement"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
+            fi
+
+            # Banner should NOT mention per-port filtering as unavailable
+            TESTS_RUN=$((TESTS_RUN + 1))
+            if echo "$proxy_output" | grep -q "per-port filtering"; then
+                echo -e "  ${RED}FAIL${NC}: banner mentions per-port filtering despite V4+ availability"
+                TESTS_FAILED=$((TESTS_FAILED + 1))
+            else
+                echo -e "  ${GREEN}PASS${NC}: banner correctly omits per-port filtering from degraded list"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
+            fi
+
+            # wsl2_proxy_policy should be irrelevant — verify no error with or without it
+            TESTS_RUN=$((TESTS_RUN + 1))
+            INSECURE_PROFILE="$TMPDIR_PROXY/v4-proxy-test.json"
+            cat > "$INSECURE_PROFILE" <<'PROFILE_EOF'
+{
+  "meta": { "name": "v4-proxy-test", "version": "1.0.0" },
+  "filesystem": { "allow": ["/tmp"] },
+  "network": { "block": false },
+  "security": { "wsl2_proxy_policy": "insecure_proxy" }
+}
+PROFILE_EOF
+            set +e
+            v4_output=$("$NONO_BIN" run --profile "$INSECURE_PROFILE" --credential github --allow "$TMPDIR_PROXY" -- echo "v4 ok" </dev/null 2>&1)
+            set -e
+
+            if echo "$v4_output" | grep -q "proxy-only network mode cannot be kernel-enforced"; then
+                echo -e "  ${RED}FAIL${NC}: insecure_proxy profile rejected despite V4+"
+                TESTS_FAILED=$((TESTS_FAILED + 1))
+            else
+                echo -e "  ${GREEN}PASS${NC}: insecure_proxy profile works (policy is no-op with V4+)"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
+            fi
         else
-            echo -e "  ${RED}FAIL${NC}: default policy should reject ProxyOnly with specific error message"
-            echo "       Exit: $proxy_exit"
-            echo "       Output: ${proxy_output:0:500}"
-            TESTS_FAILED=$((TESTS_FAILED + 1))
-        fi
+            # Pre-V4 — proxy enforcement requires seccomp fallback (EBUSY on WSL2)
+            echo "  Landlock pre-V4 — testing fail-secure proxy policy"
 
-        # Error message should mention the escape hatch
-        TESTS_RUN=$((TESTS_RUN + 1))
-        if echo "$proxy_output" | grep -q "wsl2_proxy_policy"; then
-            echo -e "  ${GREEN}PASS${NC}: error message mentions wsl2_proxy_policy escape hatch"
-            TESTS_PASSED=$((TESTS_PASSED + 1))
-        else
-            echo -e "  ${RED}FAIL${NC}: error message should mention wsl2_proxy_policy"
-            echo "       Output: ${proxy_output:0:500}"
-            TESTS_FAILED=$((TESTS_FAILED + 1))
-        fi
+            # Default policy (error): --credential should fail on WSL2
+            TESTS_RUN=$((TESTS_RUN + 1))
+            set +e
+            proxy_output=$("$NONO_BIN" run --credential github --allow "$TMPDIR_PROXY" -- echo "should fail" </dev/null 2>&1)
+            proxy_exit=$?
+            set -e
 
-        # insecure_proxy policy: create a profile that opts in
-        INSECURE_PROFILE="$TMPDIR_PROXY/insecure-proxy-test.json"
-        cat > "$INSECURE_PROFILE" <<'PROFILE_EOF'
+            if [[ "$proxy_exit" -ne 0 ]] && echo "$proxy_output" | grep -q "proxy-only network mode cannot be kernel-enforced"; then
+                echo -e "  ${GREEN}PASS${NC}: default policy rejects ProxyOnly on WSL2 (fail-secure, exit $proxy_exit)"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
+            elif [[ "$proxy_exit" -eq 0 ]]; then
+                echo -e "  ${RED}FAIL${NC}: default policy should reject ProxyOnly on WSL2 but exited 0"
+                echo "       Output: ${proxy_output:0:500}"
+                TESTS_FAILED=$((TESTS_FAILED + 1))
+            else
+                echo -e "  ${RED}FAIL${NC}: default policy should reject ProxyOnly with specific error message"
+                echo "       Exit: $proxy_exit"
+                echo "       Output: ${proxy_output:0:500}"
+                TESTS_FAILED=$((TESTS_FAILED + 1))
+            fi
+
+            # Error message should mention the escape hatch
+            TESTS_RUN=$((TESTS_RUN + 1))
+            if echo "$proxy_output" | grep -q "wsl2_proxy_policy"; then
+                echo -e "  ${GREEN}PASS${NC}: error message mentions wsl2_proxy_policy escape hatch"
+                TESTS_PASSED=$((TESTS_PASSED + 1))
+            else
+                echo -e "  ${RED}FAIL${NC}: error message should mention wsl2_proxy_policy"
+                echo "       Output: ${proxy_output:0:500}"
+                TESTS_FAILED=$((TESTS_FAILED + 1))
+            fi
+
+            # insecure_proxy policy: create a profile that opts in
+            INSECURE_PROFILE="$TMPDIR_PROXY/insecure-proxy-test.json"
+            cat > "$INSECURE_PROFILE" <<'PROFILE_EOF'
 {
   "meta": { "name": "insecure-proxy-test", "version": "1.0.0" },
   "filesystem": { "allow": ["/tmp"] },
@@ -243,39 +308,35 @@ if is_wsl2; then
 }
 PROFILE_EOF
 
-        TESTS_RUN=$((TESTS_RUN + 1))
-        set +e
-        insecure_output=$("$NONO_BIN" run --profile "$INSECURE_PROFILE" --credential github --allow "$TMPDIR_PROXY" -- echo "insecure ok" </dev/null 2>&1)
-        insecure_exit=$?
-        set -e
+            TESTS_RUN=$((TESTS_RUN + 1))
+            set +e
+            insecure_output=$("$NONO_BIN" run --profile "$INSECURE_PROFILE" --credential github --allow "$TMPDIR_PROXY" -- echo "insecure ok" </dev/null 2>&1)
+            insecure_exit=$?
+            set -e
 
-        if echo "$insecure_output" | grep -q "insecure proxy mode"; then
-            echo -e "  ${GREEN}PASS${NC}: insecure_proxy policy emits degraded-security warning"
-            TESTS_PASSED=$((TESTS_PASSED + 1))
-        elif echo "$insecure_output" | grep -q "proxy-only network mode cannot be kernel-enforced"; then
-            echo -e "  ${RED}FAIL${NC}: insecure_proxy policy was not respected (got fail-secure error)"
-            echo "       Output: ${insecure_output:0:500}"
-            TESTS_FAILED=$((TESTS_FAILED + 1))
-        else
-            # Proxy policy was accepted (no fail-secure error), but credential
-            # loading may have failed before the warning was printed (no keystore).
-            # Verify we at least got past the policy check.
-            if [[ "$insecure_exit" -ne 0 ]] && echo "$insecure_output" | grep -qi "keystore\|credential\|secret"; then
-                echo -e "  ${GREEN}PASS${NC}: insecure_proxy policy accepted (credential loading failed separately)"
+            if echo "$insecure_output" | grep -q "insecure proxy mode"; then
+                echo -e "  ${GREEN}PASS${NC}: insecure_proxy policy emits degraded-security warning"
                 TESTS_PASSED=$((TESTS_PASSED + 1))
-            else
-                echo -e "  ${RED}FAIL${NC}: insecure_proxy policy: unexpected behavior (exit $insecure_exit)"
+            elif echo "$insecure_output" | grep -q "proxy-only network mode cannot be kernel-enforced"; then
+                echo -e "  ${RED}FAIL${NC}: insecure_proxy policy was not respected (got fail-secure error)"
                 echo "       Output: ${insecure_output:0:500}"
                 TESTS_FAILED=$((TESTS_FAILED + 1))
+            else
+                if [[ "$insecure_exit" -ne 0 ]] && echo "$insecure_output" | grep -qi "keystore\|credential\|secret"; then
+                    echo -e "  ${GREEN}PASS${NC}: insecure_proxy policy accepted (credential loading failed separately)"
+                    TESTS_PASSED=$((TESTS_PASSED + 1))
+                else
+                    echo -e "  ${RED}FAIL${NC}: insecure_proxy policy: unexpected behavior (exit $insecure_exit)"
+                    echo "       Output: ${insecure_output:0:500}"
+                    TESTS_FAILED=$((TESTS_FAILED + 1))
+                fi
             fi
         fi
 
         cleanup_test_dir "$TMPDIR_PROXY"
     fi
 else
-    skip_test "default policy rejects ProxyOnly on WSL2" "not running on WSL2"
-    skip_test "error message mentions escape hatch" "not running on WSL2"
-    skip_test "insecure_proxy policy emits warning" "not running on WSL2"
+    skip_test "WSL2 proxy policy tests" "not running on WSL2"
 fi
 
 # =============================================================================

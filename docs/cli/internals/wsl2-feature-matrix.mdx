@@ -3,7 +3,7 @@ title: WSL2 Feature Matrix
 description: Complete feature-by-feature compatibility status for nono on WSL2
 ---
 
-Complete feature compatibility for nono running on WSL2 (kernel 6.6, Landlock V3).
+Complete feature compatibility for nono running on WSL2. Default counts are for the Microsoft kernel (6.6, Landlock V3). See the summary for rolling kernel (V6) numbers.
 
 Legend: **Full** = identical to native Linux | **Blocked (default)** = fails secure, requires profile opt-in | **Unavailable** = not functional on WSL2
 
@@ -20,6 +20,13 @@ Legend: **Full** = identical to native Linux | **Blocked (default)** = fails sec
 | `nono rollback` (list/show/restore/verify/cleanup) | Full | Pure userspace |
 | `nono audit` (list/show) | Full | Pure userspace |
 | `nono trust` (init/sign/verify/list) | Full | keygen/sign-policy require `gnome-keyring` (distro dependency, not WSL2-specific) |
+| `nono ps` | Full | Session listing, pure userspace |
+| `nono stop` | Full | Signal-based session stop |
+| `nono attach` | Full | PTY attach, basic supervised mode |
+| `nono detach` | Full | PTY detach |
+| `nono logs` | Full | Session event logs, pure userspace |
+| `nono inspect` | Full | Session state, pure userspace |
+| `nono prune` | Full | Session cleanup, pure userspace |
 | `nono policy` (groups/profiles/show/diff/validate) | Full | Pure logic |
 | `nono profile` (init/schema/guide) | Full | Pure logic |
 
@@ -200,7 +207,7 @@ Legend: **Full** = identical to native Linux | **Blocked (default)** = fails sec
 
 | Category | Full | Degraded | Unavailable |
 |----------|------|----------|-------------|
-| Subcommands (11) | 11 | 0 | 0 |
+| Subcommands (18) | 18 | 0 | 0 |
 | Filesystem (15) | 14 | 0 | 1 |
 | Network (5) | 2 | 0 | 3 |
 | Credential Proxy (10) | 4 | 0 | 6 |
@@ -214,20 +221,22 @@ Legend: **Full** = identical to native Linux | **Blocked (default)** = fails sec
 | Learn Mode (5) | 5 | 0 | 0 |
 | Output (6) | 6 | 0 | 0 |
 | Environment (4) | 4 | 0 | 0 |
-| **Total (110)** | **92 (84%)** | **0 (0%)** | **18 (16%)** |
+| **Total (117)** | **99 (85%)** | **0 (0%)** | **18 (15%)** |
 
 ### Root causes of all WSL2-specific limitations
 
 | Root Cause | Features Affected | Fix |
 |------------|-------------------|-----|
-| Landlock V4 missing (kernel 6.6 < 6.7) | Per-port network (3) | WSL2 kernel upgrade (automatic) |
-| Landlock V6 missing (kernel 6.6 < 6.12) | signal_mode, process_info_mode, ipc_mode (3) | WSL2 kernel upgrade (automatic) |
-| Landlock V5 missing (kernel 6.6 < 6.10) | Device ioctl filtering (1) | WSL2 kernel upgrade (automatic) |
-| seccomp notify EBUSY | capability_elevation, interactive mode, PTY relay, runtime expansion (4) | microsoft/WSL#9548 fix or eBPF alternative |
+| Landlock V4 missing (kernel 6.6 < 6.7) | Per-port network (3) | [Rolling kernel](https://github.com/Nevuly/WSL2-Linux-Kernel-Rolling) or wait for Microsoft kernel upgrade |
+| Landlock V6 missing (kernel 6.6 < 6.12) | signal_mode, process_info_mode, ipc_mode (3) | Rolling kernel or wait for Microsoft kernel upgrade |
+| Landlock V5 missing (kernel 6.6 < 6.10) | Device ioctl filtering (1) | Rolling kernel or wait for Microsoft kernel upgrade |
+| seccomp notify EBUSY | capability_elevation, interactive mode, PTY relay, runtime expansion (4) | microsoft/WSL#9548 — WSL2 userspace issue, persists regardless of kernel version |
+| Proxy port enforcement (pre-V4) | Credential proxy features (6 blocked by default) | Rolling kernel (V4+ enables native enforcement) or `wsl2_proxy_policy: "insecure_proxy"` opt-in |
+
+**With rolling kernel (6.19+, Landlock V6):** All Landlock-dependent limitations are resolved — **112/117 features (96%) fully available.** Only 5 features remain unavailable, all due to seccomp notify EBUSY (`--capability-elevation` and dependent features). See [WSL2 Support](/cli/internals/wsl2#rolling-release-kernel-community) for install instructions.
 
 ### Distro dependencies (not WSL2-specific)
 
 | Dependency | Features Affected | Fix |
 |------------|-------------------|-----|
 | `gnome-keyring` or `keepassxc` | trust keygen/sign/sign-policy/export-key | `sudo apt install gnome-keyring dbus-x11` |
-| Proxy port enforcement (seccomp notify + Landlock V4) | Credential proxy features (6 blocked by default) | WSL2 kernel upgrade or `wsl2_proxy_policy: "insecure_proxy"` opt-in |

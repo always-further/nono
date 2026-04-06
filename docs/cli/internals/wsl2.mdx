@@ -5,9 +5,9 @@ description: Running nono inside Windows Subsystem for Linux 2 (WSL2) — what w
 
 nono works on WSL2 with most features available. This page documents the compatibility details, known limitations, and workarounds.
 
-For the complete feature-by-feature breakdown (110 features), see the [WSL2 Feature Matrix](/cli/internals/wsl2-feature-matrix).
+For the complete feature-by-feature breakdown (117 features), see the [WSL2 Feature Matrix](/cli/internals/wsl2-feature-matrix).
 
-**At a glance: 84% full, 16% blocked by default (most recoverable with profile opt-in or kernel upgrade).**
+**At a glance: 85% full on Microsoft kernel, 96% with [rolling kernel](/cli/internals/wsl2#rolling-release-kernel-community).**
 
 ## Quick Summary
 
@@ -30,6 +30,7 @@ WSL2 runs a real Linux kernel with Landlock LSM enabled. Core filesystem sandbox
 | Direct mode (`nono wrap`) | Available | No fork, no supervisor |
 | Capability elevation (`--capability-elevation`) | Unavailable | seccomp notify returns `EBUSY` |
 | Snapshots and rollback (`--rollback`) | Available | Pure userspace |
+| Session management (`ps`, `attach`, `detach`, `stop`, `logs`, `inspect`, `prune`) | Available | Pure userspace / PTY relay |
 | Audit trail | Available | Pure userspace |
 | Profiles | Available | All built-in profiles work |
 | `nono setup --check-only` | Available | Reports WSL2 feature matrix |
@@ -135,9 +136,33 @@ When Landlock V4 becomes available on WSL2 (kernel 6.7+), port-level lockdown wi
 
 ## Workarounds
 
+### Rolling Release Kernel (Community)
+
+The [WSL2-Linux-Kernel-Rolling](https://github.com/Nevuly/WSL2-Linux-Kernel-Rolling) project provides pre-built WSL2 kernels tracking upstream Linux stable releases. As of kernel 6.19+, this gives nono full Landlock V6 support:
+
+- Per-port TCP filtering (V4)
+- Device ioctl filtering (V5)
+- Process scoping (V6)
+- Native credential proxy port enforcement (no `wsl2_proxy_policy` opt-in needed)
+
+**Install:**
+
+1. Download `bzImage-x86_64` from the [latest release](https://github.com/Nevuly/WSL2-Linux-Kernel-Rolling/releases/latest)
+2. Add to `%USERPROFILE%\.wslconfig`:
+   ```ini
+   [wsl2]
+   kernel=C:\\path\\to\\bzImage-x86_64
+   ```
+3. Restart WSL: `wsl --shutdown`
+4. Verify: `nono setup --check-only` should report Landlock V6
+
+**Note:** This is a community-maintained project, not officially supported by Microsoft or nono. The kernel combines upstream Linux stable releases with Microsoft's WSL2 patches. Users should understand they are trusting a third-party kernel binary. The seccomp notify limitation (`--capability-elevation`) persists regardless of kernel version as it is a WSL2 userspace issue.
+
+To revert to the Microsoft kernel, comment out or remove the `kernel=` line from `.wslconfig` and restart WSL.
+
 ### Custom WSL2 Kernel
 
-Advanced users can build a custom WSL2 kernel from [microsoft/WSL2-Linux-Kernel](https://github.com/microsoft/WSL2-Linux-Kernel) with a newer Landlock ABI or modified seccomp configuration:
+Advanced users can build a custom WSL2 kernel from [microsoft/WSL2-Linux-Kernel](https://github.com/microsoft/WSL2-Linux-Kernel):
 
 ```bash
 git clone --depth 1 --branch linux-msft-wsl-6.6.y \
@@ -147,20 +172,11 @@ cp arch/x86/configs/config-wsl .config
 make -j$(nproc)
 ```
 
-Then configure WSL2 to use the custom kernel in `%USERPROFILE%\.wslconfig`:
-
-```ini
-[wsl2]
-kernel=C:\\path\\to\\bzImage
-```
-
-Restart WSL2 with `wsl --shutdown`.
-
-Note: Getting Landlock V4 requires rebasing Microsoft's patches onto a 6.7+ upstream kernel or cherry-picking V4 patches into their 6.6 tree.
+Then configure WSL2 to use the custom kernel in `%USERPROFILE%\.wslconfig` as above. Note: Getting Landlock V4+ from the Microsoft source requires rebasing their patches onto a 6.7+ upstream kernel.
 
 ### Block-All Network
 
-If you need guaranteed network isolation (not just proxy routing), use `--block-net` which is fully kernel-enforced on WSL2:
+If you need guaranteed network isolation (not just proxy routing), use `--block-net` which is fully kernel-enforced on WSL2 regardless of kernel version:
 
 ```bash
 nono run --block-net --allow /path/to/project -- your-command
@@ -168,6 +184,5 @@ nono run --block-net --allow /path/to/project -- your-command
 
 ## Future Improvements
 
-- **Landlock V4+**: Will arrive when Microsoft upgrades the WSL2 kernel (no nono changes needed)
-- **eBPF LSM**: WSL2 kernel has `CONFIG_BPF_LSM=y` enabled, which could provide an alternative to seccomp notify for capability elevation
-- **microsoft/WSL#9548**: If Microsoft resolves the seccomp notify conflict, all features will work automatically
+- **Landlock V4+**: Available now via rolling kernel; will arrive on the Microsoft kernel when they upgrade from 6.6 LTS (no nono changes needed)
+- **microsoft/WSL#9548**: If Microsoft resolves the seccomp notify conflict, capability elevation will work automatically. This is a WSL2 userspace issue, not a kernel version issue.
