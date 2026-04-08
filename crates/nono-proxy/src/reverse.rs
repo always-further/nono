@@ -113,8 +113,12 @@ pub async fn handle_reverse_proxy(
     // Look up credential for service (optional — not all routes inject credentials)
     let cred = ctx.credential_store.get(&service);
 
-    // Validate phantom token and transform path if credential injection is active.
+    // Authenticate the request. Every reverse proxy request must prove
+    // possession of the session token, regardless of whether a credential
+    // is configured — this is the localhost auth boundary.
     if let Some(cred) = cred {
+        // Credential route: validate phantom token from the service's auth
+        // header (mode-dependent: header, url_path, query_param, basic_auth).
         if let Err(e) = validate_phantom_token_for_mode(
             &cred.inject_mode,
             remaining_header,
@@ -132,6 +136,21 @@ pub async fn handle_reverse_proxy(
                 &e.to_string(),
             );
             send_error(stream, 401, "Unauthorized").await?;
+            return Ok(());
+        }
+    } else {
+        // No-credential route (L7 filtering only): validate session token
+        // via Proxy-Authorization header. This is the same auth path that
+        // CONNECT tunnels use — the token arrives via HTTPS_PROXY userinfo.
+        if let Err(e) = token::validate_proxy_auth(remaining_header, ctx.session_token) {
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &service,
+                0,
+                &e.to_string(),
+            );
+            send_error(stream, 407, "Proxy Authentication Required").await?;
             return Ok(());
         }
     }
@@ -178,12 +197,14 @@ pub async fn handle_reverse_proxy(
         return Ok(());
     }
 
-    // Collect remaining request headers (excluding X-Nono-Token and Host).
-    // When a credential is present, also strip the credential header.
-    let cred_header_name = cred
-        .map(|c| c.header_name.as_str())
-        .unwrap_or("Authorization");
-    let filtered_headers = filter_headers(remaining_header, cred_header_name);
+    // Collect remaining request headers (excluding Host, Content-Length,
+    // and Proxy-Authorization which is proxy-hop-only).
+    // When a credential is present, also strip the credential's auth header
+    // (it contains the phantom token, not a real credential).
+    // When no credential is present, pass all other headers through —
+    // the caller may have a real Authorization header for the upstream.
+    let strip_header = cred.map(|c| c.header_name.as_str()).unwrap_or("");
+    let filtered_headers = filter_headers(remaining_header, strip_header);
     let content_length = extract_content_length(remaining_header);
 
     // Read request body if present, with size limit.
@@ -248,17 +269,10 @@ pub async fn handle_reverse_proxy(
         inject_credential_for_mode(cred, &mut request);
     }
 
-    // Forward filtered headers (excluding auth headers that we're replacing)
-    let auth_header_lower = cred_header_name.to_lowercase();
+    // Forward filtered headers. The credential's auth header was already
+    // stripped by filter_headers() when a credential is present, so no
+    // additional skipping is needed here.
     for (name, value) in &filtered_headers {
-        // Skip the auth header if we're using header/basic_auth mode
-        // (we already injected our own)
-        if cred.is_some_and(|c| {
-            matches!(c.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
-                && name.to_lowercase() == auth_header_lower
-        }) {
-            continue;
-        }
         request.push_str(&format!("{}: {}\r\n", name, value));
     }
 
@@ -386,21 +400,32 @@ fn validate_phantom_token(
     Err(ProxyError::InvalidToken)
 }
 
-/// Filter headers, removing Host, Content-Length, and the credential header.
+/// Filter headers, removing hop-by-hop and proxy-internal headers.
 ///
-/// Content-Length is re-added after body is read, and Host is rewritten
-/// to the upstream. The route's configured credential header is stripped
-/// so the phantom token is not forwarded alongside the real credential.
+/// Always strips:
+/// - `Host` (rewritten to upstream)
+/// - `Content-Length` (re-added after body is read)
+/// - `Proxy-Authorization` (hop-by-hop, contains session token)
+///
+/// When `cred_header` is non-empty, also strips that header (it contains
+/// the phantom token that must not be forwarded alongside the real credential).
+/// When `cred_header` is empty (no-credential route), all other headers
+/// including `Authorization` are passed through to the upstream.
 fn filter_headers(header_bytes: &[u8], cred_header: &str) -> Vec<(String, String)> {
     let header_str = std::str::from_utf8(header_bytes).unwrap_or("");
-    let cred_header_lower = format!("{}:", cred_header.to_lowercase());
+    let cred_header_lower = if cred_header.is_empty() {
+        String::new()
+    } else {
+        format!("{}:", cred_header.to_lowercase())
+    };
     let mut headers = Vec::new();
 
     for line in header_str.lines() {
         let lower = line.to_lowercase();
         if lower.starts_with("host:")
             || lower.starts_with("content-length:")
-            || lower.starts_with(&cred_header_lower)
+            || lower.starts_with("proxy-authorization:")
+            || (!cred_header_lower.is_empty() && lower.starts_with(&cred_header_lower))
             || line.trim().is_empty()
         {
             continue;
