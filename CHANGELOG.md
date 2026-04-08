@@ -1,5 +1,75 @@
 # Changelog
 
+## [0.30.0] - 2026-04-08
+
+### Bug Fixes
+
+- *(macos)* Improve path resolution for non-existent files
+
+- *(reverse-proxy)* Authenticate requests on non-credentialed routes
+
+- *(test)* Guard EnvVarGuard::remove against unmanaged keys
+
+- *(test)* Prevent TMPDIR pollution by not auto-deleting temp dirs used as TMPDIR
+
+- *(test)* Add clippy disallowed_methods lint and migrate remaining unguarded env var tests
+
+- *(test)* Unify env var locks to eliminate flaky test failures
+
+- *(policy)* Avoid false deny for Nix store symlink targets on Linux
+
+- Allow filesystem.read entries to be files
+
+- *(proxy)* Address review feedback — normalize prefix in CredentialStore
+
+- *(proxy)* Handle route prefixes with leading slashes
+
+
+### Build
+
+- *(deps)* Bump getrandom from 0.4.1 to 0.4.2
+
+- *(deps)* Bump tokio from 1.49.0 to 1.51.0
+
+- *(deps)* Bump sha2 from 0.10.9 to 0.11.0
+
+- *(deps)* Bump docker/login-action from 4.0.0 to 4.1.0
+
+
+### Documentation
+
+- *(theme)* Update theme colors
+
+
+### Features
+
+- *(macos)* Expand keychain DB exception to include metadata DB
+
+- *(macos)* Allow future file grants and update policies
+
+- *(nix)* Improve NixOS compatibility for /nix/store paths
+
+- *(wsl2)* ABI-aware tests and rolling kernel documentation
+
+- *(trust)* Add `files` field for attesting arbitrary-location paths
+
+
+### Miscellaneous
+
+- *(scripts)* Add script to manage Claude authentication state
+
+
+### Performance
+
+- *(nono-proxy/route)* Cache upstream host:port for faster lookups
+
+
+### Refactoring
+
+- *(proxy)* Separate route configuration from credential configuration
+
+- *(policy)* Consolidate resolved deny target skipping logic
+
 ## [0.29.1] - 2026-04-04
 
 ### Bug Fixes
