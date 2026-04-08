@@ -2,8 +2,6 @@
 
 <img src="assets/nono-logo.png" alt="nono logo" width="600"/>
 
-**AI agent security that makes the dangerous bits structurally impossible.**
-
 <p>
   From the creator of
   <a href="https://sigstore.dev"><strong>Sigstore</strong></a>
