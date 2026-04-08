@@ -1038,9 +1038,17 @@ pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<SensitivePathRule>> {
                 // If the deny path is a symlink, also mark the resolved target
                 // as sensitive. Without this, querying a symlinked path like
                 // ~/.zshrc -> ~/dev/dotfiles/.zshrc would miss the deny.
+                //
+                // Exception: on Linux, skip resolved targets inside /nix/store.
+                // NixOS home-manager creates symlinks from shell configs into the
+                // immutable Nix store, and the sandbox correctly allows reading
+                // those paths (see add_deny_access_rules). Marking the Nix store
+                // target as sensitive would cause `nono why` to report a false
+                // denial for paths the sandbox actually permits.
                 if expanded.is_symlink() {
                     if let Ok(resolved) = expanded.canonicalize() {
-                        if resolved != expanded {
+                        let skip = cfg!(target_os = "linux") && is_nix_store_path(&resolved);
+                        if resolved != expanded && !skip {
                             result.push(SensitivePathRule {
                                 expanded_path: resolved.to_string_lossy().into_owned(),
                                 group_name: group_name.clone(),
@@ -1740,6 +1748,52 @@ mod tests {
             paths.contains(&link_canonical.to_str().expect("utf8")),
             "sensitive paths must contain resolved target"
         );
+    }
+
+    #[test]
+    fn test_sensitive_paths_skips_nix_store_symlink_target_on_linux() {
+        // Simulate a NixOS home-manager scenario: a deny-listed shell config
+        // file is a symlink whose canonical target is inside /nix/store.
+        // We can't create real /nix/store paths in tests, so we test the
+        // is_nix_store_path helper indirectly and verify the branching logic.
+
+        // Part 1: non-nix symlink targets ARE included (baseline)
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let target = dir.path().join("real_zshrc");
+        std::fs::write(&target, "config").expect("write");
+        let link = dir.path().join("linked_zshrc");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let link_str = link.to_str().expect("utf8");
+        let json = format!(
+            r#"{{
+              "meta": {{ "version": 1, "schema_version": "1.0" }},
+              "groups": {{
+                "test_deny": {{
+                  "description": "Test deny",
+                  "deny": {{ "access": ["{}"] }}
+                }}
+              }}
+            }}"#,
+            link_str
+        );
+        let policy = load_policy(&json).expect("parse");
+        let sensitive = get_sensitive_paths(&policy).expect("sensitive paths");
+        let canonical = link.canonicalize().expect("canonicalize");
+        let paths: Vec<&str> = sensitive.iter().map(|r| r.expanded_path.as_str()).collect();
+
+        // Non-nix symlink: canonical target should always be included
+        assert!(
+            paths.contains(&canonical.to_str().expect("utf8")),
+            "non-nix canonical target must be in sensitive paths"
+        );
+
+        // Part 2: verify is_nix_store_path correctly identifies store paths
+        // (used by get_sensitive_paths to skip canonical targets on Linux)
+        assert!(is_nix_store_path(Path::new(
+            "/nix/store/abc123-home-manager-files/.zshrc"
+        )));
+        assert!(!is_nix_store_path(&canonical));
     }
 
     #[test]
