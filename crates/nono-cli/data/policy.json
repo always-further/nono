@@ -675,7 +675,6 @@
         "allow_localhost": true
       },
       "allow_launch_services": true,
-      "allow_gpu": true,
       "hooks": {
         "claude-code": {
           "event": "PostToolUseFailure",
@@ -721,7 +720,6 @@
         "allow_localhost": true
       },
       "allow_launch_services": true,
-      "allow_gpu": true,
       "network": { "block": false },
       "workdir": { "access": "readwrite" },
       "interactive": true
