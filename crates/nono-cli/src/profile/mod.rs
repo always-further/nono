@@ -983,6 +983,11 @@ pub struct Profile {
     pub allow_launch_services: Option<bool>,
     #[serde(default)]
     pub allow_gpu: Option<bool>,
+    /// Opt-in to allow parent-of-protected-root grants on macOS.
+    /// When `true` (and on macOS), `--allow ~` is permitted because Seatbelt deny
+    /// rules protect `~/.nono`. Ignored on Linux. Default is `false`.
+    #[serde(default)]
+    pub allow_parent_of_protected: Option<bool>,
     /// Deprecated: Parsed for backward compatibility but ignored.
     /// Supervised mode preserves TTY by default, making this unnecessary.
     #[serde(default)]
@@ -1025,6 +1030,7 @@ struct ProfileDeserialize {
     allow_launch_services: Option<bool>,
     #[serde(default)]
     allow_gpu: Option<bool>,
+    allow_parent_of_protected: Option<bool>,
     #[serde(default)]
     interactive: bool,
     #[serde(default)]
@@ -1047,6 +1053,7 @@ impl From<ProfileDeserialize> for Profile {
             open_urls: raw.open_urls,
             allow_launch_services: raw.allow_launch_services,
             allow_gpu: raw.allow_gpu,
+            allow_parent_of_protected: raw.allow_parent_of_protected,
             interactive: raw.interactive,
             skipdirs: raw.skipdirs,
         }
@@ -1479,6 +1486,9 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
         },
         allow_launch_services: child.allow_launch_services.or(base.allow_launch_services),
         allow_gpu: child.allow_gpu.or(base.allow_gpu),
+        allow_parent_of_protected: child
+            .allow_parent_of_protected
+            .or(base.allow_parent_of_protected),
         interactive: base.interactive || child.interactive,
         skipdirs: dedup_append(&base.skipdirs, &child.skipdirs),
     }
@@ -2651,6 +2661,7 @@ mod tests {
             }),
             allow_launch_services: Some(false),
             allow_gpu: None,
+            allow_parent_of_protected: None,
             interactive: false,
             skipdirs: vec!["vendor".to_string()],
         }
@@ -2720,6 +2731,7 @@ mod tests {
             }),
             allow_launch_services: Some(true),
             allow_gpu: None,
+            allow_parent_of_protected: Some(true),
             interactive: false,
             skipdirs: vec!["dist".to_string()],
         }
@@ -3365,6 +3377,17 @@ mod tests {
             Some(true),
             "Child value should be used when base is None"
         );
+    }
+
+    #[test]
+    fn test_merge_profiles_allow_parent_of_protected_child_overrides_base() {
+        let merged = merge_profiles(base_profile(), child_profile());
+        assert_eq!(merged.allow_parent_of_protected, Some(true));
+
+        let mut child = child_profile();
+        child.allow_parent_of_protected = Some(false);
+        let merged = merge_profiles(base_profile(), child);
+        assert_eq!(merged.allow_parent_of_protected, Some(false));
     }
 
     #[test]

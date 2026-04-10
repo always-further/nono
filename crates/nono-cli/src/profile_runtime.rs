@@ -22,6 +22,7 @@ pub(crate) struct PreparedProfile {
     pub(crate) open_url_allow_localhost: bool,
     pub(crate) allow_launch_services: bool,
     pub(crate) allow_gpu: bool,
+    pub(crate) allow_parent_of_protected: bool,
     pub(crate) override_deny_paths: Vec<PathBuf>,
 }
 
@@ -187,6 +188,10 @@ pub(crate) fn prepare_profile(
         allow_gpu: loaded_profile
             .as_ref()
             .and_then(|profile| profile.allow_gpu)
+            .unwrap_or(false),
+        allow_parent_of_protected: loaded_profile
+            .as_ref()
+            .and_then(|profile| profile.allow_parent_of_protected)
             .unwrap_or(false),
         override_deny_paths: collect_override_deny_paths(
             loaded_profile.as_ref(),
