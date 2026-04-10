@@ -1,0 +1,203 @@
+---
+title: WIN-1706 Decision Package
+description: Maintainer decision package for promoting Windows to first-class supported status
+---
+
+# WIN-1706 Decision Package
+
+`WIN-1706` is blocked on a product/support-contract decision, not on packaging or signing.
+
+Already complete on this branch:
+
+- release automation stages signed Windows `.exe`, machine MSI, user MSI, and zip artifacts
+- Authenticode verification is wired into the release path
+- MSI contract validation is automated
+- docs/help/setup wording now describes the active Windows command surface accurately
+
+Still blocked:
+
+- [windows.rs](/cli/development/windows-security-model) support reporting still describes Windows as `partial`
+- the library-wide `Sandbox::apply()` path is still not the backend path the CLI uses for supported Windows execution
+
+That leaves two honest paths for maintainers.
+
+## Option 1: Library/Runtime Alignment
+
+Definition:
+
+- Windows promotion requires the core library support contract to match the supported CLI/runtime behavior.
+
+Result:
+
+- Windows can only be called first-class supported after `Sandbox::support_info()` and `Sandbox::apply()` tell the same story as the CLI.
+
+Code change summary:
+
+- promote the core Windows sandbox implementation from a CLI-only/live-run path to a real library-supported path
+- replace the current library `UnsupportedPlatform` apply behavior with support-aligned Windows execution
+- move support reporting, runtime validation, and tests so they all describe one Windows contract instead of separate library and CLI stories
+
+Design impact:
+
+- best long-term architectural clarity: one Windows support contract at the library, CLI, docs, and release layers
+- fewer future support ambiguities for embedders and maintainers
+- higher implementation cost now, because backend/library alignment must be real before promotion is honest
+
+Primary code touch points:
+
+- [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs)
+  - promote `support_info()` from `partial` to a first-class supported status only when true
+  - replace the current `UnsupportedPlatform` `apply()` path with the real backend path or a support-aligned equivalent
+- [mod.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/mod.rs)
+  - ensure top-level support reporting and dispatch remain internally consistent
+- [setup.rs](C:/Users/omack/Nono/crates/nono-cli/src/setup.rs)
+  - support-status output can then move from `partial` to the final release claim
+- [main.rs](C:/Users/omack/Nono/crates/nono-cli/src/main.rs)
+  - final runtime/support wording can be simplified once the library contract matches the CLI contract
+
+Primary docs touch points:
+
+- [windows-promotion-criteria.mdx](C:/Users/omack/Nono/docs/cli/development/windows-promotion-criteria.mdx)
+- [windows-security-model.mdx](C:/Users/omack/Nono/docs/cli/development/windows-security-model.mdx)
+- [security-model.mdx](C:/Users/omack/Nono/docs/cli/internals/security-model.mdx)
+- [README.md](C:/Users/omack/Nono/README.md)
+- [installation.mdx](C:/Users/omack/Nono/docs/cli/getting_started/installation.mdx)
+
+Tradeoff:
+
+- This is the stricter and cleaner definition of support.
+- It requires real backend/library alignment work before promotion can be claimed.
+
+Concrete execution checklist:
+
+1. Implement a real Windows library apply path.
+   Update [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs) so `Sandbox::apply()` no longer returns `UnsupportedPlatform` for the Windows surface the CLI already supports.
+2. Align top-level library dispatch and support reporting.
+   Update [mod.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/mod.rs) and [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs) so `support_info()`, `apply()`, and backend classification all describe the same Windows contract.
+3. Add or update library tests first.
+   Cover promoted Windows `support_info()` behavior, `apply()` dispatch, and any newly-supported capability shapes in [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs) and adjacent sandbox tests.
+4. Update CLI support output only after the library is honest.
+   Change [setup.rs](C:/Users/omack/Nono/crates/nono-cli/src/setup.rs), [main.rs](C:/Users/omack/Nono/crates/nono-cli/src/main.rs), and [output.rs](C:/Users/omack/Nono/crates/nono-cli/src/output.rs) so Windows no longer reports `partial` once the library contract truly matches.
+5. Expand integration coverage around the promoted contract.
+   Update [env_vars.rs](C:/Users/omack/Nono/crates/nono-cli/tests/env_vars.rs), [windows-test-harness.ps1](C:/Users/omack/Nono/scripts/windows-test-harness.ps1), and [.github/workflows/ci.yml](C:/Users/omack/Nono/.github/workflows/ci.yml) so CI proves the promoted support boundary.
+6. Only then update product/release docs.
+   Change [windows-promotion-criteria.mdx](C:/Users/omack/Nono/docs/cli/development/windows-promotion-criteria.mdx), [windows-security-model.mdx](C:/Users/omack/Nono/docs/cli/development/windows-security-model.mdx), [security-model.mdx](C:/Users/omack/Nono/docs/cli/internals/security-model.mdx), [README.md](C:/Users/omack/Nono/README.md), and [installation.mdx](C:/Users/omack/Nono/docs/cli/getting_started/installation.mdx) to call Windows first-class supported.
+7. Close `WIN-1706` only after the full gate is green.
+   Require `cargo fmt --all -- --check`, `cargo build --workspace`, `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::unwrap_used`, `cargo test --workspace`, the Windows regression harness, and release/docs checks to pass on the promoted state.
+
+## Option 2: CLI Surface Is The Product
+
+Definition:
+
+- Windows promotion is defined by the supported CLI command surface, even if the library remains partial.
+
+Result:
+
+- Windows can be called first-class supported at the CLI/release level while the library remains intentionally narrower.
+
+Code change summary:
+
+- keep the current Windows CLI/runtime behavior as the promoted product boundary
+- leave the library support boundary narrower and explicitly partial
+- split support messaging so setup/help/release/docs can describe CLI support without reusing the library support label as the whole product truth
+
+Design impact:
+
+- fastest path to product-level Windows promotion on the supported command surface
+- preserves the current implementation shape with less backend churn
+- creates an ongoing two-layer support model: CLI supported, library partial
+- requires continuous documentation and review discipline so those two claims do not drift or get conflated
+
+Primary code touch points:
+
+- [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs)
+  - keep library support reporting intentionally partial, but document the narrower contract explicitly
+- [setup.rs](C:/Users/omack/Nono/crates/nono-cli/src/setup.rs)
+  - stop presenting library support status as the overall product support status
+- [main.rs](C:/Users/omack/Nono/crates/nono-cli/src/main.rs)
+  - keep the runtime contract framed as a supported Windows command surface rather than a library-wide support claim
+- potentially add an explicit CLI-vs-library support distinction in CLI diagnostics instead of reusing the library status directly
+
+Primary docs touch points:
+
+- [windows-promotion-criteria.mdx](C:/Users/omack/Nono/docs/cli/development/windows-promotion-criteria.mdx)
+- [windows-feature-gap-matrix.mdx](C:/Users/omack/Nono/docs/cli/development/windows-feature-gap-matrix.mdx)
+- [windows-security-model.mdx](C:/Users/omack/Nono/docs/cli/development/windows-security-model.mdx)
+- [security-model.mdx](C:/Users/omack/Nono/docs/cli/internals/security-model.mdx)
+- [README.md](C:/Users/omack/Nono/README.md)
+
+Tradeoff:
+
+- This unblocks product promotion faster.
+- It creates a permanent distinction between “CLI supported” and “library partially supported,” which must stay explicit in code and docs.
+
+Concrete execution checklist:
+
+1. Make the product boundary explicit in code.
+   Update [setup.rs](C:/Users/omack/Nono/crates/nono-cli/src/setup.rs), [main.rs](C:/Users/omack/Nono/crates/nono-cli/src/main.rs), and [output.rs](C:/Users/omack/Nono/crates/nono-cli/src/output.rs) so CLI/release support is described independently from library `support_info()`.
+2. Preserve the narrower library contract deliberately.
+   Keep [windows.rs](C:/Users/omack/Nono/crates/nono/src/sandbox/windows.rs) at `partial`, but document in code comments and diagnostics that this is a library boundary, not a contradiction in product messaging.
+3. Add explicit CLI-vs-library messaging tests.
+   Extend [env_vars.rs](C:/Users/omack/Nono/crates/nono-cli/tests/env_vars.rs) so setup/help/runtime messaging can claim supported CLI Windows behavior without ever claiming library-wide parity.
+4. Update release and support docs to carry the distinction everywhere.
+   Revise [windows-promotion-criteria.mdx](C:/Users/omack/Nono/docs/cli/development/windows-promotion-criteria.mdx), [windows-feature-gap-matrix.mdx](C:/Users/omack/Nono/docs/cli/development/windows-feature-gap-matrix.mdx), [windows-security-model.mdx](C:/Users/omack/Nono/docs/cli/development/windows-security-model.mdx), [security-model.mdx](C:/Users/omack/Nono/docs/cli/internals/security-model.mdx), and [README.md](C:/Users/omack/Nono/README.md) so “CLI supported” and “library partial” never drift apart.
+5. Add an operator-facing note to setup/release docs.
+   Update [installation.mdx](C:/Users/omack/Nono/docs/cli/getting_started/installation.mdx), [windows-release-candidate-checklist.mdx](C:/Users/omack/Nono/docs/cli/development/windows-release-candidate-checklist.mdx), and [windows-signing-guide.mdx](C:/Users/omack/Nono/docs/cli/development/windows-signing-guide.mdx) so the release/operator audience understands the exact promoted boundary.
+6. Re-run Windows regression coverage against the messaging split.
+   Keep [.github/workflows/ci.yml](C:/Users/omack/Nono/.github/workflows/ci.yml) and [windows-test-harness.ps1](C:/Users/omack/Nono/scripts/windows-test-harness.ps1) focused on the supported CLI surface, not implied library parity.
+7. Close `WIN-1706` only after the distinction is stable and test-covered.
+   Require the same full Rust/docs gate, plus explicit review that no help/setup/README text overstates library support.
+
+## Recommendation
+
+If maintainers want the cleanest long-term support story, choose **Option 1**.
+
+If maintainers want to optimize for product readiness on the supported Windows CLI surface and are comfortable documenting a narrower library contract, choose **Option 2**.
+
+What should not happen:
+
+- claiming first-class Windows support in README/help/release messaging while neither option has been explicitly adopted
+- changing `support_info()` wording alone without deciding whether the product bar is library-wide or CLI-surface-specific
+
+## Current PR Review Disposition
+
+Remaining PR comments on `#555` fall into these buckets:
+
+- stale/already fixed:
+  - the `GUID::from_u128` compile comment is obsolete on current branch state
+- addressed in branch behavior:
+  - WFP service install idempotency is already handled in the Windows exec strategy
+- valid follow-up, not merge-blocking:
+  - the named-pipe pair implementation could become a single duplex named pipe later, but that is an architectural improvement rather than a correctness issue for this slice
+  - request-field error construction can stay lean and allocation-aware without changing the service contract
+
+## CI Attachment Note For Maintainers
+
+The repo workflow configuration in [.github/workflows/ci.yml](C:/Users/omack/Nono/.github/workflows/ci.yml) is set to run the full CI suite on `pull_request` events targeting `main`, including:
+
+- `Test`
+- `Windows Build`
+- `Windows Smoke`
+- `Windows Integration`
+- `Windows Security`
+- `Windows Regression`
+- `Windows Packaging`
+- `Rustfmt`
+- `Verify FFI Header`
+- `Clippy`
+- `Integration Tests`
+- `Cargo Audit`
+- `Docs Checks`
+
+However, on the current fork PR head (`0b16b3d`, checked on April 1, 2026), GitHub only attached these lightweight checks:
+
+- `DCO`
+- `Conventional Commit Title`
+
+That means the missing full CI is not explained by the workflow trigger itself. The likely causes are repository Actions policy for fork PRs, required-approval rules for fork workflows, or some other GitHub-side restriction that prevents the full `pull_request` workflow from attaching to this fork head.
+
+Maintainer follow-up:
+
+1. Confirm whether the repository intentionally suppresses full Actions runs for external fork PRs.
+2. If yes, note that PR `#555` is only getting lightweight policy checks on the fork head and needs maintainer-side workflow approval or an internal branch mirror to exercise full CI.
+3. If no, treat the absence of the CI jobs above as an infrastructure/configuration issue rather than a code failure in this PR.

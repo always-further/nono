@@ -1,7 +1,7 @@
 //! Session discovery and management for the rollback system
 //!
 //! Provides functions to discover, load, and manage rollback sessions
-//! stored in `~/.nono/rollbacks/`. This is a CLI concern — the library
+//! stored in the platform's nono rollback directory. This is a CLI concern — the library
 //! provides primitives, the CLI provides session lifecycle management.
 
 use nono::undo::{SessionMetadata, SnapshotManager};
@@ -25,13 +25,37 @@ pub struct SessionInfo {
     pub is_stale: bool,
 }
 
-/// Get the rollback root directory (`~/.nono/rollbacks/`)
+/// Get the rollback root directory.
 pub fn rollback_root() -> Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        crate::config::user_state_dir()
+            .ok_or(NonoError::ConfigParse(
+                "Could not determine Windows state directory for rollback storage".to_string(),
+            ))
+            .map(|root| root.join("rollbacks"))
+    }
+
+    #[cfg(not(target_os = "windows"))]
     let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+    #[cfg(not(target_os = "windows"))]
     Ok(home.join(".nono").join("rollbacks"))
 }
 
-/// Discover all rollback sessions in `~/.nono/rollbacks/`.
+/// Get the rollback root, using a user-supplied override path if provided.
+///
+/// When `override_path` is `Some`, it is returned directly, allowing the user
+/// to redirect snapshot storage (e.g., to a Docker volume mount). When `None`,
+/// falls back to the default rollback root for the current platform.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub fn rollback_root_with_override(override_path: Option<&PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.clone());
+    }
+    rollback_root()
+}
+
+/// Discover all rollback sessions in the default rollback root.
 ///
 /// Scans the rollback root directory, loads session metadata from each
 /// subdirectory, and enriches with derived data (disk size, alive status).
@@ -174,17 +198,57 @@ fn validate_session_id(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Parse the PID from a session ID formatted as `YYYYMMDD-HHMMSS-<pid>`.
+/// Parse the PID from a session ID.
+///
+/// Supported formats:
+/// - `YYYYMMDD-HHMMSS-<pid>`
+/// - `windows-preview-<pid>-<timestamp>`
 fn parse_pid_from_session_id(session_id: &str) -> Option<u32> {
-    session_id.rsplit('-').next()?.parse().ok()
+    let parts: Vec<_> = session_id.split('-').collect();
+    match parts.as_slice() {
+        [_, _, pid] => pid.parse().ok(),
+        ["windows", "preview", pid, _timestamp] => pid.parse().ok(),
+        _ => None,
+    }
 }
 
 /// Check if a process with the given PID is still alive.
 fn is_process_alive(pid: u32) -> bool {
-    // kill(pid, 0) checks if the process exists without sending a signal
-    // SAFETY: This is a standard POSIX way to check process existence.
-    // Signal 0 does not actually send anything.
-    unsafe { nix::libc::kill(pid as nix::libc::pid_t, 0) == 0 }
+    #[cfg(unix)]
+    {
+        // kill(pid, 0) checks if the process exists without sending a signal
+        // SAFETY: This is a standard POSIX way to check process existence.
+        // Signal 0 does not actually send anything.
+        unsafe { nix::libc::kill(pid as nix::libc::pid_t, 0) == 0 }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // SAFETY: OpenProcess is called with query-only access for the
+        // provided PID. A null handle indicates that the process is not
+        // available to query.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+
+        unsafe {
+            // SAFETY: `handle` is valid because OpenProcess returned a
+            // non-null handle above, and it is closed exactly once here.
+            CloseHandle(handle);
+        }
+        true
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        pid != 0
+    }
 }
 
 /// Calculate the total size of all files in a directory tree.
@@ -240,12 +304,20 @@ mod tests {
             parse_pid_from_session_id("20260214-143022-12345"),
             Some(12345)
         );
+        assert_eq!(
+            parse_pid_from_session_id("windows-preview-12345-1743359910"),
+            Some(12345)
+        );
     }
 
     #[test]
     fn parse_pid_from_session_id_invalid() {
         assert_eq!(parse_pid_from_session_id("no-pid-here"), None);
         assert_eq!(parse_pid_from_session_id(""), None);
+        assert_eq!(
+            parse_pid_from_session_id("windows-preview-not-a-pid-1743359910"),
+            None
+        );
     }
 
     #[test]
@@ -272,6 +344,15 @@ mod tests {
         fs::write(dir.path().join("b.txt"), b"world!").expect("write");
         let size = calculate_dir_size(dir.path());
         assert_eq!(size, 11); // 5 + 6
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rollback_root_uses_windows_state_dir() {
+        let expected = crate::config::user_state_dir()
+            .expect("Windows state dir")
+            .join("rollbacks");
+        assert_eq!(rollback_root().expect("rollback root"), expected);
     }
 
     #[test]

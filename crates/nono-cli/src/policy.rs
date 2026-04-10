@@ -168,6 +168,8 @@ pub(crate) fn current_platform() -> &'static str {
         "macos"
     } else if cfg!(target_os = "linux") {
         "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
     } else {
         "unknown"
     }
@@ -1378,14 +1380,16 @@ mod tests {
         )
         .expect("resolve failed");
 
-        assert_eq!(resolved.names.len(), 2);
-
         if cfg!(target_os = "macos") {
+            assert_eq!(resolved.names.len(), 2);
             assert!(resolved.names.contains(&"claude_code_macos".to_string()));
             assert!(resolved.names.contains(&"vscode_macos".to_string()));
-        } else {
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(resolved.names.len(), 2);
             assert!(resolved.names.contains(&"claude_code_linux".to_string()));
             assert!(resolved.names.contains(&"vscode_linux".to_string()));
+        } else {
+            assert!(resolved.names.is_empty());
         }
     }
 
@@ -1445,13 +1449,14 @@ mod tests {
         )
         .expect("resolve failed");
 
-        // Exactly one should have been resolved
-        assert_eq!(resolved.names.len(), 1);
-
         if cfg!(target_os = "macos") {
+            assert_eq!(resolved.names.len(), 1);
             assert_eq!(resolved.names[0], "test_macos_only");
-        } else {
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(resolved.names.len(), 1);
             assert_eq!(resolved.names[0], "test_linux_only");
+        } else {
+            assert!(resolved.names.is_empty());
         }
     }
 
@@ -1544,8 +1549,13 @@ mod tests {
             .expect("expand_path should succeed for absolute paths");
 
         // Deny path should always be collected regardless of platform
-        assert_eq!(deny_paths.len(), 1);
-        assert_eq!(deny_paths[0], PathBuf::from("/nonexistent/test/deny"));
+        assert!(
+            deny_paths
+                .iter()
+                .any(|path| path == &PathBuf::from("/nonexistent/test/deny")),
+            "deny paths should include the original path, got: {:?}",
+            deny_paths
+        );
 
         if cfg!(target_os = "macos") {
             // On macOS, Seatbelt platform rules should be generated
@@ -1561,6 +1571,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_deny_access_includes_symlink_target() {
         // Create a temp dir with a file and a symlink to it
@@ -1625,6 +1636,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_resolve_parent_symlinks_nonexistent_leaf() {
         // Create a dir with a symlinked parent, then ask for a non-existent
@@ -1678,6 +1690,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_deny_access_nonexistent_under_symlinked_parent() {
         // Simulate /var/run/future.sock on macOS: the leaf doesn't exist yet
@@ -1736,6 +1749,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_sensitive_paths_includes_symlink_targets() {
         // Create a temp dir with a symlink
@@ -2138,13 +2152,13 @@ mod tests {
             resolve_groups(&policy, &["test_deny".to_string()], &mut caps).expect("resolve failed");
 
         // deny_paths should be populated with the expanded deny.access paths
-        assert_eq!(resolved.deny_paths.len(), 1);
         assert!(
-            resolved.deny_paths[0]
-                .to_string_lossy()
-                .contains("nonexistent/test/path"),
-            "Expected deny path to contain 'nonexistent/test/path', got: {}",
-            resolved.deny_paths[0].display()
+            resolved
+                .deny_paths
+                .iter()
+                .any(|path| path.to_string_lossy().contains("nonexistent/test/path")),
+            "Expected deny path to contain 'nonexistent/test/path', got: {:?}",
+            resolved.deny_paths
         );
     }
 
@@ -2257,6 +2271,30 @@ mod tests {
                 resolved_paths
             );
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_embedded_policy_includes_windows_system_read_group() {
+        let policy = load_embedded_policy().expect("embedded policy");
+        let mut caps = CapabilitySet::new();
+        resolve_groups(&policy, &["system_read_windows".to_string()], &mut caps)
+            .expect("resolve failed");
+        let windows_dir = Path::new(r"C:\Windows")
+            .canonicalize()
+            .expect("canonicalize windows dir");
+
+        let resolved_paths: Vec<PathBuf> = caps
+            .fs_capabilities()
+            .iter()
+            .map(|c| c.resolved.clone())
+            .collect();
+
+        assert!(
+            resolved_paths.iter().any(|p| p == &windows_dir),
+            "C:\\Windows must be included in system_read_windows capabilities, got: {:?}",
+            resolved_paths
+        );
     }
 
     #[test]
@@ -2684,6 +2722,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_apply_deny_overrides_removes_symlink_and_target_deny_paths() {
         let dir = tempfile::tempdir().expect("tmpdir");

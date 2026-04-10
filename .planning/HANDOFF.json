@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-04-06T12:59:32.653Z",
+  "phase": "none",
+  "phase_name": "v2.0-roadmap-complete",
+  "phase_dir": ".planning",
+  "plan": 0,
+  "task": 0,
+  "total_tasks": 0,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "quick-260406-ajy: Windows functional equivalence assessment", "status": "done", "commit": "67f91a8"},
+    {"id": 2, "name": "quick-260406-bem: v2.0 gap research", "status": "done", "commit": "b67f74a"},
+    {"id": 3, "name": "v2.0 REQUIREMENTS.md", "status": "done", "commit": "95be407"},
+    {"id": 4, "name": "v2.0 ROADMAP.md (Phases 7-11)", "status": "done", "commit": "45c9396"}
+  ],
+  "remaining_tasks": [
+    {"id": 5, "name": "Plan Phase 7: Quick Wins (wrap + session commands)", "status": "not_started"},
+    {"id": 6, "name": "Execute Phase 7", "status": "not_started"},
+    {"id": 7, "name": "Plan + Execute Phase 8: ConPTY Shell", "status": "not_started"},
+    {"id": 8, "name": "Plan + Execute Phase 9: WFP Port-Level + Proxy Filtering", "status": "not_started"},
+    {"id": 9, "name": "Plan + Execute Phase 10: ETW-Based Learn Command", "status": "not_started"},
+    {"id": 10, "name": "Plan + Execute Phase 11: Runtime Capability Expansion (stretch)", "status": "not_started"}
+  ],
+  "blockers": [],
+  "human_actions_pending": [
+    {
+      "action": "Review WINDOWS-V2-ROADMAP.md and confirm phase order before planning Phase 7",
+      "context": "Roadmap was just generated from gap research; user approval before execution is advisable",
+      "blocking": false
+    }
+  ],
+  "decisions": [
+    {"decision": "Phase ordering: Phase 7 before Phase 8", "rationale": "Phase 7 validates entry-point guard removal pattern before Phase 8 layers ConPTY complexity on top", "phase": "v2.0"},
+    {"decision": "Phases 9, 10, 11 are independent of each other", "rationale": "WFP IPC, ETW, and supervisor socket are separate subsystems", "phase": "v2.0"},
+    {"decision": "Single IPC version bump for Phase 9", "rationale": "Gaps 4 (proxy) and 5 (port filtering) share WFP IPC extension; combining avoids two service deployments", "phase": "9"},
+    {"decision": "ETW library decision (ferrisetw vs windows-sys direct) deferred to plan 10-01", "rationale": "Must evaluate crates.io freshness and feature completeness before committing", "phase": "10"},
+    {"decision": "Gap 6b (runtime trust interception) deferred to v3.0", "rationale": "Requires kernel minifilter driver; no user-mode workaround acceptable", "phase": "v2.0"},
+    {"decision": "Minimum build for ConPTY and ETW: Windows 10 build 17763 (1809)", "rationale": "ConPTY API requires 1809; enforced via RtlGetVersion at runtime; no silent fallback", "phase": "8"}
+  ],
+  "uncommitted_files": [
+    ".planning/phases/04-state-integrity-deployment/04-RESEARCH.md",
+    ".planning/quick/260406-bem-research-and-roadmap-windows-gap-closure/260406-bem-PLAN.md",
+    ".planning/quick/260406-bem-research-and-roadmap-windows-gap-closure/260406-bem-RESEARCH.md"
+  ],
+  "next_action": "Run `/gsd:plan-phase 7` to begin Phase 7 (Quick Wins: nono wrap + session log commands). Phases 9, 10, 11 can be planned in parallel if multiple sessions run concurrently.",
+  "context_notes": "v1.0 is complete (6 phases, all verified). v2.0 roadmap (Phases 7-11) was created in this session from gap analysis. No v2.0 code has been written yet. Three .planning files are uncommitted (see uncommitted_files). Branch is pr/windows-epic12-clean-v2."
+}

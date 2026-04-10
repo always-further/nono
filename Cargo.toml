@@ -9,7 +9,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.77"
 authors = ["Luke Hinds"]
 license = "Apache-2.0"
 repository = "https://github.com/always-further/nono"

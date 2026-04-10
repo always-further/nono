@@ -1,6 +1,7 @@
 use crate::launch_runtime::{rollback_base_exclusions, RollbackLaunchOptions};
 use crate::{config, output, rollback_preflight, rollback_session, rollback_ui};
-use nono::{AccessMode, CapabilitySet, Result};
+use nono::undo::RollbackStatus;
+use nono::{AccessMode, CapabilitySet, NonoError, Result};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::warn;
@@ -20,6 +21,8 @@ pub(crate) type RollbackRuntimeState = (
 pub(crate) struct RollbackExitContext<'a> {
     pub(crate) audit_state: Option<&'a AuditState>,
     pub(crate) rollback_state: Option<RollbackRuntimeState>,
+    /// The rollback status recorded at session start (from `initialize_rollback_state`).
+    pub(crate) rollback_status: RollbackStatus,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
     pub(crate) started: &'a str,
     pub(crate) ended: &'a str,
@@ -194,20 +197,33 @@ pub(crate) fn warn_if_rollback_flags_ignored(rollback: &RollbackLaunchOptions, s
     }
 }
 
+/// Initialize rollback state for a supervised session.
+///
+/// Returns `Ok((Some(state), RollbackStatus::Available))` on success, or
+/// `Ok((None, RollbackStatus::Skipped | RollbackStatus::FailedWarningOnly))` with a
+/// warning emitted to stderr if baseline snapshot capture fails (D-04: failure-warning-only).
+/// Callers must record the returned `RollbackStatus` in `SessionMetadata`.
+///
+/// # Decision alignment
+///
+/// - D-01: Uses the existing Merkle-tree rollback engine.
+/// - D-02: Snapshots all granted write-capable paths for the session scope.
+/// - D-03: Soft-limit warnings remain visible and do not turn fatal.
+/// - D-04: Snapshot initialization failures warn and execution continues.
 pub(crate) fn initialize_rollback_state(
     rollback: &RollbackLaunchOptions,
     caps: &CapabilitySet,
     audit_state: Option<&AuditState>,
     silent: bool,
-) -> Result<Option<RollbackRuntimeState>> {
+) -> Result<(Option<RollbackRuntimeState>, RollbackStatus)> {
     if !rollback.requested || rollback.disabled {
-        return Ok(None);
+        return Ok((None, RollbackStatus::Skipped));
     }
 
     enforce_rollback_limits(silent);
 
     let Some(audit_state) = audit_state else {
-        return Ok(None);
+        return Ok((None, RollbackStatus::Skipped));
     };
 
     let tracked_paths: Vec<PathBuf> = caps
@@ -222,7 +238,7 @@ pub(crate) fn initialize_rollback_state(
         .collect();
 
     if tracked_paths.is_empty() {
-        return Ok(None);
+        return Ok((None, RollbackStatus::Skipped));
     }
 
     let mut patterns = if rollback.track_all {
@@ -244,7 +260,20 @@ pub(crate) fn initialize_rollback_state(
         .first()
         .cloned()
         .unwrap_or_else(|| PathBuf::from("."));
-    let mut exclusion = nono::undo::ExclusionFilter::new(exclusion_config, &gitignore_root)?;
+    let mut exclusion = match nono::undo::ExclusionFilter::new(exclusion_config, &gitignore_root) {
+        Ok(e) => e,
+        Err(e) => {
+            let reason = format!("exclusion filter init failed: {e}");
+            warn!("Rollback unavailable: {reason}");
+            if !silent {
+                eprintln!(
+                    "  [nono] Warning: rollback unavailable for this session ({reason}). \
+                     Execution will continue without snapshot capability."
+                );
+            }
+            return Ok((None, RollbackStatus::FailedWarningOnly { reason }));
+        }
+    };
 
     if !rollback.track_all {
         let preflight_result =
@@ -270,7 +299,21 @@ pub(crate) fn initialize_rollback_state(
                     exclude_globs: rollback.exclude_globs.clone(),
                     force_include: rollback.include.clone(),
                 };
-                exclusion = nono::undo::ExclusionFilter::new(updated_config, &gitignore_root)?;
+                exclusion = match nono::undo::ExclusionFilter::new(updated_config, &gitignore_root)
+                {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let reason = format!("exclusion filter update failed: {e}");
+                        warn!("Rollback unavailable: {reason}");
+                        if !silent {
+                            eprintln!(
+                                "  [nono] Warning: rollback unavailable for this session ({reason}). \
+                                 Execution will continue without snapshot capability."
+                            );
+                        }
+                        return Ok((None, RollbackStatus::FailedWarningOnly { reason }));
+                    }
+                };
 
                 if !silent {
                     rollback_preflight::print_auto_exclude_notice(
@@ -282,25 +325,91 @@ pub(crate) fn initialize_rollback_state(
         }
     }
 
-    let mut manager = nono::undo::SnapshotManager::new(
+    // D-04: snapshot manager init failure → warning-only, execution continues.
+    let mut manager = match nono::undo::SnapshotManager::new(
         audit_state.session_dir.clone(),
         tracked_paths.clone(),
         exclusion,
         nono::undo::WalkBudget::default(),
-    )?;
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            let reason = format!("snapshot manager init failed: {e}");
+            warn!("Rollback unavailable: {reason}");
+            if !silent {
+                eprintln!(
+                    "  [nono] Warning: rollback unavailable for this session ({reason}). \
+                     Execution will continue without snapshot capability."
+                );
+            }
+            return Ok((None, RollbackStatus::FailedWarningOnly { reason }));
+        }
+    };
 
-    let baseline = manager.create_baseline()?;
-    let atomic_temp_before = manager.collect_atomic_temp_files();
+    // D-04: baseline capture failure → warning-only, execution continues.
+    match manager.create_baseline() {
+        Ok(baseline) => {
+            let atomic_temp_before = manager.collect_atomic_temp_files();
+            output::print_rollback_tracking(&tracked_paths, silent);
+            Ok((
+                Some((manager, baseline, tracked_paths, atomic_temp_before)),
+                RollbackStatus::Available,
+            ))
+        }
+        Err(e) => {
+            let reason = format!("{e}");
+            warn!("Rollback baseline capture failed: {reason}. Continuing without rollback.");
+            if !silent {
+                eprintln!(
+                    "  [nono] Warning: rollback baseline capture failed ({reason}). \
+                     Execution will continue; rollback will not be available for this session."
+                );
+            }
+            Ok((None, RollbackStatus::FailedWarningOnly { reason }))
+        }
+    }
+}
 
-    output::print_rollback_tracking(&tracked_paths, silent);
+/// Error variant carrying partial restore results.
+///
+/// Used to surface which files could not be restored (e.g., locked on Windows)
+/// without claiming full rollback success.
+#[derive(Debug)]
+pub(crate) struct PartialRestoreError {
+    /// Changes that were applied successfully.
+    pub applied: Vec<nono::undo::Change>,
+    /// Per-file errors (path → error message).
+    pub failures: Vec<(PathBuf, String)>,
+}
 
-    Ok(Some((manager, baseline, tracked_paths, atomic_temp_before)))
+impl std::fmt::Display for PartialRestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "partial rollback: {} file(s) applied, {} file(s) failed",
+            self.applied.len(),
+            self.failures.len()
+        )?;
+        for (path, reason) in &self.failures {
+            write!(f, "\n  {} — {}", path.display(), reason)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PartialRestoreError {}
+
+impl From<PartialRestoreError> for NonoError {
+    fn from(e: PartialRestoreError) -> Self {
+        NonoError::Snapshot(e.to_string())
+    }
 }
 
 pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<()> {
     let RollbackExitContext {
         audit_state,
         rollback_state,
+        rollback_status,
         proxy_handle,
         started,
         ended,
@@ -333,6 +442,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
             exit_code: Some(exit_code),
             merkle_roots,
             network_events: std::mem::take(&mut network_events),
+            rollback_status: RollbackStatus::Available,
         };
         manager.save_session_metadata(&meta)?;
         audit_saved = true;
@@ -360,10 +470,86 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
                 exit_code: Some(exit_code),
                 merkle_roots: Vec::new(),
                 network_events,
+                rollback_status,
             };
             nono::undo::SnapshotManager::write_session_metadata(&audit_state.session_dir, &meta)?;
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_restore_error_display_names_failed_paths() {
+        let err = PartialRestoreError {
+            applied: vec![],
+            failures: vec![(
+                PathBuf::from("C:/project/locked.txt"),
+                "The process cannot access the file because it is being used by another process"
+                    .to_string(),
+            )],
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("locked.txt"),
+            "Error message should name the locked path, got: {msg}"
+        );
+        assert!(
+            msg.contains("partial rollback"),
+            "Error message should describe partial rollback, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn partial_restore_error_counts() {
+        let err = PartialRestoreError {
+            applied: vec![],
+            failures: vec![
+                (PathBuf::from("a.txt"), "locked".to_string()),
+                (PathBuf::from("b.txt"), "locked".to_string()),
+            ],
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("2 file(s) failed"),
+            "Should count 2 failures, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn partial_restore_error_converts_to_nono_error() {
+        let err = PartialRestoreError {
+            applied: vec![],
+            failures: vec![(PathBuf::from("x.txt"), "locked".to_string())],
+        };
+        let nono_err: NonoError = err.into();
+        assert!(nono_err.to_string().contains("partial rollback"));
+    }
+
+    #[test]
+    fn rollback_status_skipped_when_rollback_disabled() {
+        // When rollback is not requested, status should be Skipped.
+        let status = RollbackStatus::Skipped;
+        assert!(!status.is_available());
+        assert_eq!(status.display_label(), "audit-only");
+    }
+
+    #[test]
+    fn rollback_status_failed_warning_only_records_reason() {
+        let reason = "baseline capture failed: disk full".to_string();
+        let status = RollbackStatus::FailedWarningOnly {
+            reason: reason.clone(),
+        };
+        assert!(!status.is_available());
+        assert_eq!(status.display_label(), "audit-only (capture failed)");
+
+        // Verify serde round-trip preserves reason
+        let json = serde_json::to_string(&status).expect("serialize");
+        let parsed: RollbackStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, status);
+    }
 }

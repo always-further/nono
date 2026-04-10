@@ -248,36 +248,59 @@ fn test_show_format_manifest_round_trip() {
     // then feed it back via --config --dry-run.
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest_path = dir.path().join("manifest.json");
+    let temp_dir = std::env::temp_dir()
+        .display()
+        .to_string()
+        .replace('\\', "\\\\");
+    let manifest = serde_json::json!({
+        "version": "0.1.0",
+        "filesystem": {
+            "grants": [{ "path": temp_dir, "access": "read" }]
+        },
+        "network": { "mode": "blocked" }
+    });
     std::fs::write(
         &manifest_path,
-        r#"{
-            "version": "0.1.0",
-            "filesystem": {
-                "grants": [{ "path": "/tmp", "access": "read" }]
-            },
-            "network": { "mode": "blocked" }
-        }"#,
+        serde_json::to_string_pretty(&manifest).expect("serialize manifest"),
     )
     .expect("write manifest");
 
-    let output = nono_bin()
-        .args([
-            "run",
-            "--config",
-            manifest_path.to_str().expect("path"),
-            "--dry-run",
-            "--",
-            "echo",
-            "hello",
-        ])
-        .output()
-        .expect("failed to run nono");
+    let mut command = nono_bin();
+    command.args([
+        "run",
+        "--config",
+        manifest_path.to_str().expect("path"),
+        "--dry-run",
+    ]);
+    #[cfg(target_os = "windows")]
+    command.args(["--", "cmd", "/c", "echo", "hello"]);
+    #[cfg(not(target_os = "windows"))]
+    command.args(["--", "echo", "hello"]);
+    let output = command.output().expect("failed to run nono");
 
+    #[cfg(not(target_os = "windows"))]
     assert!(
         output.status.success(),
         "round-trip failed, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    #[cfg(target_os = "windows")]
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "expected Windows manifest round-trip dry-run validation to succeed, stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("Capabilities:"),
+            "expected capability summary in Windows manifest round-trip dry-run output, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("dry-run sandbox would be applied with above capabilities"),
+            "expected cross-platform dry-run wording in Windows manifest round-trip output, got: {stderr}"
+        );
+    }
 }
 
 #[test]

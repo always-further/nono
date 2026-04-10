@@ -139,6 +139,21 @@ pub const TOKYO_NIGHT: Theme = Theme {
     surface: Rgb(52, 59, 88),    // Surface
 };
 
+/// Dark Factory - industrial steel, ember orange, and hazard yellow
+pub const DARK_FACTORY: Theme = Theme {
+    name: "dark-factory",
+    brand: Rgb(255, 140, 64),    // Ember orange
+    green: Rgb(116, 168, 124),   // Oxidized green
+    yellow: Rgb(214, 171, 74),   // Hazard amber
+    red: Rgb(199, 88, 74),       // Alarm red
+    blue: Rgb(94, 128, 153),     // Steel blue
+    teal: Rgb(91, 146, 133),     // Machine teal
+    text: Rgb(214, 209, 198),    // Warm steel
+    subtext: Rgb(145, 143, 137), // Oiled metal
+    overlay: Rgb(96, 94, 90),    // Rivets / rules
+    surface: Rgb(58, 56, 53),    // Factory floor
+};
+
 /// Minimal - plain ANSI-friendly grayscale with orange accent
 pub const MINIMAL: Theme = Theme {
     name: "minimal",
@@ -200,6 +215,7 @@ fn resolve(name: &str) -> Theme {
         "frappe" | "catppuccin-frappe" => FRAPPE,
         "macchiato" | "catppuccin-macchiato" => MACCHIATO,
         "tokyo-night" | "tokyo" | "tokyonight" => TOKYO_NIGHT,
+        "dark-factory" | "dark_factory" | "factory" => DARK_FACTORY,
         "minimal" | "plain" => MINIMAL,
         _ => MOCHA,
     }
@@ -213,6 +229,7 @@ pub fn available_themes() -> &'static [&'static str] {
         "frappe",
         "macchiato",
         "tokyo-night",
+        "dark-factory",
         "minimal",
     ]
 }
@@ -233,6 +250,9 @@ pub fn is_valid(name: &str) -> bool {
             | "tokyo-night"
             | "tokyo"
             | "tokyonight"
+            | "dark-factory"
+            | "dark_factory"
+            | "factory"
             | "minimal"
             | "plain"
     )
@@ -249,6 +269,7 @@ mod tests {
         assert_eq!(resolve("frappe").name, "frappe");
         assert_eq!(resolve("macchiato").name, "macchiato");
         assert_eq!(resolve("tokyo-night").name, "tokyo-night");
+        assert_eq!(resolve("dark-factory").name, "dark-factory");
         assert_eq!(resolve("minimal").name, "minimal");
     }
 
@@ -257,6 +278,8 @@ mod tests {
         assert_eq!(resolve("catppuccin").name, "mocha");
         assert_eq!(resolve("catppuccin-latte").name, "latte");
         assert_eq!(resolve("tokyo").name, "tokyo-night");
+        assert_eq!(resolve("factory").name, "dark-factory");
+        assert_eq!(resolve("dark_factory").name, "dark-factory");
         assert_eq!(resolve("plain").name, "minimal");
     }
 

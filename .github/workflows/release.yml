@@ -17,6 +17,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  WIX_VERSION: 4.0.6
 
 jobs:
   build:
@@ -46,6 +47,11 @@ jobs:
             os: ubuntu-22.04
             artifact: nono
 
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: nono.exe
+
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -72,7 +78,15 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cross build --release --target aarch64-unknown-linux-gnu -p nono-cli
 
-      - name: Package
+      - name: Install WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.dotnet\tools"
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
@@ -99,11 +113,143 @@ jobs:
           cd crates/nono-cli
           cargo deb --target aarch64-unknown-linux-gnu --no-build --deb-version "$VERSION"
 
+      # D-10: signing runs only for tag/release builds, including workflow_dispatch
+      # runs that target an actual tag. The RELEASE_TAG env var is always set to the
+      # tag name (push) or the provided input tag (workflow_dispatch), so this step
+      # correctly gates on those cases via the tag-triggered workflow definition above.
+      - name: Check signing secrets (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT)) {
+            Write-Error "WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set. Set these repository secrets before releasing Windows artifacts. See docs/cli/development/windows-signing-guide.mdx."
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            Write-Error "WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set. Set these repository secrets before releasing Windows artifacts. See docs/cli/development/windows-signing-guide.mdx."
+            exit 1
+          }
+          Write-Host "Signing secrets present — proceeding to sign."
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+
+      # D-11: build both machine and user MSIs before signing
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          if (-not (Test-Path $binary)) {
+            Write-Error "Missing release binary: $binary"
+            exit 1
+          }
+          .\scripts\build-windows-msi.ps1 `
+            -VersionTag "${{ env.RELEASE_TAG }}" `
+            -BinaryPath $binary `
+            -Scope machine `
+            -OutputDir artifact_staging
+          .\scripts\build-windows-msi.ps1 `
+            -VersionTag "${{ env.RELEASE_TAG }}" `
+            -BinaryPath $binary `
+            -Scope user `
+            -OutputDir artifact_staging
+
+      # D-13: fail closed if signing or verification fails; never upload unsigned artifacts.
+      # Signs the raw .exe and both MSIs before any upload step.
+      - name: Sign Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $machineMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-machine.msi"
+          $userMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-user.msi"
+          .\scripts\sign-windows-artifacts.ps1 `
+            -CertBase64 $env:WINDOWS_SIGNING_CERT `
+            -CertPassword $env:WINDOWS_SIGNING_CERT_PASSWORD `
+            -ArtifactPaths @($binary, $machineMsi, $userMsi)
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+
+      # Secondary Authenticode verification via PowerShell after signtool verify.
+      # Both checks must pass before artifact upload (D-13).
+      - name: Verify Authenticode signatures (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $machineMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-machine.msi"
+          $userMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-user.msi"
+          foreach ($artifact in @($binary, $machineMsi, $userMsi)) {
+            $sig = Get-AuthenticodeSignature -FilePath $artifact
+            if ($sig.Status -ne "Valid") {
+              Write-Error "Authenticode verification failed for $artifact with status $($sig.Status)."
+              exit 1
+            }
+            Write-Host "Authenticode OK: $artifact"
+          }
+
+      - name: Create zip from signed binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
+          $zipPath = Join-Path $PWD $zipName
+          if (Test-Path $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Compress-Archive -LiteralPath $binary -DestinationPath $zipPath
+
+      - name: Verify signed binary inside zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
+          $extractRoot = Join-Path $PWD "zip-signature-check"
+          if (Test-Path $extractRoot) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $zipName -DestinationPath $extractRoot -Force
+          $binaryName = "${{ matrix.artifact }}"
+          $extractedBinary = Join-Path $extractRoot $binaryName
+          $sig = Get-AuthenticodeSignature -FilePath $extractedBinary
+          if ($sig.Status -ne "Valid") {
+            Write-Error "Zip payload signature verification failed for $extractedBinary with status $($sig.Status)."
+            exit 1
+          }
+          Write-Host "Zip payload Authenticode OK: $extractedBinary"
+
+      # Artifact upload is downstream of all signing and verification steps (D-13).
+      - name: Prepare upload (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
+          if (-not (Test-Path $binary)) {
+            Write-Error "Missing signed binary artifact: $binary"
+            exit 1
+          }
+          if (-not (Test-Path $zipName)) {
+            Write-Error "Missing zip artifact: $zipName"
+            exit 1
+          }
+          Copy-Item $binary artifact_staging\
+          Copy-Item $zipName artifact_staging\
+
       - name: Prepare upload
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p artifact_staging
-          cp "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz" artifact_staging/
+          if [ -f "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz" ]; then
+            cp "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz" artifact_staging/
+          fi
+          if [ -f "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip" ]; then
+            cp "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip" artifact_staging/
+          fi
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ] && [ -d target/debian ]; then
             cp target/debian/*.deb artifact_staging/
           fi
@@ -135,8 +281,20 @@ jobs:
         run: |
           cd artifacts
           find . -name "*.tar.gz" -exec mv {} . \;
+          find . -name "*.zip" -exec mv {} . \;
+          find . -name "*.msi" -exec mv {} . \;
+          find . -name "*.exe" -exec mv {} . \;
           find . -name "*.deb" -exec mv {} . \;
           sha256sum *.tar.gz > SHA256SUMS.txt
+          if ls *.zip >/dev/null 2>&1; then
+            sha256sum *.zip >> SHA256SUMS.txt
+          fi
+          if ls *.msi >/dev/null 2>&1; then
+            sha256sum *.msi >> SHA256SUMS.txt
+          fi
+          if ls *.exe >/dev/null 2>&1; then
+            sha256sum *.exe >> SHA256SUMS.txt
+          fi
           cat SHA256SUMS.txt
 
       - name: Create GitHub Release
@@ -147,8 +305,22 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.msi
+            artifacts/*.exe
             artifacts/*.deb
             artifacts/SHA256SUMS.txt
+
+  docker:
+    name: Publish Docker Image
+    needs: release
+    if: ${{ !contains(github.event.inputs.tag || github.ref_name, 'alpha') && !contains(github.event.inputs.tag || github.ref_name, 'beta') && !contains(github.event.inputs.tag || github.ref_name, 'rc') }}
+    uses: ./.github/workflows/image-build.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref_name }}
+      version: ${{ github.event.inputs.tag || github.ref_name }}
+      push: true
+    secrets: inherit
 
   publish-crates:
     name: Publish to crates.io

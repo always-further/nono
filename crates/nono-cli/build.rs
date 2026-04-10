@@ -65,4 +65,21 @@ fn main() {
         fs::write(out_path.join("profile-authoring-guide.md"), &content)
             .expect("Failed to write profile authoring guide to OUT_DIR");
     }
+
+    // === Stage placeholder Windows WFP driver artifact next to build outputs ===
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let driver_path = Path::new("data/windows/nono-wfp-driver.sys");
+        println!("cargo:rerun-if-changed={}", driver_path.display());
+
+        if driver_path.exists() {
+            if let Some(profile_dir) = out_path.ancestors().nth(3) {
+                fs::copy(driver_path, profile_dir.join("nono-wfp-driver.sys"))
+                    .expect("Failed to copy placeholder WFP driver artifact to build output");
+            } else {
+                println!("cargo:warning=Could not determine target profile dir for placeholder WFP driver artifact");
+            }
+        } else {
+            println!("cargo:warning=data/windows/nono-wfp-driver.sys not found");
+        }
+    }
 }

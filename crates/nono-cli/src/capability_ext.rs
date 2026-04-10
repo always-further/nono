@@ -757,6 +757,10 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn json_string(path: &Path) -> String {
+        serde_json::to_string(&path.display().to_string()).expect("json path")
+    }
+
     fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
         let _guard = match crate::test_env::ENV_LOCK.lock() {
             Ok(guard) => guard,
@@ -822,8 +826,12 @@ mod tests {
 
     #[test]
     fn test_from_args_rejects_protected_state_subtree() {
-        let home = dirs::home_dir().expect("home");
-        let protected_subtree = home.join(".nono").join("rollbacks");
+        let protected_subtree = ProtectedRoots::from_defaults()
+            .expect("protected roots")
+            .as_paths()
+            .first()
+            .expect("at least one protected root")
+            .join("rollbacks");
 
         let args = SandboxArgs {
             allow: vec![protected_subtree],
@@ -1192,14 +1200,14 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "policy-adds" }},
                     "policy": {{
-                        "add_allow_read": ["{}"],
-                        "add_allow_write": ["{}"],
-                        "add_allow_readwrite": ["{}"]
+                        "add_allow_read": [{read}],
+                        "add_allow_write": [{write}],
+                        "add_allow_readwrite": [{readwrite}]
                     }}
                 }}"#,
-                read_dir.display(),
-                write_dir.display(),
-                rw_dir.display()
+                read = json_string(&read_dir),
+                write = json_string(&write_dir),
+                readwrite = json_string(&rw_dir),
             ),
         )
         .expect("write profile");
@@ -1312,6 +1320,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_from_profile_policy_add_deny_access_removes_symlinked_file_grant() {
         let dir = tempdir().expect("tmpdir");
@@ -1356,6 +1365,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_from_profile_policy_add_deny_access_respects_override_deny_for_symlinked_file() {
         let dir = tempdir().expect("tmpdir");
@@ -1400,6 +1410,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_from_profile_policy_override_deny_via_symlink_path() {
         let dir = tempdir().expect("tmpdir");
@@ -1555,12 +1566,12 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "override-deny-test" }},
                     "policy": {{
-                        "add_allow_readwrite": ["{path}"],
-                        "add_deny_access": ["{path}"],
-                        "override_deny": ["{path}"]
+                        "add_allow_readwrite": [{path}],
+                        "add_deny_access": [{path}],
+                        "override_deny": [{path}]
                     }}
                 }}"#,
-                path = denied.display()
+                path = json_string(&denied),
             ),
         )
         .expect("write profile");
@@ -1597,11 +1608,11 @@ mod tests {
                 r#"{{
                     "meta": {{ "name": "override-deny-no-grant" }},
                     "policy": {{
-                        "add_deny_access": ["{path}"],
-                        "override_deny": ["{path}"]
+                        "add_deny_access": [{path}],
+                        "override_deny": [{path}]
                     }}
                 }}"#,
-                path = denied.display()
+                path = json_string(&denied),
             ),
         )
         .expect("write profile");
@@ -1680,9 +1691,9 @@ mod tests {
             format!(
                 r#"{{
                     "meta": {{ "name": "test-upgrade" }},
-                    "filesystem": {{ "read": ["{}"] }}
+                    "filesystem": {{ "read": [{path}] }}
                 }}"#,
-                target.display()
+                path = json_string(&target),
             ),
         )
         .expect("write profile");
@@ -1725,9 +1736,9 @@ mod tests {
             format!(
                 r#"{{
                     "meta": {{ "name": "test-merge" }},
-                    "filesystem": {{ "read": ["{}"] }}
+                    "filesystem": {{ "read": [{path}] }}
                 }}"#,
-                target.display()
+                path = json_string(&target),
             ),
         )
         .expect("write profile");

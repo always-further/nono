@@ -13,11 +13,7 @@ Nono's trust system verifies the **provenance** and **integrity** of files befor
 nono trust keygen
 ```
 
-Creates an ECDSA P-256 key pair in the system keystore (macOS Keychain / Linux Secret Service). On headless or containerized systems where the system keystore is unavailable, use `--keyref file://` to store the key as a file instead:
-
-```bash
-nono trust keygen --keyref file:///home/user/.config/nono/trust/default.pem
-```
+Creates an ECDSA P-256 key pair in the system keystore (Windows Credential Manager / macOS Keychain / Linux Secret Service).
 
 ### 2. Create and sign a trust policy
 
@@ -54,25 +50,7 @@ nono trust verify --all
 
 When you run `nono run`, the pre-exec scan automatically verifies all files matching the policy before the agent launches.
 
-### Headless Quick Start (file-backed keys)
-
-On headless Linux, containers, or SSH-only hosts where the system keystore is unavailable, use `--keyref file://` throughout:
-
-```bash
-KEYREF="file://$HOME/.config/nono/trust/default.pem"
-
-nono trust keygen --keyref "$KEYREF"
-nono trust init --include "SKILLS.md" --include "CLAUDE.md" --keyref "$KEYREF"
-nono trust sign-policy --keyref "$KEYREF"
-nono trust sign --all --keyref "$KEYREF"
-nono trust verify --all
-```
-
-Verify does not need `--keyref` — it uses the public key embedded in `trust-policy.json` by `init`.
-
-<Note>
-  The trust policy records the full file path as the signer identity (e.g. `file:///home/user/.config/nono/trust/default.pem`). If you move the key to a different path, re-run `nono trust init` with the new `--keyref` to update the policy. The same key material at a different path is treated as a different signer. Use a stable, conventional path (e.g. `$HOME/.config/nono/trust/default.pem`) to avoid this.
-</Note>
+On Windows, this startup verification is the currently supported trust boundary. Runtime trust interception inside supervised child execution is not yet available because Windows supervised child processes do not yet have an attached file-open mediation channel.
 
 ## CLI Commands
 
@@ -84,7 +62,6 @@ Create a `trust-policy.json` in the current directory.
 nono trust init --include "*.md"                    # single pattern
 nono trust init --include "*.md" --include "*.py"   # multiple patterns
 nono trust init --include "SKILLS*" --key my-key    # with specific signing key
-nono trust init --keyref file:///path/to/key.pem    # with file-backed key
 nono trust init --user                              # user-level policy (~/.config/nono/)
 nono trust init --force                             # overwrite existing policy
 ```
@@ -97,8 +74,7 @@ Sign files. Any file can be signed — no trust policy is required for explicit 
 
 ```bash
 nono trust sign SKILLS.md                  # keyed (default key), creates SKILLS.md.bundle
-nono trust sign SKILLS.md --key my-key     # keyed (specific key from keystore)
-nono trust sign SKILLS.md --keyref file:///path/to/key.pem  # keyed (file-backed key)
+nono trust sign SKILLS.md --key my-key     # keyed (specific key)
 nono trust sign SKILLS.md CLAUDE.md        # per-file .bundle sidecars
 nono trust sign --all                      # all files matching policy (per-file)
 nono trust sign --all --multi-subject      # single .nono-trust.bundle for all files
@@ -143,22 +119,17 @@ nono trust list
 Generate an ECDSA P-256 signing key pair.
 
 ```bash
-nono trust keygen                          # default key ID ("default") in system keystore
-nono trust keygen --id my-signing-key      # named key in system keystore
-nono trust keygen --keyref file:///path/to/key.pem  # file-backed key
-nono trust keygen --keyref file:///path/to/key.pem --force  # overwrite existing file
+nono trust keygen                          # default key ID ("default")
+nono trust keygen --id my-signing-key      # named key
 ```
-
-The `--keyref` flag accepts `keystore://name` (explicit keystore reference) or `file:///path` (file-backed). When using `file://`, the private key is stored at the specified path and the public key at `<path>.pub`, both with owner-only permissions (0600).
 
 ### nono trust export-key
 
 Export the public key in base64 DER format for use in trust policy `public_key` fields.
 
 ```bash
-nono trust export-key                      # export default key from keystore
-nono trust export-key --id my-signing-key  # export named key from keystore
-nono trust export-key --keyref file:///path/to/key.pem  # export from file-backed key
+nono trust export-key                      # export default key
+nono trust export-key --id my-signing-key  # export named key
 nono trust export-key --pem                # output as PEM instead of base64 DER
 ```
 
@@ -169,8 +140,7 @@ Sign the trust policy file. Required after every modification to `trust-policy.j
 ```bash
 nono trust sign-policy                     # sign trust-policy.json in CWD
 nono trust sign-policy --user              # sign user-level trust policy (~/.config/nono/)
-nono trust sign-policy --key my-key        # specific key from keystore
-nono trust sign-policy --keyref file:///path/to/key.pem  # file-backed key
+nono trust sign-policy --key my-key        # specific key
 ```
 
 ## Development Override
@@ -216,8 +186,7 @@ Trust policy is defined in `trust-policy.json`, separate from the sandbox policy
 To get the public key in base64 format for a manual policy:
 
 ```bash
-nono trust export-key --id default                     # from system keystore
-nono trust export-key --keyref file:///path/to/key.pem # from file-backed key
+nono trust export-key --id default
 ```
 
 ### includes
@@ -369,11 +338,9 @@ This policy declares: only trust files signed by a GitHub Actions workflow in `m
 
 ## Signing Modes
 
-There are two signing modes, with two key storage backends for keyed signing:
+There are two signing modes:
 
-**Keyed signing (keystore)** — A private key stored in the system keystore (macOS Keychain / Linux Secret Service). The default for desktop environments. Use `--key <name>` or `--keyref keystore://<name>`.
-
-**Keyed signing (file)** — A private key stored as a local file with owner-only permissions (0600). Designed for headless Linux, containers, SSH-only hosts, and environments where the system keystore is unavailable. Use `--keyref file:///path/to/key.pem`.
+**Keyed signing** — A private key stored in the system keystore (Windows Credential Manager / macOS Keychain / Linux Secret Service). Suitable for individual developers and local workflows.
 
 **Keyless signing** — Ephemeral key + OIDC identity + Fulcio certificate + Rekor transparency log. Suitable for CI/CD pipelines with ambient OIDC tokens (e.g., GitHub Actions with `permissions: id-token: write`). The signer's identity is cryptographically bound to the signature via the OIDC token.
 

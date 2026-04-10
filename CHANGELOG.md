@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Documentation
+
+- *(windows)* Publish Windows filesystem parity contract and align preview/security docs with the current native subset
+
+### Features
+
+- *(windows)* Expand the native filesystem subset to accept exact-file grants, write-only directory rules, Windows-aware path comparisons, and policy-preprocessed `override_deny`
+
 ## [0.30.1] - 2026-04-09
 
 ### Bug Fixes
@@ -871,4 +881,3 @@
 ### 🚀 Features
 
 - First release of seperarate nono and nono-cli packages
-

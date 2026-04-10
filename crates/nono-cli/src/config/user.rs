@@ -35,7 +35,7 @@ pub struct UserConfig {
 /// UI display settings
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct UiSettings {
-    /// Color theme name (mocha, latte, frappe, macchiato, tokyo-night, minimal)
+    /// Color theme name (mocha, latte, frappe, macchiato, tokyo-night, dark-factory, minimal)
     #[serde(default)]
     pub theme: Option<String>,
     /// In-band PTY detach sequence, e.g. "ctrl-] d"

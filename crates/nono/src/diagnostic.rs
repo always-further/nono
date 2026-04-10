@@ -153,6 +153,16 @@ fn sanitize_for_diagnostic(s: &str) -> String {
     result
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn platform_sigsys() -> Option<i32> {
+    Some(libc::SIGSYS)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_sigsys() -> Option<i32> {
+    None
+}
+
 /// Parse best-effort denial hints from a command's stderr output.
 #[must_use]
 pub fn analyze_error_output(
@@ -765,7 +775,7 @@ impl<'a> DiagnosticFormatter<'a> {
                 // Signal-based exit: 128 + signal number
                 let sig = code - 128;
                 // SIGSYS is platform-dependent: 31 on Linux, 12 on macOS
-                let sigsys: i32 = libc::SIGSYS;
+                let sigsys = platform_sigsys();
                 let sig_name = match sig {
                     1 => "SIGHUP",
                     2 => "SIGINT",
@@ -775,11 +785,11 @@ impl<'a> DiagnosticFormatter<'a> {
                     11 => "SIGSEGV",
                     13 => "SIGPIPE",
                     15 => "SIGTERM",
-                    s if s == sigsys => "SIGSYS",
+                    s if Some(s) == sigsys => "SIGSYS",
                     _ => "",
                 };
 
-                if sig == sigsys {
+                if Some(sig) == sigsys {
                     // SIGSYS = seccomp/sandbox killed it
                     lines.push(format!(
                         "[nono] Command killed by {} (exit code {}).",
@@ -2895,11 +2905,12 @@ mod tests {
         assert!(output.contains("usually not"));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn test_exit_sigsys_platform_correct() {
         let caps = make_test_caps();
         let formatter = DiagnosticFormatter::new(&caps);
-        let output = formatter.format_footer(128 + libc::SIGSYS);
+        let output = formatter.format_footer(128 + platform_sigsys().expect("sigsys"));
 
         assert!(output.contains("SIGSYS"));
         assert!(output.contains("blocked system call"));

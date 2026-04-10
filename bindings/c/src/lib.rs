@@ -119,6 +119,7 @@ pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
         | nono::NonoError::BlocklistBlocked { .. }
         | nono::NonoError::InstructionFileDenied { .. } => NonoErrorCode::ErrTrustVerification,
         nono::NonoError::NetworkFilterUnsupported { .. } => NonoErrorCode::ErrUnsupportedPlatform,
+        nono::NonoError::PartialRestore { .. } => NonoErrorCode::ErrIo,
     }
 }
 

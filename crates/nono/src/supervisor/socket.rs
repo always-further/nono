@@ -563,6 +563,9 @@ mod tests {
         let response = SupervisorResponse::Decision {
             request_id: "req-001".to_string(),
             decision: crate::supervisor::types::ApprovalDecision::Granted,
+            grant: Some(
+                crate::supervisor::types::ResourceGrant::sideband_file_descriptor(AccessMode::Read),
+            ),
         };
         supervisor
             .send_response(&response)
@@ -574,9 +577,18 @@ mod tests {
             SupervisorResponse::Decision {
                 request_id,
                 decision,
+                grant,
             } => {
                 assert_eq!(request_id, "req-001");
                 assert!(decision.is_granted());
+                assert_eq!(
+                    grant,
+                    Some(
+                        crate::supervisor::types::ResourceGrant::sideband_file_descriptor(
+                            AccessMode::Read
+                        )
+                    )
+                );
             }
             other => panic!("Expected Decision, got {:?}", other),
         }

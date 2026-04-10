@@ -403,28 +403,36 @@ pub fn validate_file_uri(uri: &str) -> Result<()> {
         ))
     })?;
 
-    if !path_str.starts_with('/') {
+    let path = std::path::Path::new(path_str);
+    let is_absolute_uri_path = path_str.starts_with('/') || path.is_absolute();
+    if !is_absolute_uri_path {
         return Err(NonoError::ConfigParse(format!(
             "file:// URI must use an absolute path (file:///path), got: {}",
             uri
         )));
     }
 
-    let meaningful = path_str.trim_end_matches('/');
-    if meaningful.is_empty() || meaningful == "/" {
+    let mut has_non_root_component = false;
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err(NonoError::ConfigParse(format!(
+                    "file:// URI must not contain path traversal (..): {}",
+                    uri
+                )));
+            }
+            std::path::Component::Normal(_) => {
+                has_non_root_component = true;
+            }
+            _ => {}
+        }
+    }
+
+    if !has_non_root_component {
         return Err(NonoError::ConfigParse(format!(
             "file:// URI path is empty: {}",
             uri
         )));
-    }
-
-    for component in std::path::Path::new(path_str).components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return Err(NonoError::ConfigParse(format!(
-                "file:// URI must not contain path traversal (..): {}",
-                uri
-            )));
-        }
     }
 
     const FORBIDDEN_FILE_CHARS: &[char] = &['\0', '\n', '\r', ';', '`', '|', '$', '&', '>', '<'];
@@ -666,8 +674,10 @@ pub fn store_secret_file(path: &Path, secret: &str) -> Result<()> {
 fn load_single_secret(service: &str, account: &str) -> Result<Zeroizing<String>> {
     let entry = keyring::Entry::new(service, account).map_err(|e| {
         NonoError::KeystoreAccess(format!(
-            "Failed to access keystore for '{}': {}",
-            account, e
+            "Failed to access {} for '{}': {}",
+            system_keystore_label(),
+            account,
+            e
         ))
     })?;
 
@@ -681,14 +691,39 @@ fn load_single_secret(service: &str, account: &str) -> Result<Zeroizing<String>>
         }
         Err(keyring::Error::NoEntry) => Err(NonoError::SecretNotFound(account.to_string())),
         Err(keyring::Error::Ambiguous(creds)) => Err(NonoError::KeystoreAccess(format!(
-            "Multiple entries ({}) found for '{}' - please resolve manually",
+            "Multiple entries ({}) found for '{}' in {} - please resolve manually",
             creds.len(),
-            account
+            account,
+            system_keystore_label()
         ))),
         Err(e) => Err(NonoError::KeystoreAccess(format!(
-            "Cannot access '{}': {}",
-            account, e
+            "Cannot access '{}' in {}: {}",
+            account,
+            system_keystore_label(),
+            e
         ))),
+    }
+}
+
+fn system_keystore_label() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Windows Credential Manager"
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        "macOS Keychain"
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "system keystore"
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        "system keystore"
     }
 }
 
@@ -733,11 +768,10 @@ fn load_from_op(uri: &str) -> Result<Zeroizing<String>> {
         "1Password CLI",
         "Is 1Password waiting for authentication?",
     )
-    .map_err(|e| {
+    .inspect_err(|_e| {
         // Kill the process if it timed out
         let _ = child.kill();
         let _ = child.wait();
-        e
     })?;
 
     if !output.status.success() {
@@ -1205,6 +1239,12 @@ pub fn build_secret_mappings(
 #[allow(clippy::disallowed_methods)] // Tests use unique env var names (NONO_TEST_*), no contention.
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn system_keystore_label_mentions_windows_credential_manager() {
+        assert_eq!(system_keystore_label(), "Windows Credential Manager");
+    }
 
     #[test]
     fn test_build_mappings_from_list() {
@@ -2152,6 +2192,13 @@ mod tests {
         assert!(validate_file_uri("file:///run/secrets/api-token").is_ok());
         assert!(validate_file_uri("file:///tmp/secret.txt").is_ok());
         assert!(validate_file_uri("file:///etc/ssl/certs/ca.pem").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_validate_file_uri_valid_windows_absolute_path() {
+        assert!(validate_file_uri(r"file://C:\secrets\api-token").is_ok());
+        assert!(validate_file_uri(r"file://C:\temp\secret.txt").is_ok());
     }
 
     #[test]

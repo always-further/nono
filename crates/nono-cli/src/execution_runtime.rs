@@ -1,13 +1,12 @@
-use crate::launch_runtime::{select_threading_context, LaunchPlan};
+#[cfg(not(target_os = "windows"))]
+use crate::launch_runtime::select_threading_context;
+use crate::launch_runtime::LaunchPlan;
 use crate::proxy_runtime::start_proxy_runtime;
 use crate::supervised_runtime::{execute_supervised_runtime, SupervisedRuntimeContext};
 use crate::{config, exec_strategy, output, sandbox_state};
 use nono::{CapabilitySet, NonoError, Result, Sandbox};
 use std::path::Path;
-use std::time::Duration;
 use tracing::{error, info};
-
-const PROFILE_HINT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
@@ -54,7 +53,7 @@ fn next_capability_state_file_path() -> std::path::PathBuf {
 
 pub(crate) fn execution_start_dir(
     workdir: &std::path::Path,
-    caps: &CapabilitySet,
+    _caps: &CapabilitySet,
 ) -> Result<std::path::PathBuf> {
     let workdir_canonical =
         workdir
@@ -64,7 +63,13 @@ pub(crate) fn execution_start_dir(
                 source: e,
             })?;
 
-    if caps.path_covered(&workdir_canonical) {
+    #[cfg(target_os = "windows")]
+    {
+        Ok(workdir_canonical)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if _caps.path_covered(&workdir_canonical) {
         Ok(workdir_canonical)
     } else {
         Ok(std::path::PathBuf::from("/"))
@@ -81,13 +86,6 @@ fn recommended_builtin_profile(program: &Path) -> Option<&'static str> {
         "swival" => Some("swival"),
         _ => None,
     }
-}
-
-fn should_apply_startup_timeout(
-    recommended_profile: Option<&str>,
-    cmd_args: &[impl AsRef<std::ffi::OsStr>],
-) -> bool {
-    recommended_profile.is_some() && cmd_args.is_empty()
 }
 
 pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
@@ -108,7 +106,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     {
         return Err(NonoError::BlockedCommand {
             command: blocked,
-            reason: "This command is blocked by default due to destructive potential. \
+            reason: "This command is blocked by default due to destructive potential. 
                      Use --allow-command to override if you understand the risks."
                 .to_string(),
         });
@@ -142,7 +140,12 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         output::print_profile_hint(recommended_program_name, profile, flags.silent);
     }
     let cap_file = write_capability_state_file(&caps, &flags.override_deny_paths, flags.silent);
-    let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let cap_file_path = cap_file.as_ref().cloned().unwrap_or_else(|| {
+        #[cfg(target_os = "windows")]
+        return std::path::PathBuf::from("NUL");
+        #[cfg(not(target_os = "windows"))]
+        return std::path::PathBuf::from("/dev/null");
+    });
 
     for secret in &loaded_secrets {
         if exec_strategy::is_dangerous_env_var(&secret.env_var) {
@@ -164,6 +167,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     let proxy_handle = active_proxy.handle;
 
     let current_dir = execution_start_dir(&flags.workdir, &caps)?;
+
     apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 
     let mut env_vars: Vec<(&str, &str)> = loaded_secrets
@@ -174,6 +178,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         env_vars.push((key.as_str(), value.as_str()));
     }
 
+    #[cfg(not(target_os = "windows"))]
     let threading = select_threading_context(
         !loaded_secrets.is_empty(),
         proxy.active,
@@ -181,10 +186,14 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         trust.interception_active,
     );
 
+    #[cfg(not(target_os = "windows"))]
     info!(
         "Executing with strategy: {:?}, threading: {:?}",
         strategy, threading
     );
+
+    #[cfg(target_os = "windows")]
+    info!("Executing with strategy: {:?}", strategy);
 
     #[cfg(target_os = "linux")]
     let seccomp_proxy_fallback = {
@@ -197,21 +206,27 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 match flags.wsl2_proxy_policy {
                     crate::profile::Wsl2ProxyPolicy::Error => {
                         return Err(NonoError::SandboxInit(
-                            "WSL2: proxy-only network mode cannot be kernel-enforced. \
-                             seccomp user notification returns EBUSY on WSL2 and Landlock V4 \
-                             (per-port TCP filtering) is not available on this kernel.\n\n\
-                             The sandboxed process would be able to bypass the credential proxy \
-                             and open arbitrary outbound connections.\n\n\
-                             To allow degraded execution (credential proxy without network lockdown), \
-                             set wsl2_proxy_policy: \"insecure_proxy\" in your profile's security config.\n\n\
+                            "WSL2: proxy-only network mode cannot be kernel-enforced. 
+                             seccomp user notification returns EBUSY on WSL2 and Landlock V4 
+                             (per-port TCP filtering) is not available on this kernel.
+
+
+                             The sandboxed process would be able to bypass the credential proxy 
+                             and open arbitrary outbound connections.
+
+
+                             To allow degraded execution (credential proxy without network lockdown), 
+                             set wsl2_proxy_policy: \"insecure_proxy\" in your profile's security config.
+
+
                              See: https://nono.sh/docs/cli/internals/wsl2"
                                 .to_string(),
                         ));
                     }
                     crate::profile::Wsl2ProxyPolicy::InsecureProxy => {
                         eprintln!(
-                            "  [nono] WARNING: WSL2 insecure proxy mode — credential proxy active \
-                             but network is NOT kernel-enforced. The sandboxed process can bypass \
+                            "  [nono] WARNING: WSL2 insecure proxy mode — credential proxy active 
+                             but network is NOT kernel-enforced. The sandboxed process can bypass 
                              the proxy and open arbitrary outbound connections."
                         );
                     }
@@ -227,33 +242,42 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         }
     };
 
+    #[cfg(not(target_os = "windows"))]
     let config = exec_strategy::ExecConfig {
         command: &command,
         resolved_program: &resolved_program,
         caps: &caps,
         env_vars,
-        cap_file: &cap_file_path,
+        cap_file: cap_file.as_deref(),
         current_dir: &current_dir,
         no_diagnostics: flags.no_diagnostics || flags.silent,
         threading,
         protected_paths: &trust.protected_paths,
-        startup_timeout: if should_apply_startup_timeout(recommended_profile, &cmd_args) {
-            recommended_profile.map(|profile| exec_strategy::StartupTimeoutConfig {
-                timeout: PROFILE_HINT_STARTUP_TIMEOUT,
-                program: recommended_program_name,
-                profile,
-            })
-        } else {
-            None
-        },
         capability_elevation: flags.capability_elevation,
         #[cfg(target_os = "linux")]
         seccomp_proxy_fallback,
     };
+    #[cfg(target_os = "windows")]
+    let config = exec_strategy::ExecConfig {
+        command: &command,
+        resolved_program: &resolved_program,
+        caps: &caps,
+        env_vars,
+        cap_file: cap_file.as_deref(),
+        current_dir: &current_dir,
+        session_sid: Some(exec_strategy::generate_session_sid()),
+    };
 
     match strategy {
         exec_strategy::ExecStrategy::Direct => {
-            exec_strategy::execute_direct(&config)?;
+            #[cfg(target_os = "windows")]
+            {
+                exec_strategy::execute_direct(&config, Some(flags.session.session_id.as_str()))?;
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                exec_strategy::execute_direct(&config)?;
+            }
             unreachable!("execute_direct only returns on error");
         }
         exec_strategy::ExecStrategy::Supervised => {
@@ -261,6 +285,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 config: &config,
                 caps: &caps,
                 command: &command,
+                capability_elevation: flags.capability_elevation,
                 session,
                 rollback,
                 trust,
@@ -295,13 +320,14 @@ fn write_capability_state_file(
             }
             Err(e) => {
                 error!(
-                    "Failed to write capability state file: {}. \
+                    "Failed to write capability state file: {}. 
                      Sandboxed processes will not be able to query their own capabilities using 'nono why --self'.",
                     e
                 );
                 if !silent {
                     eprintln!(
-                        "  WARNING: Capability state file could not be written.\n  \
+                        "  WARNING: Capability state file could not be written.
+  
                          The sandbox is active, but 'nono why --self' will not work inside this sandbox."
                     );
                 }
@@ -311,12 +337,13 @@ fn write_capability_state_file(
     }
 
     error!(
-        "Failed to allocate a unique capability state file after repeated collisions. \
+        "Failed to allocate a unique capability state file after repeated collisions. 
          Sandboxed processes will not be able to query their own capabilities using 'nono why --self'."
     );
     if !silent {
         eprintln!(
-            "  WARNING: Capability state file could not be written.\n  \
+            "  WARNING: Capability state file could not be written.
+  
              The sandbox is active, but 'nono why --self' will not work inside this sandbox."
         );
     }
@@ -325,7 +352,7 @@ fn write_capability_state_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{recommended_builtin_profile, should_apply_startup_timeout};
+    use super::recommended_builtin_profile;
     use std::path::Path;
 
     #[test]
@@ -343,16 +370,5 @@ mod tests {
     #[test]
     fn recommended_builtin_profile_ignores_unknown_commands() {
         assert_eq!(recommended_builtin_profile(Path::new("/usr/bin/env")), None);
-    }
-
-    #[test]
-    fn startup_timeout_applies_only_to_bare_interactive_profiled_tools() {
-        let no_args: [&str; 0] = [];
-        assert!(should_apply_startup_timeout(Some("claude-code"), &no_args));
-        assert!(!should_apply_startup_timeout(
-            Some("claude-code"),
-            &["--version"]
-        ));
-        assert!(!should_apply_startup_timeout(None, &no_args));
     }
 }

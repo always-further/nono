@@ -31,7 +31,7 @@
 
 nono wraps any AI agent or process in a kernel-isolated sandbox in seconds. No hypervisor. No infrastructure required. A single binary, zero added latency, and flexible enough to fit a solo developer's workflow or a fleet of agents running at scale in production.
 
-**Platform support:** macOS, Linux, and [WSL2](https://nono.sh/docs/cli/internals/wsl2). Native Windows coming soon.
+**Platform support:** macOS, Linux, [WSL2](https://nono.sh/docs/cli/internals/wsl2), and the Windows native CLI are supported today. Windows native builds support a real restricted-execution command surface for setup, dry-run, direct execution, blocked-network, and selected supervised flows. Live `nono shell` and `nono wrap` remain intentionally unavailable on Windows; use their `--dry-run` forms to inspect policy. See the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation) for the current Windows boundary.
 
 **Install:**
 ```bash
@@ -104,7 +104,7 @@ Also available as [Python](https://github.com/always-further/nono-py) , [TypeScr
 | **Snapshots** | Content-addressable rollback with SHA-256 dedup and Merkle tree integrity. |
 | **Policy profiles** | Pre-built profiles for popular agents and use cases. Custom profile builder for your own needs. |
 | **Audit logs** | Verifiable logs of all agent actions, with optional remote upload and monitoring. |
-| **Cross-platform** | Support for macOS, Linux, and WSL2. Native Windows support in planning. |
+| **Cross-platform** | Support for macOS, Linux, and WSL2. Native Windows CLI support. |
 | **Multiplexing** | Run multiple agents in parallel with separate sandboxes. Attach/detach to long-running agents. |
 | **Runs anywhere** | Local CLI, CI pipelines, Containers / Kubernetes, cloud VMs, microVMs. |
 

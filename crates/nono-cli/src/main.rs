@@ -10,6 +10,10 @@ mod cli_bootstrap;
 mod command_runtime;
 mod config;
 mod credential_runtime;
+#[cfg(not(target_os = "windows"))]
+mod exec_strategy;
+#[cfg(target_os = "windows")]
+#[path = "exec_strategy_windows/mod.rs"]
 mod exec_strategy;
 mod execution_runtime;
 mod hooks;
@@ -18,6 +22,10 @@ mod launch_runtime;
 mod learn;
 mod learn_runtime;
 mod network_policy;
+#[cfg(not(target_os = "windows"))]
+mod open_url_runtime;
+#[cfg(target_os = "windows")]
+#[path = "open_url_runtime_windows.rs"]
 mod open_url_runtime;
 mod output;
 mod policy;
@@ -27,6 +35,10 @@ mod profile_cmd;
 mod profile_runtime;
 mod protected_paths;
 mod proxy_runtime;
+#[cfg(not(target_os = "windows"))]
+mod pty_proxy;
+#[cfg(target_os = "windows")]
+#[path = "pty_proxy_windows.rs"]
 mod pty_proxy;
 mod query_ext;
 mod rollback_commands;
@@ -38,18 +50,32 @@ mod sandbox_log;
 mod sandbox_prepare;
 mod sandbox_state;
 mod session;
+#[cfg(not(target_os = "windows"))]
+mod session_commands;
+#[cfg(target_os = "windows")]
+#[path = "session_commands_windows.rs"]
 mod session_commands;
 mod setup;
 mod startup_runtime;
 mod supervised_runtime;
+#[cfg(not(target_os = "windows"))]
+mod terminal_approval;
+#[cfg(target_os = "windows")]
+#[path = "terminal_approval_windows.rs"]
 mod terminal_approval;
 mod theme;
 mod trust_cmd;
+#[cfg(not(target_os = "windows"))]
+mod trust_intercept;
+#[cfg(target_os = "windows")]
+#[path = "trust_intercept_windows.rs"]
 mod trust_intercept;
 mod trust_keystore;
 mod trust_scan;
 mod update_check;
 mod why_runtime;
+#[cfg(target_os = "windows")]
+mod windows_wfp_contract;
 
 #[cfg(test)]
 mod test_env;
@@ -387,10 +413,14 @@ mod tests {
     #[test]
     fn test_execution_start_dir_falls_back_to_root_when_not_covered() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().canonicalize().expect("canonicalize");
         let caps = CapabilitySet::new();
 
         let start_dir = execution_start_dir(dir.path(), &caps).expect("start dir");
 
+        #[cfg(target_os = "windows")]
+        assert_eq!(start_dir, canonical);
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(start_dir, std::path::PathBuf::from("/"));
     }
 

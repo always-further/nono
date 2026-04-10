@@ -2,7 +2,9 @@
 //!
 //! These types define the protocol between a sandboxed child process and its
 //! unsandboxed supervisor parent. The child sends [`CapabilityRequest`]s over
-//! a Unix socket, and the supervisor responds with [`ApprovalDecision`]s.
+//! a supervisor transport, and the supervisor responds with
+//! [`ApprovalDecision`]s plus explicit resource-transfer metadata when a
+//! request is granted.
 
 use crate::capability::AccessMode;
 use serde::{Deserialize, Serialize};
@@ -32,7 +34,8 @@ pub struct CapabilityRequest {
 /// The supervisor's response to a [`CapabilityRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApprovalDecision {
-    /// Access was granted. The supervisor will pass an fd via `SCM_RIGHTS`.
+    /// Access was granted. Resource-transfer details, if any, are carried by
+    /// [`SupervisorResponse::Decision`].
     Granted,
     /// Access was denied with a reason.
     Denied {
@@ -41,6 +44,63 @@ pub enum ApprovalDecision {
     },
     /// The approval request timed out without a decision.
     Timeout,
+}
+
+/// The kind of resource the supervisor transferred for a granted request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GrantedResourceKind {
+    /// A filesystem-backed file handle or descriptor.
+    File,
+}
+
+/// The transport mechanism used to deliver a granted resource to the child.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ResourceTransferKind {
+    /// The resource arrives out-of-band via Unix `SCM_RIGHTS`.
+    SidebandFileDescriptor,
+    /// The resource is an already-duplicated Windows handle carried inline.
+    DuplicatedWindowsHandle,
+}
+
+/// Metadata describing how a granted resource reaches the sandboxed child.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceGrant {
+    /// Which transfer mechanism the child must expect.
+    pub transfer: ResourceTransferKind,
+    /// What kind of resource was granted.
+    pub resource_kind: GrantedResourceKind,
+    /// Which access mode the supervisor opened or brokered.
+    pub access: AccessMode,
+    /// Raw Windows handle value when `transfer` is
+    /// [`ResourceTransferKind::DuplicatedWindowsHandle`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_handle: Option<u64>,
+}
+
+impl ResourceGrant {
+    /// Build Unix-side metadata for a granted file descriptor transferred via
+    /// `SCM_RIGHTS`.
+    #[must_use]
+    pub fn sideband_file_descriptor(access: AccessMode) -> Self {
+        Self {
+            transfer: ResourceTransferKind::SidebandFileDescriptor,
+            resource_kind: GrantedResourceKind::File,
+            access,
+            raw_handle: None,
+        }
+    }
+
+    /// Build Windows-side metadata for a duplicated file handle transferred
+    /// inline over the supervisor transport.
+    #[must_use]
+    pub fn duplicated_windows_file_handle(raw_handle: u64, access: AccessMode) -> Self {
+        Self {
+            transfer: ResourceTransferKind::DuplicatedWindowsHandle,
+            resource_kind: GrantedResourceKind::File,
+            access,
+            raw_handle: Some(raw_handle),
+        }
+    }
 }
 
 impl ApprovalDecision {
@@ -100,6 +160,16 @@ pub enum SupervisorMessage {
     Request(CapabilityRequest),
     /// A request to open a URL in the user's browser (e.g., OAuth2 login)
     OpenUrl(UrlOpenRequest),
+    /// A request to terminate the supervisor and its child (Windows only)
+    Terminate {
+        /// Session identifier for verification
+        session_id: String,
+    },
+    /// A request to detach the CLI from the supervisor (Windows only)
+    Detach {
+        /// Session identifier for verification
+        session_id: String,
+    },
 }
 
 /// IPC message envelope sent from supervisor to child.
@@ -111,6 +181,8 @@ pub enum SupervisorResponse {
         request_id: String,
         /// The approval decision
         decision: ApprovalDecision,
+        /// Resource-transfer metadata when the supervisor granted access.
+        grant: Option<ResourceGrant>,
     },
     /// Response to a URL open request
     UrlOpened {

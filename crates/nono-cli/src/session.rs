@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", allow(dead_code))]
+
 //! Session registry for the nono capability runtime.
 //!
 //! Each `nono run` or `nono shell` invocation in supervised mode creates a session
@@ -11,6 +13,16 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
+
+#[cfg(target_os = "windows")]
+use crate::exec_strategy::JOB_OBJECT_QUERY;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Foundation::CloseHandle;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::JobObjects::{
+    JobObjectBasicProcessIdList, OpenJobObjectW, QueryInformationJobObject,
+    JOBOBJECT_BASIC_PROCESS_ID_LIST,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -34,6 +46,7 @@ pub struct SessionRecord {
     pub profile: Option<String>,
     pub workdir: PathBuf,
     pub network: String,
+    pub job_object_name: Option<String>,
     pub rollback_session: Option<String>,
 }
 
@@ -184,21 +197,139 @@ fn reconcile_session_record(record: &mut SessionRecord) -> bool {
     let original_status = record.status.clone();
     let original_exit_code = record.exit_code;
 
-    if !is_process_alive(record.supervisor_pid, record.started_epoch) {
-        record.status = SessionStatus::Exited;
-        record.attachment = SessionAttachment::Detached;
-        if record.exit_code.is_none() {
-            record.exit_code = Some(-1);
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(ref job_name) = record.job_object_name {
+            if !is_job_object_active(job_name) {
+                record.status = SessionStatus::Exited;
+                if record.exit_code.is_none() {
+                    record.exit_code = Some(-1);
+                }
+            } else {
+                record.status = SessionStatus::Running;
+                record.exit_code = None;
+            }
+        } else {
+            // Fallback for sessions without job objects
+            if !is_process_alive(record.supervisor_pid, record.started_epoch) {
+                record.status = SessionStatus::Exited;
+                if record.exit_code.is_none() {
+                    record.exit_code = Some(-1);
+                }
+            } else {
+                record.status = SessionStatus::Running;
+                record.exit_code = None;
+            }
         }
-    } else if is_process_stopped(record.supervisor_pid) {
-        record.status = SessionStatus::Paused;
-        record.exit_code = None;
-    } else {
-        record.status = SessionStatus::Running;
-        record.exit_code = None;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if !is_process_alive(record.supervisor_pid, record.started_epoch) {
+            record.status = SessionStatus::Exited;
+            record.attachment = SessionAttachment::Detached;
+            if record.exit_code.is_none() {
+                record.exit_code = Some(-1);
+            }
+        } else if is_process_stopped(record.supervisor_pid) {
+            record.status = SessionStatus::Paused;
+            record.exit_code = None;
+        } else {
+            record.status = SessionStatus::Running;
+            record.exit_code = None;
+        }
     }
 
     record.status != original_status || record.exit_code != original_exit_code
+}
+
+#[cfg(target_os = "windows")]
+fn is_job_object_active(name: &str) -> bool {
+    let mut name_u16: Vec<u16> = name.encode_utf16().collect();
+    name_u16.push(0);
+
+    let h_job = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, name_u16.as_ptr()) };
+    if h_job.is_null() {
+        return false;
+    }
+
+    let mut basic_list: JOBOBJECT_BASIC_PROCESS_ID_LIST = unsafe { std::mem::zeroed() };
+    let mut returned_len = 0;
+
+    unsafe {
+        QueryInformationJobObject(
+            h_job,
+            JobObjectBasicProcessIdList,
+            &mut basic_list as *mut _ as *mut _,
+            std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() as u32,
+            &mut returned_len,
+        );
+        CloseHandle(h_job);
+    }
+
+    basic_list.NumberOfAssignedProcesses > 0
+}
+
+#[cfg(target_os = "windows")]
+pub fn get_job_pids(name: &str) -> Vec<u32> {
+    let mut name_u16: Vec<u16> = name.encode_utf16().collect();
+    name_u16.push(0);
+
+    let h_job = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, name_u16.as_ptr()) };
+    if h_job.is_null() {
+        return vec![];
+    }
+
+    let mut basic_list: JOBOBJECT_BASIC_PROCESS_ID_LIST = unsafe { std::mem::zeroed() };
+    let mut returned_len = 0;
+
+    unsafe {
+        QueryInformationJobObject(
+            h_job,
+            JobObjectBasicProcessIdList,
+            &mut basic_list as *mut _ as *mut _,
+            std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() as u32,
+            &mut returned_len,
+        );
+    }
+
+    if basic_list.NumberOfAssignedProcesses == 0 {
+        unsafe { CloseHandle(h_job) };
+        return vec![];
+    }
+
+    // Allocate correctly sized buffer for JOBOBJECT_BASIC_PROCESS_ID_LIST
+    // The structure has a header and an array of ProcessIdList[1]
+    // We need space for NumberOfAssignedProcesses PIDs.
+    let size = std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
+        + (basic_list.NumberOfAssignedProcesses as usize - 1) * std::mem::size_of::<usize>();
+    let mut buffer = vec![0u8; size];
+    let list_ptr = buffer.as_mut_ptr() as *mut JOBOBJECT_BASIC_PROCESS_ID_LIST;
+    unsafe { (*list_ptr).NumberOfAssignedProcesses = basic_list.NumberOfAssignedProcesses };
+
+    let ok = unsafe {
+        QueryInformationJobObject(
+            h_job,
+            JobObjectBasicProcessIdList,
+            list_ptr as *mut _,
+            size as u32,
+            &mut returned_len,
+        )
+    };
+
+    unsafe { CloseHandle(h_job) };
+
+    if ok == 0 {
+        return vec![];
+    }
+
+    let pids = unsafe {
+        std::slice::from_raw_parts(
+            (*list_ptr).ProcessIdList.as_ptr(),
+            (*list_ptr).NumberOfProcessIdsInList as usize,
+        )
+    };
+    pids.iter().map(|&pid| pid as u32).collect()
 }
 
 fn load_reconciled_session_file(path: &Path) -> Result<SessionRecord> {
@@ -497,15 +628,24 @@ enum ProcessLiveness {
 
 /// Check if a PID is currently running (signal 0 check).
 fn pid_liveness(pid: u32) -> ProcessLiveness {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
 
-    let nix_pid = Pid::from_raw(pid as i32);
-    match kill(nix_pid, None) {
-        Ok(()) => ProcessLiveness::Running,
-        Err(nix::errno::Errno::ESRCH) => ProcessLiveness::NotRunning,
-        Err(nix::errno::Errno::EPERM) => ProcessLiveness::RunningNoPermission,
-        _ => ProcessLiveness::Running,
+        let nix_pid = Pid::from_raw(pid as i32);
+        match kill(nix_pid, None) {
+            Ok(()) => ProcessLiveness::Running,
+            Err(nix::errno::Errno::ESRCH) => ProcessLiveness::NotRunning,
+            Err(nix::errno::Errno::EPERM) => ProcessLiveness::RunningNoPermission,
+            _ => ProcessLiveness::Running,
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        ProcessLiveness::NotRunning
     }
 }
 
@@ -553,6 +693,11 @@ pub fn get_process_start_time(pid: u32) -> Option<u64> {
     Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn get_process_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Get the current process's start time (for recording in session state).
 pub fn current_process_start_epoch() -> u64 {
     get_process_start_time(std::process::id()).unwrap_or(0)
@@ -591,6 +736,11 @@ pub(crate) fn session_socket_path(session_id: &str) -> Result<PathBuf> {
     Ok(ensure_sessions_dir()?.join(format!("{session_id}.sock")))
 }
 
+pub fn session_log_path(session_id: &str) -> Result<PathBuf> {
+    validate_session_id(session_id)?;
+    Ok(ensure_sessions_dir()?.join(format!("{session_id}.log")))
+}
+
 pub(crate) fn session_events_path(session_id: &str) -> Result<PathBuf> {
     validate_session_id(session_id)?;
     Ok(sessions_dir()?.join(format!("{session_id}.events.ndjson")))
@@ -603,6 +753,21 @@ fn create_temp_session_file(path: &Path) -> Result<(PathBuf, File)> {
             path.display()
         ))
     })?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(|e| NonoError::ConfigWrite {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(parent, perms).map_err(|e| NonoError::ConfigWrite {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+    }
     validate_sessions_dir(parent)?;
 
     for _ in 0..16 {
@@ -762,12 +927,27 @@ fn load_session_file(path: &Path) -> Result<SessionRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "windows"))]
     use tempfile::tempdir;
+    use tempfile::TempDir;
 
     #[cfg(unix)]
     fn make_private_dir(path: &Path) {
         let perms = std::fs::Permissions::from_mode(0o700);
         std::fs::set_permissions(path, perms).expect("chmod 700");
+    }
+
+    #[cfg(target_os = "windows")]
+    fn temp_session_test_dir(prefix: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("tempdir")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn temp_session_test_dir(_prefix: &str) -> TempDir {
+        tempdir().expect("tempdir")
     }
 
     #[test]
@@ -786,6 +966,7 @@ mod tests {
             profile: Some("developer".to_string()),
             workdir: PathBuf::from("/home/user/project"),
             network: "allowed".to_string(),
+            job_object_name: None,
             rollback_session: None,
         };
 
@@ -809,7 +990,7 @@ mod tests {
 
     #[test]
     fn test_write_and_load_session_file() {
-        let dir = tempdir().expect("tempdir");
+        let dir = temp_session_test_dir("nono-session-write-load-");
         let path = dir.path().join("test.json");
 
         let record = SessionRecord {
@@ -826,6 +1007,7 @@ mod tests {
             profile: None,
             workdir: PathBuf::from("/tmp"),
             network: "blocked".to_string(),
+            job_object_name: None,
             rollback_session: None,
         };
 
@@ -838,7 +1020,7 @@ mod tests {
 
     #[test]
     fn test_update_session_file() {
-        let dir = tempdir().expect("tempdir");
+        let dir = temp_session_test_dir("nono-session-update-");
         #[cfg(unix)]
         make_private_dir(dir.path());
         let path = dir.path().join("update.json");
@@ -857,6 +1039,7 @@ mod tests {
             profile: None,
             workdir: PathBuf::from("/tmp"),
             network: "allowed".to_string(),
+            job_object_name: None,
             rollback_session: None,
         };
 
@@ -880,7 +1063,7 @@ mod tests {
 
     #[test]
     fn test_session_guard_drop_marks_exited() {
-        let dir = tempdir().expect("tempdir");
+        let dir = temp_session_test_dir("nono-session-guard-");
         #[cfg(unix)]
         make_private_dir(dir.path());
         let path = dir.path().join("sessions");
@@ -904,6 +1087,7 @@ mod tests {
             profile: None,
             workdir: PathBuf::from("/tmp"),
             network: "allowed".to_string(),
+            job_object_name: None,
             rollback_session: None,
         };
 
@@ -920,6 +1104,7 @@ mod tests {
         assert_eq!(loaded.exit_code, Some(-1));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn test_get_current_process_start_time() {
         let start = get_process_start_time(std::process::id());
@@ -962,7 +1147,7 @@ mod tests {
 
     #[test]
     fn test_load_session_prefix_match() {
-        let dir = tempdir().expect("tempdir");
+        let dir = temp_session_test_dir("nono-session-prefix-");
         let sessions_path = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions_path).expect("mkdir");
 
@@ -980,6 +1165,7 @@ mod tests {
             profile: None,
             workdir: PathBuf::from("/tmp"),
             network: "allowed".to_string(),
+            job_object_name: None,
             rollback_session: None,
         };
 

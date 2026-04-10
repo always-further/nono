@@ -1,0 +1,121 @@
+---
+title: Windows Supervisor IPC
+description: Initial Windows-safe supervisor communication design based on named pipes
+---
+
+# Windows Supervisor IPC
+
+WIN-401 selects **per-session duplex Windows named pipes** as the initial supervisor
+communication mechanism for Windows.
+
+This is the first Windows-safe replacement for the current Unix supervisor model.
+It gives the project a concrete control channel that does not depend on Unix
+domain sockets, `fork()`, or `SCM_RIGHTS`.
+
+## Decision
+
+Use a **single duplex named pipe per supervisor session** as the primary control
+channel between the untrusted child and the unsandboxed supervisor.
+
+The supervisor will:
+
+- create a uniquely named pipe before launching the child
+- restrict access to the invoking user/session
+- pass the pipe name and a random session token to the child at startup
+- accept framed request/response messages over that pipe
+
+The child will:
+
+- connect to the named pipe during startup
+- use it for capability requests, URL-open requests, audit/control messages, and
+  future supervisor coordination
+
+## Why Named Pipes
+
+Named pipes are the closest Windows-native fit for the role currently played by
+Unix sockets:
+
+- they are local IPC primitives supported directly by Windows
+- they work cleanly with `CreateProcess`-based startup
+- they support bidirectional byte-stream style communication
+- they can be secured with Windows ACLs instead of filesystem socket
+  permissions
+- they do not require a network listener or external service
+
+This keeps the Windows path local, explicit, and consistent with the existing
+supervisor trust model.
+
+## What Replaces What
+
+The Unix implementation assumes:
+
+- `socketpair()` or Unix socket connection setup
+- a raw inherited fd such as `NONO_SUPERVISOR_FD`
+- `SCM_RIGHTS` ancillary data to pass opened fds back to the child
+- `fork()`-oriented parent/child startup sequencing
+
+The Windows design replaces those assumptions as follows:
+
+| Unix assumption | Windows replacement |
+| --- | --- |
+| Unix socket / `socketpair()` | per-session duplex named pipe |
+| inherited raw fd (`NONO_SUPERVISOR_FD`) | pipe name + session token passed at process launch |
+| `SCM_RIGHTS` fd passing | `DuplicateHandle` or explicitly inherited `HANDLE`s |
+| `fork()` setup model | `CreateProcess` startup with explicit handle/argument wiring |
+
+The important shift is that Windows supervisor coordination becomes
+**name-and-token based for the control plane** and **handle-duplication based for
+resource transfer**, rather than Unix-fd based.
+
+## Handle Passing Model
+
+Named pipes solve the control channel, but they do not replace Unix fd passing
+by themselves.
+
+When the Windows supervisor later needs to grant access to an already-opened
+resource, it should:
+
+1. open the resource in the supervisor
+2. duplicate the resulting `HANDLE` into the child process with
+   `DuplicateHandle`
+3. send a response over the named pipe describing the duplicated handle and its
+   intended access semantics
+
+This is the Windows equivalent of the Unix "supervisor opens the resource and
+the child receives a usable descriptor" model. It preserves the same core
+security property: the supervisor, not the untrusted child, performs the actual
+privileged open.
+
+## Security Notes
+
+- The pipe name must be unpredictable per session.
+- The supervisor must validate that the connecting child presents the expected
+  session token before serving requests.
+- The pipe should be ACL-restricted to the invoking user/session to avoid
+  cross-user access.
+- Errors remain fail-closed: if pipe setup, authentication, or handle
+  duplication fails, the supervisor denies the request.
+- The child should never be told to "open it yourself later" after approval;
+  approvals must continue to resolve to supervisor-opened resources.
+
+## Scope for Initial Implementation
+
+This decision only chooses the Windows IPC foundation. It does **not** claim
+that full Windows supervised execution or sandbox enforcement already exists.
+
+Current implementation now provides:
+
+- a `SupervisorSocket` replacement backed by named pipes
+- Windows-safe framing and request/response transport
+- process-launch wiring for pipe name and child process handle ownership
+- explicit resource-grant metadata in supervisor responses
+- Windows `DuplicateHandle` helper plumbing for brokered file handles
+- a test-covered parent-side request handler that records audit entries, rejects duplicate request IDs, denies safely on backend/open failure, and brokers approved file handles into the target process
+
+Still intentionally deferred until later supervisor work:
+
+- live runtime capability expansion over that transport
+- child-side consumption of brokered handles for active approval flows
+- broader resource kinds beyond file-handle brokering
+
+Later stories can then layer real supervisor behavior on top of that transport.

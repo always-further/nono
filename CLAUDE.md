@@ -189,3 +189,182 @@ make fmt             # Auto-format
 - [DESIGN-undo-system.md](proj/DESIGN-undo-system.md) - Content-addressable snapshot system
 - [Landlock docs](https://landlock.io/)
 - [macOS Sandbox Guide](https://developer.apple.com/library/archive/documentation/Security/Conceptual/AppSandboxDesignGuide/)
+
+<!-- GSD:project-start source:PROJECT.md -->
+## Project
+
+**nono - Windows Parity Milestone**
+
+nono is a capability-based sandboxing system for running untrusted AI agents with OS-enforced isolation. This milestone focuses on bringing the Windows implementation to functional parity with Linux and macOS, specifically enabling supervisor capabilities for long-running agents and robust, kernel-level network enforcement via WFP.
+
+**Core Value:** Windows security must be as structurally impossible and feature-complete as Unix platforms, ensuring the dangerous bits are kernel-enforced without compromising the supervisor-led security model.
+
+### Constraints
+
+- **Security**: Fail secure on any unsupported shape â€” never silently degrade.
+- **Compatibility**: Must support Windows 10/11 (modern Job Objects and WFP).
+- **Performance**: Zero startup latency must be maintained for the Windows backend.
+<!-- GSD:project-end -->
+
+<!-- GSD:stack-start source:codebase/STACK.md -->
+## Technology Stack
+
+## Languages
+- Rust 1.77 (Edition 2021) - Core library, CLI, and proxy implementation.
+- Shell (Bash/Sh) - Integration tests and build scripts (`scripts/test-linux.sh`, `tests/run_integration_tests.sh`).
+- PowerShell - Windows-specific build and test automation (`scripts/build-windows-msi.ps1`, `tests/windows-test-harness.ps1`).
+- C - FFI bindings for the core library (`bindings/c/src/lib.rs`).
+## Runtime
+- Native binary (compiled for Linux, macOS, Windows).
+- Minimum Rust version: 1.77 (bumped in Phase 04 plan 02 to support safer Windows service/WFP handle bindings via windows-sys 0.59).
+- Cargo - Rust's package manager.
+- Lockfile: `Cargo.lock` present.
+## Frameworks
+- `nono` - Internal capability-based sandboxing library.
+- Rust's built-in test runner.
+- `tempfile` - Temporary file management for tests.
+- `proptest` - Property-based testing in `nono-cli`.
+- `jsonschema` - Schema validation for manifests and capability files.
+- `cbindgen` - C header generation from Rust code.
+- `typify` - Rust type generation from JSON schema.
+- `prettyplease` - Code formatting for generated code.
+## Key Dependencies
+- `tokio` (v1) - Asynchronous runtime for CLI and proxy.
+- `hyper` (v1) - HTTP implementation for network filtering and update checks.
+- `landlock` (v0.4) - Linux Landlock LSM bindings.
+- `windows-sys` (v0.59) - Low-level Windows API bindings.
+- `sigstore-rs` (`sigstore-verify`, `sigstore-sign`) - Attestation and verification.
+- `serde` / `serde_json` / `toml` - Serialization and configuration handling.
+- `tracing` / `tracing-subscriber` - Structured logging and diagnostics.
+- `clap` (v4) - CLI argument parsing.
+- `keyring` (v3) - Cross-platform system keystore access.
+- `zeroize` - Secure memory clearing for sensitive data.
+## Configuration
+- Configured via environment variables (e.g., `NONO_LOG`, `NONO_NO_UPDATE_CHECK`, `NONO_UPDATE_URL`).
+- Supports `env://` URI scheme for credentials in `crates/nono/src/keystore.rs`.
+- `Cargo.toml` (workspace and crate-level).
+- `Makefile` for high-level build orchestration.
+- `Cross.toml` for cross-compilation.
+## Platform Requirements
+- Rust toolchain (1.74+).
+- Platform-specific headers (libc, etc.).
+- Linux: Kernel with Landlock support (5.13+).
+- macOS: Recent macOS version (Seatbelt support).
+- Windows: Windows 10/11 (WFP and Job Objects support).
+- Standalone binaries for Linux (x86_64, aarch64), macOS (Intel/Apple Silicon), and Windows (x64).
+<!-- GSD:stack-end -->
+
+<!-- GSD:conventions-start source:CONVENTIONS.md -->
+## Conventions
+
+## Naming Patterns
+- Snake case: `capability.rs`, `net_filter.rs`, `cli_bootstrap.rs`.
+- Platform-specific suffixes: `pty_proxy_windows.rs`, `session_commands_windows.rs`.
+- Snake case: `allow_path()`, `block_network()`, `init_tracing()`.
+- Factory methods: `new()`, `new_dir()`, `new_file()`.
+- Conversion methods: `from_json()`, `to_json()`.
+- Snake case: `caps`, `support`, `legacy_network_warnings`.
+- Pascal case for Structs and Enums: `CapabilitySet`, `Sandbox`, `NonoError`, `AccessMode`.
+- Type aliases: `pub type Result<T> = std::result::Result<T, NonoError>;`.
+## Code Style
+- `rustfmt`: Standard Rust formatting is enforced.
+- Config: Managed by `cargo fmt --all`. No custom `.rustfmt.toml` detected, implying default settings.
+- `clippy`: Used for static analysis.
+- Strictness: CI runs with `-D warnings` (fail on any warning).
+- Specific Rules: `-D clippy::unwrap_used` is enforced to prevent panics in production code.
+- Exceptions: `#[allow(clippy::unwrap_used)]` is permitted in test modules and documentation examples.
+## Import Organization
+- Re-exports in `crates/nono/src/lib.rs` provide a flat public API for the core library.
+## Error Handling
+- Custom Error Enum: `NonoError` defined in `crates/nono/src/error.rs` using `thiserror`.
+- Error Variants: Descriptive names with contextual data (e.g., `PathNotFound(PathBuf)`).
+- Result Alias: `Result<T>` used throughout the codebase for brevity.
+- Error Propagation: Use of the `?` operator is standard.
+- User-facing errors: CLI commands return `nono::Result<()>` to main.
+## Logging
+- Initialization: Centralized in `crates/nono-cli/src/cli_bootstrap.rs` via `init_tracing()`.
+- Verbosity: Controlled by CLI flags (`-v`, `-vv`, `-vvv`) or `RUST_LOG` environment variable.
+- Silent Mode: `--silent` suppresses all logs (sets level to `off`).
+- File Logging: Supported via `--log-file` path.
+- Macro Usage: `error!`, `warn!`, `info!`, `debug!`, `trace!` from the `tracing` crate.
+## Comments
+- Public API documentation is mandatory.
+- Complex logic within functions.
+- Platform-specific implementation details (e.g., Landlock vs Seatbelt).
+- Rust doc comments: `///` for items, `//!` for module/crate level documentation.
+- Examples: Documentation often includes `fn main() -> nono::Result<()>` examples in `no_run` blocks.
+## Function Design
+## Module Design
+- Explicit re-exports in `lib.rs`.
+- Use of `pub(crate)` for internal logic not intended for the public API.
+- `lib.rs` acts as the primary entry point for the library.
+- `mod.rs` (or file-based modules) used to organize sub-modules.
+<!-- GSD:conventions-end -->
+
+<!-- GSD:architecture-start source:ARCHITECTURE.md -->
+## Architecture
+
+## Pattern Overview
+- **Platform-Agnostic Interface**: A unified library API (`nono`) that abstracts over platform-specific sandboxing mechanisms: Landlock (Linux), Seatbelt (macOS), and WFP/AppContainer concepts (Windows).
+- **Supervised Execution**: A multi-process model where an unsandboxed supervisor process (`nono-cli`) monitors and mediates a sandboxed child process.
+- **Explicit Capability Grants**: Security is based on positive allow-lists (capabilities) defined in a `CapabilitySet`.
+- **Network Proxying & Credential Injection**: Outbound network traffic is intercepted by a local proxy (`nono-proxy`) to enforce domain-level filtering and securely inject API credentials without exposing them to the sandboxed environment.
+- **State Integrity with Rollback**: Support for filesystem snapshots and Merkle-tree-based integrity verification to allow "undoing" changes made during a session.
+## Layers
+- Purpose: Provides low-level sandboxing primitives, capability models, and integrity engines.
+- Location: `crates/nono/src/`
+- Contains: Platform drivers (`sandbox/`), supervisor IPC primitives (`supervisor/`), and rollback logic (`undo/`).
+- Depends on: `libc`, `nix` (non-Windows), `windows-sys` (Windows).
+- Used by: `nono-cli`, `bindings/c`.
+- Purpose: Entry point for users and agents; manages session lifecycle, policies, and UI.
+- Location: `crates/nono-cli/src/`
+- Contains: Execution strategies (`exec_strategy/`), command runtimes (`..._runtime.rs`), and profile management (`profile/`).
+- Depends on: `nono`, `nono-proxy`, `clap`, `tracing`.
+- Purpose: Intercepts and filters network traffic from sandboxed processes.
+- Location: `crates/nono-proxy/src/`
+- Contains: Proxy server (`server.rs`), credential injection (`credential.rs`), and host filtering (`filter.rs`).
+- Depends on: `tokio`, `h2`, `rustls`.
+- Used by: `nono-cli`.
+- Purpose: Exposes the core library to C/C++ and other languages.
+- Location: `bindings/c/`
+- Contains: FFI wrappers and header generation (`cbindgen`).
+## Data Flow
+## Key Abstractions
+- Purpose: Encapsulates the platform-specific logic for applying restrictions.
+- Examples: `crates/nono/src/sandbox/mod.rs`.
+- Pattern: Strategy Pattern.
+- Purpose: A portable representation of allowed resources.
+- Examples: `crates/nono/src/capability.rs`.
+- Purpose: Defines how the sandboxed process is launched and monitored.
+- Examples: `crates/nono-cli/src/exec_strategy.rs` (Unix), `crates/nono-cli/src/exec_strategy_windows/mod.rs` (Windows).
+## Entry Points
+- Location: `crates/nono-cli/src/main.rs`
+- Responsibilities: Bootstrap, logging, and dispatching to `app_runtime`.
+- Location: `crates/nono/src/lib.rs`
+- Responsibilities: Public interface for embedding sandboxing in other Rust apps.
+## Error Handling
+- `nono::NonoError`: Central error enum for the core library.
+- `nono_proxy::ProxyError`: Errors specific to network interception.
+- `DiagnosticFormatter`: Generates human-readable explanations for sandbox denials (`crates/nono/src/diagnostic.rs`).
+## Cross-Cutting Concerns
+<!-- GSD:architecture-end -->
+
+<!-- GSD:workflow-start source:GSD defaults -->
+## GSD Workflow Enforcement
+
+Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
+
+Use these entry points:
+- `/gsd:quick` for small fixes, doc updates, and ad-hoc tasks
+- `/gsd:debug` for investigation and bug fixing
+- `/gsd:execute-phase` for planned phase work
+
+Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
+<!-- GSD:workflow-end -->
+
+<!-- GSD:profile-start -->
+## Developer Profile
+
+> Profile not yet configured. Run `/gsd:profile-user` to generate your developer profile.
+> This section is managed by `generate-claude-profile` -- do not edit manually.
+<!-- GSD:profile-end -->

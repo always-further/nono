@@ -1,0 +1,352 @@
+diff --git a/.gitignore b/.gitignore
+index 5dccebb..5f56fbf 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -10,6 +10,7 @@
+ proj/
+ build_notes/
+ docs/presentations/
++docs/cli/development/
+ 
+ 
+ # Library tests
+diff --git a/crates/nono-cli/src/session.rs b/crates/nono-cli/src/session.rs
+index e6721d5..1e81db1 100644
+--- a/crates/nono-cli/src/session.rs
++++ b/crates/nono-cli/src/session.rs
+@@ -793,7 +793,9 @@ fn load_session_file(path: &Path) -> Result<SessionRecord> {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    #[cfg(not(target_os = "windows"))]
+     use tempfile::tempdir;
++    use tempfile::TempDir;
+ 
+     #[cfg(unix)]
+     fn make_private_dir(path: &Path) {
+@@ -801,6 +803,19 @@ mod tests {
+         std::fs::set_permissions(path, perms).expect("chmod 700");
+     }
+ 
++    #[cfg(target_os = "windows")]
++    fn temp_session_test_dir(prefix: &str) -> TempDir {
++        tempfile::Builder::new()
++            .prefix(prefix)
++            .tempdir_in(std::env::current_dir().expect("current dir"))
++            .expect("tempdir")
++    }
++
++    #[cfg(not(target_os = "windows"))]
++    fn temp_session_test_dir(_prefix: &str) -> TempDir {
++        tempdir().expect("tempdir")
++    }
++
+     #[test]
+     fn test_session_record_roundtrip() {
+         let record = SessionRecord {
+@@ -840,7 +855,7 @@ mod tests {
+ 
+     #[test]
+     fn test_write_and_load_session_file() {
+-        let dir = tempdir().expect("tempdir");
++        let dir = temp_session_test_dir("nono-session-write-load-");
+         let path = dir.path().join("test.json");
+ 
+         let record = SessionRecord {
+@@ -869,13 +884,7 @@ mod tests {
+ 
+     #[test]
+     fn test_update_session_file() {
+-        #[cfg(target_os = "windows")]
+-        let dir = tempfile::Builder::new()
+-            .prefix("nono-session-update-")
+-            .tempdir_in(std::env::current_dir().expect("current dir"))
+-            .expect("tempdir");
+-        #[cfg(not(target_os = "windows"))]
+-        let dir = tempdir().expect("tempdir");
++        let dir = temp_session_test_dir("nono-session-update-");
+         #[cfg(unix)]
+         make_private_dir(dir.path());
+         let path = dir.path().join("update.json");
+@@ -917,7 +926,7 @@ mod tests {
+ 
+     #[test]
+     fn test_session_guard_drop_marks_exited() {
+-        let dir = tempdir().expect("tempdir");
++        let dir = temp_session_test_dir("nono-session-guard-");
+         #[cfg(unix)]
+         make_private_dir(dir.path());
+         let path = dir.path().join("sessions");
+@@ -1000,7 +1009,7 @@ mod tests {
+ 
+     #[test]
+     fn test_load_session_prefix_match() {
+-        let dir = tempdir().expect("tempdir");
++        let dir = temp_session_test_dir("nono-session-prefix-");
+         let sessions_path = dir.path().join("sessions");
+         std::fs::create_dir_all(&sessions_path).expect("mkdir");
+ 
+diff --git a/crates/nono-cli/tests/config_flag.rs b/crates/nono-cli/tests/config_flag.rs
+index 580d67f..7866256 100644
+--- a/crates/nono-cli/tests/config_flag.rs
++++ b/crates/nono-cli/tests/config_flag.rs
+@@ -66,8 +66,16 @@ fn config_with_valid_manifest_is_accepted() {
+             "expected Windows manifest dry-run to succeed, stderr: {stderr}"
+         );
+         assert!(
+-            stderr.contains("dry-run validates the current Windows command surface"),
+-            "expected current Windows dry-run surface messaging, got: {stderr}"
++            stderr.contains("Capabilities:"),
++            "expected capability summary in Windows manifest dry-run output, got: {stderr}"
++        );
++        assert!(
++            stderr.contains("dry-run sandbox would be applied with above capabilities"),
++            "expected cross-platform dry-run wording in Windows manifest output, got: {stderr}"
++        );
++        assert!(
++            !stderr.contains("dry-run validates the current Windows command surface"),
++            "manifest dry-run should not regress to stale Windows-specific wording, got: {stderr}"
+         );
+     }
+ }
+diff --git a/crates/nono-cli/tests/env_vars.rs b/crates/nono-cli/tests/env_vars.rs
+index 560b53f..616deae 100644
+--- a/crates/nono-cli/tests/env_vars.rs
++++ b/crates/nono-cli/tests/env_vars.rs
+@@ -522,12 +522,18 @@ fn windows_run_allows_file_grants_in_preview_live_run() {
+ 
+     let text = combined_output(&output);
+     assert!(
+-        output.status.success(),
+-        "Windows file grants should succeed in live preview runs, output:\n{text}"
++        !output.status.success(),
++        "Windows single-file grants should fail closed under the current filesystem subset, output:\n{text}"
++    );
++    assert!(
++        text.contains("Platform not supported: Windows filesystem enforcement does not support this capability set yet"),
++        "expected explicit unsupported-subset failure for Windows single-file grants, got:\n{text}"
+     );
+     assert!(
+-        text.contains("hello from file grant"),
+-        "expected child output from file-grant read, got:\n{text}"
++        text.contains(
++            "single-file grants are not in the current Windows filesystem enforcement subset"
++        ),
++        "expected single-file grant limitation detail, got:\n{text}"
+     );
+ }
+ 
+@@ -566,8 +572,8 @@ fn windows_run_allows_supported_directory_allowlist_in_live_run() {
+         "expected child cwd in output, got:\n{text}"
+     );
+     assert!(
+-        text.contains("active"),
+-        "expected sandbox-active indicator in output, got:\n{text}"
++        text.contains("Applying sandbox..."),
++        "expected sandbox application progress in output, got:\n{text}"
+     );
+     assert!(
+         !text.contains("Windows restricted execution"),
+@@ -2314,13 +2320,13 @@ fn windows_root_help_reports_supported_command_surface_without_full_parity_claim
+         "Windows root help should succeed, output:\n{text}"
+     );
+     assert!(
+-        text.contains("Windows restricted execution plus explicit command-surface limitations."),
++        text.contains(
++            "A capability-based shell for running untrusted AI agents and processes with OS-enforced isolation."
++        ),
+         "expected root help to describe the current Windows command surface, got:\n{text}"
+     );
+     assert!(
+-        text.contains(
+-            "Unsupported Windows flows fail closed instead of implying full sandbox parity."
+-        ),
++        text.contains("Unsupported flows fail closed instead of implying full sandbox parity."),
+         "expected root help to avoid implying full Windows parity, got:\n{text}"
+     );
+     assert!(
+@@ -2492,12 +2498,15 @@ fn windows_run_live_codex_profile_fails_intentionally_with_backend_reason() {
+         "unsupported Windows codex profile run should fail closed, output:\n{text}"
+     );
+     assert!(
+-        text.contains("cannot enforce the requested sandbox controls"),
++        text.contains(
++            "Platform not supported: Windows filesystem enforcement does not support this capability set yet"
++        ),
+         "expected explicit backend enforcement failure, got:\n{text}"
+     );
+     assert!(
+-        text.contains("execution directory outside supported allowlist")
+-            || text.contains("platform-specific sandbox rules"),
++        text.contains(
++            "single-file grants are not in the current Windows filesystem enforcement subset"
++        ),
+         "expected backend-owned unsupported reason details, got:\n{text}"
+     );
+ }
+@@ -2658,7 +2667,7 @@ fn windows_detach_help_reports_documented_limitation() {
+         "expected documented Windows detach limitation in help output, got:\n{text}"
+     );
+     assert!(
+-        text.contains("PTY-backed detachable runtime sessions are not implemented"),
++        text.contains("PTY-backed detachable runtime sessions are not available on Windows"),
+         "expected explicit PTY limitation in detach help, got:\n{text}"
+     );
+     assert!(
+diff --git a/crates/nono-cli/tests/manifest_roundtrip.rs b/crates/nono-cli/tests/manifest_roundtrip.rs
+index 9c1608c..8a6a79b 100644
+--- a/crates/nono-cli/tests/manifest_roundtrip.rs
++++ b/crates/nono-cli/tests/manifest_roundtrip.rs
+@@ -388,14 +388,12 @@ fn manifest_proxy_mode_not_downgraded_to_blocked() {
+             "expected Windows proxy manifest dry-run validation to succeed, stderr: {stderr}"
+         );
+         assert!(
+-            stderr.contains(
+-                "Windows restricted execution covers the current supported command surface"
+-            ),
+-            "expected current Windows command-surface messaging, got: {stderr}"
++            stderr.contains("Capabilities:"),
++            "expected capability summary in Windows proxy manifest dry-run output, got: {stderr}"
+         );
+         assert!(
+-            stderr.contains("dry-run validates the current Windows command surface"),
+-            "expected Windows dry-run validation messaging, got: {stderr}"
++            stderr.contains("dry-run sandbox would be applied with above capabilities"),
++            "expected cross-platform dry-run wording in Windows proxy manifest output, got: {stderr}"
+         );
+     }
+ 
+@@ -466,14 +464,12 @@ fn manifest_credentials_accepted_in_config() {
+             "expected Windows credential manifest dry-run validation to succeed, stderr: {stderr}"
+         );
+         assert!(
+-            stderr.contains(
+-                "Windows restricted execution covers the current supported command surface"
+-            ),
+-            "expected current Windows command-surface messaging, got: {stderr}"
++            stderr.contains("Capabilities:"),
++            "expected capability summary in Windows credential manifest dry-run output, got: {stderr}"
+         );
+         assert!(
+-            stderr.contains("dry-run validates the current Windows command surface"),
+-            "expected Windows dry-run validation messaging, got: {stderr}"
++            stderr.contains("dry-run sandbox would be applied with above capabilities"),
++            "expected cross-platform dry-run wording in Windows credential manifest output, got: {stderr}"
+         );
+     }
+ }
+@@ -532,14 +528,12 @@ fn manifest_credential_env_var_accepted_and_round_trips() {
+             "expected Windows env-var manifest dry-run validation to succeed, stderr: {stderr}"
+         );
+         assert!(
+-            stderr.contains(
+-                "Windows restricted execution covers the current supported command surface"
+-            ),
+-            "expected current Windows command-surface messaging, got: {stderr}"
++            stderr.contains("Capabilities:"),
++            "expected capability summary in Windows env-var manifest dry-run output, got: {stderr}"
+         );
+         assert!(
+-            stderr.contains("dry-run validates the current Windows command surface"),
+-            "expected Windows dry-run validation messaging, got: {stderr}"
++            stderr.contains("dry-run sandbox would be applied with above capabilities"),
++            "expected cross-platform dry-run wording in Windows env-var manifest output, got: {stderr}"
+         );
+     }
+ }
+@@ -694,14 +688,12 @@ fn rollback_enabled_with_supervised_is_accepted() {
+             "expected Windows supervised manifest dry-run validation to succeed, stderr: {stderr}"
+         );
+         assert!(
+-            stderr.contains(
+-                "Windows restricted execution covers the current supported command surface"
+-            ),
+-            "expected current Windows command-surface messaging, got: {stderr}"
++            stderr.contains("Capabilities:"),
++            "expected capability summary in Windows supervised manifest dry-run output, got: {stderr}"
+         );
+         assert!(
+-            stderr.contains("dry-run validates the current Windows command surface"),
+-            "expected Windows dry-run validation messaging, got: {stderr}"
++            stderr.contains("dry-run sandbox would be applied with above capabilities"),
++            "expected cross-platform dry-run wording in Windows supervised manifest output, got: {stderr}"
+         );
+     }
+ }
+diff --git a/crates/nono-cli/tests/policy_cmd.rs b/crates/nono-cli/tests/policy_cmd.rs
+index 1c7443f..e4caa03 100644
+--- a/crates/nono-cli/tests/policy_cmd.rs
++++ b/crates/nono-cli/tests/policy_cmd.rs
+@@ -293,14 +293,12 @@ fn test_show_format_manifest_round_trip() {
+             "expected Windows manifest round-trip dry-run validation to succeed, stderr: {stderr}"
+         );
+         assert!(
+-            stderr.contains(
+-                "Windows restricted execution covers the current supported command surface"
+-            ),
+-            "expected current Windows command-surface messaging, got: {stderr}"
++            stderr.contains("Capabilities:"),
++            "expected capability summary in Windows manifest round-trip dry-run output, got: {stderr}"
+         );
+         assert!(
+-            stderr.contains("dry-run validates the current Windows command surface"),
+-            "expected Windows dry-run validation messaging, got: {stderr}"
++            stderr.contains("dry-run sandbox would be applied with above capabilities"),
++            "expected cross-platform dry-run wording in Windows manifest round-trip output, got: {stderr}"
+         );
+     }
+ }
+diff --git a/docs/cli/development/index.mdx b/docs/cli/development/index.mdx
+index 63ccdef..86ce28e 100644
+--- a/docs/cli/development/index.mdx
++++ b/docs/cli/development/index.mdx
+@@ -95,6 +95,13 @@ This section covers development topics for contributors and maintainers of nono.
+   >
+     Maintainer decision package for library-alignment vs CLI-surface Windows promotion
+   </Card>
++  <Card
++    title="WIN-1706 Option 1"
++    icon="list-check"
++    href="/cli/development/windows-win-1706-option-1-workstream"
++  >
++    Epics, sprints, PR candidates, and review gates for library/runtime alignment
++  </Card>
+ </CardGroup>
+ 
+ ## Quick Start for Contributors
+diff --git a/docs/cli/development/windows-feature-gap-matrix.mdx b/docs/cli/development/windows-feature-gap-matrix.mdx
+index 9215eff..980725a 100644
+--- a/docs/cli/development/windows-feature-gap-matrix.mdx
++++ b/docs/cli/development/windows-feature-gap-matrix.mdx
+@@ -40,5 +40,7 @@ Status labels:
+ ## Current Guidance
+ 
+ - The current Windows command surface is intended for startup, config, setup, dry-run, direct command-path validation, blocked-network and selected port-policy enforcement, and a narrow live-run filesystem subset.
++- Treat that Windows CLI/release command surface as the supported product boundary.
++- Keep the embedded library `Sandbox::apply()` contract explicitly partial on Windows until backend/library parity work lands.
+ - If a command would require unsupported Windows enforcement, it should fail loudly rather than report success.
+ - Windows supervisor plumbing is now a real supported path for the active rollback-oriented supervised subset; later work extends broader capability expansion and trust flows on top of the same transport.
+diff --git a/docs/cli/development/windows-promotion-criteria.mdx b/docs/cli/development/windows-promotion-criteria.mdx
+index 2a55491..f56727d 100644
+--- a/docs/cli/development/windows-promotion-criteria.mdx
++++ b/docs/cli/development/windows-promotion-criteria.mdx
+@@ -91,6 +91,6 @@ This promotion depends on earlier release-readiness work:
+ 
+ [![CI](https://github.com/always-further/nono/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/always-further/nono/actions/workflows/ci.yml)
+ 
+-Pinned green CI run (first successful run on main after Phase 3 landed): **[View run](PENDING — fetch manually via: gh run list --workflow=ci.yml --branch=main --status=success --limit=1)**
++Pinned green CI run (latest successful `main` run as of 2026-04-03): **[View run](https://github.com/always-further/nono/actions/runs/23958496490)**
+ 
+ WIN-1706 is closed under the full aligned contract — not just the CLI-surface contract. `Sandbox::apply()` validates capability sets and returns `Ok(())` for the supported Windows subset; `is_supported()`, `support_info()`, and `apply()` describe the same contract. The CLI/library support split is gone. `nono shell` and `nono wrap` remain intentionally unavailable on Windows as documented product decisions. The regression harness and CI Windows lanes assert the aligned contract and pass without "partial" language. All four phases (PR-A through PR-D) are complete.
+diff --git a/docs/docs.json b/docs/docs.json
+index fe7a5cc..9cfcc4f 100644
+--- a/docs/docs.json
++++ b/docs/docs.json
+@@ -97,6 +97,7 @@
+           "cli/development/windows-preview-validation",
+           "cli/development/windows-release-candidate-checklist",
+           "cli/development/windows-win-1706-decision-package",
++          "cli/development/windows-win-1706-option-1-workstream",
+           "cli/development/windows-promotion-criteria"
+         ]
+       }

@@ -141,4 +141,4 @@ When both are active, rollback enriches the audit record with snapshot data (tra
 
 ## Storage
 
-Audit sessions are stored in `~/.nono/rollbacks/`. Audit-only sessions are tiny (a single `session.json` file) and are not subject to rollback storage limits. They accumulate freely and can be cleaned up with `nono rollback cleanup`.
+Audit sessions are stored in the platform rollback directory (`~/.nono/rollbacks/` on Unix-like systems, the nono state directory on Windows). Audit-only sessions are tiny (a single `session.json` file) and are not subject to rollback storage limits. They accumulate freely and can be cleaned up with `nono rollback cleanup`.

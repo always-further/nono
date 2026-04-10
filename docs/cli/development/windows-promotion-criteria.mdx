@@ -1,0 +1,96 @@
+---
+title: Windows Promotion Criteria
+description: Draft promotion gates for Windows as a first-class nono release target
+---
+
+# Windows Promotion Criteria
+
+This document records the gates for the Windows support contract in nono releases. Windows is supported as a first-class platform under the full aligned contract: `Sandbox::apply()` is real on Windows, the CLI/library split is closed, and `nono shell` / `nono wrap` remain intentionally unavailable as documented product decisions.
+
+## Gate Summary
+
+| Gate | Requirement | Status |
+|------|-------------|--------|
+| Runtime output is free of misleading preview language | REL-01 | Met |
+| CI lanes treat Windows identically to macOS and Linux | REL-01 | Met |
+| Windows listed as supported platform in README and release artifacts under the aligned contract | REL-02 | Met |
+| Installation guide reflects current Windows support level accurately | REL-03 | Met |
+| Product limitations documented as intentional decisions, not gaps | REL-03 | Met |
+| Formal promotion criteria recorded and reviewed | REL-04 | Met |
+
+## Gate Details
+
+### REL-01: Runtime output contains no preview language
+
+- [x] `nono --help` on Windows contains no language describing the platform as preview, experimental, or beta
+- [x] `nono run --dry-run` on Windows uses final supported-platform wording
+- [x] Supervised mode output on Windows shows `supervised (...)` for the supported subset
+- [x] Windows CLI/release support and the embedded library `Sandbox::apply()` contract are aligned under the same first-class supported status
+- [x] CI job names for Windows (`Windows Build`, `Windows Smoke`, `Windows Integration`, `Windows Security`, `Windows Regression`, `Windows Packaging`) carry no "preview" qualifier
+
+### REL-02: Windows listed as supported platform in release automation and README
+
+- [x] README platform support line reflects the adopted Windows CLI support contract accurately
+- [x] README Kernel-Enforced Sandbox feature table includes a Windows row
+- [x] release workflow uploads signed Windows artifacts (`.exe`, machine MSI, user MSI, zip) as first-class release assets alongside macOS and Linux artifacts
+
+### REL-03: Installation guide and README reflect the final Windows release contract
+
+- [x] Installation guide reflects the current supported release level accurately
+- [x] Installation guide PowerShell example uses a real version placeholder (`vX.Y.Z`)
+- [x] `nono shell` and `nono wrap` limitations are documented as intentional product decisions
+- [x] release-guide wording matches the current support state
+
+### REL-04: Formal promotion criteria documented
+
+- [x] This document exists and is committed to the repository
+- [x] This document is linked from the Windows RC checklist
+- [x] This document is listed in the docs navigation (docs.json)
+- [x] `WIN-1705` promotion audit outcomes are recorded in this document
+- [ ] every gate above is checked off
+
+## Current Audit Result
+
+`WIN-1705` is complete for the current branch state.
+
+Met:
+
+- Windows release automation now stages signed `.exe`, machine MSI, user MSI, and zip artifacts.
+- Authenticode verification is automated for the raw binary, both MSI scopes, and the zip payload.
+- MSI contract validation covers scope split, upgrade-code split, ARP repair/modify disablement, and optional service inclusion/exclusion behavior.
+- Help, dry-run, install, and release docs no longer describe the active Windows command surface as preview-only.
+- `nono shell` and `nono wrap` are documented as intentional Windows product limitations rather than accidental gaps.
+- Setup output describes Windows as first-class supported under the aligned contract.
+- README and product docs describe Windows as a supported platform across both the CLI surface and the embedded library.
+
+WIN-1706 is complete under the full aligned contract. `Sandbox::apply()` is real on Windows as of PR-A; the CLI and library no longer describe different support states. `nono shell` and `nono wrap` remain intentionally unavailable as documented product decisions, not gaps in the contract.
+
+For the maintainer-facing comparison of the two honest promotion paths, see the [WIN-1706 Decision Package](/cli/development/windows-win-1706-decision-package).
+
+## What Windows Does Not Support
+
+These are intentional product decisions, not promotion blockers:
+
+| Feature | Decision | Rationale |
+|---------|----------|-----------|
+| `nono shell` live execution | Permanently unsupported on Windows | Requires Unix exec/ptrace semantics; no Windows equivalent |
+| `nono wrap` live execution | Permanently unsupported on Windows | Requires one-way wrap/apply enforcement; no Windows equivalent |
+| Runtime trust interception | Deferred | Requires supervisor parity work beyond current scope |
+| Delegated open/browser flows | Deferred | Not part of current Windows backend |
+
+These limitations are documented in the [Windows Feature Gap Matrix](/cli/development/windows-feature-gap-matrix) and do not affect the supported command set or enforcement guarantees.
+
+## Prior Phase Prerequisites
+
+This promotion depends on earlier release-readiness work:
+
+- **Signing path:** Release workflow and docs must support signed Windows artifacts without silent fallback
+- **Packaging path:** installer, upgrade, uninstall, and any service packaging claims must match what the release workflow actually builds
+
+## Milestone Closed: WIN-1706
+
+[![CI](https://github.com/always-further/nono/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/always-further/nono/actions/workflows/ci.yml)
+
+Pinned green CI run (latest successful `main` run as of 2026-04-03): **[View run](https://github.com/always-further/nono/actions/runs/23958496490)**
+
+WIN-1706 is closed under the full aligned contract — not just the CLI-surface contract. `Sandbox::apply()` validates capability sets and returns `Ok(())` for the supported Windows subset; `is_supported()`, `support_info()`, and `apply()` describe the same contract. The CLI/library support split is gone. `nono shell` and `nono wrap` remain intentionally unavailable on Windows as documented product decisions. The regression harness and CI Windows lanes assert the aligned contract and pass without "partial" language. All four phases (PR-A through PR-D) are complete.

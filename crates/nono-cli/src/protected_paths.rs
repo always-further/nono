@@ -1,7 +1,7 @@
 //! Protection for nono's own state paths.
 //!
 //! These checks enforce a hard fail if initial sandbox capabilities overlap
-//! with internal CLI state roots (currently `~/.nono`).
+//! with internal CLI state roots.
 
 use nono::{CapabilitySet, NonoError, Result};
 use std::path::{Path, PathBuf};
@@ -17,13 +17,35 @@ pub struct ProtectedRoots {
 impl ProtectedRoots {
     /// Build protected roots from current defaults.
     ///
-    /// Today this protects the full `~/.nono` subtree.
+    /// On Windows, protect both the current OS state root and the historical
+    /// preview-era `~/.nono` subtree so older local state remains fail-closed.
     pub fn from_defaults() -> Result<Self> {
-        let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
-        let state_root = resolve_path(&home.join(".nono"));
-        Ok(Self {
-            roots: vec![state_root],
-        })
+        #[cfg(target_os = "windows")]
+        {
+            let mut roots = Vec::new();
+
+            if let Some(state_root) = crate::config::user_state_dir() {
+                roots.push(resolve_path(&state_root));
+            }
+
+            roots.push(resolve_path(&crate::config::legacy_windows_state_dir()?));
+            sort_and_dedup_roots(&mut roots);
+
+            if roots.is_empty() {
+                return Err(NonoError::HomeNotFound);
+            }
+
+            Ok(Self { roots })
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+            let state_root = resolve_path(&home.join(".nono"));
+            Ok(Self {
+                roots: vec![state_root],
+            })
+        }
     }
 
     /// Return a slice of protected root paths.
@@ -69,8 +91,8 @@ pub fn validate_requested_path_against_protected_roots(
     let resolved_roots: Vec<PathBuf> = protected_roots.iter().map(|p| resolve_path(p)).collect();
 
     for protected_root in &resolved_roots {
-        let inside_protected = requested_path.starts_with(protected_root);
-        let parent_of_protected = !is_file && protected_root.starts_with(&requested_path);
+        let inside_protected = path_starts_with(&requested_path, protected_root);
+        let parent_of_protected = !is_file && path_starts_with(protected_root, &requested_path);
         if inside_protected || parent_of_protected {
             return Err(NonoError::SandboxInit(format!(
                 "Refusing to grant '{}' (source: {}) because it overlaps protected nono state root '{}'.",
@@ -86,6 +108,7 @@ pub fn validate_requested_path_against_protected_roots(
 
 /// Return the protected root overlapped by a requested path, if any.
 #[must_use]
+#[cfg(not(target_os = "windows"))]
 pub fn overlapping_protected_root(
     path: &Path,
     is_file: bool,
@@ -95,8 +118,8 @@ pub fn overlapping_protected_root(
     let resolved_roots: Vec<PathBuf> = protected_roots.iter().map(|p| resolve_path(p)).collect();
 
     for protected_root in &resolved_roots {
-        let inside_protected = requested_path.starts_with(protected_root);
-        let parent_of_protected = !is_file && protected_root.starts_with(&requested_path);
+        let inside_protected = path_starts_with(&requested_path, protected_root);
+        let parent_of_protected = !is_file && path_starts_with(protected_root, &requested_path);
         if inside_protected || parent_of_protected {
             return Some(protected_root.clone());
         }
@@ -109,18 +132,18 @@ pub fn overlapping_protected_root(
 /// existing ancestor and appending remaining components.
 fn resolve_path(path: &Path) -> PathBuf {
     if let Ok(canonical) = path.canonicalize() {
-        return canonical;
+        return normalize_for_compare(&canonical);
     }
 
     let mut remaining = Vec::new();
     let mut current = path.to_path_buf();
     loop {
         if let Ok(canonical) = current.canonicalize() {
-            let mut result = canonical;
+            let mut result = normalize_for_compare(&canonical);
             for component in remaining.iter().rev() {
                 result = result.join(component);
             }
-            return result;
+            return normalize_for_compare(&result);
         }
 
         match current.file_name() {
@@ -134,7 +157,62 @@ fn resolve_path(path: &Path) -> PathBuf {
         }
     }
 
+    normalize_for_compare(path)
+}
+
+fn sort_and_dedup_roots(roots: &mut Vec<PathBuf>) {
+    roots.sort();
+    roots.dedup_by(|left, right| paths_equal(left, right));
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_for_compare(path: &Path) -> PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+    let without_verbatim = raw
+        .replace("\\\\?\\UNC\\", r"\\")
+        .replace("\\\\?\\", "")
+        .replace("\\??\\", "");
+    PathBuf::from(without_verbatim)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_for_compare(path: &Path) -> PathBuf {
     path.to_path_buf()
+}
+
+#[cfg(target_os = "windows")]
+fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+    let mut path_components = path.components();
+    let mut prefix_components = prefix.components();
+
+    loop {
+        match (path_components.next(), prefix_components.next()) {
+            (_, None) => return true,
+            (None, Some(_)) => return false,
+            (Some(left), Some(right)) => {
+                let left = left.as_os_str().to_string_lossy();
+                let right = right.as_os_str().to_string_lossy();
+                if !left.eq_ignore_ascii_case(&right) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+    path.starts_with(prefix)
+}
+
+#[cfg(target_os = "windows")]
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    path_starts_with(left, right) && path_starts_with(right, left)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    left == right
 }
 
 #[cfg(test)]
@@ -206,6 +284,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn overlapping_protected_root_reports_match() {
         let tmp = TempDir::new().expect("tmpdir");
@@ -217,5 +296,46 @@ mod tests {
         let expected = std::fs::canonicalize(&protected).unwrap_or(protected);
 
         assert_eq!(overlap, Some(expected));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn protected_roots_include_current_windows_state_dir() {
+        let roots = ProtectedRoots::from_defaults().expect("protected roots");
+        let expected = resolve_path(
+            &crate::config::user_state_dir().expect("windows user state dir should exist"),
+        );
+        assert!(
+            roots
+                .as_paths()
+                .iter()
+                .any(|root| paths_equal(root, &expected)),
+            "protected roots should include current Windows state dir, got: {:?}",
+            roots.as_paths()
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_protected_path_check_handles_verbatim_prefix_and_case_insensitive_drive_letters() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let protected = tmp.path().join("StateRoot");
+        std::fs::create_dir_all(protected.join("rollbacks")).expect("mkdir");
+
+        let canonical = protected
+            .join("rollbacks")
+            .canonicalize()
+            .expect("canonical");
+        let raw = canonical.display().to_string();
+        let verbatim = PathBuf::from(format!(r"\\?\{}", raw.to_ascii_uppercase()));
+        let normalized_requested = resolve_path(&verbatim);
+        let normalized_protected = resolve_path(&protected);
+
+        assert!(
+            path_starts_with(&normalized_requested, &normalized_protected),
+            "normalized requested path should stay inside protected root:\nrequested={}\nprotected={}",
+            normalized_requested.display(),
+            normalized_protected.display()
+        );
     }
 }

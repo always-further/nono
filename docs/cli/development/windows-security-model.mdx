@@ -1,0 +1,220 @@
+---
+title: Windows Security Model
+description: Enforcement model and implementation sequencing for the current Windows port
+---
+
+# Windows Security Model
+
+This design note locks the current model for the Windows port and the remaining path to fuller parity.
+
+It is the implementation baseline for `WIN-701` and the first backend stories that follow it.
+
+## Security Bar
+
+The target is **functionally equivalent Windows security**.
+
+That means the Windows implementation does not need to reproduce Landlock or Seatbelt literally. It does need to provide a defensible Windows-native security boundary for the same core product promises:
+
+- restricted child-process execution
+- restricted filesystem access
+- restricted network access
+- supervised approval flow where supported
+- explicit failure when a requested control cannot be enforced safely
+
+## Model Overview
+
+The Windows port will use a layered model:
+
+1. **Process containment**
+   Windows child processes run inside a containment boundary that binds process lifetime and limits escape from the runtime session.
+
+2. **Supervisor-owned coordination**
+   Windows supervisor traffic uses named pipes and Windows-safe handle transfer instead of Unix sockets and `SCM_RIGHTS`.
+
+3. **Policy enforcement**
+   Filesystem, network, and related capability controls are enforced through Windows-native mechanisms chosen to match the nono capability model as closely as is practical.
+
+4. **Fail-closed unsupported behavior**
+   If a requested capability set cannot be enforced safely on Windows, the runtime must fail clearly rather than claim success.
+
+## Selected Primitives
+
+### Process containment
+
+The initial primitive is a **Windows Job Object**.
+
+Why:
+
+- it is Windows-native
+- it binds child lifetime to the nono session
+- it gives a reliable first containment slice while deeper enforcement is still being built
+- it fits both direct and supervised Windows execution paths
+
+The first containment slice uses:
+
+- `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+- `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`
+
+This is not the full Windows sandbox, but it is a real enforced boundary for process lifetime and session cleanup.
+
+### Supervisor transport
+
+The supervisor transport is already selected separately in the Windows IPC note:
+
+- per-session duplex named pipes
+- Windows-safe handle brokering for approved resources
+
+That model remains the basis for future supervised capability expansion.
+
+### Filesystem and network enforcement
+
+These remain implementation work, but the design constraint is now fixed:
+
+- the first full Windows release must include **real network enforcement**
+- filesystem and network controls must be enforced, not advisory
+- if an exact mapping is not possible, Windows behavior must still be explicit, testable, and fail-closed
+
+### Filesystem policy compilation
+
+The first implementation step for filesystem enforcement is a **Windows filesystem policy compiler** inside the core sandbox backend.
+
+Its job is to:
+
+- canonicalize and retain Windows filesystem grants in a backend-owned representation
+- distinguish the first enforceable subset from unsupported grant shapes
+- keep Windows path-policy decisions in the library layer rather than scattering them across CLI code
+
+The initial compiled subset is intentionally narrow:
+
+- directory grants are compiled
+- single-file grants are compiled as exact-path rules
+- write-only directory grants are compiled as writable directory rules
+
+The first attached enforcement behavior for that policy is the current **Windows live-run filesystem surface**:
+
+- Windows live execution still fails closed when the capability set requests backend gaps such as backend-native deny-within-allow semantics
+- unsupported Windows filesystem gaps now report deterministic backend reason labels such as `execution directory outside supported allowlist` instead of collapsing every failure into a generic filesystem limitation error
+- network and port-filtering gaps are now backend-owned as well, so live `--block-net`, proxy-policy, and related enforcement-dependent requests report deterministic backend reasons instead of a second CLI-only bucket
+- Windows entry-point decisions are backend-owned too: `run`, `shell`, and `wrap` now flow through the same Windows validation surface instead of hard-coding separate CLI-only rejections
+- Windows supervised feature classes are backend-owned as well: rollback snapshots, proxy filtering, runtime capability elevation, and runtime trust interception now compile into explicit supported vs unsupported Windows-supervisor results instead of CLI-side string assembly
+- if the compiled policy exists, the executable path required for launch must be covered by it, including exact-path single-file rules
+- if a live run requests user-intent directory grants, the selected working directory must stay inside that compiled directory allowlist subset
+- restricted Windows launches now always run under the low-integrity child-token path when they use the compiled filesystem subset, so direct writes back into the user's medium-integrity workspace remain blocked even when the requested policy includes a writable directory
+- if that subset includes a writable directory, writable semantics are currently split into two Windows-native cases without relabeling the user's workspace:
+  - user-allowed directories that already live under known low-integrity-compatible roots such as `%LOCALAPPDATA%\Temp\Low`, and `AppData\LocalLow` when the current user environment permits direct creation there, can be written directly by the low-integrity child
+  - user-allowed directories outside those roots can also be written directly when they already carry a compatible low-integrity mandatory label; the backend now detects that label dynamically instead of limiting direct-write semantics to a fixed path list
+  - all other writable policies use a redirected low-integrity runtime root for runtime-owned state instead of mutating workspace labels
+- in that redirected case, `nono` now first tries to create a managed `.nono-runtime-low` subtree inside the user-allowlisted writable directory and lowers that subtree to low integrity; if Windows permits that setup, `NONO_CAP_FILE`, temp paths, profile/config state, install-layout vars, WinINet-style cache vars (`INETCACHE`, `INETCOOKIES`, `INETHISTORY`), PowerShell module-analysis cache, XDG cache/state roots (`XDG_CACHE_HOME`, `XDG_STATE_HOME`), Python cache/user-base paths (`PIP_BUILD_TRACKER`, `PYTHONPYCACHEPREFIX`, `PYTHONUSERBASE`), Go cache/module/workspace paths (`GOCACHE`, `GOMODCACHE`, `GOPATH`), interactive shell and REPL history/state paths (`HISTFILE`, `LESSHISTFILE`, `NODE_REPL_HISTORY`, `PYTHONHISTFILE`, `SQLITE_HISTORY`, `IPYTHONDIR`), Ruby/Bundler/Composer package-manager roots (`GEM_HOME`, `GEM_PATH`, `BUNDLE_USER_HOME`, `BUNDLE_USER_CACHE`, `BUNDLE_USER_CONFIG`, `BUNDLE_APP_CONFIG`, `COMPOSER_HOME`, `COMPOSER_CACHE_DIR`), cloud/container/IaC config roots (`AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AZURE_CONFIG_DIR`, `KUBECONFIG`, `DOCKER_CONFIG`, `CLOUDSDK_CONFIG`, `TF_CLI_CONFIG_FILE`, `TF_DATA_DIR`), Git/GnuPG state (`GIT_CONFIG_GLOBAL`, `GNUPGHOME`), per-tool user config files (`NPM_CONFIG_USERCONFIG`, `PIP_CONFIG_FILE`, `RIPGREP_CONFIG_PATH`), and common toolchain/cache homes resolve under that managed subtree instead of inheriting ambient host paths
+- if Windows cannot safely lower the allowlisted runtime subtree, `nono` falls back to the existing low-integrity runtime root under `%LOCALAPPDATA%\Temp\Low` rather than silently writing into the medium-integrity workspace
+- `NONO_CAP_FILE` now lives under the redirected runtime temp directory on Windows so `nono why --self` follows the same temp-root trust model as the Unix path instead of needing a broader validation exception
+- that redirected runtime root is now validated too: if Windows cannot verify that the chosen runtime tree is itself low-integrity-compatible, the run fails closed instead of silently trusting a path-shaped fallback
+- common absolute path arguments are preflight-validated against the compiled directory allowlist and rejected before launch when they point outside the supported subset
+- common Windows command surfaces now receive command-aware path mediation for `cmd.exe` builtins, `more.com`, PowerShell file cmdlets, `xcopy.exe`, `find.exe`, `findstr.exe`, `comp.exe`, `fc.exe`, and Windows Script Host launches
+- that command-aware mediation is intentionally a launch-time preflight for the current restricted-execution surface, not a full shell-proof sandbox boundary; it relies on resolved program names plus known argument shapes and can be bypassed by shell-specific features or alternate invocation forms, which is why fuller Windows-native enforcement work still prioritizes backend boundaries such as WFP, supervisor brokering, and broader OS-level enforcement rather than treating argument parsing as the final security model
+- `override_deny` is now treated as policy preprocessing on Windows rather than as a backend-native deny rule: matching deny-group entries are removed before the Windows filesystem policy is compiled, but Windows still does not provide a native deny-within-allow boundary comparable to macOS Seatbelt
+- shell launchers also receive runtime hardening where Windows can enforce it directly, including `cmd.exe /d`, PowerShell `-NoProfile -NonInteractive -NoLogo`, and `cscript.exe //NoLogo //B`
+- read-only restricted launches now use a low-integrity child token, which gives Windows a real per-process write boundary for common medium-integrity host locations while still allowing reads from the compiled allowlist
+- protected-path validation now uses Windows-aware canonical comparison for case-insensitive drive letters and verbatim path prefixes, and Windows blocks access to both the current platform state root and the legacy `~/.nono` Windows state root
+- child process executable discovery is also tightened at runtime with a minimal `PATH`, `PATHEXT`, `COMSPEC`, `SystemRoot`, `windir`, and `SystemDrive` baseline plus `NoDefaultCurrentDirectoryInExePath=1`, so restricted child processes rely less on ambient host execution state even when no writable runtime directory is present
+- redirected runtime state now covers not just temp/profile/config paths but also `ProgramFiles` and `CommonProgramFiles` families so restricted child processes do not inherit the host install layout by default
+- the first runtime-backed file-access hook beyond launch mediation is now in place for common developer and shell tooling: writable restricted runs redirect `CARGO_HOME`, `RUSTUP_HOME`, `DOTNET_CLI_HOME`, `NUGET_PACKAGES`, `NUGET_HTTP_CACHE_PATH`, `NUGET_PLUGINS_CACHE_PATH`, `ChocolateyInstall`, `ChocolateyToolsLocation`, `VCPKG_ROOT`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `NPM_CONFIG_CACHE`, `NPM_CONFIG_USERCONFIG`, `YARN_CACHE_FOLDER`, `PIP_CACHE_DIR`, `PIP_CONFIG_FILE`, `PIP_BUILD_TRACKER`, `PYTHONPYCACHEPREFIX`, `PYTHONUSERBASE`, `GOCACHE`, `GOMODCACHE`, `GOPATH`, `HISTFILE`, `LESSHISTFILE`, `NODE_REPL_HISTORY`, `PYTHONHISTFILE`, `SQLITE_HISTORY`, `IPYTHONDIR`, `GEM_HOME`, `GEM_PATH`, `BUNDLE_USER_HOME`, `BUNDLE_USER_CACHE`, `BUNDLE_USER_CONFIG`, `BUNDLE_APP_CONFIG`, `COMPOSER_HOME`, `COMPOSER_CACHE_DIR`, `GRADLE_USER_HOME`, `MAVEN_USER_HOME`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`, `AZURE_CONFIG_DIR`, `KUBECONFIG`, `DOCKER_CONFIG`, `CLOUDSDK_CONFIG`, `GIT_CONFIG_GLOBAL`, `GNUPGHOME`, `TF_CLI_CONFIG_FILE`, `TF_DATA_DIR`, `RIPGREP_CONFIG_PATH`, and `PSModuleAnalysisCachePath` into the writable allowlist, and runs without a safe writable runtime directory strip those host values instead of inheriting them
+- Windows env sanitization now treats overridden environment keys case-insensitively and deduplicates the final environment block case-insensitively, so redirected runtime-owned paths win even when the host uses mixed-case variable names such as `ProgramData`
+- the initial policy baseline includes a Windows `system_read_windows` group so standard system executables have an explicit read grant instead of relying on earlier Windows scaffolding assumptions
+- Windows rollback/object-store writes now use Windows-safe replace semantics instead of assuming Unix rename behavior, and restore failures caused by locked or in-use files are surfaced as explicit restore errors rather than being downgraded into generic warnings
+
+That is not full runtime filesystem enforcement yet. It is the first enforced slice attached to the backend policy model that later denial and brokering work will consume. The current subset now includes directory allowlists, exact-path single-file grants, and write-only directory rules that can drive launch validation and writable-runtime selection; `override_deny` works as policy preprocessing, while backend-native deny-within-allow semantics and broader Windows-native write mediation remain deferred.
+
+## Execution Semantics
+
+The Windows port will distinguish between:
+
+- **plain execution paths**
+  These may use direct launch when no policy requires active Windows enforcement beyond process containment.
+
+- **restricted execution paths**
+  These must use real Windows enforcement and may require supervised execution when policy brokering is part of the design.
+
+That means Windows direct execution is not the same thing as unrestricted product semantics. It is only valid when the requested capability set matches what the active Windows backend can enforce safely.
+
+## Sprint 3 Implementation Boundary
+
+Sprint 3 implements:
+
+- this design lock
+- basic Job Object process containment for Windows child launch
+
+Sprint 3 does **not** claim:
+
+- filesystem enforcement
+- network enforcement
+- supervisor parity
+- capability expansion parity
+
+Those remain later epics.
+
+## Windows Supervised Boundary
+
+The Windows supervised path is now split intentionally:
+
+- supported today:
+  - parent-owned supervised process lifecycle for rollback snapshots and post-exit handling
+  - a real Windows supervisor event-loop slice with explicit lifecycle phases for control-channel readiness, child launch, child wait, and shutdown
+  - Windows-safe named-pipe supervisor transport with explicit brokered-resource response metadata and `DuplicateHandle` helpers for future approved file-handle transfer
+  - test-covered parent-side capability-request handling that records audit entries, rejects duplicate request IDs, denies safely on backend/open failures, and brokers approved file handles into the target process under the Windows security model
+  - deterministic runtime teardown on interrupted or failed supervised sessions via drop-time control-channel shutdown plus failure diagnostics that report accumulated supervisor audit-entry counts
+- still fail-closed:
+  - generic child-side runtime capability expansion attachment for ordinary Windows commands
+  - proxy/network-filter-driven supervision
+  - runtime trust interception
+  - delegated child-side URL opening through `open-url-helper`
+  - broad live child-side consumption of brokered Windows handles for resource transfer outside the current explicit supervisor-request test path
+
+That means Windows supervised execution is now a real supported runtime path for the current rollback-oriented subset, even though it is not Unix-parity supervision yet. The current implementation has deterministic rejection for the remaining unsupported feature classes, a parent-side event loop that monitors the child process to completion, and more actionable startup/shutdown diagnostics when launch or wait handling fails.
+
+For trust and delegated browser-open flows, the current boundary is explicit:
+
+- startup trust verification still runs before launch
+- runtime trust interception is not active because Windows supervised children do not yet have an attached file-open mediation channel
+- `open-url-helper` remains intentionally unavailable on Windows for the same reason
+- `--allow-launch-services` remains macOS-only
+
+The live Windows launch path is now also shared intentionally across direct and supervised execution for the currently supported subset:
+
+- both paths compile the same Windows filesystem and network backend plans
+- both paths validate launch-time filesystem and argument coverage through the backend before spawn
+- both paths route blocked-network enforcement through the same Windows backend path for the supported subset, but those flows are only available when current backend readiness is satisfied
+- unsupported direct or supervised restrictions fail with backend-owned diagnostics instead of caller-specific fallback wording
+- built-in profile-backed runs now use that same backend-owned path too: supported profiles such as the current `default` subset can run live, while profiles that still depend on unsupported Windows controls fail intentionally with backend reason labels instead of a generic “profiles are Windows-preview-only” block
+- Windows `shell` mode is now an explicit product limitation rather than an accidental stub: `nono shell --dry-run` remains available for policy inspection, but live interactive shell launch stays unsupported on Windows because the current backend does not provide a credible interactive-shell enforcement boundary
+- Windows `wrap` mode is now treated the same way: `nono wrap --dry-run` remains available for inspection, but live one-way wrap/apply execution stays unsupported on Windows because the current backend does not provide a credible one-shot enforcement model that matches the product contract
+
+## Windows State and Trust Storage
+
+Windows now reports its effective storage layout explicitly in `nono setup --check-only`:
+
+- user config root
+- user state root
+- rollback root
+- user trust policy path
+
+Those paths are absolute and backend-owned, and the rollback root resolves under the Windows nono state directory instead of reusing Unix-style path assumptions.
+
+Windows trust and keystore diagnostics also now identify the native backend as **Windows Credential Manager** instead of using a generic system-keystore label. That makes trust setup and failure messages match the actual platform implementation.
+
+## Windows Packaging Contract
+
+The current Windows packaging contract is now explicit:
+
+- `machine MSI` and `user MSI` are the supported managed install paths
+- `zip` is the supported portable install path
+- same-scope MSI upgrades are the supported automatic upgrade expectation
+- cross-scope migration and MSI-to-zip migration are operator-managed, not automatic
+
+That packaging strategy is documented separately in the [Windows Installer Strategy](/cli/development/windows-installer-strategy) and is the baseline for later signing and release-validation work.
+
+## Design Rules
+
+- Do not report Windows support as full until filesystem and network restrictions are truly enforced.
+- Do not silently downgrade a restricted request into plain direct execution.
+- Keep the Windows backend, supervisor, and CLI messaging aligned on the same support model.
+- Prefer explicit Windows-native primitives over Unix emulation layers.

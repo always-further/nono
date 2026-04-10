@@ -22,12 +22,34 @@ pub(crate) fn run_detached_launch(args: RunArgs, silent: bool) -> Result<()> {
     })?;
     let (startup_log_path, startup_log_stdio) = create_detached_startup_log(&session_id)?;
     let mut child = Command::new(exe);
+
+    // Re-launch with --internal-supervisor on Windows to support double-launch.
+    // On Unix, we keep the existing behavior.
+    if cfg!(target_os = "windows") {
+        child.arg("--internal-supervisor");
+    }
+
     child.args(std::env::args_os().skip(1));
     child.env(DETACHED_LAUNCH_ENV, "1");
     child.env(DETACHED_SESSION_ID_ENV, &session_id);
     child.stdin(Stdio::null());
     child.stdout(Stdio::null());
     child.stderr(startup_log_stdio);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt as _;
+        use windows_sys::Win32::System::Threading::{
+            CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+        };
+
+        // Use DETACHED_PROCESS and CREATE_NEW_PROCESS_GROUP as mandated.
+        // Also use CREATE_BREAKAWAY_FROM_JOB to escape any current job object
+        // if the system allows it, which is standard for daemonization on Windows.
+        child.creation_flags(
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+        );
+    }
 
     #[cfg(unix)]
     unsafe {
@@ -44,10 +66,38 @@ pub(crate) fn run_detached_launch(args: RunArgs, silent: bool) -> Result<()> {
         .map_err(|e| NonoError::SandboxInit(format!("Failed to launch detached session: {e}")))?;
 
     let session_path = session::session_file_path(&session_id)?;
+    #[cfg(not(target_os = "windows"))]
     let attach_path = session::session_socket_path(&session_id)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
-        if session_path.exists() && attach_path.exists() {
+        #[cfg(not(target_os = "windows"))]
+        let attach_ready = attach_path.exists();
+
+        #[cfg(target_os = "windows")]
+        let attach_ready = {
+            use windows_sys::Win32::Foundation::{
+                GetLastError, ERROR_FILE_NOT_FOUND, ERROR_SEM_TIMEOUT,
+            };
+            use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+
+            let pipe_name = format!("\\\\.\\pipe\\nono-session-{}", session_id);
+            let pipe_name_u16 = crate::exec_strategy::to_u16_null_terminated(&pipe_name);
+            let result = unsafe { WaitNamedPipeW(pipe_name_u16.as_ptr(), 50) };
+            if result != 0 {
+                true
+            } else {
+                let err = unsafe { GetLastError() };
+                if err == ERROR_FILE_NOT_FOUND || err == ERROR_SEM_TIMEOUT {
+                    false
+                } else {
+                    return Err(NonoError::SandboxInit(format!(
+                        "Named pipe readiness probe failed with error {err}"
+                    )));
+                }
+            }
+        };
+
+        if session_path.exists() && attach_ready {
             cleanup_startup_log(&startup_log_path);
             print_detached_launch_banner(&session_id, args.name.as_deref(), silent);
             return Ok(());

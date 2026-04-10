@@ -1,0 +1,109 @@
+---
+title: Windows Preview Pilot
+description: Packaging, handoff, and operator guidance for the current Windows validation track
+---
+
+This guide is the handoff package for the current Windows validation track. It covers how to obtain a build, what the supported Windows surface can do safely today, and which commands to use during validation.
+
+The `preview` name is historical. The active product contract is the current Windows supported command surface, not a generic preview-everything label.
+
+For the current Windows filesystem boundary, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract).
+
+## Artifact
+
+Windows builds are published as:
+
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+
+The MSI packages install `nono.exe`, `README.md`, and `LICENSE`, add the install directory to `PATH` for the selected scope, and create a standard Apps & Features uninstall entry. MSI and zip are the supported Windows delivery paths. Release automation supports Authenticode signing when the required signing secrets are configured. Verify signatures with `Get-AuthenticodeSignature` before deploying.
+
+## Install
+
+1. Download either the machine MSI, the user MSI, or the portable zip artifact from a GitHub release.
+2. For MSI, launch it directly or use `msiexec /i`.
+3. For the zip, extract it into a local tools directory such as `C:\Tools\nono`.
+4. Add that directory to `PATH`, or invoke the binary directly.
+
+Example PowerShell session:
+
+```powershell
+$version = "vX.Y.Z"
+$msi = "nono-$version-x86_64-pc-windows-msvc-user.msi"
+$uri = "https://github.com/always-further/nono/releases/download/$version/$msi"
+$path = Join-Path $env:TEMP $msi
+Invoke-WebRequest -Uri $uri -OutFile $path
+Start-Process msiexec.exe -Wait -ArgumentList @("/i", $path)
+nono --version
+```
+
+## Preview Scope
+
+Available now:
+
+- `nono --help`
+- `nono --version`
+- `nono setup --check-only`
+- `nono run --dry-run ...`
+- `nono run -- <command>` for supported direct restricted execution
+- live exact-file grants and writable runtime redirection within the current Windows restricted-execution surface
+- live `--block-net`, proxy-only, and supported connect/bind/localhost policy shapes through the WFP-backed Windows network surface when readiness requirements are met
+
+Intentionally blocked when real enforcement would be implied, or when Windows has an explicit unsupported live mode:
+
+- live profile-backed restricted runs
+- `nono shell`
+- `nono wrap` (documented unsupported Windows live mode)
+- generic supervised enforcement outside the current rollback-oriented supported subset
+
+The current Windows validation track is for startup, config, dry-run, direct execution path validation, and the supported restricted-execution surface. It is not a claim of full Windows sandbox parity.
+
+## Current Packaging Limits
+
+- Apps & Features uninstall is supported through the MSI package.
+- machine MSI upgrades machine MSI installs, and user MSI upgrades user MSI installs.
+- zip installs are operator-managed and upgraded by replacing the extracted directory.
+- The current public MSI contract does not install or manage `nono-wfp-service` by default.
+- Service-capable packaging remains a documented future machine-MSI path rather than a shipped default release behavior.
+
+## Windows Smoke Checks
+
+Run these commands after installation:
+
+```powershell
+nono --help
+nono --version
+nono setup --check-only
+nono run --dry-run --profile codex -- cmd /c echo test
+nono run -- cmd /c echo hello
+nono run --read-file C:\path\to\allowed.txt -- cmd /c type C:\path\to\allowed.txt
+```
+
+Expected blocked checks:
+
+```powershell
+nono run --profile codex -- cmd /c echo hello
+nono wrap -- cmd /c echo hello
+```
+
+Those commands should fail loudly with documented Windows limitation or backend-owned diagnostics. They must not report unsupported flows as successfully enforced.
+
+Also validate that:
+
+- exact-file grants succeed when the file is explicitly allowed
+- `override_deny` behaves like policy preprocessing rather than causing a Windows-only live-run rejection by itself
+- WFP-backed network failures report actionable readiness or activation details instead of generic limitation wording
+
+## Debugging Inputs
+
+For Windows triage, capture:
+
+- the exact command line
+- stdout and stderr
+- `nono --version`
+- whether the run was `--dry-run` or live
+- whether a profile or network restriction was requested
+- whether `nono setup --check-only` reported WFP service/driver readiness beforehand
+
+In CI, the Windows lanes upload build, smoke, integration, security, and regression logs as artifacts for comparison with local Windows behavior.

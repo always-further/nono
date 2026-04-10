@@ -10,6 +10,8 @@ use crate::sandbox_prepare::{
     prepare_sandbox, print_allow_launch_services_warning, validate_external_proxy_bypass,
 };
 use crate::theme;
+#[cfg(target_os = "windows")]
+use nono::Sandbox;
 use nono::{NonoError, Result};
 use std::ffi::OsString;
 
@@ -34,7 +36,7 @@ pub(crate) fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
                 prepared.secrets.len()
             );
         }
-        output::print_dry_run(&program, &cmd_args, silent);
+        output::print_dry_run(&program, &cmd_args, &Sandbox::support_info(), silent);
         return Ok(());
     }
 
@@ -43,6 +45,23 @@ pub(crate) fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 }
 
 pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let shell_path = args.shell.unwrap_or_else(|| {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let pwsh = std::path::PathBuf::from(&system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        if pwsh.exists() {
+            pwsh
+        } else {
+            std::path::PathBuf::from(&system_root)
+                .join("System32")
+                .join("cmd.exe")
+        }
+    });
+    #[cfg(not(target_os = "windows"))]
     let shell_path = args
         .shell
         .or_else(|| {
@@ -61,11 +80,26 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
                 prepared.secrets.len()
             );
         }
-        output::print_dry_run(shell_path.as_os_str(), &[], silent);
+        output::print_dry_run(
+            shell_path.as_os_str(),
+            &[],
+            &Sandbox::support_info(),
+            silent,
+        );
         return Ok(());
     }
 
     let prepared = prepare_sandbox(&args.sandbox, silent)?;
+
+    #[cfg(target_os = "windows")]
+    Sandbox::validate_windows_preview_entry_point(
+        nono::WindowsPreviewEntryPoint::Shell,
+        &prepared.caps,
+        &resolve_requested_workdir(args.sandbox.workdir.as_ref()),
+        nono::WindowsPreviewContext {
+            has_deny_override_policy: !prepared.override_deny_paths.is_empty(),
+        },
+    )?;
 
     if prepared.allow_launch_services_active {
         print_allow_launch_services_warning(silent);
@@ -87,11 +121,13 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         flags: ExecutionFlags {
             workdir: resolve_requested_workdir(args.sandbox.workdir.as_ref()),
             no_diagnostics: true,
+            interactive_shell: true,
             capability_elevation: prepared.capability_elevation,
             override_deny_paths: prepared.override_deny_paths,
             session: SessionLaunchOptions {
                 session_name: args.name,
                 detach_sequence: load_configured_detach_sequence()?,
+                interactive_pty: true,
                 ..SessionLaunchOptions::default()
             },
             ..ExecutionFlags::defaults(silent)?
@@ -120,11 +156,21 @@ pub(crate) fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
                 prepared.secrets.len()
             );
         }
-        output::print_dry_run(&program, &cmd_args, silent);
+        output::print_dry_run(&program, &cmd_args, &Sandbox::support_info(), silent);
         return Ok(());
     }
 
     let prepared = prepare_sandbox(&args, silent)?;
+
+    #[cfg(target_os = "windows")]
+    Sandbox::validate_windows_preview_entry_point(
+        nono::WindowsPreviewEntryPoint::Wrap,
+        &prepared.caps,
+        &resolve_requested_workdir(args.workdir.as_ref()),
+        nono::WindowsPreviewContext {
+            has_deny_override_policy: !prepared.override_deny_paths.is_empty(),
+        },
+    )?;
 
     if prepared.upstream_proxy.is_some()
         || matches!(

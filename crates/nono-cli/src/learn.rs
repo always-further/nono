@@ -5,7 +5,9 @@
 //! to be allowed in a nono profile.
 
 use crate::cli::LearnArgs;
-use nono::{AccessMode, NonoError, Result};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use nono::AccessMode;
+use nono::{NonoError, Result};
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
