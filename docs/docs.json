@@ -83,7 +83,25 @@
       },
       {
         "group": "Development",
-        "pages": ["cli/development/index", "cli/development/testing"]
+        "pages": [
+          "cli/development/index",
+          "cli/development/testing",
+          "cli/development/windows-supervisor-ipc",
+          "cli/development/windows-feature-gap-matrix",
+          "cli/development/windows-security-model",
+          "cli/development/windows-filesystem-parity-contract",
+          "cli/development/windows-network-enforcement",
+          "cli/development/windows-full-port-roadmap",
+          "cli/development/windows-macos-parity-roadmap",
+          "cli/development/windows-installer-strategy",
+          "cli/development/windows-signing-guide",
+          "cli/development/windows-preview-pilot",
+          "cli/development/windows-preview-validation",
+          "cli/development/windows-release-candidate-checklist",
+          "cli/development/windows-win-1706-decision-package",
+          "cli/development/windows-win-1706-option-1-workstream",
+          "cli/development/windows-promotion-criteria"
+        ]
       }
     ]
   },

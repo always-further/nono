@@ -11,6 +11,97 @@ This section covers development topics for contributors and maintainers of nono.
   <Card title="Testing" icon="vial" href="/cli/development/testing">
     Integration test suites, running tests locally, and CI pipeline
   </Card>
+  <Card
+    title="Windows Supervisor IPC"
+    icon="arrow-right-arrow-left"
+    href="/cli/development/windows-supervisor-ipc"
+  >
+    Initial named-pipe design for replacing Unix socket and fd-passing assumptions
+  </Card>
+  <Card
+    title="Windows Feature Matrix"
+    icon="table-cells"
+    href="/cli/development/windows-feature-gap-matrix"
+  >
+    Working, partial, stubbed, and deferred status across the current Windows command surface
+  </Card>
+  <Card
+    title="Windows Security Model"
+    icon="shield-halved"
+    href="/cli/development/windows-security-model"
+  >
+    Enforcement model and implementation baseline for the full Windows port
+  </Card>
+  <Card
+    title="Windows Filesystem Contract"
+    icon="folder-tree"
+    href="/cli/development/windows-filesystem-parity-contract"
+  >
+    Supported Windows filesystem capability shapes, enforcement boundaries, and intentional limits
+  </Card>
+  <Card
+    title="Windows Network Enforcement"
+    icon="network-wired"
+    href="/cli/development/windows-network-enforcement"
+  >
+    Design spike and backend policy contract for the Windows network port
+  </Card>
+  <Card
+    title="Windows Full Port"
+    icon="road"
+    href="/cli/development/windows-full-port-roadmap"
+  >
+    Epics, sprint plan, dependencies, and release criteria for first-class Windows support
+  </Card>
+  <Card
+    title="Windows macOS Parity"
+    icon="road-circle-check"
+    href="/cli/development/windows-macos-parity-roadmap"
+  >
+    Epics, sprints, and acceptance criteria for bringing Windows up to the macOS feature surface
+  </Card>
+  <Card
+    title="Windows Preview Pilot"
+    icon="box-archive"
+    href="/cli/development/windows-preview-pilot"
+  >
+    Release artifact, install flow, and operator guidance for the current Windows validation track
+  </Card>
+  <Card
+    title="Windows Preview Validation"
+    icon="clipboard-check"
+    href="/cli/development/windows-preview-validation"
+  >
+    Packaging, smoke-test, and guardrail checklist for the current Windows validation boundary
+  </Card>
+  <Card
+    title="Windows RC Checklist"
+    icon="list-check"
+    href="/cli/development/windows-release-candidate-checklist"
+  >
+    Formal Windows release-candidate gate for CI, packaging, enforcement, and upgrade validation
+  </Card>
+  <Card
+    title="Windows Installer Strategy"
+    icon="box"
+    href="/cli/development/windows-installer-strategy"
+  >
+    Supported Windows release artifacts, install scopes, and upgrade expectations
+  </Card>
+  <Card
+    title="WIN-1706 Decision"
+    icon="scale-balanced"
+    href="/cli/development/windows-win-1706-decision-package"
+  >
+    Maintainer decision package for library-alignment vs CLI-surface Windows promotion
+  </Card>
+  <Card
+    title="WIN-1706 Option 1"
+    icon="list-check"
+    href="/cli/development/windows-win-1706-option-1-workstream"
+  >
+    Epics, sprints, PR candidates, and review gates for library/runtime alignment
+  </Card>
 </CardGroup>
 
 ## Quick Start for Contributors
@@ -23,18 +114,17 @@ This section covers development topics for contributors and maintainers of nono.
 
 2. **Build the project**
    ```bash
-   cargo build --release
+   make build
    ```
 
 3. **Run the test suite**
    ```bash
-   ./tests/run_integration_tests.sh
+   make test
    ```
 
 4. **Check formatting and lints**
    ```bash
-   cargo fmt -- --check
-   cargo clippy -- -D warnings -D clippy::unwrap_used
+   make check
    ```
 
 ## Development Environment
@@ -52,8 +142,8 @@ This section covers development topics for contributors and maintainers of nono.
 # Debug build
 cargo build
 
-# Release build (used for integration tests)
-cargo build --release
+# Workspace build via project make target
+make build
 
 # Run with verbose logging
 RUST_LOG=debug cargo run -- run --allow-cwd -- echo "test"

@@ -1,0 +1,127 @@
+---
+title: Windows Signing Guide
+description: Authenticode signing setup and verification for Windows release artifacts
+---
+
+# Windows Signing Guide
+
+This guide covers the Authenticode signing setup required to produce signed Windows release artifacts.
+
+Signing runs only in CI for tag or release builds. Local developer builds are never signed.
+This is intentional: the signing secrets are CI-only and the workflow is designed to fail
+closed on any signing or verification error (D-10, D-13).
+
+## Required GitHub Actions secrets
+
+Both secrets must be set as repository secrets before the release workflow can produce signed artifacts.
+
+| Secret | Description | Source |
+|--------|-------------|--------|
+| `WINDOWS_SIGNING_CERT` | Base64-encoded PFX certificate (certificate + private key) | Export your code-signing cert to PFX, then run: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx"))` |
+| `WINDOWS_SIGNING_CERT_PASSWORD` | Password protecting the PFX file | Set when exporting the PFX |
+
+Set these at `Settings -> Secrets and variables -> Actions -> New repository secret` in the GitHub repository.
+
+If either secret is missing, the release workflow fails immediately before signing with:
+
+```text
+WINDOWS_SIGNING_CERT and WINDOWS_SIGNING_CERT_PASSWORD must be set.
+Set these repository secrets before releasing Windows artifacts.
+See docs/cli/development/windows-signing-guide.mdx.
+```
+
+No artifacts are uploaded. The workflow does not silently skip signing and produce unsigned artifacts.
+This is intentional: unsigned Windows artifacts are not releasable (D-13).
+
+## What gets signed
+
+The release workflow signs these artifacts before uploading them:
+
+- `nono.exe` — the compiled binary
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi` — the per-machine MSI installer
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi` — the per-user MSI installer
+
+The `.zip` artifact (`nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`) contains the already-signed
+`nono.exe` and is assembled after signing. The release workflow also publishes the signed raw
+`nono.exe` as a release asset so signature verification does not require zip extraction.
+
+## Signing implementation
+
+Signing is performed by `scripts/sign-windows-artifacts.ps1`. The script:
+
+1. Decodes `WINDOWS_SIGNING_CERT` from base64 to a temporary PFX file.
+2. Imports the certificate into `Cert:\CurrentUser\My` for the duration of the job.
+3. Calls `signtool.exe sign /fd sha256 /sha1 <thumbprint> /tr http://timestamp.digicert.com /td sha256 <artifact>` for each artifact.
+4. Calls `signtool.exe verify /pa /tw <artifact>` for each artifact. The `/tw` flag treats a missing timestamp as a failure, ensuring every released artifact has a durable timestamp (D-12).
+5. Removes the certificate from the store and deletes the temporary PFX file in all exit paths (including errors).
+
+The script requires `signtool.exe` on `PATH`, which is available on GitHub Actions `windows-latest` runners via the pre-installed Windows SDK.
+
+### Timestamping
+
+The script uses RFC 3161 timestamping via `/tr` and `/td sha256`. This is the current
+Microsoft-recommended mode for SHA-256 signed binaries. The DigiCert endpoint
+(`http://timestamp.digicert.com`) supports RFC 3161 when addressed via `/tr`.
+
+D-12 (locked): DigiCert timestamping, SHA-256 only.
+D-14 (locked): `signtool.exe` is the only signing primitive. No custom PKCS#7 logic or
+alternative tooling is permitted.
+
+## Verifying signatures
+
+To verify an Authenticode signature on a downloaded artifact:
+
+```powershell
+$sig = Get-AuthenticodeSignature -FilePath "nono.exe"
+$sig.Status
+# Expected: Valid
+
+$sig.SignerCertificate.Subject
+# Expected: CN=<your organization name>, ...
+```
+
+For MSI artifacts, pass the MSI path:
+
+```powershell
+Get-AuthenticodeSignature -FilePath "nono-v0.2.0-x86_64-pc-windows-msvc-machine.msi" |
+    Select-Object Status, SignerCertificate
+```
+
+`Status` must be `Valid`. Any other status (`NotSigned`, `HashMismatch`, `UnknownError`) means
+the artifact is not distributable.
+
+The release workflow checks these statuses automatically before upload for:
+
+- the signed `nono.exe`
+- the machine MSI
+- the user MSI
+- the extracted `nono.exe` inside the zip payload
+
+## Generating a test certificate
+
+To test the signing workflow without a production code-signing certificate, generate a self-signed certificate:
+
+```powershell
+$cert = New-SelfSignedCertificate `
+    -Subject "CN=nono Test Signing" `
+    -CertStoreLocation "Cert:\CurrentUser\My" `
+    -Type CodeSigningCert `
+    -HashAlgorithm SHA256
+
+$password = ConvertTo-SecureString -String "TestPassword123!" -Force -AsPlainText
+Export-PfxCertificate -Cert $cert -FilePath "nono-test.pfx" -Password $password
+
+$base64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes("nono-test.pfx"))
+Write-Host $base64
+
+Remove-Item "nono-test.pfx" -Force
+Remove-Item -Path $cert.PSPath -Force
+```
+
+Do not use self-signed certificates in production releases. Production releases require a
+certificate from a trusted CA enrolled in the Microsoft Trusted Root Program.
+
+Note that `signtool verify /pa /tw` will warn or fail for self-signed certificates because
+they are not trusted by the default authentication policy (`/pa`). Use
+`signtool verify /pa /tw /r <thumbprint>` or accept the expected failure output when running
+local tests with self-signed certs.

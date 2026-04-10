@@ -34,8 +34,8 @@ See [Profiles & Groups](/cli/features/profiles-groups) for all built-in profiles
 | Command | Description |
 |---------|-------------|
 | `nono run` | Run a command inside the sandbox (supervised, default) |
-| `nono shell` | Start an interactive shell inside the sandbox |
-| `nono wrap` | Apply sandbox and exec into command (no parent process, minimal overhead) |
+| `nono shell` | Start an interactive shell inside the sandbox (`--dry-run` only on Windows) |
+| `nono wrap` | Apply sandbox and exec into command (no parent process, minimal overhead; `--dry-run` only on Windows) |
 | `nono ps` / `attach` / `detach` / `stop` / `inspect` / `prune` | [Manage runtime sessions](/cli/features/session-lifecycle) - discover, reattach, inspect, stop, and clean up long-lived sessions |
 | `nono why` | Check why a path/network operation would be allowed or denied |
 | `nono rollback` | [Manage rollback sessions](/cli/features/atomic-rollbacks) - list, show, restore, verify, cleanup snapshots |
@@ -103,6 +103,10 @@ nono shell --allow-cwd --shell /bin/zsh
 ```
 
 Exit the shell with `Ctrl-D` or `exit`.
+
+<Note>
+On Windows, live `nono shell` execution is intentionally unavailable as a product-surface limitation. Use `nono shell --dry-run` to inspect shell policy, or use `nono run -- <command>` for supported execution.
+</Note>
 
 ## Checking Path Access (`nono why`)
 

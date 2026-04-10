@@ -214,6 +214,48 @@ pub struct NetworkAuditEvent {
     pub reason: Option<String>,
 }
 
+/// Rollback availability status for a session.
+///
+/// Recorded in [`SessionMetadata`] so that `nono rollback list/show/restore`
+/// can surface exactly why rollback is or is not available without re-examining
+/// snapshot files.
+///
+/// Older `session.json` payloads that lack this field deserialize as `Available`
+/// (backward-compatible default) so existing sessions continue to behave as before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackStatus {
+    /// Baseline snapshot captured successfully; rollback is available.
+    #[default]
+    Available,
+    /// Rollback was explicitly disabled (`--no-rollback`) or skipped (no write paths).
+    Skipped,
+    /// Baseline snapshot capture was attempted but failed; execution continued with a
+    /// warning and rollback is NOT available for this session.
+    FailedWarningOnly {
+        /// Human-readable reason the capture failed.
+        reason: String,
+    },
+}
+
+impl RollbackStatus {
+    /// Returns `true` if rollback snapshots are available for this session.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    /// Returns a human-readable label for display in `nono rollback list/show`.
+    #[must_use]
+    pub fn display_label(&self) -> &str {
+        match self {
+            Self::Available => "rollback-capable",
+            Self::Skipped => "audit-only",
+            Self::FailedWarningOnly { .. } => "audit-only (capture failed)",
+        }
+    }
+}
+
 /// Metadata for an undo session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMetadata {
@@ -236,6 +278,12 @@ pub struct SessionMetadata {
     /// Network events captured by the proxy during this session
     #[serde(default)]
     pub network_events: Vec<NetworkAuditEvent>,
+    /// Whether rollback snapshots were captured for this session.
+    ///
+    /// Defaults to `Available` when deserializing older payloads that lack this
+    /// field, preserving backward compatibility.
+    #[serde(default)]
+    pub rollback_status: RollbackStatus,
 }
 
 /// A snapshot manifest capturing filesystem state at a point in time
@@ -327,5 +375,106 @@ mod tests {
         assert_eq!(parsed.number, 0);
         assert!(parsed.parent.is_none());
         assert!(parsed.files.is_empty());
+    }
+
+    #[test]
+    fn rollback_status_available_is_available() {
+        assert!(RollbackStatus::Available.is_available());
+        assert!(!RollbackStatus::Skipped.is_available());
+        assert!(!RollbackStatus::FailedWarningOnly {
+            reason: "disk full".to_string()
+        }
+        .is_available());
+    }
+
+    #[test]
+    fn rollback_status_display_labels() {
+        assert_eq!(
+            RollbackStatus::Available.display_label(),
+            "rollback-capable"
+        );
+        assert_eq!(RollbackStatus::Skipped.display_label(), "audit-only");
+        assert_eq!(
+            RollbackStatus::FailedWarningOnly {
+                reason: "error".to_string()
+            }
+            .display_label(),
+            "audit-only (capture failed)"
+        );
+    }
+
+    #[test]
+    fn rollback_status_serde_roundtrip() {
+        let status = RollbackStatus::FailedWarningOnly {
+            reason: "locked file".to_string(),
+        };
+        let json = serde_json::to_string(&status).expect("serialize");
+        let parsed: RollbackStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, status);
+    }
+
+    #[test]
+    fn session_metadata_defaults_rollback_status_for_legacy_json() {
+        // Older session.json payloads lack rollback_status; must deserialize as Available.
+        let legacy = serde_json::json!({
+            "session_id": "legacy-no-status",
+            "started": "2025-01-01T00:00:00Z",
+            "ended": null,
+            "command": ["test"],
+            "tracked_paths": [],
+            "snapshot_count": 1,
+            "exit_code": 0,
+            "merkle_roots": [],
+        });
+        let meta: SessionMetadata = serde_json::from_value(legacy).expect("deserialize");
+        // Default must be Available for backward compatibility
+        assert_eq!(meta.rollback_status, RollbackStatus::Available);
+        assert!(meta.rollback_status.is_available());
+    }
+
+    #[test]
+    fn session_metadata_rollback_status_skipped_roundtrip() {
+        let meta = SessionMetadata {
+            session_id: "test-skip".to_string(),
+            started: "2025-01-01T00:00:00Z".to_string(),
+            ended: None,
+            command: vec!["test".to_string()],
+            tracked_paths: vec![],
+            snapshot_count: 0,
+            exit_code: None,
+            merkle_roots: vec![],
+            network_events: vec![],
+            rollback_status: RollbackStatus::Skipped,
+        };
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let parsed: SessionMetadata = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.rollback_status, RollbackStatus::Skipped);
+        assert!(!parsed.rollback_status.is_available());
+    }
+
+    #[test]
+    fn session_metadata_rollback_status_failed_warning_roundtrip() {
+        let reason = "disk full during baseline capture".to_string();
+        let meta = SessionMetadata {
+            session_id: "test-fail".to_string(),
+            started: "2025-01-01T00:00:00Z".to_string(),
+            ended: None,
+            command: vec!["test".to_string()],
+            tracked_paths: vec![],
+            snapshot_count: 0,
+            exit_code: None,
+            merkle_roots: vec![],
+            network_events: vec![],
+            rollback_status: RollbackStatus::FailedWarningOnly {
+                reason: reason.clone(),
+            },
+        };
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let parsed: SessionMetadata = serde_json::from_str(&json).expect("deserialize");
+        assert!(!parsed.rollback_status.is_available());
+        assert_eq!(
+            parsed.rollback_status.display_label(),
+            "audit-only (capture failed)"
+        );
     }
 }

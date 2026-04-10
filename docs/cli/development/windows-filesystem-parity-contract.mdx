@@ -1,0 +1,95 @@
+---
+title: Windows Filesystem Parity Contract
+description: Supported Windows filesystem capability shapes, current enforcement boundaries, and intentional limitations relative to macOS
+---
+
+# Windows Filesystem Parity Contract
+
+This document records the current Windows filesystem contract in parity terms against macOS.
+
+It is not a claim of identical backend semantics. Windows does **not** implement Seatbelt-style deny rules or macOS extension mechanics. It does define which filesystem capability shapes are supported today, which are deferred, and where Windows still relies on launch-time mediation rather than a broader native boundary.
+
+## Supported Capability Shapes
+
+Windows currently supports these filesystem policy shapes in the live restricted-run path:
+
+- directory allowlists for read, write, and read+write access
+- exact-path single-file grants for read, write, and read+write access
+- executable-path validation against the compiled Windows filesystem policy
+- working-directory validation when a live run depends on user-intent directory grants
+- writable runtime-root placement inside writable allowlists where Windows can establish a low-integrity-compatible destination
+
+## Writable Behavior
+
+Windows writable behavior is currently split into two categories:
+
+- **Direct writes**: allowed when the writable directory is already low-integrity-compatible, such as `%LOCALAPPDATA%\Temp\Low`, `AppData\LocalLow`, or another directory that already carries a compatible low-integrity label
+- **Runtime-owned redirected writes**: used when the requested writable directory is not directly low-integrity-compatible; `nono` creates or selects a low-integrity runtime root and redirects temp, profile, cache, and similar runtime-owned state there
+
+This means Windows now supports more practical writable workspace flows than the earlier directory-only subset, but it still does **not** relabel ordinary user workspaces to make direct writes broadly available.
+
+## Write-Only Semantics
+
+Windows accepts write-only directory and write-only file grants in the compiled filesystem policy.
+
+Those grants currently matter in three places:
+
+- launch-time path validation for mediated commands and absolute-path arguments
+- writable runtime-root selection and redirected runtime-owned state
+- direct low-integrity writes when the target directory is already compatible
+
+This is **not** yet a full Windows-native read-deny boundary for arbitrary processes. When Windows cannot enforce a broader read restriction directly, `nono` relies on launch-time validation plus the low-integrity write boundary instead of claiming stronger semantics than the backend can provide.
+
+## Deny-Override Parity
+
+Windows currently distinguishes between two different concepts:
+
+- **Policy preprocessing override**: `override_deny` is supported as a CLI/profile policy feature that removes matching deny-group entries before the Windows backend compiles the effective capability set
+- **Backend-native deny-within-allow enforcement**: still unavailable on Windows
+
+That means Windows can honor targeted deny overrides at policy-construction time, but it cannot yet express a general native "deny this child path inside an allowed parent" filesystem boundary comparable to macOS Seatbelt deny rules.
+
+## Path Handling Guarantees
+
+Windows filesystem comparisons in the backend are normalized for:
+
+- case-insensitive drive-letter comparisons
+- verbatim path prefixes such as `\\?\`
+- UNC verbatim prefixes such as `\\?\UNC\`
+- canonicalized executable and argument-path validation
+
+Regression coverage exists for symlink, junction, parent-escape, drive-case, and verbatim-path-sensitive comparisons in the Windows backend tests.
+
+## Launch-Time Mediation Boundary
+
+Windows currently uses backend-owned launch validation for:
+
+- executable paths
+- selected command-aware file arguments
+- absolute-path arguments that point outside the compiled policy
+
+This mediation is intentionally treated as **preflight**, not a complete sandbox boundary. It reduces reliance on ambient shell behavior, but it is not a substitute for fuller Windows-native enforcement.
+
+## Intentional Remaining Differences
+
+These differences remain explicit and intentional:
+
+- Windows does not yet implement backend-native deny-within-allow filesystem rules
+- Windows does not yet provide a general read-deny boundary that would make write-only semantics equivalent to macOS for arbitrary child behavior
+- Windows still relies on low-integrity process writes plus launch-time mediation for part of the current filesystem contract
+- ordinary medium-integrity workspace directories are not mutated in place to force broader writable parity
+
+## Practical Parity Summary
+
+Windows is now functionally comparable to macOS for these filesystem workflow shapes:
+
+- allowlisted workspace reads
+- allowlisted workspace writes when a low-integrity-compatible writable destination exists
+- exact-file grant validation for supported live runs
+- runtime-owned writable state placement inside a bounded writable area
+
+Windows is **not** yet fully comparable to macOS for these filesystem workflow shapes:
+
+- native deny-within-allow enforcement
+- arbitrary-process write-only semantics without relying on launch-time mediation
+- broad workspace writes in ordinary medium-integrity user directories without redirection

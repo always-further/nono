@@ -259,7 +259,10 @@ mod tests {
     #[test]
     fn test_query_path_granted() {
         let caps = nono_capability_set_new();
-        let path = CString::new("/tmp").unwrap_or_default();
+        let allowed_dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let path = CString::new(allowed_dir.to_string_lossy().into_owned()).unwrap_or_default();
         // SAFETY: caps and path are valid.
         unsafe {
             nono_capability_set_allow_path(
@@ -269,12 +272,9 @@ mod tests {
             );
             let ctx = nono_query_context_new(caps);
 
-            // On macOS /tmp canonicalizes to /private/tmp, so query with
-            // the canonical path to match the resolved capability.
-            let canonical_tmp =
-                std::fs::canonicalize("/tmp").unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-            let query_str = format!("{}/test.txt", canonical_tmp.display());
-            let query_path = CString::new(query_str).unwrap_or_default();
+            let query_path =
+                CString::new(allowed_dir.join("test.txt").to_string_lossy().into_owned())
+                    .unwrap_or_default();
             let mut result = std::mem::zeroed::<NonoQueryResult>();
             let rc = nono_query_context_query_path(
                 ctx,

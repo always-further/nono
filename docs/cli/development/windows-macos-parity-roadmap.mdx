@@ -1,0 +1,394 @@
+---
+title: Windows macOS Parity Roadmap
+description: Epics, sprints, dependencies, and acceptance criteria for full Windows parity with the macOS feature surface
+---
+
+# Windows macOS Parity Roadmap
+
+This roadmap starts from the current repository state:
+
+- Windows already has a real restricted-execution command surface
+- Windows already has meaningful filesystem and blocked-network enforcement
+- Windows already has a supported rollback-oriented supervised path
+- Windows already has packaging, signing, and release-readiness work in flight
+- Windows still falls short of macOS in several security, supervisor, and product-surface areas
+
+This plan is **not** the same as the original Windows bring-up roadmap.
+
+This plan assumes the next program goal is:
+
+> make Windows functionally comparable to macOS for the nono product surface that users and operators actually rely on
+
+## Planning Constraints
+
+The roadmap below is optimized for:
+
+- **one engineer**
+- **functional parity with macOS behavior**, not literal implementation parity
+- **explicit product decisions** where true parity is not technically credible
+- **security honesty**: unsupported Windows behavior must fail clearly rather than emulate macOS with weaker guarantees
+
+That means this roadmap does not require Windows to reproduce Seatbelt or macOS extension mechanics exactly. It does require Windows to deliver equivalent product outcomes for the same core workflows.
+
+## Parity Success Bar
+
+Windows reaches macOS parity when all of the following are true:
+
+- the same major restricted-run workflows are available on both platforms
+- filesystem and network restrictions cover the same practical capability shapes
+- supervised runtime approval flows behave comparably
+- trust interception and delegated open flows are supported or intentionally product-limited across both platforms
+- `shell` and `wrap` either work comparably or are resolved by a cross-platform product decision
+- CI, release, operator docs, and support guidance treat Windows as a first-class peer to macOS
+
+## Current Gap Summary
+
+Based on the current Windows feature matrix and implementation state, the main parity gaps are:
+
+- broader filesystem parity beyond the current narrow live subset
+- richer network policy parity beyond the current blocked-network subset
+- child-attached supervised capability expansion for ordinary Windows processes
+- runtime trust interception
+- delegated open / browser-launch flows
+- `nono shell` remains unsupported on Windows
+- `nono wrap` remains unsupported on Windows
+- final release-promotion criteria are not yet met
+
+## Epic Overview
+
+The remaining parity program is organized into five epics:
+
+1. `WIN-EPIC-13` Filesystem Parity
+2. `WIN-EPIC-14` Network Parity
+3. `WIN-EPIC-15` Supervisor and Trust Parity
+4. `WIN-EPIC-16` CLI Product-Surface Parity
+5. `WIN-EPIC-17` Release Parity and Platform Promotion
+
+The sequencing is intentional:
+
+- close backend parity first
+- then close supervisor and trust gaps
+- then resolve shell / wrap product behavior
+- then finish release and promotion work
+
+## Epic WIN-EPIC-13: Filesystem Parity
+
+Goal: close the largest functional gap between the current Windows restricted-run model and the macOS feature surface.
+
+### Sprint WIN-13.1: Grant Shape Parity
+
+#### `WIN-1301: Support additional allowlist grant shapes`
+Points: 13
+
+Acceptance criteria:
+
+- Windows supports more than the current directory-only subset where a secure mapping is credible
+- single-file grants are either implemented or reclassified into a clearly documented permanent limitation
+- write-only semantics are either implemented or reclassified intentionally
+- capability-to-policy mapping remains backend-owned and deterministic
+
+#### `WIN-1302: Audit deny-override parity`
+Points: 8
+
+Acceptance criteria:
+
+- current macOS deny-override use cases are explicitly mapped to Windows outcomes
+- each deny-override case is classified as supported, deferred, or permanently product-limited
+- no live restricted run silently downgrades deny behavior
+
+### Sprint WIN-13.2: Write Mediation Parity
+
+#### `WIN-1303: Expand writable allowlist behavior`
+Points: 13
+
+Acceptance criteria:
+
+- Windows writable allowlists support more real user-workspace flows than the current low-integrity-compatible subset
+- runtime-owned redirection is reduced where a stronger Windows-native write boundary exists
+- supported writable flows are documented and test-covered
+
+#### `WIN-1304: Reduce dependence on argument preflight`
+Points: 8
+
+Acceptance criteria:
+
+- command-argument mediation is no longer carrying security weight for workflows that now have a stronger backend boundary
+- docs clearly distinguish preflight validation from real enforcement
+- remaining argument-based guards are narrow, explicit, and auditable
+
+### Sprint WIN-13.3: Filesystem Edge-Case Hardening
+
+#### `WIN-1305: Add parity regression coverage for Windows path edge cases`
+Points: 8
+
+Acceptance criteria:
+
+- tests cover symlink, junction, UNC, verbatim-path, and drive-letter parity-sensitive cases
+- runtime-root and writable-root selection behavior is regression-tested
+- security-sensitive path comparisons remain fail-closed
+
+#### `WIN-1306: Publish final Windows filesystem parity contract`
+Points: 3
+
+Acceptance criteria:
+
+- docs describe the supported Windows filesystem contract in parity terms against macOS
+- known residual differences are explicit and intentional
+
+## Epic WIN-EPIC-14: Network Parity
+
+Goal: move from the current blocked-network subset to macOS-comparable network behavior.
+
+### Sprint WIN-14.1: WFP Lifecycle Hardening
+
+#### `WIN-1401: Harden live WFP activation and cleanup`
+Points: 8
+
+Acceptance criteria:
+
+- live blocked-network activation and cleanup are stable without test-only seams for the supported path
+- cleanup failure, stale-filter, and activation failure modes are explicitly diagnosed
+- direct and supervised blocked-network runs share the same backend contract
+
+#### `WIN-1402: Finalize WFP readiness and setup contract`
+Points: 5
+
+Acceptance criteria:
+
+- setup/readiness output matches actual runtime dependency requirements
+- service/driver readiness states are actionable and deterministic
+- operator docs describe real readiness expectations
+
+### Sprint WIN-14.2: Proxy and Port Policy Parity
+
+#### `WIN-1403: Implement ProxyOnly parity path`
+Points: 13
+
+Acceptance criteria:
+
+- `ProxyOnly` has a real Windows backend path rather than a fail-closed placeholder
+- supported proxy enforcement behavior matches macOS product expectations
+- unsupported proxy shapes fail clearly
+
+#### `WIN-1404: Implement connect / bind / localhost policy parity`
+Points: 13
+
+Acceptance criteria:
+
+- Windows supports the practical connect / bind / localhost policy shapes that matter on macOS
+- unsupported network policy shapes are narrow and documented
+- backend classification and tests cover each supported shape
+
+### Sprint WIN-14.3: Process-Tree Network Enforcement
+
+#### `WIN-1405: Close interpreter and process-tree network gaps`
+Points: 13
+
+Acceptance criteria:
+
+- restrictions apply to real launch trees, not only a narrow executable-path slice
+- interpreter / shell-host launches no longer force the current blocked limitation for supported network modes
+- network diagnostics remain backend-owned and actionable
+
+## Epic WIN-EPIC-15: Supervisor and Trust Parity
+
+Goal: make Windows supervised execution functionally comparable to macOS for runtime approval and trust flows.
+
+### Sprint WIN-15.1: Child-Attached Supervisor Transport
+
+#### `WIN-1501: Attach ordinary Windows children to the supervisor request channel`
+Points: 13
+
+Acceptance criteria:
+
+- generic supervised Windows commands can issue runtime capability requests through the live transport
+- parent-side broker / approval handling is exercised by real child processes, not only test scaffolding
+- unsupported transports fail clearly
+
+#### `WIN-1502: Promote runtime capability expansion from partial to supported`
+Points: 8
+
+Acceptance criteria:
+
+- supported runtime expansion flows work on Windows
+- denied requests fail safely and are audited
+- CLI messaging no longer treats runtime expansion as a preview-only Windows limitation for the supported path
+
+### Sprint WIN-15.2: Trust Interception
+
+#### `WIN-1503: Implement runtime file-open mediation for supervised Windows children`
+Points: 13
+
+Acceptance criteria:
+
+- Windows supervised children can trigger runtime file-open mediation
+- approval and denial are enforced through the Windows supervisor model
+- trust-related audit and diagnostics are test-covered
+
+#### `WIN-1504: Enable Windows trust interception`
+Points: 8
+
+Acceptance criteria:
+
+- trust interception works for supported Windows supervised flows
+- startup trust verification and runtime trust interception form one coherent product path
+- docs and help output reflect actual Windows trust behavior
+
+### Sprint WIN-15.3: Delegated Open Flows
+
+#### `WIN-1505: Implement delegated browser-open / URL-open support`
+Points: 8
+
+Acceptance criteria:
+
+- `open-url-helper` or its Windows equivalent works in the supported supervised path
+- delegated open flows are audited and bounded
+- unsupported delegated-open cases fail clearly
+
+#### `WIN-1506: Align support/setup/help messaging for supervised Windows trust flows`
+Points: 3
+
+Acceptance criteria:
+
+- setup/help/support docs describe the now-supported trust and open-flow path accurately
+- residual Windows-specific differences are explicit
+
+## Epic WIN-EPIC-16: CLI Product-Surface Parity
+
+Goal: eliminate the last major Windows/macOS product-surface differences or resolve them with explicit cross-platform product decisions.
+
+### Sprint WIN-16.1: Shell Mode Parity Decision
+
+#### `WIN-1601: Implement Windows shell mode or finalize a cross-platform product limitation`
+Points: 13
+
+Acceptance criteria:
+
+- either `nono shell` is credibly supported on Windows
+- or the product decision is elevated to a cross-platform limitation rather than a Windows-only gap
+- help/docs/tests all reflect the final decision
+
+### Sprint WIN-16.2: Wrap / Apply Parity Decision
+
+#### `WIN-1602: Implement Windows wrap mode or finalize a cross-platform product limitation`
+Points: 13
+
+Acceptance criteria:
+
+- either `nono wrap` is credibly supported on Windows
+- or the product decision is elevated to a cross-platform limitation rather than a Windows-only gap
+- no misleading platform-specific enforcement claims remain
+
+### Sprint WIN-16.3: Output and UX Parity
+
+#### `WIN-1603: Unify Windows and macOS support messaging`
+Points: 5
+
+Acceptance criteria:
+
+- runtime, setup, and help output use parity-oriented language instead of subset-oriented language where parity has actually been achieved
+- docs, CLI output, and operator guidance stay aligned
+
+## Epic WIN-EPIC-17: Release Parity and Platform Promotion
+
+Goal: make Windows release confidence and support posture equivalent to macOS.
+
+### Sprint WIN-17.1: CI and Validation Parity
+
+#### `WIN-1701: Expand Windows CI to parity-grade coverage`
+Points: 8
+
+Acceptance criteria:
+
+- Windows CI covers the same classes of release-critical workflows as macOS
+- backend, supervisor, trust, and installer paths are exercised by automation
+- Windows release confidence no longer depends on ad hoc local validation
+
+#### `WIN-1702: Add parity regression suites`
+Points: 8
+
+Acceptance criteria:
+
+- Windows regression suites explicitly cover parity-sensitive workflows
+- failures are isolated and useful for debugging
+
+### Sprint WIN-17.2: Signing, Installer, and Service Readiness
+
+#### `WIN-1703: Complete Windows signing and artifact verification`
+Points: 8
+
+Acceptance criteria:
+
+- Windows binaries and installers are signed in the supported release path
+- verification steps are documented and automation-ready
+- failures in signing infrastructure fail explicitly
+
+#### `WIN-1704: Finalize installer, upgrade, uninstall, and service packaging behavior`
+Points: 8
+
+Acceptance criteria:
+
+- machine/user MSI behavior is fully validated
+- upgrade and uninstall flows are operator-clear and test-covered
+- service packaging behavior is either supported and documented or intentionally excluded from the public contract
+
+### Sprint WIN-17.3: Promotion Audit
+
+#### `WIN-1705: Run final Windows/macOS parity audit`
+Points: 5
+
+Acceptance criteria:
+
+- each parity requirement is marked met, intentionally limited, or blocked
+- residual differences are explicit and product-approved
+- Windows support messaging is ready to move from restricted-execution command surface to first-class supported peer
+
+#### `WIN-1706: Promote Windows to first-class supported platform status`
+Points: 3
+
+Acceptance criteria:
+
+- release, support, and documentation language reflects first-class support
+- promotion criteria are updated from draft to complete
+- Windows is no longer described as a subset platform
+
+## Critical Path
+
+The fastest credible route to macOS parity is:
+
+1. `WIN-EPIC-13` Filesystem Parity
+2. `WIN-EPIC-14` Network Parity
+3. `WIN-EPIC-15` Supervisor and Trust Parity
+4. `WIN-EPIC-16` CLI Product-Surface Parity
+5. `WIN-EPIC-17` Release Parity and Platform Promotion
+
+## What This Roadmap Intentionally Avoids
+
+- It does not assume exact Seatbelt-style implementation parity.
+- It does not count packaging polish as parity if backend/security behavior still differs materially.
+- It does not treat Windows-only permanent limitations as acceptable parity unless product explicitly makes them cross-platform decisions.
+
+## Estimated Program Shape
+
+For one engineer, this is roughly a **12 to 15 sprint** parity program.
+
+Best case:
+
+- `12` sprints if `shell` / `wrap` become explicit cross-platform product decisions
+
+Likely case:
+
+- `14 to 15` sprints if either `shell` or `wrap` requires a real Windows implementation
+
+## Recommended Immediate Next Step
+
+If the program is moving now, the best next story is:
+
+- `WIN-1301: Support additional allowlist grant shapes`
+
+That should be followed immediately by:
+
+- `WIN-1401: Harden live WFP activation and cleanup`
+- `WIN-1501: Attach ordinary Windows children to the supervisor request channel`
+
+That sequence attacks the deepest remaining parity gaps first.

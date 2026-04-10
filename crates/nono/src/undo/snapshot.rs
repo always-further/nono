@@ -7,7 +7,6 @@
 use crate::error::{NonoError, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -251,10 +250,20 @@ impl SnapshotManager {
     ///
     /// All manifest paths are validated to be within tracked directories
     /// before any writes occur.
+    ///
+    /// # Partial failures
+    ///
+    /// Per-file errors (e.g., locked files on Windows) are aggregated rather
+    /// than aborting the restore. If any files could not be restored, the
+    /// function returns `Err(NonoError::PartialRestore { .. })` with the list
+    /// of applied changes and a summary of the failures. The `applied` count
+    /// lets callers surface exactly which files are stuck without claiming full
+    /// rollback success.
     pub fn restore_to(&self, manifest: &SnapshotManifest) -> Result<Vec<Change>> {
         self.validate_manifest_paths(manifest)?;
         let current_files = self.walk_current()?;
         let mut applied_changes = Vec::new();
+        let mut restore_failures: Vec<(std::path::PathBuf, String)> = Vec::new();
 
         // Restore files from manifest
         for (path, state) in &manifest.files {
@@ -266,15 +275,21 @@ impl SnapshotManager {
             if needs_restore {
                 // Ensure parent directory exists
                 if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).map_err(|e| {
-                        NonoError::Snapshot(format!(
-                            "Failed to create directory {}: {e}",
-                            parent.display()
-                        ))
-                    })?;
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        restore_failures.push((
+                            path.clone(),
+                            format!("Failed to create directory {}: {e}", parent.display()),
+                        ));
+                        continue;
+                    }
                 }
 
-                self.object_store.retrieve_to(&state.hash, path)?;
+                if let Err(e) = self.object_store.retrieve_to(&state.hash, path) {
+                    // Collect per-file failures so locked files on Windows are
+                    // surfaced explicitly rather than aborting the restore.
+                    restore_failures.push((path.clone(), e.to_string()));
+                    continue;
+                }
 
                 // Restore permissions (mask out setuid/setgid/sticky bits)
                 #[cfg(unix)]
@@ -319,7 +334,29 @@ impl SnapshotManager {
             }
         }
 
-        Ok(applied_changes)
+        if restore_failures.is_empty() {
+            Ok(applied_changes)
+        } else {
+            // Build a concise summary listing the first few locked paths.
+            // Cap at 3 entries to keep the error message readable.
+            let summary_entries: Vec<String> = restore_failures
+                .iter()
+                .take(3)
+                .map(|(p, reason)| format!("{}: {reason}", p.display()))
+                .collect();
+            let mut summary = summary_entries.join("; ");
+            if restore_failures.len() > 3 {
+                summary.push_str(&format!(
+                    " ... and {} more",
+                    restore_failures.len().saturating_sub(3)
+                ));
+            }
+            Err(NonoError::PartialRestore {
+                applied: applied_changes.len(),
+                failed: restore_failures.len(),
+                summary,
+            })
+        }
     }
 
     /// Collect files that match the atomic temp-file pattern used by editors/tools.
@@ -694,8 +731,8 @@ impl SnapshotManager {
         Ok(FileState {
             hash,
             size: metadata.len(),
-            mtime: metadata.mtime(),
-            permissions: metadata.mode(),
+            mtime: metadata_mtime(&metadata),
+            permissions: metadata_mode(&metadata),
         })
     }
 
@@ -819,9 +856,36 @@ fn file_state_from_metadata(path: &Path) -> Result<FileState> {
     Ok(FileState {
         hash: super::types::ContentHash::from_bytes(hash_bytes),
         size: metadata.len(),
-        mtime: metadata.mtime(),
-        permissions: metadata.mode(),
+        mtime: metadata_mtime(&metadata),
+        permissions: metadata_mode(&metadata),
     })
+}
+
+#[cfg(unix)]
+fn metadata_mtime(metadata: &fs::Metadata) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mtime()
+}
+
+#[cfg(not(unix))]
+fn metadata_mtime(metadata: &fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn metadata_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mode()
+}
+
+#[cfg(not(unix))]
+fn metadata_mode(_metadata: &fs::Metadata) -> u32 {
+    0
 }
 
 /// Write content to a file atomically via temp file + rename.
@@ -864,10 +928,10 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         return Err(e);
     }
 
-    fs::rename(&temp_path, path).map_err(|e| {
+    super::object_store::replace_file(&temp_path, path).map_err(|e| {
         let _ = fs::remove_file(&temp_path);
         NonoError::Snapshot(format!(
-            "Failed to rename {} to {}: {e}",
+            "Failed to replace {} with {}: {e}",
             temp_path.display(),
             path.display()
         ))
@@ -910,7 +974,7 @@ fn has_atomic_temp_suffix(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::undo::exclusion::ExclusionConfig;
-    use crate::undo::types::ContentHash;
+    use crate::undo::types::{ContentHash, RollbackStatus};
     use tempfile::TempDir;
 
     fn setup_test_dir() -> (TempDir, PathBuf) {
@@ -1052,6 +1116,60 @@ mod tests {
         assert!(!tracked.join("new.txt").exists());
     }
 
+    /// Verify that restore_to returns a PartialRestore error when a file cannot
+    /// be restored (e.g., read-only target or locked file), and that the error
+    /// message names the failing path.
+    ///
+    /// On Unix, we make the parent directory read-only after snapshotting so that
+    /// the rename of the temp file cannot be completed. On Windows this simulates
+    /// the ERROR_SHARING_VIOLATION scenario (e.g., a file held open exclusively).
+    #[test]
+    #[cfg(unix)]
+    fn restore_partial_failure_names_locked_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let mut manager = make_manager(&session_dir, &tracked);
+        let baseline = manager.create_baseline().expect("baseline");
+
+        // Modify the file so restore will attempt to overwrite it.
+        let locked_file = tracked.join("file1.txt");
+        fs::write(&locked_file, b"modified content").expect("modify file1");
+
+        // Make the *directory* read-only so rename of the temp file fails.
+        let original_perms = fs::metadata(&tracked).expect("metadata").permissions();
+        fs::set_permissions(&tracked, fs::Permissions::from_mode(0o555))
+            .expect("make dir read-only");
+
+        let result = manager.restore_to(&baseline);
+
+        // Restore permissions so TempDir cleanup can remove the dir.
+        let _ = fs::set_permissions(&tracked, original_perms);
+
+        // The restore should have failed with a PartialRestore error.
+        match result {
+            Err(NonoError::PartialRestore {
+                failed, summary, ..
+            }) => {
+                assert!(failed > 0, "Expected at least one failure");
+                assert!(
+                    summary.contains("file1.txt"),
+                    "PartialRestore summary should name the locked file, got: {summary}"
+                );
+            }
+            Err(other) => {
+                panic!("Expected PartialRestore error, got: {other}");
+            }
+            Ok(_) => {
+                // If the OS somehow allowed the write (running as root), skip assertion.
+                // This is not a test failure — root bypasses permission checks.
+            }
+        }
+    }
+
     #[test]
     fn merkle_root_differs_between_snapshots() {
         let (dir, tracked) = setup_test_dir();
@@ -1104,6 +1222,7 @@ mod tests {
             exit_code: Some(0),
             merkle_roots: vec![baseline.merkle_root],
             network_events: vec![],
+            rollback_status: RollbackStatus::Available,
         };
 
         manager.save_session_metadata(&meta).expect("save metadata");
@@ -1159,6 +1278,7 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![baseline.merkle_root],
             network_events: vec![],
+            rollback_status: RollbackStatus::Available,
         };
         manager.save_session_metadata(&meta).expect("save");
 

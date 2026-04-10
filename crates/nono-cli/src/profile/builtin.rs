@@ -240,6 +240,7 @@ mod tests {
             "homebrew_macos".to_string(),
             "system_read_linux_core".to_string(),
             "system_read_macos".to_string(),
+            "system_read_windows".to_string(),
             "system_write_linux".to_string(),
             "system_write_macos".to_string(),
             "user_tools".to_string(),

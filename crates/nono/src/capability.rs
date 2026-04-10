@@ -2020,6 +2020,7 @@ mod tests {
         assert!(!caps.path_covered_with_access(&file_canonical, AccessMode::Read));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_remove_exact_file_caps_for_paths_matches_original_and_resolved() {
         let dir = tempdir().unwrap();

@@ -16,7 +16,7 @@ use colored::Colorize;
 use nono::undo::{MerkleTree, ObjectStore, SnapshotManager};
 use nono::{NonoError, Result};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// A session paired with its change counts (created, modified, deleted).
 type SessionChanges<'a> = (&'a SessionInfo, (usize, usize, usize));
@@ -30,7 +30,8 @@ fn canonical_candidates(path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::with_capacity(2);
 
     // Primary: canonicalize if possible, otherwise use as-is
-    let primary = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let primary =
+        normalize_path_for_compare(&path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
     candidates.push(primary.clone());
 
     // macOS symlink aliases: try both directions
@@ -52,6 +53,68 @@ fn canonical_candidates(path: &Path) -> Vec<PathBuf> {
     }
 
     candidates
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+    let without_verbatim = if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{stripped}")
+    } else if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else {
+        raw.into_owned()
+    };
+
+    let path = Path::new(&without_verbatim);
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => normalized.push(".."),
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(target_os = "windows")]
+fn path_overlaps_filter(stored: &Path, filter: &Path) -> bool {
+    let stored = normalize_path_for_compare(stored);
+    let filter = normalize_path_for_compare(filter);
+    windows_path_starts_with(&stored, &filter) || windows_path_starts_with(&filter, &stored)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_overlaps_filter(stored: &Path, filter: &Path) -> bool {
+    stored.starts_with(filter) || filter.starts_with(stored)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_path_starts_with(path: &Path, prefix: &Path) -> bool {
+    let mut path_components = path.components();
+    let mut prefix_components = prefix.components();
+
+    loop {
+        match (path_components.next(), prefix_components.next()) {
+            (_, None) => return true,
+            (None, Some(_)) => return false,
+            (Some(left), Some(right)) => {
+                let left = left.as_os_str().to_string_lossy();
+                let right = right.as_os_str().to_string_lossy();
+                if !left.eq_ignore_ascii_case(&right) {
+                    return false;
+                }
+            }
+        }
+    }
 }
 
 /// Prefix used for all rollback command output
@@ -88,7 +151,7 @@ fn cmd_list(args: RollbackListArgs) -> Result<()> {
             s.metadata.tracked_paths.iter().any(|stored| {
                 filter_candidates
                     .iter()
-                    .any(|filter| stored.starts_with(filter) || filter.starts_with(stored))
+                    .any(|filter| path_overlaps_filter(stored, filter))
             })
         });
     }
@@ -204,12 +267,26 @@ fn print_session_line(s: &SessionInfo, created: usize, modified: usize, deleted:
     let change_summary = format_change_summary(created, modified, deleted);
     let timestamp = format_session_timestamp(&s.metadata.started);
 
+    // Surface audit-only sessions explicitly so they are never confused with
+    // rollback-capable sessions.
+    let status_tag = match &s.metadata.rollback_status {
+        nono::undo::RollbackStatus::Available => String::new(),
+        nono::undo::RollbackStatus::Skipped => {
+            format!("  [{}]", theme::fg("audit-only", theme::current().subtext))
+        }
+        nono::undo::RollbackStatus::FailedWarningOnly { .. } => format!(
+            "  [{}]",
+            theme::fg("audit-only (capture failed)", theme::current().subtext)
+        ),
+    };
+
     eprintln!(
-        "    {}  {}  {}  {}",
+        "    {}  {}  {}  {}{}",
         s.metadata.session_id.white().bold(),
         timestamp.truecolor(100, 100, 100),
         theme::fg(&cmd_name, theme::current().subtext),
         change_summary,
+        status_tag,
     );
 }
 
@@ -268,6 +345,8 @@ fn print_sessions_json(sessions: &[&SessionInfo]) -> Result<()> {
                 "disk_size": s.disk_size,
                 "is_alive": s.is_alive,
                 "is_stale": s.is_stale,
+                "rollback_available": s.metadata.rollback_status.is_available(),
+                "rollback_status": s.metadata.rollback_status.display_label(),
             })
         })
         .collect();
@@ -287,6 +366,26 @@ fn cmd_show(args: RollbackShowArgs) -> Result<()> {
 
     if args.json {
         return print_show_json(&session);
+    }
+
+    // Surface audit-only status before showing diff output.
+    match &session.metadata.rollback_status {
+        nono::undo::RollbackStatus::Available => {}
+        nono::undo::RollbackStatus::Skipped => {
+            eprintln!(
+                "{} Session {} is audit-only — rollback snapshots were not captured.",
+                prefix(),
+                args.session_id
+            );
+        }
+        nono::undo::RollbackStatus::FailedWarningOnly { reason } => {
+            eprintln!(
+                "{} Session {} is audit-only — baseline snapshot capture failed: {}",
+                prefix(),
+                args.session_id,
+                reason
+            );
+        }
     }
 
     // Collect all changes from all snapshots
@@ -612,6 +711,17 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
 
 fn cmd_restore(args: RollbackRestoreArgs) -> Result<()> {
     let session = load_session(&args.session_id)?;
+
+    // Reject restore attempts for audit-only sessions — they have no baseline
+    // snapshot to restore to.
+    if !session.metadata.rollback_status.is_available() {
+        let label = session.metadata.rollback_status.display_label();
+        return Err(NonoError::Snapshot(format!(
+            "Session {} is {label} and cannot be restored. \
+             Only sessions where rollback was enabled at launch can be restored.",
+            args.session_id,
+        )));
+    }
 
     // Default to the last snapshot (final state), not baseline
     let snapshot = args
@@ -1319,6 +1429,7 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![],
             network_events: vec![],
+            rollback_status: nono::undo::RollbackStatus::Available,
         };
 
         let session = SessionInfo {
@@ -1350,6 +1461,7 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![],
             network_events: vec![],
+            rollback_status: nono::undo::RollbackStatus::Available,
         };
         let meta2 = SessionMetadata {
             session_id: "20260219-110000-67890".to_string(),
@@ -1361,6 +1473,7 @@ mod tests {
             exit_code: None,
             merkle_roots: vec![],
             network_events: vec![],
+            rollback_status: nono::undo::RollbackStatus::Available,
         };
 
         let s1 = SessionInfo {
@@ -1395,8 +1508,26 @@ mod tests {
         if let Some(home) = dirs::home_dir() {
             let path = home.join("dev").join("project");
             let result = shorten_home(&path);
+            #[cfg(target_os = "windows")]
+            assert!(
+                result.starts_with("~\\"),
+                "Expected ~\\... but got: {result}"
+            );
+            #[cfg(not(target_os = "windows"))]
             assert!(result.starts_with("~/"), "Expected ~/... but got: {result}");
+            #[cfg(target_os = "windows")]
+            assert!(result.ends_with(r"dev\project"));
+            #[cfg(not(target_os = "windows"))]
             assert!(result.ends_with("dev/project"));
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_overlaps_filter_handles_verbatim_prefix_and_drive_case() {
+        let stored = PathBuf::from(r"C:\Users\Tester\Project");
+        let filter = PathBuf::from(r"\\?\c:\users\tester\project\src");
+
+        assert!(path_overlaps_filter(&stored, &filter));
     }
 }

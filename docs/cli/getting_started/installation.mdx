@@ -24,6 +24,60 @@ sudo dpkg -i nono-cli_${VERSION}_${ARCH}.deb
 
 Other distributions are in the process of being packaged. In the meantime, you can use the prebuilt binaries or build from source.
 
+## Windows Native
+
+Windows is available as a native build with a supported restricted-execution command surface, distributed as either:
+
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi` for administrator-managed installs
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi` for per-user installs without elevation
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip` for portable extraction
+
+The supported Windows release paths are the two MSI scopes plus the portable zip. Machine MSI upgrades machine MSI installs, user MSI upgrades user MSI installs, and zip installs are upgraded by replacing the extracted directory manually.
+
+### MSI install
+
+Administrator-managed install:
+
+```powershell
+msiexec /i nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi
+```
+
+Per-user install:
+
+```powershell
+msiexec /i nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi
+```
+
+### Zip install
+
+1. Download `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip` from [GitHub Releases](https://github.com/always-further/nono/releases)
+2. Extract `nono.exe`
+3. Add the extraction directory to `PATH`, or invoke the binary directly
+
+Example:
+
+```powershell
+$version = "vX.Y.Z"
+$zip = "nono-$version-x86_64-pc-windows-msvc.zip"
+Invoke-WebRequest `
+  -Uri "https://github.com/always-further/nono/releases/download/$version/$zip" `
+  -OutFile $zip
+Expand-Archive -LiteralPath $zip -DestinationPath .\nono -Force
+.\nono\nono.exe --version
+```
+
+Windows currently supports:
+
+- `nono --help`
+- `nono --version`
+- `nono setup --check-only`
+- `nono run --dry-run ...`
+- `nono run -- <command>` for supported direct restricted execution
+
+Windows currently supports a restricted-execution command surface with backend-owned launch validation and low-integrity write boundaries. Supported live restricted runs work for the active backend surface, while blocked-network and other enforcement-dependent flows rely on current Windows backend readiness and unsupported flows fail explicitly with backend diagnostics. Live `nono shell` and `nono wrap` are intentionally unavailable on Windows as product-surface limitations because they rely on Unix execution semantics with no credible Windows equivalent today. Runtime trust interception and delegated open flows are also not supported on Windows.
+
+For more detail on supported artifact types and scope behavior, see the [Windows Installer Strategy](/cli/development/windows-installer-strategy).
+
 ## Building from Source
 
 See the [Development Guide](/cli/development/index) for instructions on building nono from source.
@@ -34,8 +88,8 @@ See the [Development Guide](/cli/development/index) for instructions on building
 |----------|-----------|--------|
 | Linux (kernel 5.13+) | Landlock LSM | Supported |
 | macOS | Seatbelt (sandbox_init) | Supported |
+| Windows (10 1903+) | WFP + Process Integrity | Partial |
 | Windows (WSL2) | Landlock LSM (via WSL2 kernel) | Supported ([84% feature coverage](/cli/internals/wsl2-feature-matrix)) |
-| Windows (native) | - | Not supported |
 
 ### WSL2
 

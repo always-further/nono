@@ -1,0 +1,100 @@
+---
+title: Windows Validation Checklist
+description: Validation checklist for Windows packaging and current restricted-execution runtime behavior
+---
+
+Use this checklist before handing a Windows build to a tester or marking a release candidate as ready for broader validation of the current Windows restricted-execution surface.
+
+The filename keeps the historical `preview` label, but the checks below are for the current supported Windows command surface and its intentionally unsupported flows.
+
+For the current Windows filesystem contract, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract).
+
+## Packaging Validation
+
+- Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`.
+- Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`.
+- Confirm the release workflow produced `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`.
+- Confirm the release workflow produced the signed raw `nono.exe` artifact.
+- Confirm the MSI packages install `nono.exe`, `README.md`, and `LICENSE`.
+- Confirm each MSI creates an Apps & Features uninstall entry with the expected install scope.
+- Confirm the zip contains `nono.exe`.
+- Confirm `SHA256SUMS.txt` includes the Windows zip checksum.
+- Confirm `SHA256SUMS.txt` includes both Windows MSI checksums.
+- Confirm `SHA256SUMS.txt` includes the Windows `nono.exe` checksum.
+- Confirm the GitHub release exposes the Windows MSI and zip artifacts alongside existing Unix artifacts.
+
+## Local Runtime Validation
+
+Run on a clean Windows machine or VM:
+
+```powershell
+nono --help
+nono --version
+nono setup --check-only
+nono run --dry-run -- cmd /c echo test
+nono run --dry-run --profile codex -- cmd /c echo test
+nono run -- cmd /c echo hello
+nono run --read-file C:\path\to\allowed.txt -- cmd /c type C:\path\to\allowed.txt
+```
+
+Expected results:
+
+- `--help` and `--version` succeed.
+- `setup --check-only` succeeds and reports the current Windows command surface and readiness details.
+- dry-run output reports command and capability state without implying enforcement.
+- plain `run -- cmd /c ...` succeeds with current Windows command-surface messaging.
+- live exact-file grants succeed when the requested file path is explicitly granted.
+- live `--block-net` and supported proxy/port-policy runs succeed when WFP readiness is satisfied, and otherwise fail with explicit backend readiness diagnostics.
+
+## Guardrail Validation
+
+Run these commands and confirm they fail intentionally:
+
+```powershell
+nono run --profile codex -- cmd /c echo hello
+nono shell
+nono wrap -- cmd /c echo hello
+```
+
+Expected results:
+
+- each command returns a non-zero exit code
+- each failure uses explicit Windows limitation or backend-diagnostic wording
+- none of the outputs claim that sandbox enforcement was applied
+
+Also confirm:
+
+- `override_deny` use cases that already resolve during policy preprocessing do not fail purely because the run is on Windows
+- command-aware path mediation still rejects absolute or escaped file paths outside the compiled allowlist
+- WFP-backed failures distinguish readiness, activation, stale-filter, and cleanup diagnostics instead of generic limitation wording
+
+## CI Validation
+
+On pull requests or mainline pushes, confirm:
+
+- the `Windows Build` job ran on `windows-latest`
+- the `Windows Smoke` job ran on `windows-latest`
+- the `Windows Integration` job ran on `windows-latest`
+- the `Windows Security` job ran on `windows-latest`
+- the `Windows Regression` job ran on `windows-latest`
+- the `Windows Packaging` job ran on `windows-latest`
+- `windows-build.log` is available as an artifact
+- `windows-smoke.log` is available as an artifact
+- `windows-integration.log` is available as an artifact
+- `windows-security.log` is available as an artifact
+- `windows-regression.log` is available as an artifact
+- Windows MSI contract validation passed in CI
+
+These logs are the baseline comparison set for Windows bug reports.
+
+## Exit Criteria
+
+The Windows build is ready for broader validation when:
+
+- the Windows zip artifact is published successfully
+- local smoke checks pass
+- unsupported enforcement-dependent flows fail loudly and consistently
+- CI Windows logs are available for debugging
+- Apps & Features uninstall works for both MSI scopes
+
+For the formal release-candidate gate, use the [Windows Release Candidate Checklist](/cli/development/windows-release-candidate-checklist).

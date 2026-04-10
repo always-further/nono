@@ -19,7 +19,12 @@ use crate::{Result, DETACHED_LAUNCH_ENV};
 
 pub(crate) fn run(cli: Cli) -> Result<()> {
     let mut update_handle = start_update_check_handle(&cli);
-    dispatch_command(cli.command, cli.silent, &mut update_handle)
+    dispatch_command(
+        cli.command,
+        cli.silent,
+        cli.internal_supervisor,
+        &mut update_handle,
+    )
 }
 
 fn start_update_check_handle(cli: &Cli) -> Option<update_check::UpdateCheckHandle> {
@@ -33,13 +38,14 @@ fn start_update_check_handle(cli: &Cli) -> Option<update_check::UpdateCheckHandl
 fn dispatch_command(
     command: Commands,
     silent: bool,
+    internal_supervisor: bool,
     update_handle: &mut Option<update_check::UpdateCheckHandle>,
 ) -> Result<()> {
     match command {
         Commands::Learn(args) => run_learn(*args, silent),
-        Commands::Run(args) => {
-            run_command_with_update(update_handle, silent, || run_or_detach(*args, silent))
-        }
+        Commands::Run(args) => run_command_with_update(update_handle, silent, || {
+            run_or_detach(*args, silent, internal_supervisor)
+        }),
         Commands::Shell(args) => {
             run_command_with_banner_and_update(update_handle, silent, || run_shell(*args, silent))
         }
@@ -108,11 +114,13 @@ fn run_command_with_banner_and_update<T>(
     run_command_with_update(update_handle, silent, command)
 }
 
-fn run_or_detach(args: RunArgs, silent: bool) -> Result<()> {
-    if args.detached && std::env::var_os(DETACHED_LAUNCH_ENV).is_none() {
+fn run_or_detach(args: RunArgs, silent: bool, internal_supervisor: bool) -> Result<()> {
+    if args.detached && !internal_supervisor && std::env::var_os(DETACHED_LAUNCH_ENV).is_none() {
         run_detached_launch(args, silent)
     } else {
-        output::print_banner(silent);
+        if !internal_supervisor {
+            output::print_banner(silent);
+        }
         run_sandbox(args, silent)
     }
 }

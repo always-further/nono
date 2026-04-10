@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", allow(dead_code))]
+
 //! CLI output styling for nono
 //!
 //! All colors are drawn from the active theme via `theme::current()`.
@@ -296,6 +298,7 @@ pub fn print_supervised_info(silent: bool, rollback: bool, proxy_active: bool) {
         features.push("proxy");
     }
     features.push("supervisor");
+
     eprintln!(
         "  {} {}",
         fg("mode", t.subtext),
@@ -497,7 +500,12 @@ fn render_diagnostic_line(idx: usize, line: &str, t: &theme::Theme) -> String {
 }
 
 /// Print dry run message
-pub fn print_dry_run(program: &OsStr, cmd_args: &[OsString], silent: bool) {
+pub fn print_dry_run(
+    program: &OsStr,
+    cmd_args: &[OsString],
+    support: &nono::SupportInfo,
+    silent: bool,
+) {
     if silent {
         return;
     }
@@ -513,16 +521,17 @@ pub fn print_dry_run(program: &OsStr, cmd_args: &[OsString], silent: bool) {
     eprintln!(
         "  {} {}",
         fg("dry-run", t.yellow).bold(),
-        fg(
-            "sandbox would be applied with above capabilities",
-            t.subtext,
-        ),
+        fg(dry_run_summary(support), t.subtext),
     );
     eprintln!(
         "  {} {}",
         fg("$", t.subtext),
         fg(&command.join(" "), t.text)
     );
+}
+
+fn dry_run_summary(_support: &nono::SupportInfo) -> &'static str {
+    "sandbox would be applied with above capabilities"
 }
 
 // ---------------------------------------------------------------------------

@@ -166,6 +166,7 @@ pub fn is_supported() -> bool {
 pub fn support_info() -> SupportInfo {
     SupportInfo {
         is_supported: true,
+        status: crate::sandbox::SupportStatus::Supported,
         platform: "macos",
         details: "macOS Seatbelt sandbox available".to_string(),
     }

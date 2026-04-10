@@ -3,12 +3,19 @@ use crate::profile;
 use nono::{NonoError, Result};
 use std::fs;
 use std::path::Path;
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 use nix::libc;
 
 pub struct SetupRunner {
     check_only: bool,
+    register_wfp_service: bool,
+    install_wfp_service: bool,
+    install_wfp_driver: bool,
+    start_wfp_service: bool,
+    start_wfp_driver: bool,
     generate_profiles: bool,
     show_shell_integration: bool,
     #[allow(dead_code)]
@@ -19,6 +26,11 @@ impl SetupRunner {
     pub fn new(args: &SetupArgs) -> Self {
         Self {
             check_only: args.check_only,
+            register_wfp_service: args.register_wfp_service,
+            install_wfp_service: args.install_wfp_service,
+            install_wfp_driver: args.install_wfp_driver,
+            start_wfp_service: args.start_wfp_service,
+            start_wfp_driver: args.start_wfp_driver,
             generate_profiles: args.profiles,
             show_shell_integration: args.shell_integration,
             verbose: args.verbose,
@@ -31,6 +43,41 @@ impl SetupRunner {
 
         // Sandbox support testing
         self.test_sandbox_support()?;
+
+        #[cfg(target_os = "windows")]
+        {
+            crate::exec_strategy::cleanup_windows_network_enforcement_artifacts();
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.register_wfp_service {
+            self.register_windows_wfp_service()?;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_service {
+            self.install_windows_wfp_service()?;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_driver {
+            self.install_windows_wfp_driver()?;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.start_wfp_driver {
+            self.start_windows_wfp_driver()?;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.start_wfp_service {
+            self.start_windows_wfp_service()?;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.any_windows_wfp_action_requested() {
+            self.report_windows_wfp_post_action_status()?;
+        }
 
         // Show what nono protects
         self.show_protection_summary()?;
@@ -67,22 +114,7 @@ impl SetupRunner {
         println!("  * Version: {}", env!("CARGO_PKG_VERSION"));
 
         // Detect platform
-        let platform = if cfg!(target_os = "macos") {
-            "macOS (Seatbelt sandbox)"
-        } else if cfg!(target_os = "linux") {
-            "Linux (Landlock sandbox)"
-        } else if cfg!(target_os = "windows") {
-            return Err(NonoError::Setup(
-                "Windows is not supported. nono requires macOS (Seatbelt) or Linux (Landlock) for sandboxing.".to_string()
-            ));
-        } else {
-            return Err(NonoError::Setup(
-                "Unsupported platform. nono requires macOS (Seatbelt) or Linux (Landlock)."
-                    .to_string(),
-            ));
-        };
-
-        println!("  * Platform: {}", platform);
+        println!("  * Platform: {}", installation_platform_label()?);
         println!();
 
         Ok(())
@@ -97,6 +129,153 @@ impl SetupRunner {
         #[cfg(target_os = "linux")]
         self.test_linux_landlock()?;
 
+        #[cfg(target_os = "windows")]
+        self.test_windows_support()?;
+
+        println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn register_windows_wfp_service(&self) -> Result<()> {
+        if !crate::exec_strategy::is_admin_process() {
+            return Err(NonoError::Setup(
+                "Windows WFP service registration requires an elevated administrator session. Please run this command from an 'Administrator' terminal.".to_string()
+            ));
+        }
+
+        println!(
+            "[{}/{}] Registering Windows WFP service...",
+            self.register_phase_index(),
+            self.total_phases()
+        );
+        let report = crate::exec_strategy::install_windows_wfp_service()?;
+        println!("  * WFP service registration: {}", report.status_label);
+        println!("  * {}", report.details);
+        println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn install_windows_wfp_service(&self) -> Result<()> {
+        if !crate::exec_strategy::is_admin_process() {
+            return Err(NonoError::Setup(
+                "Windows WFP service installation requires an elevated administrator session."
+                    .to_string(),
+            ));
+        }
+        println!(
+            "[{}/{}] Registering Windows WFP service (placeholder)...",
+            self.install_phase_index(),
+            self.total_phases()
+        );
+        let report = crate::exec_strategy::install_windows_wfp_service()?;
+        println!("  * WFP service install: {}", report.status_label);
+        println!("  * {}", report.details);
+        println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn install_windows_wfp_driver(&self) -> Result<()> {
+        if !crate::exec_strategy::is_admin_process() {
+            return Err(NonoError::Setup(
+                "Windows WFP driver registration requires an elevated administrator session."
+                    .to_string(),
+            ));
+        }
+        println!(
+            "[{}/{}] Registering Windows WFP driver...",
+            self.install_driver_phase_index(),
+            self.total_phases()
+        );
+        let report = crate::exec_strategy::install_windows_wfp_driver()?;
+        println!("  * WFP driver install: {}", report.status_label);
+        println!("  * {}", report.details);
+        println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn start_windows_wfp_driver(&self) -> Result<()> {
+        if !crate::exec_strategy::is_admin_process() {
+            return Err(NonoError::Setup(
+                "Starting Windows WFP driver requires an elevated administrator session."
+                    .to_string(),
+            ));
+        }
+        println!(
+            "[{}/{}] Starting Windows WFP driver...",
+            self.start_driver_phase_index(),
+            self.total_phases()
+        );
+        let report = crate::exec_strategy::start_windows_wfp_driver()?;
+        println!("  * WFP driver start: {}", report.status_label);
+        println!("  * {}", report.details);
+        println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn start_windows_wfp_service(&self) -> Result<()> {
+        if !crate::exec_strategy::is_admin_process() {
+            return Err(NonoError::Setup(
+                "Starting Windows WFP service requires an elevated administrator session."
+                    .to_string(),
+            ));
+        }
+        println!(
+            "[{}/{}] Starting Windows WFP service...",
+            self.start_phase_index(),
+            self.total_phases()
+        );
+        let report = crate::exec_strategy::start_windows_wfp_service()?;
+        println!("  * WFP service start: {}", report.status_label);
+        println!("  * {}", report.details);
+        println!();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn test_windows_support(&self) -> Result<()> {
+        let info = nono::Sandbox::support_info();
+        let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
+        let storage = windows_storage_layout()?;
+        println!("  * Platform: {}", info.platform);
+        println!("  * Support status: {}", info.status_label());
+        println!("  * {}", info.details);
+        println!(
+            "  * Administrator session: {}",
+            if crate::exec_strategy::is_admin_process() {
+                "YES"
+            } else {
+                "NO (Standard User)"
+            }
+        );
+        println!(
+            "  * User config root: {}",
+            storage.user_config_root.display()
+        );
+        println!("  * User state root: {}", storage.user_state_root.display());
+        println!("  * Rollback root: {}", storage.rollback_root.display());
+        println!(
+            "  * User trust policy: {}",
+            storage.user_trust_policy.display()
+        );
+        print_windows_foundation_report("  * ");
+        print_windows_wfp_readiness_report("  * ", &wfp);
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn report_windows_wfp_post_action_status(&self) -> Result<()> {
+        println!(
+            "[{}/{}] Re-checking Windows WFP readiness...",
+            self.recheck_wfp_phase_index(),
+            self.total_phases()
+        );
+        let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
+        print_windows_wfp_readiness_report("  * ", &wfp);
         println!();
         Ok(())
     }
@@ -239,19 +418,35 @@ impl SetupRunner {
     }
 
     fn show_protection_summary(&self) -> Result<()> {
-        println!("[3/{}] Default protections...", self.total_phases());
+        println!(
+            "[{}/{}] Default protections...",
+            self.protection_phase_index(),
+            self.total_phases()
+        );
 
         // Get sensitive paths and dangerous commands from policy
         let loaded_policy = crate::policy::load_embedded_policy()?;
-        let sensitive_paths = crate::policy::get_sensitive_paths(&loaded_policy)?;
         let dangerous_commands = crate::policy::get_dangerous_commands(&loaded_policy);
+        match crate::policy::get_sensitive_paths(&loaded_policy) {
+            Ok(sensitive_paths) => {
+                println!(
+                    "  * {} sensitive paths blocked by default:",
+                    sensitive_paths.len()
+                );
+                println!("      SSH keys, AWS/GCP/Azure credentials, Kubernetes config,");
+                println!("      Docker config, GPG keys, password managers, shell configs");
+            }
+            Err(err) => {
+                #[cfg(target_os = "windows")]
+                println!(
+                    "  * Sensitive path expansion: unavailable in the current Windows command surface ({})",
+                    err
+                );
 
-        println!(
-            "  * {} sensitive paths blocked by default:",
-            sensitive_paths.len()
-        );
-        println!("      SSH keys, AWS/GCP/Azure credentials, Kubernetes config,");
-        println!("      Docker config, GPG keys, password managers, shell configs");
+                #[cfg(not(target_os = "windows"))]
+                return Err(err);
+            }
+        }
 
         println!(
             "  * {} dangerous commands blocked by default:",
@@ -271,7 +466,11 @@ impl SetupRunner {
     }
 
     fn show_builtin_profiles(&self) {
-        println!("[4/{}] Built-in profiles...", self.total_phases());
+        println!(
+            "[{}/{}] Built-in profiles...",
+            self.profiles_phase_index(),
+            self.total_phases()
+        );
 
         let profiles = profile::list_profiles();
 
@@ -297,12 +496,21 @@ impl SetupRunner {
         }
 
         println!();
+        #[cfg(target_os = "windows")]
+        println!("  Use with: nono run --profile <name> -- <command>");
+        #[cfg(target_os = "windows")]
+        println!("            Supported profile-backed restrictions run live; unsupported controls fail with backend diagnostics.");
+        #[cfg(not(target_os = "windows"))]
         println!("  Use with: nono run --profile <name> -- <command>");
         println!();
     }
 
     fn setup_profiles(&self) -> Result<()> {
-        println!("[5/{}] Setting up example profiles...", self.total_phases());
+        println!(
+            "[{}/{}] Setting up example profiles...",
+            self.setup_profiles_phase_index(),
+            self.total_phases()
+        );
 
         // Create profile directory
         let profile_dir = crate::profile::resolve_user_config_dir()?
@@ -341,26 +549,12 @@ impl SetupRunner {
     }
 
     fn show_shell_help(&self) {
-        println!("[6/{}] Shell integration...", self.total_phases());
-
-        // Detect shell
-        let shell = std::env::var("SHELL")
-            .ok()
-            .and_then(|s| s.split('/').next_back().map(String::from))
-            .unwrap_or_else(|| "bash".to_string());
-
-        let shell_rc = match shell.as_str() {
-            "zsh" => "~/.zshrc",
-            "bash" => "~/.bashrc",
-            "fish" => "~/.config/fish/config.fish",
-            _ => "~/.bashrc",
-        };
-
-        println!("  You can add these aliases to {}:", shell_rc);
-        println!();
-        println!("    alias nono-claude='nono run --profile claude-code -- claude'");
-        println!("    alias nono-safe='nono run --allow-cwd --block-net --'");
-        println!();
+        println!(
+            "[{}/{}] Shell integration...",
+            self.shell_integration_phase_index(),
+            self.total_phases()
+        );
+        print_shell_help_body();
     }
 
     fn show_summary(&self) {
@@ -370,22 +564,51 @@ impl SetupRunner {
         if self.check_only {
             println!("Installation verified!");
             println!();
-            println!("Your system is ready to use nono. Run 'nono run --help' to get started.");
+            print_check_only_summary();
         } else {
             println!("Setup complete!");
             println!();
+            #[cfg(target_os = "windows")]
+            {
+                println!("Quick start examples:");
+                println!();
+                println!("  # Run a built-in profile where the Windows backend supports it");
+                println!("  nono run --profile default -- cmd /c echo hello");
+                println!();
+                println!("  # Preview filesystem and network policy without launching");
+                println!("  nono run --dry-run --profile claude-code -- claude");
+                println!();
+                println!("  # Direct execution with the current supported Windows command surface");
+                println!("  nono run -- <command>");
+                println!();
+                println!("  # Check why a sensitive path is blocked");
+                println!("  nono why ~/.ssh/id_rsa");
+                println!();
+                println!("Documentation: https://github.com/always-further/nono#readme");
+                println!();
+                println!("Run 'nono run --help' to inspect the current Windows command surface.");
+            }
+
+            #[cfg(not(target_os = "windows"))]
             println!("Quick start examples:");
             println!();
+            #[cfg(not(target_os = "windows"))]
             println!("  # Run Claude Code with built-in profile (recommended)");
+            #[cfg(not(target_os = "windows"))]
             println!("  nono run --profile claude-code -- claude");
             println!();
+            #[cfg(not(target_os = "windows"))]
             println!("  # Run any command with current directory access");
+            #[cfg(not(target_os = "windows"))]
             println!("  nono run --allow-cwd -- <command>");
             println!();
+            #[cfg(not(target_os = "windows"))]
             println!("  # Check why a sensitive path is blocked");
+            #[cfg(not(target_os = "windows"))]
             println!("  nono why ~/.ssh/id_rsa");
             println!();
 
+            #[cfg(not(target_os = "windows"))]
             if self.generate_profiles {
                 println!("Custom profiles:");
                 let profile_dir = crate::profile::resolve_user_config_dir()
@@ -396,14 +619,46 @@ impl SetupRunner {
                 println!();
             }
 
+            #[cfg(not(target_os = "windows"))]
             println!("Documentation: https://github.com/always-further/nono#readme");
             println!();
+            #[cfg(not(target_os = "windows"))]
             println!("Run 'nono run --help' to see all options.");
         }
     }
 
     fn total_phases(&self) -> usize {
         let mut count = 4; // Installation check + sandbox test + protection summary + profiles
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.register_wfp_service {
+            count += 1;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_service {
+            count += 1;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.install_wfp_driver {
+            count += 1;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.start_wfp_driver {
+            count += 1;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.start_wfp_service {
+            count += 1;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.check_only && self.any_windows_wfp_action_requested() {
+            count += 1;
+        }
 
         if !self.check_only {
             if self.generate_profiles {
@@ -416,6 +671,256 @@ impl SetupRunner {
 
         count
     }
+
+    fn protection_phase_index(&self) -> usize {
+        #[cfg(target_os = "windows")]
+        if !self.check_only {
+            let mut index = 3
+                + usize::from(self.register_wfp_service)
+                + usize::from(self.install_wfp_service)
+                + usize::from(self.install_wfp_driver)
+                + usize::from(self.start_wfp_driver)
+                + usize::from(self.start_wfp_service);
+
+            if self.any_windows_wfp_action_requested() {
+                index += 1;
+            }
+
+            return index;
+        }
+
+        3
+    }
+
+    fn profiles_phase_index(&self) -> usize {
+        #[cfg(target_os = "windows")]
+        if !self.check_only {
+            let mut index = 4
+                + usize::from(self.register_wfp_service)
+                + usize::from(self.install_wfp_service)
+                + usize::from(self.install_wfp_driver)
+                + usize::from(self.start_wfp_driver)
+                + usize::from(self.start_wfp_service);
+
+            if self.any_windows_wfp_action_requested() {
+                index += 1;
+            }
+
+            return index;
+        }
+
+        4
+    }
+
+    fn register_phase_index(&self) -> usize {
+        3
+    }
+
+    fn install_phase_index(&self) -> usize {
+        3 + usize::from(self.register_wfp_service)
+    }
+
+    fn start_phase_index(&self) -> usize {
+        3 + usize::from(self.register_wfp_service)
+            + usize::from(self.install_wfp_service)
+            + usize::from(self.install_wfp_driver)
+            + usize::from(self.start_wfp_driver)
+    }
+
+    fn install_driver_phase_index(&self) -> usize {
+        3 + usize::from(self.register_wfp_service) + usize::from(self.install_wfp_service)
+    }
+
+    fn start_driver_phase_index(&self) -> usize {
+        3 + usize::from(self.register_wfp_service)
+            + usize::from(self.install_wfp_service)
+            + usize::from(self.install_wfp_driver)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn any_windows_wfp_action_requested(&self) -> bool {
+        self.register_wfp_service
+            || self.install_wfp_service
+            || self.install_wfp_driver
+            || self.start_wfp_driver
+            || self.start_wfp_service
+    }
+
+    fn recheck_wfp_phase_index(&self) -> usize {
+        3 + usize::from(self.register_wfp_service)
+            + usize::from(self.install_wfp_service)
+            + usize::from(self.install_wfp_driver)
+            + usize::from(self.start_wfp_driver)
+            + usize::from(self.start_wfp_service)
+    }
+
+    fn setup_profiles_phase_index(&self) -> usize {
+        self.profiles_phase_index() + 1
+    }
+
+    fn shell_integration_phase_index(&self) -> usize {
+        self.profiles_phase_index() + 1 + usize::from(self.generate_profiles)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn installation_platform_label() -> Result<&'static str> {
+    Ok("macOS (Seatbelt sandbox)")
+}
+
+#[cfg(target_os = "linux")]
+fn installation_platform_label() -> Result<&'static str> {
+    Ok("Linux (Landlock sandbox)")
+}
+
+#[cfg(target_os = "windows")]
+fn installation_platform_label() -> Result<&'static str> {
+    Ok("Windows (restricted execution)")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn installation_platform_label() -> Result<&'static str> {
+    Err(NonoError::Setup(
+        "Unsupported platform. nono requires macOS (Seatbelt) or Linux (Landlock).".to_string(),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn print_shell_help_body() {
+    println!("  Add a PowerShell function or alias, for example:");
+    println!();
+    println!("    function nono-safe {{ nono run --allow-cwd --block-net -- @Args }}");
+    println!();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn print_shell_help_body() {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .and_then(|s| s.split('/').next_back().map(String::from))
+        .unwrap_or_else(|| "bash".to_string());
+
+    let shell_rc = match shell.as_str() {
+        "zsh" => "~/.zshrc",
+        "bash" => "~/.bashrc",
+        "fish" => "~/.config/fish/config.fish",
+        _ => "~/.bashrc",
+    };
+
+    println!("  You can add these aliases to {}:", shell_rc);
+    println!();
+    println!("    alias nono-claude='nono run --profile claude-code -- claude'");
+    println!("    alias nono-safe='nono run --allow-cwd --block-net --'");
+    println!();
+}
+
+#[cfg(target_os = "windows")]
+fn print_check_only_summary() {
+    let info = nono::Sandbox::support_info();
+    let wfp = crate::exec_strategy::probe_windows_wfp_readiness();
+    println!("Support status: {}", info.status_label());
+    println!("{}", info.details);
+    if let Ok(storage) = windows_storage_layout() {
+        println!("User config root: {}", storage.user_config_root.display());
+        println!("User state root: {}", storage.user_state_root.display());
+        println!("Rollback root: {}", storage.rollback_root.display());
+        println!("User trust policy: {}", storage.user_trust_policy.display());
+    }
+    print_windows_foundation_report("");
+    print_windows_wfp_readiness_report("", &wfp);
+    println!("Use 'nono run --dry-run ...' to validate profiles and policy.");
+    println!("Plain 'nono run -- <command>' uses the current supported Windows command surface with backend-owned launch validation and low-integrity write boundaries.");
+    println!("Blocked-network and other enforcement-dependent Windows flows require current backend readiness; check the WFP readiness lines above before treating them as available.");
+    println!("Live 'nono shell' and 'nono wrap' remain intentionally unavailable on Windows; use their --dry-run forms to inspect policy.");
+    println!("Run 'nono run --help' to inspect the current command surface.");
+}
+
+#[cfg(target_os = "windows")]
+fn print_windows_foundation_report(prefix: &str) {
+    let job_probe = crate::exec_strategy::probe_job_object_permissions();
+    let integrity_probe = crate::exec_strategy::probe_integrity_level_support();
+    let bfe_probe = crate::exec_strategy::probe_bfe_service_status();
+
+    println!(
+        "{}Job Object creation: {}",
+        prefix,
+        if job_probe.is_ok() { "OK" } else { "FAILED" }
+    );
+    if let Err(e) = &job_probe {
+        println!("{}  - {}", prefix, e);
+    }
+    println!(
+        "{}Token Integrity level support: {}",
+        prefix,
+        if integrity_probe.is_ok() {
+            "OK"
+        } else {
+            "FAILED"
+        }
+    );
+    if let Err(e) = &integrity_probe {
+        println!("{}  - {}", prefix, e);
+    }
+    println!(
+        "{}BFE service status: {}",
+        prefix,
+        if bfe_probe.is_ok() { "OK" } else { "FAILED" }
+    );
+    if let Err(e) = &bfe_probe {
+        println!("{}  - {}", prefix, e);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn print_windows_wfp_readiness_report(
+    prefix: &str,
+    wfp: &crate::exec_strategy::WindowsWfpReadinessReport,
+) {
+    println!("{prefix}WFP readiness: {}", wfp.status_label);
+    println!("{prefix}{}", wfp.details);
+    if let Some(next_action) = &wfp.next_action {
+        println!("{prefix}{next_action}");
+    }
+    println!(
+        "{prefix}WFP service readiness: {}",
+        wfp.service_status_label
+    );
+    println!("{prefix}{}", wfp.service_details);
+    println!("{prefix}WFP driver readiness: {}", wfp.driver_status_label);
+    println!("{prefix}{}", wfp.driver_details);
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsStorageLayout {
+    user_config_root: PathBuf,
+    user_state_root: PathBuf,
+    rollback_root: PathBuf,
+    user_trust_policy: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_storage_layout() -> Result<WindowsStorageLayout> {
+    let user_config_root = crate::profile::resolve_user_config_dir()?.join("nono");
+    let user_state_root = crate::config::user_state_dir().ok_or_else(|| {
+        NonoError::Setup("Could not determine Windows user state directory".to_string())
+    })?;
+    let rollback_root = crate::rollback_session::rollback_root()?;
+    let user_trust_policy = crate::trust_cmd::user_trust_policy_path().ok_or_else(|| {
+        NonoError::Setup("Could not determine Windows user trust policy path".to_string())
+    })?;
+
+    Ok(WindowsStorageLayout {
+        user_config_root,
+        user_state_root,
+        rollback_root,
+        user_trust_policy,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn print_check_only_summary() {
+    println!("Your system is ready to use nono. Run 'nono run --help' to get started.");
 }
 
 // ABI probing is now handled by the library's detect_abi().
@@ -537,6 +1042,11 @@ mod tests {
         // Run the actual setup code that writes example profiles.
         let runner = SetupRunner {
             check_only: false,
+            register_wfp_service: false,
+            install_wfp_service: false,
+            install_wfp_driver: false,
+            start_wfp_service: false,
+            start_wfp_driver: false,
             generate_profiles: true,
             show_shell_integration: false,
             verbose: 0,
@@ -554,6 +1064,21 @@ mod tests {
     fn test_library_detect_abi_returns_result() {
         // Verify the library detection works (or returns an error without panicking)
         let _ = nono::Sandbox::detect_abi();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_storage_layout_uses_absolute_user_roots() {
+        let layout = windows_storage_layout().expect("windows storage layout");
+
+        assert!(layout.user_config_root.is_absolute());
+        assert!(layout.user_state_root.is_absolute());
+        assert!(layout.rollback_root.is_absolute());
+        assert!(layout.user_trust_policy.is_absolute());
+        assert_eq!(
+            layout.rollback_root,
+            layout.user_state_root.join("rollbacks")
+        );
     }
 
     #[cfg(target_os = "linux")]

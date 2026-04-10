@@ -1,0 +1,206 @@
+---
+title: Windows Network Enforcement
+description: Design spike for the Windows network enforcement backend
+---
+
+This note now covers both the initial `WIN-704` design spike and the current implementation slice. Windows still does **not** have full network parity, but it now has:
+
+- a real WFP-backed app-scoped network-policy backend for live Windows runs
+- service-managed install and cleanup for blocked, proxy-only, and practical port allowlist shapes
+- shared direct and supervised runtime activation/cleanup behavior
+
+## Selected Direction
+
+The recommended target for real Windows network enforcement is:
+
+- **Windows Filtering Platform (WFP)** for the long-term backend
+
+This is the only option in scope that plausibly gives:
+
+- real per-process connect and bind enforcement
+- deterministic allow-all vs blocked runtime behavior
+- auditable deny paths
+- an upgrade path to proxy-only and richer policy shapes
+
+The current implementation does **not** have full WFP parity yet. It adds the compiled Windows network policy model, records `WFP` as both the preferred and active backend for the supported shapes, and uses `nono-wfp-service` to install/remove app-scoped WFP filters for live runs.
+
+## Why Not the Other Options
+
+- **user-mode proxy only**
+  Useful for routing and credential injection, but not a real enforcement primitive. A child can bypass it unless the platform blocks direct network access separately.
+
+- **Windows Firewall rule orchestration**
+  This is now the first implemented backend slice for `Blocked`, but only for a narrow subset. It is still awkward for short-lived per-session rules and weaker than WFP for broad process-tree semantics.
+
+- **AppContainer**
+  Strong boundary, but it changes execution identity and filesystem semantics too much for the current port stage.
+
+## Initial Enforceable Subset
+
+The first backend-owned network policy model distinguishes:
+
+- `AllowAll`
+- `Blocked`
+- `ProxyOnly { port, bind_ports }`
+
+The supported WFP-backed shape now also carries:
+
+- TCP connect allowlists
+- TCP bind allowlists
+- localhost-only port filters
+
+## Policy Compilation Contract
+
+The library now exposes a Windows network policy compiler:
+
+- `Sandbox::windows_network_policy(&caps) -> WindowsNetworkPolicy`
+
+That compiled policy carries:
+
+- the selected Windows network mode
+- deduplicated connect / bind / localhost port allowlists
+- the selected backend state for live enforcement
+
+This mirrors the Windows filesystem policy compiler and is the intended backend contract for later runtime installation.
+
+## Runtime Plan
+
+Current sequence:
+
+1. compile `WindowsNetworkPolicy` from `CapabilitySet`
+2. keep Windows validation/runtime classification backend-owned
+3. send a single WFP runtime activation request for the selected policy shape
+4. install deterministic permit filters first, then the fallback block filters for the remaining surface
+5. remove the same deterministic filter set on cleanup
+
+## Preview and Full-Port Boundary
+
+Today:
+
+- plain `AllowAll` remains the no-enforcement path
+- `Blocked` installs per-app WFP block filters on connect and accept layers
+- `ProxyOnly` allows only loopback traffic on the selected proxy port plus explicitly allowed bind ports, then blocks the rest
+- connect / bind / localhost allowlists install higher-priority permit filters ahead of the fallback block filters
+- the same WFP path is used for direct launches, supervised launches, and child processes reached through interpreter or shell hosts such as `cmd.exe`
+- activation, stale-filter collisions, and cleanup mismatches now return backend-owned diagnostics from the service host
+
+Remaining work is narrower:
+
+- ship the final privileged service/driver packaging model
+- widen process-tree attachment beyond the current per-app launch contract
+- add any future policy shapes that still fall outside the current port/loopback model
+
+## WFP Scaffold Boundary
+
+The current backend contract now carries two backend states per compiled Windows network policy:
+
+- `preferred backend`
+  This is the long-term Windows target. For `Blocked` and `ProxyOnly`, it is `windows-filtering-platform`.
+- `active backend`
+  This is what the current runtime can actually install today. For the supported blocked / proxy / port-policy shapes, it is `windows-filtering-platform`.
+
+That means later WFP work can replace the active backend without changing the higher-level `WindowsNetworkPolicy` contract again.
+
+The runtime code now also reflects that split directly:
+
+- `WfpNetworkBackend`
+  The current active backend for the narrow supported `Blocked` subset and the preferred backend for future-targeted shapes.
+- `FirewallRulesNetworkBackend`
+  The older coarse backend slice kept in code as a fallback implementation path while the WFP path is hardened further.
+
+The WFP path returns deterministic diagnostics for cases such as:
+
+- WFP backend not installed
+- WFP backend not available in the current build
+- WFP service or driver not running
+
+The runtime activation path now uses the same lifecycle model as setup readiness:
+
+- `install service first`
+- `start service first`
+- `install driver first`
+- `start driver first`
+- `components present, but runtime activation still must install or clean up enforceable network-policy state`
+
+That keeps setup, readiness, and live WFP activation failures aligned without falsely claiming working WFP enforcement.
+
+`nono setup --check-only` now also prints a single `Next action:` line derived from that same lifecycle state, so setup guidance and live activation failures point at the same recovery step.
+
+When the service and driver both probe as present, the Windows runtime performs backend activation by running `nono-wfp-service --probe-runtime-activation` with a JSON activation request over stdio. The runtime request now covers `activate_blocked_mode`, `activate_proxy_mode`, and `activate_allow_all_mode` with port restrictions.
+
+That service-owned workflow now:
+- validates the request kind and protocol version
+- re-checks local backend layout inside the service host
+- performs a backend-owned network-policy activation attempt
+- returns a structured activation state
+
+Today, `nono-wfp-service` validates the request, derives the target app id with `FwpmGetAppIdFromFileName0`, opens the WFP engine, and installs app-scoped permit/block filters on:
+
+- `FWPM_LAYER_ALE_AUTH_CONNECT_V4`
+- `FWPM_LAYER_ALE_AUTH_CONNECT_V6`
+- `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4`
+- `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6`
+
+Those filters are keyed deterministically from the runtime request fields so the matching `deactivate_policy_mode` request can remove them by key. Permit filters are installed at higher weight for allowed connect / bind / loopback ports, followed by fallback block filters for the remaining surface.
+
+This does **not** mean the broader Windows network backend is finished:
+
+- backend selection now routes supported direct and supervised Windows policies to `windows-filtering-platform`
+- runtime still fails closed when activation cannot install or clean up the required filters
+- broader packaging, service hardening, and future policy shapes are still deferred
+
+The first real probing layer is now in place for that scaffold:
+
+- it probes the Windows Base Filtering Engine (`BFE`) service as the platform prerequisite
+- it probes explicit expected backend component names:
+  - binary: `nono-wfp-service.exe`
+  - service: `nono-wfp-service`
+  - driver: `nono-wfp-driver`
+  - driver binary: `nono-wfp-driver.sys`
+- the binary now also defines the first explicit startup contract for service registration:
+  - registration target: `nono-wfp-service`
+  - startup args: `--service-mode`
+  - runtime probe arg: `--probe-runtime-activation`
+  - runtime result today: fail closed unless the service can install and later clean up the target app's WFP filters successfully
+- `nono setup --install-wfp-service` now performs the first repo-owned registration flow:
+  - verifies the WFP binary artifact is present
+  - verifies the Windows Base Filtering Engine (`BFE`) prerequisite is running
+  - registers the service with `sc create`
+  - writes the placeholder service description
+  - does **not** auto-start the service, because the placeholder host still fails closed
+- `nono setup --install-wfp-driver` now performs the first repo-owned driver registration flow:
+  - verifies the placeholder driver artifact is present in the build output
+  - verifies `BFE` is running
+  - registers `nono-wfp-driver` with `sc create ... type= kernel`
+  - writes a placeholder driver description
+  - does **not** auto-start the driver, because this branch still does not ship a working WFP driver
+- `nono setup --start-wfp-driver` now performs the first explicit driver startup attempt flow:
+  - verifies the driver is registered
+  - verifies `BFE` is running
+  - attempts `sc start nono-wfp-driver`
+  - reports `already running`, `running`, or a fail-closed startup error
+  - keeps the current placeholder-driver behavior explicit when startup does not stay in `RUNNING`
+- `nono setup --start-wfp-service` now performs the first explicit startup attempt flow:
+  - verifies the service is registered
+  - verifies `BFE` is running
+  - attempts `sc start nono-wfp-service`
+  - reports `already running`, `running`, or a fail-closed startup error
+  - keeps the current placeholder-host behavior explicit when startup does not stay in `RUNNING`
+- missing backend binary is treated as an early installability failure before service probing
+- this repo now ships the first backend artifacts:
+  - `nono-wfp-service` as a placeholder service-host binary
+  - `nono-wfp-driver.sys` as a placeholder driver artifact copied into the Windows build output
+- after building all CLI bins, readiness can advance from `missing binary` to `missing service` / `missing driver`, and after registration it can advance again to `missing driver`
+- the probe now distinguishes driver lifecycle states explicitly:
+  - `missing driver binary`
+  - `driver not registered`
+  - `driver stopped`
+- because this branch still does not install the backend service or driver, current post-build probe results land on those service/driver readiness failures rather than a working backend
+
+## Real Blockers
+
+The remaining blockers for actual `WIN-704` implementation are:
+
+- choosing and shipping the privileged WFP integration model
+- defining install/setup requirements for that component
+- deciding whether first release network enforcement is limited to `Blocked` before `ProxyOnly`

@@ -1,0 +1,99 @@
+"Issue Type","Summary","Epic Name","Epic Link","Story Points","Sprint","Labels","Description","Acceptance Criteria"
+"Epic","WIN-EPIC-7: Windows Sandbox Backend","WIN-EPIC-7: Windows Sandbox Backend","","","","windows-port;full-port;security;backend","Goal: replace preview classification and intentional blocking with real Windows enforcement.",""
+"Story","WIN-701: Finalize Windows security model","","WIN-EPIC-7: Windows Sandbox Backend","5","Sprint 3","windows-port;full-port;security;backend;needs-architecture","Finalize the Windows enforcement model and write down what functionally equivalent Windows security means for this product.","- chosen Windows enforcement primitives are documented
+- capability mapping is explicit for filesystem, network, process, IPC, and child lifecycle controls
+- unsupported semantics are identified before implementation starts
+- the meaning of functionally equivalent Windows security is written down"
+"Story","WIN-702: Implement process containment primitives","","WIN-EPIC-7: Windows Sandbox Backend","8","Sprint 3","windows-port;full-port;security;backend","Implement Windows child-process containment primitives as the first enforced runtime slice.","- Windows child processes launch inside the chosen containment model
+- parent/child lifetime rules are enforceable
+- orphaned-process behavior is deterministic
+- tests cover process lifecycle and containment failure paths"
+"Story","WIN-703: Implement filesystem restriction backend","","WIN-EPIC-7: Windows Sandbox Backend","13","Sprint 3;Sprint 4","windows-port;full-port;security;backend;filesystem","Implement the Windows filesystem restriction backend for supported allowlist behavior.","- Windows enforces a supported subset of allowlist path restrictions
+- denied paths fail deterministically
+- protected paths remain blocked
+- capability-to-policy mapping is documented and tested"
+"Story","WIN-704: Implement network enforcement backend","","WIN-EPIC-7: Windows Sandbox Backend","13","Sprint 4","windows-port;full-port;security;backend;network","Implement real Windows network enforcement for restricted live runs in the first full-port release.","- live network restriction requests are truly enforced on Windows
+- allow-all vs restricted network modes are distinct in runtime behavior
+- blocked connections fail intentionally
+- the implementation is documented and testable"
+"Story","WIN-705: Return deterministic unsupported results for non-mapped capabilities","","WIN-EPIC-7: Windows Sandbox Backend","5","Sprint 4","windows-port;full-port;security;backend","Ensure every unsupported or deferred capability returns an intentional result rather than advisory-only success.","- each capability class reports supported, blocked, or deferred intentionally
+- no silent advisory-only success remains in live restricted execution
+- CLI messaging reflects backend reality"
+"Story","WIN-706: Wire enforced backend into live run path","","WIN-EPIC-7: Windows Sandbox Backend","8","Sprint 4;Sprint 5","windows-port;full-port;security;backend;cli-runtime","Connect the real Windows sandbox backend to the live Windows run path.","- live restricted runs use the real Windows backend
+- supported restrictions execute successfully
+- unsupported restrictions fail clearly
+- call paths are test-covered"
+"Epic","WIN-EPIC-8: Supervisor Parity and Execution Hardening","WIN-EPIC-8: Supervisor Parity and Execution Hardening","","","","windows-port;full-port;supervisor;security","Goal: replace the current Windows supervisor scaffold with a real supervised runtime.",""
+"Story","WIN-801: Implement Windows supervisor event loop","","WIN-EPIC-8: Windows Supervisor Parity and Execution Hardening","13","Sprint 5","windows-port;full-port;supervisor;security","Implement the parent event loop for supervised Windows execution.","- the parent event loop runs on Windows
+- startup and shutdown are stable
+- supervisor diagnostics are actionable"
+"Story","WIN-802: Replace Unix fd-passing assumptions with Windows handle brokering","","WIN-EPIC-8: Windows Supervisor Parity and Execution Hardening","13","Sprint 5;Sprint 6","windows-port;full-port;supervisor;security;ipc","Replace Unix fd-passing assumptions with Windows-safe handle brokering for supervised flows.","- approved resources can be shared using Windows-safe handle transfer
+- no Unix socket or SCM_RIGHTS dependency remains in supervised Windows flows
+- transfer failure modes are testable"
+"Story","WIN-803: Implement runtime capability expansion on Windows","","WIN-EPIC-8: Windows Supervisor Parity and Execution Hardening","13","Sprint 6","windows-port;full-port;supervisor;security","Implement approved runtime capability expansion within the Windows supervisor model.","- supervised requests can expand access within the Windows security model
+- denied requests fail safely
+- audit and diagnostics capture the decision path"
+"Story","WIN-804: Harden supervised teardown and recovery","","WIN-EPIC-8: Windows Supervisor Parity and Execution Hardening","5","Sprint 6","windows-port;full-port;supervisor;hardening","Harden cleanup, failure handling, and recovery semantics for supervised Windows sessions.","- interrupted sessions clean up correctly
+- failed supervisor startup does not leave ambiguous state
+- rollback and audit hooks behave consistently on supervisor failure"
+"Story","WIN-805: Enable real supervised Windows run mode","","WIN-EPIC-8: Windows Supervisor Parity and Execution Hardening","8","Sprint 7","windows-port;full-port;supervisor;cli-runtime","Promote supervised Windows mode from scaffold to real product path.","- supervised Windows mode is no longer scaffold-only
+- CLI output no longer reports preview limitation for active supervised features
+- process-level Windows tests cover the real supervised path"
+"Epic","WIN-EPIC-9: Filesystem, Rollback, State, and Keystore Parity","WIN-EPIC-9: Filesystem, Rollback, State, and Keystore Parity","","","","windows-port;full-port;filesystem;rollback;state;keystore","Goal: make Windows storage, path, rollback, and trust behavior production-usable.",""
+"Story","WIN-901: Harden Windows path normalization and protected-path semantics","","WIN-EPIC-9: Filesystem, Rollback, State, and Keystore Parity","8","Sprint 7","windows-port;full-port;filesystem;security","Harden canonicalization and protected-path behavior for Windows-specific path semantics.","- canonicalization is Windows-safe
+- drive-letter, UNC, junction, and symlink behavior are handled intentionally
+- protected-path checks remain fail-closed"
+"Story","WIN-902: Port rollback snapshot semantics to Windows","","WIN-EPIC-9: Filesystem, Rollback, State, and Keystore Parity","13","Sprint 7;Sprint 8","windows-port;full-port;rollback;filesystem","Port rollback snapshot behavior to Windows workspaces.","- rollback snapshots work on Windows workspaces
+- exclusion rules and large-directory behavior are documented
+- Windows file-lock behavior is handled intentionally"
+"Story","WIN-903: Validate state, audit, and runtime storage behavior on Windows","","WIN-EPIC-9: Filesystem, Rollback, State, and Keystore Parity","5","Sprint 8","windows-port;full-port;state;audit","Validate Windows state, audit, and runtime storage behavior for admin and user installs.","- state roots resolve consistently for admin and user installs
+- audit and runtime state do not depend on Unix conventions
+- state migration or compatibility behavior is documented"
+"Story","WIN-904: Keystore parity for credential and trust flows","","WIN-EPIC-9: Filesystem, Rollback, State, and Keystore Parity","8","Sprint 8","windows-port;full-port;keystore;trust","Bring Windows keystore-backed credential and trust flows to production parity.","- Windows keystore-backed flows work for supported trust and credential paths
+- missing or inaccessible secret-store behavior fails clearly
+- tests cover expected Windows secret-loading scenarios"
+"Story","WIN-905: Document Windows-specific filesystem and rollback semantics","","WIN-EPIC-9: Filesystem, Rollback, State, and Keystore Parity","3","Sprint 8","windows-port;full-port;docs;filesystem;rollback","Document Windows-specific filesystem, path, and rollback behavior for operators and developers.","- docs explain Windows-specific path and rollback behavior
+- operator guidance is aligned with actual implementation limits"
+"Epic","WIN-EPIC-10: CLI Feature Parity and Windows UX Completion","WIN-EPIC-10: CLI Feature Parity and Windows UX Completion","","","","windows-port;full-port;cli-runtime;ux","Goal: remove preview-era product gaps for the main Windows CLI surface.",""
+"Story","WIN-1001: Enable live profile-backed restricted runs on Windows","","WIN-EPIC-10: CLI Feature Parity and Windows UX Completion","8","Sprint 9","windows-port;full-port;cli-runtime;profiles","Enable live profile-backed restricted execution on Windows where backend support exists.","- built-in profiles work in live mode where backend support exists
+- unsupported profile controls fail intentionally
+- output reflects real enforcement status"
+"Story","WIN-1002: Enable Windows shell mode or make a permanent product decision","","WIN-EPIC-10: CLI Feature Parity and Windows UX Completion","8","Sprint 9","windows-port;full-port;cli-runtime;product-decision","Enable Windows shell mode or formalize a permanent product decision for it.","- nono shell has a supported Windows behavior or a documented permanent limitation
+- the chosen behavior is tested
+- CLI help reflects the decision"
+"Story","WIN-1003: Enable wrap/apply semantics on Windows or make a permanent product decision","","WIN-EPIC-10: CLI Feature Parity and Windows UX Completion","8","Sprint 9","windows-port;full-port;cli-runtime;product-decision","Enable wrap/apply semantics on Windows or formalize a permanent product decision for them.","- nono wrap works correctly on Windows or is formally product-deferred
+- no misleading enforcement claims remain"
+"Story","WIN-1004: Enable Windows trust interception and delegated open flows","","WIN-EPIC-10: CLI Feature Parity and Windows UX Completion","8","Sprint 9;Sprint 10","windows-port;full-port;trust;supervisor","Enable trust interception and delegated open flows in supported Windows supervised paths.","- trust interception works in supported Windows supervised flows
+- delegated browser or open flows are supported or intentionally limited
+- diagnostics explain platform-specific behavior"
+"Story","WIN-1005: Promote help/setup/support output to first-class Windows messaging","","WIN-EPIC-10: CLI Feature Parity and Windows UX Completion","3","Sprint 10","windows-port;full-port;ux;docs","Promote help, setup, and support output from preview-era wording to first-class Windows messaging.","- preview-only language is removed where no longer true
+- support, setup, and help text accurately reflect Windows support status
+- docs and runtime output are aligned"
+"Epic","WIN-EPIC-11: Windows Test Automation and Reliability","WIN-EPIC-11: Windows Test Automation and Reliability","","","","windows-port;full-port;test-automation;reliability","Goal: make Windows support regression-resistant and releaseable.",""
+"Story","WIN-1101: Expand unit-test coverage for backend and supervisor flows","","WIN-EPIC-11: Windows Test Automation and Reliability","8","Sprint 10","windows-port;full-port;test-automation;backend;supervisor","Expand Windows unit coverage for backend and supervisor behaviors.","- Windows backend and supervisor behaviors have targeted unit coverage
+- security-sensitive failure paths are exercised by tests"
+"Story","WIN-1102: Build a Windows integration harness","","WIN-EPIC-11: Windows Test Automation and Reliability","13","Sprint 10;Sprint 11","windows-port;full-port;test-automation;integration","Build a Windows-native integration harness without Unix shell assumptions.","- integration coverage runs on Windows without Unix shell assumptions
+- key run, setup, profile, and rollback paths are covered
+- test artifacts are useful for debugging failures"
+"Story","WIN-1103: Expand CI into enforced Windows test lanes","","WIN-EPIC-11: Windows Test Automation and Reliability","8","Sprint 11","windows-port;full-port;test-automation;ci","Expand CI so Windows support is gated by enforced test lanes instead of ad hoc validation.","- CI runs build, smoke, and integration subsets on Windows
+- failures are isolated and debuggable
+- Windows release confidence no longer depends on ad hoc local verification"
+"Story","WIN-1104: Add regression tests for Windows path and security edge cases","","WIN-EPIC-11: Windows Test Automation and Reliability","8","Sprint 11","windows-port;full-port;test-automation;security;filesystem","Add Windows regression coverage for path and security edge cases.","- path traversal, junction, symlink, UNC, and canonicalization edge cases are covered
+- tests protect against silent security regressions"
+"Story","WIN-1105: Add Windows release-candidate validation checklist","","WIN-EPIC-11: Windows Test Automation and Reliability","3","Sprint 11","windows-port;full-port;test-automation;release","Add a formal Windows release-candidate validation checklist to the repo.","- a formal Windows RC gate exists in-repo
+- enforcement, packaging, and upgrade checks are part of release validation"
+"Epic","WIN-EPIC-12: Packaging, Signing, and Release Readiness","WIN-EPIC-12: Packaging, Signing, and Release Readiness","","","","windows-port;full-port;packaging;release","Goal: make Windows distribution supportable in real environments.",""
+"Story","WIN-1201: Finalize Windows installer strategy","","WIN-EPIC-12: Packaging, Signing, and Release Readiness","5","Sprint 12","windows-port;full-port;packaging;release","Finalize the supported Windows installer and artifact strategy for the full release.","- MSI and zip delivery are the supported release paths, or a replacement decision is documented
+- user vs machine install behavior is defined
+- upgrade expectations are documented"
+"Story","WIN-1202: Add signed binary and installer workflow","","WIN-EPIC-12: Packaging, Signing, and Release Readiness","8","Sprint 12","windows-port;full-port;packaging;release;signing","Add signing support to the Windows binary and installer release workflow.","- release automation supports signing
+- binaries and installers are signed in the release path
+- operator verification steps are documented"
+"Story","WIN-1203: Validate uninstall, upgrade, and repair behavior","","WIN-EPIC-12: Packaging, Signing, and Release Readiness","5","Sprint 12","windows-port;full-port;packaging;release","Validate uninstall, upgrade, and repair behavior for Windows release artifacts.","- Apps & Features uninstall works
+- upgrade behavior is validated
+- user and machine scope installs are both covered"
+"Story","WIN-1204: Add Windows service packaging if a service-capable runtime exists","","WIN-EPIC-12: Packaging, Signing, and Release Readiness","8","Sprint 12","windows-port;full-port;packaging;release;blocked-by-runtime","Add Windows service packaging only if a real service-capable runtime exists.","- this story only proceeds if a real Windows service runtime exists
+- installer registration and service lifecycle work correctly
+- uninstall and upgrade preserve service correctness"
+"Story","WIN-1205: Promote Windows to first-class release target","","WIN-EPIC-12: Packaging, Signing, and Release Readiness","5","Sprint 12","windows-port;full-port;release;docs","Promote Windows from preview to first-class supported release target.","- docs, release automation, and support messaging all reflect first-class Windows support
+- Windows is no longer described as preview"

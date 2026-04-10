@@ -14,6 +14,9 @@ mod env_sanitization;
 #[cfg(target_os = "linux")]
 mod supervisor_linux;
 
+use crate::rollback_runtime::{
+    finalize_supervised_exit, AuditState, RollbackExitContext, RollbackRuntimeState,
+};
 use nix::libc;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -246,7 +249,7 @@ pub struct ExecConfig<'a> {
     /// Environment variables to set.
     pub env_vars: Vec<(&'a str, &'a str)>,
     /// Path to the capability state file.
-    pub cap_file: &'a std::path::Path,
+    pub cap_file: Option<&'a std::path::Path>,
     /// Directory the child process should start in.
     pub current_dir: &'a std::path::Path,
     /// Whether to suppress diagnostic output.
@@ -349,7 +352,10 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<()> {
         }
     }
 
-    cmd.args(cmd_args).env("NONO_CAP_FILE", config.cap_file);
+    cmd.args(cmd_args);
+    if let Some(cap_file) = config.cap_file {
+        cmd.env("NONO_CAP_FILE", cap_file);
+    }
 
     for (key, value) in &config.env_vars {
         cmd.env(key, value);
@@ -394,6 +400,7 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<()> {
 /// Does NOT pipe stdout/stderr. The child inherits the parent's terminal directly,
 /// preserving TTY semantics for interactive programs (e.g., Claude Code, vim).
 /// The parent prints diagnostics and rollback UI after the child exits.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_supervised(
     config: &ExecConfig<'_>,
     supervisor: Option<&SupervisorConfig<'_>>,
@@ -401,6 +408,14 @@ pub fn execute_supervised(
     on_fork: Option<&mut dyn FnMut(u32)>,
     pty_pair: Option<crate::pty_proxy::PtyPair>,
     pty_session_id: Option<&str>,
+    audit_state: Option<AuditState>,
+    rollback_state: Option<RollbackRuntimeState>,
+    rollback_status: nono::undo::RollbackStatus,
+    proxy_handle: Option<&nono_proxy::server::ProxyHandle>,
+    command: &[String],
+    started: &str,
+    silent: bool,
+    rollback_prompt_disabled: bool,
 ) -> Result<i32> {
     let program = &config.command[0];
     let cmd_args = &config.command[1..];
@@ -470,9 +485,11 @@ pub fn execute_supervised(
     }
 
     // Add NONO_CAP_FILE
-    if let Some(cap_file_str) = config.cap_file.to_str() {
-        if let Ok(cstr) = CString::new(format!("NONO_CAP_FILE={}", cap_file_str)) {
-            env_c.push(cstr);
+    if let Some(cap_file) = config.cap_file {
+        if let Some(cap_file_str) = cap_file.to_str() {
+            if let Ok(cstr) = CString::new(format!("NONO_CAP_FILE={}", cap_file_str)) {
+                env_c.push(cstr);
+            }
         }
     }
 
@@ -1133,6 +1150,20 @@ pub fn execute_supervised(
                 }
             };
 
+            let ended = chrono::Local::now().to_rfc3339();
+            finalize_supervised_exit(RollbackExitContext {
+                audit_state: audit_state.as_ref(),
+                rollback_state,
+                rollback_status,
+                proxy_handle,
+                started,
+                ended: &ended,
+                command,
+                exit_code,
+                silent,
+                rollback_prompt_disabled,
+            })?;
+
             // Analyze PTY screen content for sandbox-related errors.
             let error_observation = pty_proxy
                 .as_ref()
@@ -1358,6 +1389,8 @@ fn wait_for_child_with_startup_timeout(
             }
         }
     }
+
+    wait_for_child(child)
 }
 
 /// Wait for child process, handling EINTR from signals.
@@ -2091,6 +2124,7 @@ fn handle_supervisor_message(
                     decision: ApprovalDecision::Denied {
                         reason: reason.to_string(),
                     },
+                    grant: None,
                 };
                 return sock.send_response(&response);
             }
@@ -2241,6 +2275,7 @@ fn handle_supervisor_message(
                                 decision: ApprovalDecision::Denied {
                                     reason: format!("Failed to send file descriptor: {e}"),
                                 },
+                                grant: None,
                             };
                             return sock.send_response(&response);
                         }
@@ -2252,6 +2287,7 @@ fn handle_supervisor_message(
                             decision: ApprovalDecision::Denied {
                                 reason: format!("Supervisor failed to open path: {e}"),
                             },
+                            grant: None,
                         };
                         return sock.send_response(&response);
                     }
@@ -2262,6 +2298,13 @@ fn handle_supervisor_message(
             let response = SupervisorResponse::Decision {
                 request_id: request.request_id,
                 decision,
+                grant: if matches!(decision, ApprovalDecision::Granted) {
+                    Some(nono::ResourceGrant::sideband_file_descriptor(
+                        request.access,
+                    ))
+                } else {
+                    None
+                },
             };
             sock.send_response(&response)?;
         }

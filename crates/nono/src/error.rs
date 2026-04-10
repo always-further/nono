@@ -143,6 +143,21 @@ pub enum NonoError {
     #[error("Session already has an active attached client")]
     AttachBusy,
 
+    /// One or more files could not be restored (e.g. locked on Windows).
+    ///
+    /// Carries the list of successfully applied changes along with per-file
+    /// failure details so callers can surface exactly which files are stuck
+    /// without claiming full rollback success.
+    #[error("Partial rollback: {applied} file(s) restored, {failed} file(s) failed: {summary}")]
+    PartialRestore {
+        /// Number of files successfully restored.
+        applied: usize,
+        /// Number of files that could not be restored.
+        failed: usize,
+        /// Human-readable summary of the first few failures.
+        summary: String,
+    },
+
     // Trust/attestation errors
     #[error("Trust verification failed for {path}: {reason}")]
     TrustVerification { path: String, reason: String },

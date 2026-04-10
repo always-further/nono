@@ -12,6 +12,7 @@ use tracing::{debug, warn};
 
 /// Cached verification result for an instruction file.
 #[derive(Debug, Clone)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 struct CacheEntry {
     /// File inode at verification time
     inode: u64,
@@ -25,6 +26,7 @@ struct CacheEntry {
 
 /// Cached verification outcome (simplified for storage).
 #[derive(Debug, Clone)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 enum CachedOutcome {
     /// Verified successfully (includes digest for TOCTOU re-check at open time)
     Verified { publisher: String, digest: String },
@@ -34,6 +36,7 @@ enum CachedOutcome {
 
 /// Successful trust verification result returned from `check_path`.
 #[derive(Debug, Clone)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct TrustVerified {
     /// Publisher name that matched the trust policy
     pub publisher: String,
@@ -49,6 +52,7 @@ pub struct TrustVerified {
 /// and verifies matching files before they reach the approval backend.
 /// Results are cached by (path, inode, mtime, size) to avoid repeated
 /// verification of the same file content.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct TrustInterceptor {
     /// Trust policy for evaluation
     policy: TrustPolicy,
@@ -60,6 +64,7 @@ pub struct TrustInterceptor {
     project_root: PathBuf,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 impl TrustInterceptor {
     /// Create a new trust interceptor from a trust policy and project root.
     ///
@@ -314,6 +319,7 @@ impl TrustInterceptor {
 /// and perform cryptographic signature verification.
 ///
 /// Both keyed and keyless bundles undergo cryptographic verification.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn load_signer(
     file_path: &Path,
     bundle_path: &Path,
@@ -379,6 +385,7 @@ fn load_signer(
     Ok(identity)
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn format_outcome(outcome: &VerificationOutcome) -> String {
     match outcome {
         VerificationOutcome::Verified { publisher } => format!("verified ({publisher})"),

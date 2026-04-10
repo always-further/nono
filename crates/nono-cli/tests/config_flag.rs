@@ -7,6 +7,23 @@ fn nono_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nono"))
 }
 
+#[cfg(target_os = "windows")]
+fn test_command() -> [&'static str; 4] {
+    ["--", "cmd", "/c", "echo"]
+}
+
+#[cfg(not(target_os = "windows"))]
+fn test_command() -> [&'static str; 2] {
+    ["--", "echo"]
+}
+
+fn escaped_temp_dir() -> String {
+    std::env::temp_dir()
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+}
+
 #[test]
 fn config_with_valid_manifest_is_accepted() {
     let mut f = tempfile::NamedTempFile::new().expect("create temp file");
@@ -15,32 +32,52 @@ fn config_with_valid_manifest_is_accepted() {
         r#"{{
             "version": "0.1.0",
             "filesystem": {{
-                "grants": [{{ "path": "/tmp", "access": "read" }}]
+                "grants": [{{ "path": "{}", "access": "read" }}]
             }},
             "network": {{ "mode": "blocked" }}
-        }}"#
+        }}"#,
+        escaped_temp_dir()
     )
     .expect("write manifest");
 
-    let output = nono_bin()
-        .args([
-            "run",
-            "--config",
-            f.path().to_str().expect("path"),
-            "--dry-run",
-            "--",
-            "echo",
-            "hello",
-        ])
-        .output()
-        .expect("failed to run nono");
+    let mut command = nono_bin();
+    command.args([
+        "run",
+        "--config",
+        f.path().to_str().expect("path"),
+        "--dry-run",
+    ]);
+    command.args(test_command());
+    command.arg("hello");
+    let output = command.output().expect("failed to run nono");
 
-    // --dry-run prints what would happen and exits 0
+    #[cfg(not(target_os = "windows"))]
     assert!(
         output.status.success(),
         "expected success, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    #[cfg(target_os = "windows")]
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "expected Windows manifest dry-run to succeed, stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("Capabilities:"),
+            "expected capability summary in Windows manifest dry-run output, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("dry-run sandbox would be applied with above capabilities"),
+            "expected cross-platform dry-run wording in Windows manifest output, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains("dry-run validates the current Windows command surface"),
+            "manifest dry-run should not regress to stale Windows-specific wording, got: {stderr}"
+        );
+    }
 }
 
 #[test]

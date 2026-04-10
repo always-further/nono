@@ -13,7 +13,7 @@ use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::info;
 
 fn collect_missing_cli_requested_paths(args: &SandboxArgs) -> Vec<String> {
     let mut missing = Vec::new();

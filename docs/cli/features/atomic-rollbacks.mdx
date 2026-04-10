@@ -22,8 +22,10 @@ nono run --rollback --profile claude-code -- claude
 ```
 
 <Note>
-`--rollback` automatically selects supervised execution because the parent process needs to remain unsandboxed to write snapshots to `~/.nono/rollbacks/`.
+`--rollback` automatically selects supervised execution because the parent process needs to remain unsandboxed to write snapshots to the platform rollback directory (`~/.nono/rollbacks/` on Unix-like systems, the nono state directory on Windows).
 </Note>
+
+On Windows, rollback state lives under the nono state directory rather than a Unix-style home-directory fallback. `nono setup --check-only` reports the exact config root, state root, and rollback root that the current installation will use.
 
 ## Snapshot Architecture
 
@@ -41,10 +43,10 @@ Each snapshot builds a Merkle tree over all tracked files. The root hash provide
 
 ### Session Structure
 
-Sessions are stored in `~/.nono/rollbacks/` with the following layout:
+Sessions are stored in the platform rollback directory with the following layout:
 
 ```
-~/.nono/rollbacks/
+<rollback-root>/
   <session-id>/
     manifest.json       # Session metadata, Merkle roots, timestamps
     objects/            # Content-addressable file store
@@ -54,7 +56,7 @@ Sessions are stored in `~/.nono/rollbacks/` with the following layout:
       1/                # Final snapshot (or intermediate)
 ```
 
-Session IDs use the format `YYYYMMDD-HHMMSS-PID` (e.g., `20260214-143022-12345`).
+Session IDs use the format `YYYYMMDD-HHMMSS-PID` (e.g., `20260214-143022-12345`). Older Windows sessions may also appear as `windows-preview-<pid>-<timestamp>`, and nono treats both formats as valid when detecting stale sessions.
 
 ### Exclusion Filters
 
@@ -142,7 +144,9 @@ nono rollback restore 20260214-143022-12345 --snapshot 0
 nono rollback restore 20260214-143022-12345 --dry-run
 ```
 
-Restoration uses atomic rename per file to prevent partial restores.
+Restoration uses an atomic replace step per file to prevent partial restores. On Windows, this uses Windows-safe replace semantics rather than assuming Unix rename behavior.
+
+If a file cannot be restored because it is locked or in use by another process on Windows, restore now fails explicitly with a Windows-aware diagnostic instead of silently downgrading that file to a warning.
 
 ### `nono rollback verify`
 

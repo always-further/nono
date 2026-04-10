@@ -78,10 +78,20 @@ pub use keystore::{
 pub use net_filter::{FilterResult, HostFilter};
 #[cfg(target_os = "linux")]
 pub use sandbox::{detect_abi, is_wsl2, DetectedAbi};
-pub use sandbox::{Sandbox, SupportInfo};
+pub use sandbox::{PreviewRuntimeStatus, Sandbox, SupportInfo, SupportStatus};
+#[cfg(target_os = "windows")]
+pub use sandbox::{
+    WindowsFilesystemPolicy, WindowsFilesystemRule, WindowsNetworkBackendKind,
+    WindowsNetworkLaunchSupport, WindowsNetworkPolicy, WindowsNetworkPolicyMode,
+    WindowsPreviewContext, WindowsPreviewEntryPoint, WindowsSupervisorContext,
+    WindowsSupervisorFeatureKind, WindowsSupervisorSupport,
+};
 pub use state::SandboxState;
+#[cfg(target_os = "windows")]
+pub use supervisor::BrokerTargetProcess;
 pub use supervisor::{
-    ApprovalBackend, ApprovalDecision, CapabilityRequest, SupervisorSocket, UrlOpenRequest,
+    ApprovalBackend, ApprovalDecision, CapabilityRequest, GrantedResourceKind, ResourceGrant,
+    ResourceTransferKind, SupervisorSocket, UrlOpenRequest,
 };
 pub use trust::{
     Enforcement, IncludePatterns, Publisher, SignerIdentity, TrustPolicy, VerificationOutcome,

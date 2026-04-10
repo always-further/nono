@@ -58,7 +58,7 @@ keyring = "3"
 
 # Keyless (Sigstore/Fulcio/Rekor) signing for instruction file attestation
 sigstore-sign = "0.6"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "net", "io-util"] }
 
 ureq = "3"
 
@@ -83,6 +83,11 @@ keyring = { version = "3", features = ["sync-secret-service"] }
 nix = { version = "0.31", features = ["process", "signal", "fs", "user", "term"] }
 dns-lookup = "2"
 keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+uuid = { version = "1", features = ["v4"] }
+windows-service = "0.7"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_EventLog", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Rpc", "Win32_System_Services", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [build-dependencies]
 toml = "1.0"

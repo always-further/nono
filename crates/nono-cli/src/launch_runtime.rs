@@ -1,10 +1,14 @@
+#![cfg_attr(target_os = "windows", allow(dead_code))]
+
 use crate::cli::RunArgs;
 use crate::config;
 use crate::proxy_runtime::prepare_proxy_launch_options;
 use crate::sandbox_prepare::{
     prepare_sandbox, print_allow_launch_services_warning, PreparedSandbox,
 };
-use crate::{exec_strategy, instruction_deny, profile, trust_scan};
+use crate::{
+    exec_strategy, instruction_deny, profile, session, trust_scan, DETACHED_SESSION_ID_ENV,
+};
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result};
 use std::collections::HashMap;
@@ -39,9 +43,11 @@ pub(crate) struct LaunchPlan {
 #[derive(Clone, Default)]
 pub(crate) struct SessionLaunchOptions {
     pub(crate) detached_start: bool,
+    pub(crate) session_id: String,
     pub(crate) session_name: Option<String>,
     pub(crate) profile_name: Option<String>,
     pub(crate) detach_sequence: Option<Vec<u8>>,
+    pub(crate) interactive_pty: bool,
 }
 
 #[derive(Clone, Default)]
@@ -90,6 +96,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) no_diagnostics: bool,
     pub(crate) silent: bool,
     pub(crate) capability_elevation: bool,
+    pub(crate) interactive_shell: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,
     pub(crate) override_deny_paths: Vec<PathBuf>,
@@ -108,6 +115,7 @@ impl ExecutionFlags {
             no_diagnostics: false,
             silent,
             capability_elevation: false,
+            interactive_shell: false,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
             override_deny_paths: Vec::new(),
@@ -208,14 +216,20 @@ pub(crate) fn prepare_run_launch_plan(
             no_diagnostics,
             silent,
             capability_elevation: prepared.capability_elevation,
+            interactive_shell: false,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: prepared.wsl2_proxy_policy,
             override_deny_paths: prepared.override_deny_paths,
             session: SessionLaunchOptions {
                 detached_start: run_args.detached,
+                session_id: std::env::var(DETACHED_SESSION_ID_ENV)
+                    .ok()
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(session::generate_session_id),
                 session_name: run_args.name,
                 profile_name: args.profile.clone(),
                 detach_sequence,
+                interactive_pty: false,
             },
             rollback: RollbackLaunchOptions {
                 requested: rollback,

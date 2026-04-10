@@ -1,15 +1,15 @@
 use crate::launch_runtime::{
     ProxyLaunchOptions, RollbackLaunchOptions, SessionLaunchOptions, TrustLaunchOptions,
 };
+#[cfg(not(target_os = "windows"))]
+use crate::protected_paths;
 use crate::rollback_runtime::{
-    create_audit_state, finalize_supervised_exit, initialize_rollback_state,
-    warn_if_rollback_flags_ignored, AuditState, RollbackExitContext,
+    create_audit_state, initialize_rollback_state, warn_if_rollback_flags_ignored, AuditState,
 };
 use crate::{
-    exec_strategy, output, protected_paths, pty_proxy, session, terminal_approval, trust_intercept,
+    exec_strategy, output, pty_proxy, session, terminal_approval, trust_intercept,
     DETACHED_SESSION_ID_ENV,
 };
-use colored::Colorize;
 use nono::{CapabilitySet, Result};
 
 struct SessionRuntimeState {
@@ -23,6 +23,7 @@ pub(crate) struct SupervisedRuntimeContext<'a> {
     pub(crate) config: &'a exec_strategy::ExecConfig<'a>,
     pub(crate) caps: &'a CapabilitySet,
     pub(crate) command: &'a [String],
+    pub(crate) capability_elevation: bool,
     pub(crate) session: &'a SessionLaunchOptions,
     pub(crate) rollback: &'a RollbackLaunchOptions,
     pub(crate) trust: &'a TrustLaunchOptions,
@@ -57,12 +58,7 @@ fn create_trust_interceptor(
                 Err(e) => {
                     tracing::warn!("Trust interceptor pattern compilation failed: {e}");
                     eprintln!(
-                        "  {}",
-                        format!(
-                            "WARNING: Runtime instruction file verification disabled \
-                         (pattern error: {e})"
-                        )
-                        .yellow()
+                        "  WARNING: Runtime instruction file verification disabled (pattern error: {e})"
                     );
                     None
                 }
@@ -110,10 +106,15 @@ fn create_session_runtime_state(
             nono::NetworkMode::AllowAll => "allowed".to_string(),
             nono::NetworkMode::ProxyOnly { port, .. } => format!("proxy (localhost:{port})"),
         },
+        job_object_name: if cfg!(target_os = "windows") {
+            Some(format!(r"Local\nono-session-{}", short_session_id))
+        } else {
+            None
+        },
         rollback_session: audit_state.map(|state| state.session_id.clone()),
     };
     let session_guard = Some(session::SessionGuard::new(session_record)?);
-    let pty_pair = if session.detached_start {
+    let pty_pair = if session.detached_start || session.interactive_pty {
         Some(pty_proxy::open_pty()?)
     } else {
         None
@@ -132,6 +133,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         config,
         caps,
         command,
+        capability_elevation,
         session,
         rollback,
         trust,
@@ -149,11 +151,14 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         rollback.destination.as_ref(),
     )?;
     warn_if_rollback_flags_ignored(rollback, silent);
-    let rollback_state = initialize_rollback_state(rollback, caps, audit_state.as_ref(), silent)?;
+    let (rollback_state, rollback_status) =
+        initialize_rollback_state(rollback, caps, audit_state.as_ref(), silent)?;
 
-    let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
     let approval_backend = terminal_approval::TerminalApproval;
     let supervisor_session_id = build_supervisor_session_id(audit_state.as_ref());
+    #[cfg(not(target_os = "windows"))]
+    let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
+    #[cfg(not(target_os = "windows"))]
     let supervisor_cfg = exec_strategy::SupervisorConfig {
         protected_roots: protected_roots.as_paths(),
         approval_backend: &approval_backend,
@@ -173,6 +178,27 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
             nono::NetworkMode::ProxyOnly { bind_ports, .. } => bind_ports.clone(),
             _ => Vec::new(),
         },
+    };
+    #[cfg(target_os = "windows")]
+    let supervisor_cfg = exec_strategy::SupervisorConfig {
+        session_id: &supervisor_session_id,
+        requested_features: nono::Sandbox::windows_supervisor_support(
+            nono::WindowsSupervisorContext {
+                rollback_snapshots: rollback.requested && !rollback.disabled,
+                proxy_filtering: proxy.active,
+                runtime_capability_expansion: capability_elevation,
+                runtime_trust_interception: trust.interception_active,
+            },
+        )
+        .requested_feature_labels(),
+        support: nono::Sandbox::windows_supervisor_support(nono::WindowsSupervisorContext {
+            rollback_snapshots: rollback.requested && !rollback.disabled,
+            proxy_filtering: proxy.active,
+            runtime_capability_expansion: capability_elevation,
+            runtime_trust_interception: trust.interception_active,
+        }),
+        approval_backend: &approval_backend,
+        interactive_shell: session.interactive_pty && !session.detached_start,
     };
 
     let trust_interceptor = create_trust_interceptor(trust);
@@ -195,30 +221,48 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
                 guard.set_child_pid(child_pid);
             }
         };
-        exec_strategy::execute_supervised(
-            config,
-            Some(&supervisor_cfg),
-            trust_interceptor,
-            Some(&mut on_fork),
-            pty_pair,
-            Some(&short_session_id),
-        )?
+        #[cfg(not(target_os = "windows"))]
+        {
+            exec_strategy::execute_supervised(
+                config,
+                Some(&supervisor_cfg),
+                trust_interceptor,
+                Some(&mut on_fork),
+                pty_pair,
+                Some(&short_session_id),
+                audit_state,
+                rollback_state,
+                rollback_status,
+                proxy_handle,
+                command,
+                &started,
+                silent,
+                rollback.prompt_disabled,
+            )?
+        }
+        #[cfg(target_os = "windows")]
+        {
+            exec_strategy::execute_supervised(
+                config,
+                Some(&supervisor_cfg),
+                trust_interceptor,
+                Some(&mut on_fork),
+                pty_pair,
+                Some(&short_session_id),
+                audit_state,
+                rollback_state,
+                rollback_status,
+                proxy_handle,
+                command,
+                &started,
+                silent,
+                rollback.prompt_disabled,
+            )?
+        }
     };
     if let Some(ref mut guard) = session_guard {
         guard.set_exited(exit_code);
     }
-    let ended = chrono::Local::now().to_rfc3339();
-    finalize_supervised_exit(RollbackExitContext {
-        audit_state: audit_state.as_ref(),
-        rollback_state,
-        proxy_handle,
-        started: &started,
-        ended: &ended,
-        command,
-        exit_code,
-        silent,
-        rollback_prompt_disabled: rollback.prompt_disabled,
-    })?;
 
     Ok(exit_code)
 }

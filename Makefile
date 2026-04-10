@@ -6,7 +6,7 @@
 #   make check        Run clippy and format check
 #   make release      Build release binaries
 
-.PHONY: all build build-lib build-cli build-ffi build-arm64 test test-lib test-cli test-ffi check clippy fmt clean install audit help
+.PHONY: all build build-lib build-cli build-ffi build-arm64 test test-lib test-cli test-ffi check clippy fmt clean install audit help test-windows-harness test-windows-smoke test-windows-integration test-windows-security
 
 # Default target
 all: build
@@ -51,6 +51,18 @@ test-cli:
 
 test-ffi:
 	cargo test -p nono-ffi
+
+test-windows-harness:
+	pwsh -File scripts/windows-test-harness.ps1 -Suite all
+
+test-windows-smoke:
+	pwsh -File scripts/windows-test-harness.ps1 -Suite smoke
+
+test-windows-integration:
+	pwsh -File scripts/windows-test-harness.ps1 -Suite integration
+
+test-windows-security:
+	pwsh -File scripts/windows-test-harness.ps1 -Suite security
 
 test-doc:
 	cargo test --doc
@@ -128,6 +140,10 @@ help:
 	@echo "  make test-cli       Run CLI tests only"
 	@echo "  make test-ffi       Run C FFI tests only"
 	@echo "  make test-doc       Run doc tests only"
+	@echo "  make test-windows-harness      Run Windows build, smoke, integration, and security suites"
+	@echo "  make test-windows-smoke        Run Windows smoke suite"
+	@echo "  make test-windows-integration  Run Windows integration suite"
+	@echo "  make test-windows-security     Run Windows security/regression suite"
 	@echo ""
 	@echo "Check:"
 	@echo "  make check          Run clippy and format check"

@@ -1,0 +1,152 @@
+---
+title: Windows Release Candidate Checklist
+description: Formal Windows RC gate for enforcement, packaging, upgrade, and reliability validation
+---
+
+# Windows Release Candidate Checklist
+
+Use this checklist before marking a Windows build as a release candidate.
+
+## CI Gate
+
+Confirm the main CI workflow completed these Windows lanes successfully:
+
+- `Windows Build`
+- `Windows Smoke`
+- `Windows Integration`
+- `Windows Security`
+- `Windows Regression`
+- `Windows Packaging`
+
+Confirm the following artifacts are available for debugging:
+
+- `windows-build.log`
+- `windows-smoke.log`
+- `windows-integration.log`
+- `windows-security.log`
+- `windows-regression.log`
+
+## Packaging Gate
+
+Confirm the release workflow produced:
+
+- `nono.exe`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`
+- `nono-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+
+Confirm:
+
+- the signed raw `nono.exe` release asset is present
+- each MSI installs `nono.exe`, `README.md`, and `LICENSE`
+- each MSI creates an Apps & Features uninstall entry with the expected install scope
+- the zip contains `nono.exe`
+- `SHA256SUMS.txt` includes the Windows zip and MSI checksums
+- machine and user MSI artifacts match the documented scope strategy in [Windows Installer Strategy](/cli/development/windows-installer-strategy)
+- MSI contract validation passes for scope, upgrade-code split, ARP repair/modify settings, and service exclusion/inclusion behavior as applicable
+
+## Signature Gate
+
+Verify Authenticode signatures on all Windows release artifacts. Run these commands on the downloaded release artifacts or on the artifacts from `artifact_staging/` on the build runner:
+
+```powershell
+# Verify the binary
+(Get-AuthenticodeSignature -FilePath "nono.exe").SignatureStatus
+# Expected: Valid
+
+# Verify the machine MSI
+(Get-AuthenticodeSignature -FilePath "nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi").SignatureStatus
+# Expected: Valid
+
+# Verify the user MSI
+(Get-AuthenticodeSignature -FilePath "nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi").SignatureStatus
+# Expected: Valid
+```
+
+Confirm:
+
+- [ ] `nono.exe` — `Get-AuthenticodeSignature` returns `SignatureStatus : Valid`
+- [ ] `nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi` — `Get-AuthenticodeSignature` returns `SignatureStatus : Valid`
+- [ ] `nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi` — `Get-AuthenticodeSignature` returns `SignatureStatus : Valid`
+- [ ] the `.zip` artifact contains the signed `nono.exe` (confirm by extracting and running `Get-AuthenticodeSignature`)
+
+Any result other than `Valid` (`NotSigned`, `HashMismatch`, `UnknownError`) means the artifact must not be promoted to a release. See [Windows Signing Guide](/cli/development/windows-signing-guide) for troubleshooting.
+
+## Runtime Gate
+
+Run on a clean Windows machine or VM:
+
+```powershell
+nono --help
+nono --version
+nono setup --check-only
+nono run --dry-run -- cmd /c echo test
+nono run --profile default -- cmd /c echo hello
+nono run --block-net --allow . -- cmd /c echo hello
+```
+
+Expected results:
+
+- help and version succeed
+- setup reports the current Windows supported command surface and WFP readiness
+- dry-run validates policy without claiming full enforcement parity
+- supported live profile-backed runs succeed
+- blocked-network enforcement succeeds on the supported path when WFP readiness is satisfied, or fails with explicit backend diagnostics when readiness is not satisfied
+
+## Unsupported-Flow Gate
+
+Run these commands and confirm they fail clearly:
+
+```powershell
+nono run --profile codex -- cmd /c echo hello
+nono shell
+nono wrap -- cmd /c echo hello
+nono open-url-helper https://example.com
+```
+
+Expected results:
+
+- each command returns a non-zero exit code
+- each failure explains the documented Windows limitation or backend-owned reason
+- none of the outputs imply unsupported enforcement was applied
+
+## Upgrade and Uninstall Gate
+
+Validate both user-scope and machine-scope installation behavior:
+
+- install the previous Windows release
+- upgrade to the candidate MSI within the same scope
+- confirm `nono --version` reports the candidate version
+- confirm Apps & Features uninstall removes the expected installation
+- confirm zip-based installs still run without MSI-specific dependencies
+- confirm the raw signed `nono.exe` still reports the candidate version when launched directly
+- do not treat MSI-to-zip or cross-scope migration as a supported automatic upgrade path unless later release notes say otherwise
+- confirm repair/modify are intentionally unavailable in Apps & Features for the current MSI contract
+
+## Storage and Trust Gate
+
+Confirm:
+
+- `setup --check-only` reports Windows config/state/rollback/trust roots
+- rollback metadata and snapshots are written under the Windows state root
+- trust diagnostics identify Windows Credential Manager
+
+## Exit Criteria
+
+The Windows release candidate gate is complete when:
+
+- Windows CI lanes are green
+- Windows logs are attached as artifacts
+- packaging artifacts are present and verifiable
+- supported live Windows restrictions run through the active backend command surface
+- unsupported Windows flows fail explicitly
+- packaging validation covers machine/user MSI scope behavior and optional service-contract expectations
+- upgrade and uninstall behavior are validated
+- the current repair-disabled MSI contract is validated and documented
+- Windows artifact signatures are verified — all three artifacts (`nono.exe`, machine MSI, user MSI) return `SignatureStatus : Valid` via `Get-AuthenticodeSignature`
+
+## Promotion Criteria
+
+Before promoting Windows to a first-class release target, review the draft gates in the [Windows Promotion Criteria](/cli/development/windows-promotion-criteria) document and confirm they are truly satisfied. The RC checklist gates above are the operational pre-release verification; the promotion criteria document is the future-state promotion checklist rather than a declaration that promotion is already complete.
+
+If packaging/signing/CI gates are green but promotion is still blocked, use the [WIN-1706 Decision Package](/cli/development/windows-win-1706-decision-package) to decide whether Windows promotion is defined by library/runtime alignment or by the supported CLI surface.

@@ -52,14 +52,26 @@ pub(crate) fn is_dangerous_env_var(key: &str) -> bool {
         || key.starts_with("OP_SESSION_")
 }
 
+fn env_key_matches(left: &str, right: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 /// Decide whether an inherited env var should be dropped for sandbox execution.
 pub(super) fn should_skip_env_var(
     key: &str,
     config_env_vars: &[(&str, &str)],
     blocked_extra: &[&str],
 ) -> bool {
-    config_env_vars.iter().any(|(ek, _)| *ek == key)
-        || blocked_extra.contains(&key)
+    config_env_vars
+        .iter()
+        .any(|(ek, _)| env_key_matches(ek, key))
+        || blocked_extra
+            .iter()
+            .any(|blocked| env_key_matches(blocked, key))
         || is_dangerous_env_var(key)
 }
 
@@ -123,5 +135,16 @@ mod tests {
         assert!(is_dangerous_env_var("NODE_OPTIONS"));
         assert!(is_dangerous_env_var("PYTHONPATH"));
         assert!(is_dangerous_env_var("RUBYOPT"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_should_skip_env_var_matches_windows_keys_case_insensitively() {
+        assert!(should_skip_env_var(
+            "ProgramData",
+            &[("PROGRAMDATA", r"C:\sandbox\programdata")],
+            &[]
+        ));
+        assert!(should_skip_env_var("Path", &[], &["PATH"]));
     }
 }

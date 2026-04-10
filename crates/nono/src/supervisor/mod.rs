@@ -7,17 +7,18 @@
 //! # Architecture
 //!
 //! ```text
-//! Child (sandboxed) --[Unix socket]--> Supervisor (unsandboxed) --[ApprovalBackend]--> decision source
+//! Child (sandboxed) --[supervisor transport]--> Supervisor (unsandboxed) --[ApprovalBackend]--> decision source
 //! ```
 //!
 //! The child sends [`CapabilityRequest`]s over a [`SupervisorSocket`]. The
 //! supervisor delegates to an [`ApprovalBackend`] for the decision. If granted,
-//! the supervisor opens the path and passes the fd back via `SCM_RIGHTS`.
+//! the supervisor opens the path, brokers the opened resource into the child,
+//! and returns explicit transfer metadata with the approval response.
 //!
 //! # Components
 //!
 //! - **Types** ([`types`]): IPC message types (`CapabilityRequest`, `ApprovalDecision`, `AuditEntry`)
-//! - **Socket** ([`socket`]): Unix domain socket with length-prefixed framing and fd-passing
+//! - **Socket** ([`socket`]): platform transport with framed messages and brokered resource transfer
 //! - **ApprovalBackend** (this module): Trait for pluggable approval decisions
 //!
 //! # Security
@@ -26,13 +27,19 @@
 //! - Peer authentication via `SO_PEERCRED` (Linux) / `LOCAL_PEERPID` (macOS)
 //! - Path comparison uses [`Path::starts_with()`], never string operations
 
+#[cfg(not(target_os = "windows"))]
+pub mod socket;
+#[cfg(target_os = "windows")]
+#[path = "socket_windows.rs"]
 pub mod socket;
 pub mod types;
 
+#[cfg(target_os = "windows")]
+pub use socket::BrokerTargetProcess;
 pub use socket::SupervisorSocket;
 pub use types::{
-    ApprovalDecision, AuditEntry, CapabilityRequest, SupervisorMessage, SupervisorResponse,
-    UrlOpenRequest,
+    ApprovalDecision, AuditEntry, CapabilityRequest, GrantedResourceKind, ResourceGrant,
+    ResourceTransferKind, SupervisorMessage, SupervisorResponse, UrlOpenRequest,
 };
 
 use crate::error::Result;
@@ -168,5 +175,21 @@ mod tests {
         let timeout = ApprovalDecision::Timeout;
         assert!(!timeout.is_granted());
         assert!(!timeout.is_denied());
+    }
+
+    #[test]
+    fn test_resource_grant_helpers() {
+        let unix = ResourceGrant::sideband_file_descriptor(AccessMode::Read);
+        assert_eq!(unix.transfer, ResourceTransferKind::SidebandFileDescriptor);
+        assert_eq!(unix.resource_kind, GrantedResourceKind::File);
+        assert_eq!(unix.raw_handle, None);
+
+        let windows = ResourceGrant::duplicated_windows_file_handle(42, AccessMode::ReadWrite);
+        assert_eq!(
+            windows.transfer,
+            ResourceTransferKind::DuplicatedWindowsHandle
+        );
+        assert_eq!(windows.resource_kind, GrantedResourceKind::File);
+        assert_eq!(windows.raw_handle, Some(42));
     }
 }

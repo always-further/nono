@@ -13,30 +13,68 @@ use crate::policy;
 use nono::{NonoError, Result};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 // ============================================================================
 // Environment variable validation
 // ============================================================================
 
-/// Validate and return the HOME environment variable.
+/// Validate and return the user's home directory.
 ///
-/// Returns an error if HOME is not set or is not an absolute path.
-/// This prevents attacks where a malicious parent process sets
-/// HOME to a relative or attacker-controlled path, which would
-/// cause deny rules and sensitive path checks to target wrong locations.
+/// On Unix, this is `HOME`. On Windows, fall back to `USERPROFILE` and then
+/// `HOMEDRIVE` + `HOMEPATH` when `HOME` is absent.
+///
+/// Returns an error if no usable home directory variable is set or if the
+/// resolved value is not absolute. This prevents attacks where a malicious
+/// parent process sets a relative or attacker-controlled home path, which
+/// would cause deny rules and sensitive path checks to target wrong locations.
 pub fn validated_home() -> Result<String> {
-    let home = std::env::var("HOME").map_err(|_| NonoError::EnvVarValidation {
-        var: "HOME".to_string(),
-        reason: "not set".to_string(),
-    })?;
+    let (home, source_var) = resolve_home_env()?;
 
     if !Path::new(&home).is_absolute() {
         return Err(NonoError::EnvVarValidation {
-            var: "HOME".to_string(),
+            var: source_var.to_string(),
             reason: format!("must be an absolute path, got: {}", home),
         });
     }
 
     Ok(home)
+}
+
+fn resolve_home_env() -> Result<(String, &'static str)> {
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(home) = std::env::var("HOME") {
+        return Ok((home, "HOME"));
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Ok(home) = std::env::var("HOME") {
+        if Path::new(&home).is_absolute() {
+            return Ok((home, "HOME"));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            return Ok((userprofile, "USERPROFILE"));
+        }
+
+        let home_drive = std::env::var("HOMEDRIVE").ok();
+        let home_path = std::env::var("HOMEPATH").ok();
+        if let (Some(drive), Some(path)) = (home_drive, home_path) {
+            return Ok((format!("{}{}", drive, path), "HOMEDRIVE/HOMEPATH"));
+        }
+    }
+
+    Err(NonoError::EnvVarValidation {
+        #[cfg(target_os = "windows")]
+        var: "HOME/USERPROFILE/HOMEDRIVE/HOMEPATH".to_string(),
+        #[cfg(not(target_os = "windows"))]
+        var: "HOME".to_string(),
+        reason: "not set".to_string(),
+    })
 }
 
 /// Validate and return the TMPDIR environment variable, falling back to /tmp.
@@ -69,6 +107,22 @@ pub fn user_state_dir() -> Option<PathBuf> {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .map(|p| p.join("nono"))
+}
+
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    &crate::test_env::ENV_LOCK
+}
+
+/// Legacy Windows state directory used by earlier preview builds.
+///
+/// The Windows port now uses the OS state directory, but we still need to
+/// recognize the historical `~/.nono` subtree for protected-path checks and
+/// compatibility with older local data.
+#[cfg(target_os = "windows")]
+pub fn legacy_windows_state_dir() -> Result<PathBuf> {
+    let home = validated_home()?;
+    Ok(Path::new(&home).join(".nono"))
 }
 
 // ============================================================================
@@ -191,6 +245,9 @@ mod tests {
 
     #[test]
     fn test_check_sensitive_path() {
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         assert!(check_sensitive_path("~/.ssh")
             .expect("should not fail")
             .is_some());
@@ -212,6 +269,9 @@ mod tests {
 
     #[test]
     fn test_check_sensitive_path_component_wise() {
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // ~/.sshevil must NOT match ~/.ssh (component-wise comparison)
         let home = validated_home().expect("HOME must be set");
         let evil_path = format!("{}/.sshevil", home);
@@ -223,5 +283,55 @@ mod tests {
         assert!(check_sensitive_path("~/.ssh/id_rsa")
             .expect("should not fail")
             .is_some());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validated_home_falls_back_to_userprofile() {
+        let _guard = test_env_lock().lock().expect("env lock");
+        let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", r"C:\Users\tester");
+
+        let home = validated_home().expect("USERPROFILE should be accepted on Windows");
+        assert_eq!(home, r"C:\Users\tester");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(userprofile) = original_userprofile {
+            std::env::set_var("USERPROFILE", userprofile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validated_home_ignores_non_absolute_home_when_userprofile_exists() {
+        let _guard = test_env_lock().lock().expect("env lock");
+        let original_home = std::env::var("HOME").ok();
+        let original_userprofile = std::env::var("USERPROFILE").ok();
+
+        std::env::set_var("HOME", "/home/user");
+        std::env::set_var("USERPROFILE", r"C:\Users\tester");
+
+        let home = validated_home().expect("USERPROFILE should be accepted on Windows");
+        assert_eq!(home, r"C:\Users\tester");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(userprofile) = original_userprofile {
+            std::env::set_var("USERPROFILE", userprofile);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
     }
 }

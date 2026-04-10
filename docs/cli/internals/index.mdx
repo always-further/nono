@@ -5,6 +5,8 @@ description: How nono enforces sandboxing at the OS level - threat model, guaran
 
 nono implements a capability-based security model using kernel-level enforcement. This page explains the security guarantees, assumptions, and limitations.
 
+On Windows, the current product contract is intentionally narrower than Linux or macOS: direct restricted execution, blocked-network and selected supervised flows are supported where the backend can enforce them credibly, while live `shell` and `wrap` remain intentionally unavailable. See [Security Model](/cli/internals/security-model) and [Windows Security Model](/cli/development/windows-security-model) for the exact boundary.
+
 ## Core Principle
 
 **Deny by default, allow explicitly.**
