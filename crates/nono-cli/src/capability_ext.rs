@@ -45,11 +45,12 @@ fn try_new_profile_exact_path(
     access: AccessMode,
     label: &str,
     protected_roots: &ProtectedRoots,
+    allow_parent_of_protected: bool,
 ) -> Result<Option<FsCapability>> {
-    validate_requested_file(path, "Profile", protected_roots)?;
+    validate_requested_file(path, "Profile", protected_roots, allow_parent_of_protected)?;
     match try_new_file(path, access, label) {
         Err(NonoError::ExpectedFile(_)) => {
-            handle_exact_directory_path(path, access, protected_roots)
+            handle_exact_directory_path(path, access, protected_roots, allow_parent_of_protected)
         }
         result => result,
     }
@@ -60,8 +61,9 @@ fn handle_exact_directory_path(
     path: &Path,
     access: AccessMode,
     protected_roots: &ProtectedRoots,
+    allow_parent_of_protected: bool,
 ) -> Result<Option<FsCapability>> {
-    validate_requested_dir(path, "Profile", protected_roots)?;
+    validate_requested_dir(path, "Profile", protected_roots, allow_parent_of_protected)?;
     let resolved = path.canonicalize().map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
             NonoError::PathNotFound(path.to_path_buf())
@@ -95,6 +97,7 @@ fn handle_exact_directory_path(
     path: &Path,
     _access: AccessMode,
     _protected_roots: &ProtectedRoots,
+    _allow_parent_of_protected: bool,
 ) -> Result<Option<FsCapability>> {
     Err(NonoError::ExpectedFile(path.to_path_buf()))
 }
@@ -226,10 +229,11 @@ fn apply_profile_dir_allows(
     protected_roots: &ProtectedRoots,
     caps: &mut CapabilitySet,
     label_prefix: &str,
+    allow_parent_of_protected: bool,
 ) -> Result<()> {
     for path_template in path_templates {
         let path = expand_vars(path_template, workdir)?;
-        validate_requested_dir(&path, "Profile", protected_roots)?;
+        validate_requested_dir(&path, "Profile", protected_roots, allow_parent_of_protected)?;
         let label = format!(
             "{label_prefix} '{}' does not exist, skipping",
             path_template
@@ -246,12 +250,14 @@ fn validate_requested_dir(
     path: &Path,
     source: &str,
     protected_roots: &ProtectedRoots,
+    allow_parent_of_protected: bool,
 ) -> Result<()> {
     protected_paths::validate_requested_path_against_protected_roots(
         path,
         false,
         source,
         protected_roots.as_paths(),
+        allow_parent_of_protected,
     )
 }
 
@@ -259,12 +265,14 @@ fn validate_requested_file(
     path: &Path,
     source: &str,
     protected_roots: &ProtectedRoots,
+    allow_parent_of_protected: bool,
 ) -> Result<()> {
     protected_paths::validate_requested_path_against_protected_roots(
         path,
         true,
         source,
         protected_roots.as_paths(),
+        allow_parent_of_protected,
     )
 }
 
@@ -310,7 +318,7 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Directory permissions (canonicalize handles existence check atomically)
         for path in &args.allow {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
+            validate_requested_dir(path, "CLI", &protected_roots, false)?;
             if let Some(cap) =
                 try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")?
             {
@@ -319,14 +327,14 @@ impl CapabilitySetExt for CapabilitySet {
         }
 
         for path in &args.read {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
+            validate_requested_dir(path, "CLI", &protected_roots, false)?;
             if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
                 caps.add_fs(cap);
             }
         }
 
         for path in &args.write {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
+            validate_requested_dir(path, "CLI", &protected_roots, false)?;
             if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
                 caps.add_fs(cap);
             }
@@ -334,7 +342,7 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Single file permissions
         for path in &args.allow_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
+            validate_requested_file(path, "CLI", &protected_roots, false)?;
             if let Some(cap) =
                 try_new_file(path, AccessMode::ReadWrite, "Skipping non-existent file")?
             {
@@ -343,14 +351,14 @@ impl CapabilitySetExt for CapabilitySet {
         }
 
         for path in &args.read_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
+            validate_requested_file(path, "CLI", &protected_roots, false)?;
             if let Some(cap) = try_new_file(path, AccessMode::Read, "Skipping non-existent file")? {
                 caps.add_fs(cap);
             }
         }
 
         for path in &args.write_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
+            validate_requested_file(path, "CLI", &protected_roots, false)?;
             if let Some(cap) = try_new_file(path, AccessMode::Write, "Skipping non-existent file")?
             {
                 caps.add_fs(cap);
@@ -385,6 +393,7 @@ impl CapabilitySetExt for CapabilitySet {
     ) -> Result<(CapabilitySet, bool)> {
         let mut caps = CapabilitySet::new();
         let protected_roots = ProtectedRoots::from_defaults()?;
+        let allow_parent_of_protected = profile.allow_parent_of_protected.unwrap_or(false);
 
         // Resolve policy groups from the already-finalized profile.
         let loaded_policy = policy::load_embedded_policy()?;
@@ -401,7 +410,12 @@ impl CapabilitySetExt for CapabilitySet {
         // Directories with read+write access
         for path_template in &fs.allow {
             let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
+            validate_requested_dir(
+                &path,
+                "Profile",
+                &protected_roots,
+                allow_parent_of_protected,
+            )?;
             let label = format!("Profile path '{}' does not exist, skipping", path_template);
             if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
                 cap.source = CapabilitySource::Profile;
@@ -419,10 +433,20 @@ impl CapabilitySetExt for CapabilitySet {
                 .unwrap_or(false);
 
             let maybe_cap = if reads_file {
-                validate_requested_file(&path, "Profile", &protected_roots)?;
+                validate_requested_file(
+                    &path,
+                    "Profile",
+                    &protected_roots,
+                    allow_parent_of_protected,
+                )?;
                 try_new_file(&path, AccessMode::Read, &label)?
             } else {
-                validate_requested_dir(&path, "Profile", &protected_roots)?;
+                validate_requested_dir(
+                    &path,
+                    "Profile",
+                    &protected_roots,
+                    allow_parent_of_protected,
+                )?;
                 try_new_dir(&path, AccessMode::Read, &label)?
             };
 
@@ -435,7 +459,12 @@ impl CapabilitySetExt for CapabilitySet {
         // Directories with write-only access
         for path_template in &fs.write {
             let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
+            validate_requested_dir(
+                &path,
+                "Profile",
+                &protected_roots,
+                allow_parent_of_protected,
+            )?;
             let label = format!("Profile path '{}' does not exist, skipping", path_template);
             if let Some(mut cap) = try_new_dir(&path, AccessMode::Write, &label)? {
                 cap.source = CapabilitySource::Profile;
@@ -447,9 +476,13 @@ impl CapabilitySetExt for CapabilitySet {
         for path_template in &fs.allow_file {
             let path = expand_vars(path_template, workdir)?;
             let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) =
-                try_new_profile_exact_path(&path, AccessMode::ReadWrite, &label, &protected_roots)?
-            {
+            if let Some(mut cap) = try_new_profile_exact_path(
+                &path,
+                AccessMode::ReadWrite,
+                &label,
+                &protected_roots,
+                allow_parent_of_protected,
+            )? {
                 // Also allow atomic-write temp files (e.g. .claude.json.tmp.PID.TS).
                 // Many tools write to a temp file then rename for crash safety.
                 add_atomic_write_rule(&mut caps, &cap)?;
@@ -462,9 +495,13 @@ impl CapabilitySetExt for CapabilitySet {
         for path_template in &fs.read_file {
             let path = expand_vars(path_template, workdir)?;
             let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) =
-                try_new_profile_exact_path(&path, AccessMode::Read, &label, &protected_roots)?
-            {
+            if let Some(mut cap) = try_new_profile_exact_path(
+                &path,
+                AccessMode::Read,
+                &label,
+                &protected_roots,
+                allow_parent_of_protected,
+            )? {
                 cap.source = CapabilitySource::Profile;
                 caps.add_fs(cap);
             }
@@ -474,9 +511,13 @@ impl CapabilitySetExt for CapabilitySet {
         for path_template in &fs.write_file {
             let path = expand_vars(path_template, workdir)?;
             let label = format!("Profile file '{}' does not exist, skipping", path_template);
-            if let Some(mut cap) =
-                try_new_profile_exact_path(&path, AccessMode::Write, &label, &protected_roots)?
-            {
+            if let Some(mut cap) = try_new_profile_exact_path(
+                &path,
+                AccessMode::Write,
+                &label,
+                &protected_roots,
+                allow_parent_of_protected,
+            )? {
                 add_atomic_write_rule(&mut caps, &cap)?;
                 cap.source = CapabilitySource::Profile;
                 caps.add_fs(cap);
@@ -491,6 +532,7 @@ impl CapabilitySetExt for CapabilitySet {
             &protected_roots,
             &mut caps,
             "Profile policy path",
+            allow_parent_of_protected,
         )?;
         apply_profile_dir_allows(
             &profile.policy.add_allow_read,
@@ -499,6 +541,7 @@ impl CapabilitySetExt for CapabilitySet {
             &protected_roots,
             &mut caps,
             "Profile policy path",
+            allow_parent_of_protected,
         )?;
         apply_profile_dir_allows(
             &profile.policy.add_allow_write,
@@ -507,6 +550,7 @@ impl CapabilitySetExt for CapabilitySet {
             &protected_roots,
             &mut caps,
             "Profile policy path",
+            allow_parent_of_protected,
         )?;
 
         for path_template in &profile.policy.add_deny_access {
@@ -689,21 +733,21 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
 
     // Additional directories from CLI
     for path in &args.allow {
-        validate_requested_dir(path, "CLI", &protected_roots)?;
+        validate_requested_dir(path, "CLI", &protected_roots, false)?;
         if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.read {
-        validate_requested_dir(path, "CLI", &protected_roots)?;
+        validate_requested_dir(path, "CLI", &protected_roots, false)?;
         if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.write {
-        validate_requested_dir(path, "CLI", &protected_roots)?;
+        validate_requested_dir(path, "CLI", &protected_roots, false)?;
         if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
@@ -711,7 +755,7 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
 
     // Additional files from CLI
     for path in &args.allow_file {
-        validate_requested_file(path, "CLI", &protected_roots)?;
+        validate_requested_file(path, "CLI", &protected_roots, false)?;
         if let Some(cap) = try_new_file(path, AccessMode::ReadWrite, "Skipping non-existent file")?
         {
             caps.add_fs(cap);
@@ -719,14 +763,14 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
     }
 
     for path in &args.read_file {
-        validate_requested_file(path, "CLI", &protected_roots)?;
+        validate_requested_file(path, "CLI", &protected_roots, false)?;
         if let Some(cap) = try_new_file(path, AccessMode::Read, "Skipping non-existent file")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.write_file {
-        validate_requested_file(path, "CLI", &protected_roots)?;
+        validate_requested_file(path, "CLI", &protected_roots, false)?;
         if let Some(cap) = try_new_file(path, AccessMode::Write, "Skipping non-existent file")? {
             caps.add_fs(cap);
         }

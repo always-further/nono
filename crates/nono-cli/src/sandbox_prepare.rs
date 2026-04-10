@@ -553,9 +553,14 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             }
         }
 
-        let caps = CapabilitySet::try_from(&manifest)?;
+        let mut caps = CapabilitySet::try_from(&manifest)?;
         let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
-        protected_paths::validate_caps_against_protected_roots(&caps, protected_roots.as_paths())?;
+        protected_paths::validate_caps_against_protected_roots(
+            &caps,
+            protected_roots.as_paths(),
+            false,
+        )?;
+        protected_paths::emit_protected_root_deny_rules(protected_roots.as_paths(), &mut caps)?;
 
         let (rollback_exclude_patterns, rollback_exclude_globs) =
             if let Some(ref rb) = manifest.rollback {
@@ -622,6 +627,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         open_url_allow_localhost,
         allow_launch_services: profile_allow_launch_services,
         allow_gpu: profile_allow_gpu,
+        allow_parent_of_protected: profile_allow_parent_of_protected,
         override_deny_paths,
     } = prepared_profile;
 
@@ -737,7 +743,13 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
     let deny_paths = policy::resolve_deny_paths_for_groups(&loaded_policy, &active_groups)?;
     policy::validate_deny_overlaps(&deny_paths, &caps)?;
     let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
-    protected_paths::validate_caps_against_protected_roots(&caps, protected_roots.as_paths())?;
+    let allow_parent_of_protected = profile_allow_parent_of_protected;
+    protected_paths::validate_caps_against_protected_roots(
+        &caps,
+        protected_roots.as_paths(),
+        allow_parent_of_protected,
+    )?;
+    protected_paths::emit_protected_root_deny_rules(protected_roots.as_paths(), &mut caps)?;
 
     if needs_unlink_overrides {
         policy::apply_unlink_overrides(&mut caps);
