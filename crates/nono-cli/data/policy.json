@@ -747,7 +747,6 @@
         "allow": [
           "$HOME/.openclaw",
           "$HOME/.config/openclaw",
-          "$HOME/.local",
           "$TMPDIR/openclaw-$UID"
         ]
       },
