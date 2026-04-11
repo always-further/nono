@@ -466,12 +466,6 @@ mod tests {
                 .any(|r| r.contains("AGXDeviceUserClient")),
             "AGXDeviceUserClient platform rule should be present"
         );
-        assert!(
-            caps.platform_rules()
-                .iter()
-                .any(|r| r.contains("IOSurfaceRootUserClient")),
-            "IOSurfaceRootUserClient platform rule should be present"
-        );
     }
 
     #[cfg(target_os = "macos")]
