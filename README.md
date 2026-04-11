@@ -31,7 +31,6 @@
 <img src="assets/term.gif" alt="nono terminal demo" width="800"/>
 
 </div>
----
 
 > [!WARNING]
 > Early alpha -- not yet security audited for production use. Active development may cause breakage.
