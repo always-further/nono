@@ -339,6 +339,15 @@ impl PtyProxy {
     pub fn try_accept(&mut self) -> bool {
         match self.attach_listener.accept() {
             Ok((mut stream, _addr)) => {
+                if let Err(e) = stream.set_nonblocking(false) {
+                    debug!(
+                        "PTY proxy: failed to set accepted attach stream blocking: {}",
+                        e
+                    );
+                    let _ = stream.write_all(&[ATTACH_ACK_DENIED]);
+                    return false;
+                }
+
                 if let Err(e) = authenticate_attach_peer(stream.as_raw_fd()) {
                     warn!(
                         "PTY proxy: rejected unauthorized attach for {}: {}",
@@ -447,6 +456,12 @@ impl PtyProxy {
                 );
                 if !replay.is_empty() && stream.write_all(&replay).is_err() {
                     debug!("PTY proxy: failed to replay scrollback to attached client");
+                }
+
+                if !set_nonblocking(stream.as_raw_fd()) {
+                    debug!("PTY proxy: failed to set attached client socket nonblocking");
+                    let _ = stream.write_all(&[ATTACH_ACK_DENIED]);
+                    return false;
                 }
 
                 let socket_fd = stream.into_raw_fd();
@@ -1265,6 +1280,14 @@ fn encode_attach_handshake(winsize: Option<Winsize>) -> [u8; ATTACH_HANDSHAKE_LE
     buf
 }
 
+fn encode_attach_request_frame(winsize: Option<Winsize>) -> [u8; ATTACH_HANDSHAKE_LEN + 1] {
+    let handshake = encode_attach_handshake(winsize);
+    let mut buf = [0u8; ATTACH_HANDSHAKE_LEN + 1];
+    buf[0] = ATTACH_REQUEST_ATTACH;
+    buf[1..].copy_from_slice(&handshake);
+    buf
+}
+
 fn decode_attach_handshake(buf: &[u8; ATTACH_HANDSHAKE_LEN]) -> Option<Winsize> {
     if buf[..4] != ATTACH_HANDSHAKE_MAGIC {
         return None;
@@ -1300,13 +1323,10 @@ fn decode_resize_message(buf: &[u8; RESIZE_MESSAGE_LEN]) -> Option<Winsize> {
 }
 
 fn send_attach_handshake(stream: &mut UnixStream) -> Result<()> {
-    stream
-        .write_all(&[ATTACH_REQUEST_ATTACH])
-        .map_err(|e| NonoError::ConfigParse(format!("Failed to send attach request: {}", e)))?;
-    let handshake = encode_attach_handshake(get_terminal_winsize());
-    stream
-        .write_all(&handshake)
-        .map_err(|e| NonoError::ConfigParse(format!("Failed to send attach handshake: {}", e)))
+    let handshake = encode_attach_request_frame(get_terminal_winsize());
+    stream.write_all(&handshake).map_err(|e| {
+        NonoError::ConfigParse(format!("Failed to send attach request/handshake: {}", e))
+    })
 }
 
 fn send_attach_resize(socket: &UnixDatagram, winsize: Winsize) -> Result<()> {
@@ -1942,8 +1962,10 @@ fn run_attach_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        read_fd_once, select_attach_replay_bytes, terminal_restore_escape, write_all_fd,
-        AttachedClient, PtyProxy, ReadFdOutcome, ScreenState, DEFAULT_DETACH_SEQUENCE,
+        decode_attach_handshake, encode_attach_request_frame, read_fd_once,
+        select_attach_replay_bytes, terminal_restore_escape, write_all_fd, AttachedClient,
+        PtyProxy, ReadFdOutcome, ScreenState, ATTACH_HANDSHAKE_MAGIC, ATTACH_REQUEST_ATTACH,
+        DEFAULT_DETACH_SEQUENCE,
     };
     use nix::libc;
     use std::collections::VecDeque;
@@ -2005,6 +2027,24 @@ mod tests {
     fn terminal_restore_escape_can_clear_screen() {
         let esc = std::str::from_utf8(terminal_restore_escape(true)).unwrap_or("");
         assert!(esc.ends_with("\u{1b}[2J\u{1b}[H"));
+    }
+
+    #[test]
+    fn attach_request_frame_prefixes_request_byte_and_valid_handshake() {
+        let winsize = nix::pty::Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let frame = encode_attach_request_frame(Some(winsize));
+
+        assert_eq!(frame[0], ATTACH_REQUEST_ATTACH);
+        assert_eq!(&frame[1..5], ATTACH_HANDSHAKE_MAGIC.as_slice());
+        let handshake: [u8; 8] = frame[1..].try_into().expect("fixed-size handshake");
+        let decoded = decode_attach_handshake(&handshake).expect("valid handshake");
+        assert_eq!(decoded.ws_row, winsize.ws_row);
+        assert_eq!(decoded.ws_col, winsize.ws_col);
     }
 
     #[test]
