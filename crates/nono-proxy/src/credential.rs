@@ -95,18 +95,18 @@ impl CredentialStore {
                 let secret = match nono::keystore::load_secret_by_ref(KEYRING_SERVICE, key) {
                     Ok(s) => s,
                     Err(nono::NonoError::SecretNotFound(_)) => {
-                        if key.contains("://") {
-                            warn!(
-                                "Credential '{}' not found for route '{}' — requests will proceed without credential injection",
-                                key, normalized_prefix
-                            );
+                        let hint = if !key.contains("://") && cfg!(target_os = "macos") {
+                            format!(
+                                " To add it to the macOS keychain: security add-generic-password -s \"nono\" -a \"{}\" -w",
+                                key
+                            )
                         } else {
-                            warn!(
-                                "Credential '{}' not found for route '{}' — requests will proceed without credential injection. \
-                                 To add it to the macOS keychain: security add-generic-password -s \"nono\" -a \"{}\" -w",
-                                key, normalized_prefix, key
-                            );
-                        }
+                            String::new()
+                        };
+                        warn!(
+                            "Credential '{}' not found for route '{}' — requests will proceed without credential injection.{}",
+                            key, normalized_prefix, hint
+                        );
                         continue;
                     }
                     Err(e) => return Err(ProxyError::Credential(e.to_string())),
