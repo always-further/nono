@@ -10,12 +10,13 @@ pub(crate) struct AuditState {
     pub(crate) session_dir: PathBuf,
 }
 
-pub(crate) type RollbackRuntimeState = (
-    nono::undo::SnapshotManager,
-    nono::undo::SnapshotManifest,
-    Vec<PathBuf>,
-    HashSet<PathBuf>,
-);
+pub(crate) struct RollbackRuntimeState {
+    pub(crate) manager: nono::undo::SnapshotManager,
+    pub(crate) baseline: nono::undo::SnapshotManifest,
+    pub(crate) tracked_paths: Vec<PathBuf>,
+    pub(crate) atomic_temp_before: HashSet<PathBuf>,
+    pub(crate) session_id: String,
+}
 
 pub(crate) struct RollbackExitContext<'a> {
     pub(crate) audit_state: Option<&'a AuditState>,
@@ -123,16 +124,11 @@ fn enforce_rollback_limits(silent: bool) {
     }
 }
 
-pub(crate) fn create_audit_state(
-    rollback_requested: bool,
-    rollback_disabled: bool,
-    audit_disabled: bool,
-    rollback_destination: Option<&PathBuf>,
-) -> Result<Option<AuditState>> {
-    if !rollback_requested || rollback_disabled || audit_disabled {
-        return Ok(None);
-    }
-
+/// Create a new session directory with a unique ID.
+///
+/// Used by both audit and rollback to establish a session storage location.
+/// When both are active, audit creates the dir and rollback shares it.
+fn ensure_session_dir(rollback_destination: Option<&PathBuf>) -> Result<(String, PathBuf)> {
     let session_id = format!(
         "{}-{}",
         chrono::Local::now().format("%Y%m%d-%H%M%S"),
@@ -163,6 +159,19 @@ pub(crate) fn create_audit_state(
             warn!("Failed to set session directory permissions to 0700: {e}");
         }
     }
+
+    Ok((session_id, session_dir))
+}
+
+pub(crate) fn create_audit_state(
+    audit_disabled: bool,
+    rollback_destination: Option<&PathBuf>,
+) -> Result<Option<AuditState>> {
+    if audit_disabled {
+        return Ok(None);
+    }
+
+    let (session_id, session_dir) = ensure_session_dir(rollback_destination)?;
 
     Ok(Some(AuditState {
         session_id,
@@ -206,8 +215,12 @@ pub(crate) fn initialize_rollback_state(
 
     enforce_rollback_limits(silent);
 
-    let Some(audit_state) = audit_state else {
-        return Ok(None);
+    // When audit is active, share its session directory. Otherwise create
+    // a standalone directory so rollback snapshots still have somewhere to
+    // live (handles the --rollback --no-audit case).
+    let (session_id, session_dir) = match audit_state {
+        Some(state) => (state.session_id.clone(), state.session_dir.clone()),
+        None => ensure_session_dir(rollback.destination.as_ref())?,
     };
 
     let tracked_paths: Vec<PathBuf> = caps
@@ -283,7 +296,7 @@ pub(crate) fn initialize_rollback_state(
     }
 
     let mut manager = nono::undo::SnapshotManager::new(
-        audit_state.session_dir.clone(),
+        session_dir.clone(),
         tracked_paths.clone(),
         exclusion,
         nono::undo::WalkBudget::default(),
@@ -294,7 +307,13 @@ pub(crate) fn initialize_rollback_state(
 
     output::print_rollback_tracking(&tracked_paths, silent);
 
-    Ok(Some((manager, baseline, tracked_paths, atomic_temp_before)))
+    Ok(Some(RollbackRuntimeState {
+        manager,
+        baseline,
+        tracked_paths,
+        atomic_temp_before,
+        session_id,
+    }))
 }
 
 pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<()> {
@@ -317,14 +336,19 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
 
     let mut audit_saved = false;
 
-    if let Some((mut manager, baseline, tracked_paths, atomic_temp_before)) = rollback_state {
+    if let Some(RollbackRuntimeState {
+        mut manager,
+        baseline,
+        tracked_paths,
+        atomic_temp_before,
+        session_id: rb_session_id,
+    }) = rollback_state
+    {
         let (final_manifest, changes) = manager.create_incremental(&baseline)?;
         let merkle_roots = vec![baseline.merkle_root, final_manifest.merkle_root];
 
         let meta = nono::undo::SessionMetadata {
-            session_id: audit_state
-                .map(|state| state.session_id.clone())
-                .unwrap_or_default(),
+            session_id: rb_session_id,
             started: started.to_string(),
             ended: Some(ended.to_string()),
             command: command.to_vec(),
@@ -348,6 +372,8 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         let _ = manager.cleanup_new_atomic_temp_files(&atomic_temp_before);
     }
 
+    // Audit-only path: no rollback snapshots, just persist session metadata
+    // with network events. This is the default for supervised sessions.
     if !audit_saved {
         if let Some(audit_state) = audit_state {
             let meta = nono::undo::SessionMetadata {
@@ -366,4 +392,72 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_audit_state_returns_none_when_disabled() {
+        let result = create_audit_state(true, None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn create_audit_state_creates_session_when_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().to_path_buf();
+
+        let state = create_audit_state(false, Some(&dest)).unwrap().unwrap();
+
+        assert!(!state.session_id.is_empty());
+        assert!(state.session_dir.exists());
+        assert!(state.session_dir.starts_with(tmp.path()));
+    }
+
+    #[test]
+    fn ensure_session_dir_creates_dir_in_custom_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().to_path_buf();
+
+        let (session_id, session_dir) = ensure_session_dir(Some(&dest)).unwrap();
+
+        assert!(!session_id.is_empty());
+        assert!(session_dir.exists());
+        assert!(session_dir.starts_with(tmp.path()));
+    }
+
+    #[test]
+    fn ensure_session_dir_id_contains_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().to_path_buf();
+
+        let (session_id, _) = ensure_session_dir(Some(&dest)).unwrap();
+
+        let pid = std::process::id().to_string();
+        assert!(
+            session_id.contains(&pid),
+            "session_id '{session_id}' should contain pid '{pid}'"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_session_dir_sets_0700_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().to_path_buf();
+
+        let (_, session_dir) = ensure_session_dir(Some(&dest)).unwrap();
+
+        let mode = std::fs::metadata(&session_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "session dir should have 0700 permissions");
+    }
 }

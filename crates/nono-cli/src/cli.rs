@@ -1122,7 +1122,7 @@ pub struct RunArgs {
     pub no_diagnostics: bool,
 
     /// Disable the audit trail for this session
-    #[arg(long, conflicts_with = "rollback", help_heading = "OPTIONS")]
+    #[arg(long, help_heading = "OPTIONS")]
     pub no_audit: bool,
 
     /// Disable trust verification (not recommended for production)
