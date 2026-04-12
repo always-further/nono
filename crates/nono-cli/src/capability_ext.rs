@@ -628,7 +628,7 @@ impl CapabilitySetExt for CapabilitySet {
         caps.set_ipc_mode_mut(ipc_mode);
 
         // Apply CLI overrides (CLI args take precedence)
-        add_cli_overrides(&mut caps, args)?;
+        add_cli_overrides(&mut caps, args, allow_parent_of_protected)?;
 
         // Expand profile-level override_deny paths for finalize_caps
         let mut profile_overrides = Vec::with_capacity(profile.policy.override_deny.len());
@@ -728,26 +728,30 @@ fn apply_cli_network_mode(caps: &mut CapabilitySet, args: &SandboxArgs) {
 /// a profile or group capability. The subsequent `deduplicate()` call resolves
 /// conflicts using source priority (User wins over Group/System) and merges
 /// complementary access modes (Read + Write = ReadWrite).
-fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()> {
+fn add_cli_overrides(
+    caps: &mut CapabilitySet,
+    args: &SandboxArgs,
+    allow_parent_of_protected: bool,
+) -> Result<()> {
     let protected_roots = ProtectedRoots::from_defaults()?;
 
     // Additional directories from CLI
     for path in &args.allow {
-        validate_requested_dir(path, "CLI", &protected_roots, false)?;
+        validate_requested_dir(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.read {
-        validate_requested_dir(path, "CLI", &protected_roots, false)?;
+        validate_requested_dir(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.write {
-        validate_requested_dir(path, "CLI", &protected_roots, false)?;
+        validate_requested_dir(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
@@ -755,7 +759,7 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
 
     // Additional files from CLI
     for path in &args.allow_file {
-        validate_requested_file(path, "CLI", &protected_roots, false)?;
+        validate_requested_file(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_file(path, AccessMode::ReadWrite, "Skipping non-existent file")?
         {
             caps.add_fs(cap);
@@ -763,14 +767,14 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
     }
 
     for path in &args.read_file {
-        validate_requested_file(path, "CLI", &protected_roots, false)?;
+        validate_requested_file(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_file(path, AccessMode::Read, "Skipping non-existent file")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.write_file {
-        validate_requested_file(path, "CLI", &protected_roots, false)?;
+        validate_requested_file(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_file(path, AccessMode::Write, "Skipping non-existent file")? {
             caps.add_fs(cap);
         }
