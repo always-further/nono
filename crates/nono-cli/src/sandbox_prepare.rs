@@ -408,6 +408,7 @@ pub(crate) fn maybe_enable_gpu(
                 e.file_name().to_str().is_some_and(|n| {
                     n == "nvidiactl"
                         || n == "nvidia-uvm"
+                        || n == "nvidia-uvm-tools"
                         || (n.starts_with("nvidia")
                             && n[6..].bytes().all(|b| b.is_ascii_digit())
                             && n.len() > 6)
@@ -464,7 +465,7 @@ pub(crate) fn maybe_enable_gpu(
     if gpu_device_count == 0 {
         return Err(NonoError::SandboxInit(
             "--allow-gpu: no GPU devices found (checked /dev/dri/renderD*, \
-             /dev/nvidia*, /dev/kfd, /dev/dxg)"
+             /dev/nvidia*, /dev/nvidia-uvm-tools, /dev/kfd, /dev/dxg)"
                 .to_string(),
         ));
     }
