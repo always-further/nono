@@ -1,5 +1,104 @@
 # Changelog
 
+## [0.33.0] - 2026-04-12
+
+### Bug Fixes
+
+- Address review feedback on downstream bump workflows
+
+- *(fmt)* Sort imports alphabetically in command_runtime.rs
+
+- *(shell)* Initialize proxy runtime when credentials are configured
+
+- *(cli)* Decouple audit trail from rollback
+
+- *(proxy)* Guard macOS keychain hint with platform check
+
+- *(proxy)* Warn when keychain credential is not found
+
+- *(landlock)* Widen /proc/self Landlock rule to /proc for grandchild access
+
+- *(seccomp)* Resolve /proc/self correctly for grandchild processes
+
+- *(cli)* Adjust ps command output column widths
+
+- *(cli)* Align status and attach columns in ps output
+
+- *(test)* Add --allow-cwd to GPU integration tests
+
+- *(cli)* Compile dummy GPU function for non-macOS tests
+
+- *(pty-proxy)* Exit early if client socket cannot be set nonblocking
+
+- *(pty)* Correctly handle blocking state for attach streams
+
+- *(sandbox)* Prevent interactive CWD prompt in detached mode
+
+- Tighten GPU IOKit surface to AGXDeviceUserClient only
+
+- *(test)* Handle non-default TMPDIR in linux nested home grant test
+
+- *(policy)* Remove broad ~/.local allow from openclaw profile on Linux
+
+
+### CI/CD
+
+- Remove nono-registry from downstream dispatch
+
+- Add release automation for downstream SDK repos
+
+
+### Documentation
+
+- *(readme)* Add early alpha warning and remove separator
+
+- *(readme)* Overhaul content and visuals
+
+- *(cli)* Clarify --allow-gpu flag behavior and profile interaction
+
+
+### Features
+
+- *(macos)* Make parent-of-protected-root relaxation opt-in via profile
+
+- *(gpu)* Add WSL2 GPU support via /dev/dxg passthrough
+
+- *(gpu)* Add WSL2 GPU support via /dev/dxg passthrough
+
+- *(gpu)* Add Linux GPU access and improve macOS support
+
+- *(profile)* Introduce separate profile preparation for preflight
+
+- *(cli)* Introduce pre-flight CWD prompt for detached launches
+
+
+### Miscellaneous
+
+- Remove test results file
+
+
+### Performance
+
+- *(seccomp)* Skip read_tgid for direct child and use Cow for cap_check_path
+
+
+### Refactoring
+
+- *(cli-validation)* Propagate protected parent flag to cli validation
+
+- *(command-blocking)* Improve deprecation warning messages
+
+- *(command-blocking)* Deprecate startup-only command blocking
+
+
+### Testing
+
+- *(macos)* Address Gemini review feedback
+
+- *(macos)* Align GPU IOKit tests with tightened surface from #635
+
+- *(gpu)* Skip DRM tests if no render node permissions
+
 ## [Unreleased]
 
 ### Deprecations
