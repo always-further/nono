@@ -75,9 +75,8 @@ pub struct PolicyPatchConfig {
     /// Additional deny.access paths to apply.
     #[serde(default)]
     pub add_deny_access: Vec<String>,
-    /// Additional commands to block, extending deny.commands from groups.
-    /// Useful for blocking specific binaries (e.g. "docker", "kubectl") without
-    /// requiring changes to policy.json.
+    /// Deprecated startup-only command denylist extension.
+    /// Parsed for compatibility in v0.33.0, but not enforced for child processes.
     #[serde(default)]
     pub add_deny_commands: Vec<String>,
     /// Paths to exempt from deny groups.
@@ -856,8 +855,8 @@ pub struct SecurityConfig {
     /// Policy group names to resolve (from policy.json)
     #[serde(default)]
     pub groups: Vec<String>,
-    /// Commands to allow even when blocked by default policy (e.g. `["rm"]`).
-    /// Applied before CLI `--allow-command` overrides.
+    /// Deprecated startup-only command allowlist override.
+    /// Parsed for compatibility in v0.33.0, but not enforced for child processes.
     #[serde(default)]
     pub allowed_commands: Vec<String>,
     /// Signal isolation mode. Controls whether the sandboxed process can signal

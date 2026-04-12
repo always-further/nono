@@ -64,7 +64,7 @@ Inherit from another profile by name:
 | Field                 | Type            | Default      | Description |
 |-----------------------|-----------------|--------------|-------------|
 | `groups`              | array of string | `[]`         | Policy group names from `policy.json`. Use `nono policy groups` to list available groups. |
-| `allowed_commands`    | array of string | `[]`         | Commands to allow even when blocked by deny groups (e.g., `["rm"]`). |
+| `allowed_commands`    | array of string | `[]`         | Deprecated in v0.33.0. Startup-only command allowlist override. Not enforced for child processes. |
 | `signal_mode`         | string          | `"isolated"` | One of: `"isolated"`, `"allow_same_sandbox"`, `"allow_all"`. |
 | `process_info_mode`   | string          | `"isolated"` | One of: `"isolated"`, `"allow_same_sandbox"`, `"allow_all"`. |
 | `ipc_mode`            | string          | `"shared_memory_only"` | One of: `"shared_memory_only"`, `"full"`. Use `"full"` for multiprocessing (enables POSIX semaphores). macOS only. |
@@ -101,7 +101,7 @@ Provides subtractive and additive composition on top of inherited groups and fil
 | `add_allow_write`    | array of string | Additional write-only path grants. |
 | `add_allow_readwrite`| array of string | Additional read+write path grants. |
 | `add_deny_access`    | array of string | Additional deny paths. |
-| `add_deny_commands`  | array of string | Command names (basename only) to block. Blocks execution of the named binaries regardless of where they are installed. Checked before the sandbox enforces filesystem rules. |
+| `add_deny_commands`  | array of string | Deprecated in v0.33.0. Startup-only command denylist extension. Not enforced for child processes; prefer `add_deny_access` and narrower grants instead. |
 | `override_deny`      | array of string | Paths to exempt from deny groups. Each path must also be granted via `filesystem` or `add_allow_*`. Does not implicitly grant access; only removes the deny rule. |
 
 ### network
@@ -349,7 +349,7 @@ With `capability_elevation` enabled, nono runs in supervised mode where every fi
 
 ### Blocking container access (Docker, Podman, kubectl)
 
-Use `add_deny_access` together with `add_deny_commands` for defense-in-depth when you want to prevent an agent from reaching the Docker daemon or similar container runtimes:
+Use `add_deny_access` to prevent an agent from reaching the Docker daemon or similar container runtimes. `add_deny_commands` is deprecated startup-only gating and should not be relied on as enforcement:
 
 ```json
 {
@@ -365,7 +365,7 @@ Use `add_deny_access` together with `add_deny_commands` for defense-in-depth whe
 }
 ```
 
-On macOS, `add_deny_access` on a socket path also emits a Seatbelt `network-outbound` deny — Seatbelt treats `connect(2)` as a network operation so a file deny alone won't block it. `add_deny_commands` blocks the CLI tools as defense-in-depth, catching cases where an agent reaches the daemon through a forwarded or alternate socket path. Both are visible in `nono policy show` under **Policy patches**.
+On macOS, `add_deny_access` on a socket path also emits a Seatbelt `network-outbound` deny — Seatbelt treats `connect(2)` as a network operation so a file deny alone won't block it. Prefer path- and network-based controls; `add_deny_commands` remains as deprecated startup-only compatibility behavior and is visible in `nono policy show` under **Policy patches**.
 
 ### Profile with group exclusion
 

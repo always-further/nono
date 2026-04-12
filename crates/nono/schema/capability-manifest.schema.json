@@ -280,12 +280,14 @@
         "allowed_commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Commands to allow even when blocked by policy."
+          "description": "Deprecated in v0.33.0. Startup-only command allowlist override. Not enforced for child processes.",
+          "deprecated": true
         },
         "blocked_commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Commands to block from execution."
+          "description": "Deprecated in v0.33.0. Startup-only command denylist extension. Not enforced for child processes.",
+          "deprecated": true
         },
         "signal_mode": {
           "$ref": "#/$defs/SignalMode",

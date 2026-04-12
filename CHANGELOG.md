@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Deprecations
+
+- Deprecate startup-only command blocking surfaces in `v0.33.0`, add compatibility warnings, and document the child-process bypass.
+
 ## [0.32.0] - 2026-04-10
 
 ### Features
@@ -900,4 +906,3 @@
 ### 🚀 Features
 
 - First release of seperarate nono and nono-cli packages
-

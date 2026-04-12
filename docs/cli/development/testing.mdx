@@ -111,7 +111,7 @@ Tests network blocking functionality.
 
 ### 6. Dangerous Commands (`test_commands.sh`)
 
-Verifies that potentially destructive commands are blocked by default.
+Verifies the current startup-only command-blocking compatibility behavior.
 
 | Category | Commands Blocked |
 |----------|------------------|
@@ -124,6 +124,7 @@ Verifies that potentially destructive commands are blocked by default.
 Also tests:
 - `--allow-command` flag to permit specific blocked commands
 - `--block-command` flag to block additional commands
+- documented child-process bypass behavior while the feature is deprecated in `v0.33.x`
 
 ### 7. Edge Cases (`test_edge_cases.sh`)
 

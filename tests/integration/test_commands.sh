@@ -101,6 +101,11 @@ expect_failure "ls blocked with --block-command ls" \
 expect_failure "explicitly blocked command overrides default allow" \
     "$NONO_BIN" run --allow "$TMPDIR" --block-command echo -- echo "should fail"
 
+# Documented limitation while command blocking is deprecated in v0.33.x:
+# the startup-only check does not apply to child processes.
+expect_success "documented limitation: child shell bypasses blocked command check" \
+    "$NONO_BIN" run --allow "$TMPDIR" --block-command uname -- sh -c "uname >/dev/null"
+
 # =============================================================================
 # Package Managers
 # =============================================================================

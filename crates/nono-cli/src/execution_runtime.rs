@@ -1,7 +1,7 @@
 use crate::launch_runtime::{select_threading_context, LaunchPlan};
 use crate::proxy_runtime::start_proxy_runtime;
 use crate::supervised_runtime::{execute_supervised_runtime, SupervisedRuntimeContext};
-use crate::{config, exec_strategy, output, sandbox_state};
+use crate::{command_blocking_deprecation, config, exec_strategy, output, sandbox_state};
 use nono::{CapabilitySet, NonoError, Result, Sandbox};
 use std::path::Path;
 use std::time::Duration;
@@ -108,9 +108,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     {
         return Err(NonoError::BlockedCommand {
             command: blocked,
-            reason: "This command is blocked by default due to destructive potential. \
-                     Use --allow-command to override if you understand the risks."
-                .to_string(),
+            reason: command_blocking_deprecation::blocked_command_reason(),
         });
     }
 

@@ -1,5 +1,6 @@
 use crate::capability_ext::{self, CapabilitySetExt};
 use crate::cli::SandboxArgs;
+use crate::command_blocking_deprecation;
 #[cfg(target_os = "linux")]
 use crate::config;
 use crate::credential_runtime::load_env_credentials;
@@ -531,6 +532,9 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         })?;
         let mut manifest = nono::manifest::CapabilityManifest::from_json(&json)?;
         manifest.validate()?;
+        let manifest_warnings =
+            command_blocking_deprecation::collect_manifest_warnings(&manifest, config_path);
+        command_blocking_deprecation::print_warnings(&manifest_warnings, silent);
 
         if let Some(ref mut fs) = manifest.filesystem {
             for grant in &mut fs.grants {
@@ -620,6 +624,11 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         allow_gpu: profile_allow_gpu,
         override_deny_paths,
     } = prepared_profile;
+
+    if let Some(profile) = loaded_profile.as_ref() {
+        let profile_warnings = command_blocking_deprecation::collect_profile_warnings(profile);
+        command_blocking_deprecation::print_warnings(&profile_warnings, silent);
+    }
 
     #[cfg(target_os = "linux")]
     if args.profile.as_deref() == Some("claude-code") {

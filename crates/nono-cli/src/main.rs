@@ -7,6 +7,7 @@ mod audit_commands;
 mod capability_ext;
 mod cli;
 mod cli_bootstrap;
+mod command_blocking_deprecation;
 mod command_runtime;
 mod config;
 mod credential_runtime;
@@ -61,6 +62,9 @@ use cli_bootstrap::{
     collect_legacy_network_warnings, init_theme, init_tracing, normalize_legacy_flag_env_vars,
     print_legacy_network_warnings,
 };
+use command_blocking_deprecation::{
+    collect_cli_warnings, print_warnings as print_deprecation_warnings,
+};
 use nono::Result;
 use tracing::error;
 
@@ -78,6 +82,8 @@ fn main() {
     init_tracing(&cli);
     init_theme(&cli);
     print_legacy_network_warnings(&legacy_network_warnings, cli.silent);
+    let command_blocking_warnings = collect_cli_warnings(&cli);
+    print_deprecation_warnings(&command_blocking_warnings, cli.silent);
 
     if let Err(e) = run_cli(cli) {
         error!("{}", e);

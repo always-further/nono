@@ -810,11 +810,11 @@ pub struct SandboxArgs {
     pub env_credential_map: Vec<String>,
 
     // ── Commands ─────────────────────────────────────────────────────────
-    /// Allow a normally-blocked dangerous command (use with caution)
+    /// Deprecated startup-only command allowlist override (not child-process enforced)
     #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
     pub allow_command: Vec<String>,
 
-    /// Block an additional command beyond the default blocklist
+    /// Deprecated startup-only command denylist extension (not child-process enforced)
     #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
     pub block_command: Vec<String>,
 
@@ -971,11 +971,11 @@ pub struct WrapSandboxArgs {
     pub env_credential_map: Vec<String>,
 
     // ── Commands ─────────────────────────────────────────────────────────
-    /// Allow a normally-blocked dangerous command (use with caution)
+    /// Deprecated startup-only command allowlist override (not child-process enforced)
     #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
     pub allow_command: Vec<String>,
 
-    /// Block an additional command beyond the default blocklist
+    /// Deprecated startup-only command denylist extension (not child-process enforced)
     #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
     pub block_command: Vec<String>,
 

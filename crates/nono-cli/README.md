@@ -138,9 +138,13 @@ Profiles can form chains (up to 10 levels deep). Circular dependencies are detec
 my-dev.json → team-base.json → claude-code (built-in)
 ```
 
-## Command Blocking
+## Deprecated Command Blocking
 
-Dangerous commands are blocked by default:
+Command blocking is deprecated in `v0.33.0`. It is only checked against the
+directly-invoked startup command, not enforced for child processes, and should
+not be treated as a sandbox security boundary.
+
+Dangerous commands are still startup-blocked by default in `v0.33.x`:
 
 | Category | Commands |
 |----------|----------|
@@ -149,7 +153,7 @@ Dangerous commands are blocked by default:
 | Permission changes | `chmod`, `chown`, `chgrp` |
 | Privilege escalation | `sudo`, `su`, `doas` |
 
-Override per invocation with `--allow-command`, or permanently in a profile with `allowed_commands`:
+Compatibility overrides still exist temporarily:
 
 ```bash
 # Per invocation
@@ -165,6 +169,9 @@ cat > ~/.config/nono/profiles/my-profile.json << 'EOF'
 EOF
 nono run --profile my-profile -- rm /tmp/old-file.txt
 ```
+
+Prefer resource-based controls instead: narrower filesystem grants,
+`add_deny_access`, `unlink_protection`, and network policy.
 
 ## Documentation
 

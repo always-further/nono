@@ -475,7 +475,9 @@ nono shell --allow-cwd --shell /bin/zsh
 
 #### `--allow-command`
 
-Allow a normally-blocked dangerous command. By default, destructive commands like `rm`, `dd`, `chmod` are blocked. Use this flag to override for a specific command.
+Deprecated in `v0.33.0`. Allows a normally-blocked startup command, but only for
+the directly-invoked executable. Child processes can bypass this check, so it
+should not be treated as a sandbox security boundary.
 
 ```bash
 # Allow rm (blocked by default)
@@ -486,14 +488,16 @@ nono run --allow-cwd --allow-command rm --allow-command mv -- my-script.sh
 ```
 
 <Note>
-  Even with `--allow-command`, the kernel sandbox still restricts file operations to granted paths. A command can only affect files within directories you explicitly allowed.
+  `--allow-command` and the default command blocklist are startup-only checks.
+  They do not prevent child processes, interpreters, language runtimes, shell
+  built-ins, renamed binaries, or equivalent APIs from performing the same
+  operation. For hard protection, rely on kernel-enforced path and network
+  controls such as `deny.access`, `deny.unlink`, narrower filesystem grants,
+  and network policy.
 </Note>
 
-<Note>
-  Command blocking is a best-effort surface-level control. It matches against the executable name being invoked directly. It does not prevent a process from performing the equivalent operation through language-level APIs (e.g., `os.remove()` in Python), shell built-ins, or renamed binaries. For hard protection against destructive filesystem operations, rely on kernel-enforced deny groups (`deny.access`, `deny.unlink`) and path-based sandboxing, which apply regardless of how the operation is invoked.
-</Note>
-
-Commands can also be allowed permanently via the `allowed_commands` field in a profile's security config:
+Commands can also be allowed temporarily via the deprecated `allowed_commands`
+field in a profile's security config:
 
 ```json
 {
@@ -509,7 +513,8 @@ nono run --profile my-profile -- rm /tmp/old-file.txt
 
 #### `--block-command`
 
-Block an additional command beyond the default blocklist.
+Deprecated in `v0.33.0`. Adds a startup-only command denylist entry for the
+directly-invoked executable. Child processes can bypass this check.
 
 ```bash
 # Block a custom tool in addition to defaults

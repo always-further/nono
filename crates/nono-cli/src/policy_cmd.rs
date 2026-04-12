@@ -479,7 +479,10 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
 
     if !profile.security.allowed_commands.is_empty() {
         println!();
-        println!("  {}", theme::fg("Allowed commands:", t.subtext).bold());
+        println!(
+            "  {}",
+            theme::fg("Allowed commands (deprecated, startup-only):", t.subtext).bold()
+        );
         for cmd in &profile.security.allowed_commands {
             println!("    {}", theme::fg(cmd, t.text));
         }
@@ -559,7 +562,7 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
         if !pp.add_deny_commands.is_empty() {
             println!(
                 "    {}: {}",
-                theme::fg("add_deny_commands", t.yellow),
+                theme::fg("add_deny_commands (deprecated, startup-only)", t.yellow),
                 pp.add_deny_commands.join(", ")
             );
         }

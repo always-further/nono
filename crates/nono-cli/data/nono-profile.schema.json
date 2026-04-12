@@ -135,7 +135,8 @@
         "allowed_commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Commands to allow even when blocked by default policy. Applied before CLI --allow-command overrides."
+          "description": "Deprecated in v0.33.0. Startup-only command allowlist override. Not enforced for child processes; prefer resource-based controls instead.",
+          "deprecated": true
         },
         "signal_mode": {
           "oneOf": [
@@ -260,6 +261,12 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Additional deny.access paths to apply."
+        },
+        "add_deny_commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Deprecated in v0.33.0. Startup-only command denylist extension. Not enforced for child processes; prefer resource-based controls instead.",
+          "deprecated": true
         },
         "override_deny": {
           "type": "array",
