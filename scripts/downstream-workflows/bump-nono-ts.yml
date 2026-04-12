@@ -49,7 +49,8 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          # Update nono crate dependency
+          # Update nono crate dependency (handles both `nono = "x.y.z"` and `nono = { "x.y.z" }`)
+          sed -i "s/^nono[[:space:]]*=[[:space:]]*{[[:space:]]*\"[^\"]*\"[[:space:]]*}/nono = { \"${VERSION}\" }/" Cargo.toml
           sed -i "s/^nono[[:space:]]*=[[:space:]]*\"[^\"]*\"/nono = \"${VERSION}\"/" Cargo.toml
 
       - name: Create Pull Request
