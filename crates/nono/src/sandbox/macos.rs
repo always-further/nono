@@ -850,13 +850,13 @@ mod tests {
     #[test]
     fn test_generate_profile_with_gpu_iokit_rules() {
         let mut caps = CapabilitySet::new();
+        // Minimal IOKit surface: AGXDeviceUserClient is the only class required
+        // for Metal compute on Apple Silicon. IOSurfaceRootUserClient is tried
+        // opportunistically but Metal continues without it when denied.
         caps.add_platform_rule(
             "(allow iokit-open \
-                (iokit-connection \"IOGPU\") \
                 (iokit-user-client-class \
-                    \"AGXDeviceUserClient\" \
-                    \"AGXSharedUserClient\" \
-                    \"IOSurfaceRootUserClient\"))",
+                    \"AGXDeviceUserClient\"))",
         )
         .unwrap();
         caps.add_platform_rule("(allow iokit-get-properties)")
@@ -865,10 +865,10 @@ mod tests {
         let profile = generate_profile(&caps).unwrap();
 
         assert!(profile.contains("(allow iokit-open"));
-        assert!(profile.contains("IOGPU"));
         assert!(profile.contains("AGXDeviceUserClient"));
-        assert!(profile.contains("AGXSharedUserClient"));
-        assert!(profile.contains("IOSurfaceRootUserClient"));
+        assert!(!profile.contains("IOGPU"));
+        assert!(!profile.contains("AGXSharedUserClient"));
+        assert!(!profile.contains("IOSurfaceRootUserClient"));
         assert!(profile.contains("(allow iokit-get-properties)"));
     }
 

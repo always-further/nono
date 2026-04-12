@@ -1721,14 +1721,14 @@ mod tests {
     #[test]
     fn test_platform_rule_validation_accepts_gpu_iokit_rules() {
         let mut caps = CapabilitySet::new();
+        // Minimal IOKit surface: AGXDeviceUserClient is the only class required
+        // for Metal compute on Apple Silicon. IOSurfaceRootUserClient is tried
+        // opportunistically but Metal continues without it when denied.
         assert!(caps
             .add_platform_rule(
                 "(allow iokit-open \
-                    (iokit-connection \"IOGPU\") \
                     (iokit-user-client-class \
-                        \"AGXDeviceUserClient\" \
-                        \"AGXSharedUserClient\" \
-                        \"IOSurfaceRootUserClient\"))"
+                        \"AGXDeviceUserClient\"))"
             )
             .is_ok());
         assert!(caps
