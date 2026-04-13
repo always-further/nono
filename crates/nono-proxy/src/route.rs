@@ -336,6 +336,19 @@ fn build_tls_connector(
         (None, None) => builder.with_no_client_auth(),
     };
 
+    // Disable TLS session resumption when client certificates are configured.
+    //
+    // With TLS 1.3 PSK resumption the server may skip the CertificateRequest
+    // handshake message, so the client certificate is never re-presented on
+    // resumed connections. Servers that authenticate via x509 client certs
+    // (e.g. Kubernetes API servers) then reject or hang the request because
+    // the client identity is not established. Forcing a full handshake every
+    // time ensures the client certificate is always sent.
+    let mut tls_config = tls_config;
+    if client_cert_path.is_some() {
+        tls_config.resumption = rustls::client::Resumption::disabled();
+    }
+
     Ok(tokio_rustls::TlsConnector::from(Arc::new(tls_config)))
 }
 

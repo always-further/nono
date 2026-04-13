@@ -157,10 +157,22 @@ pub async fn handle_reverse_proxy(
 
     // Transform the path based on injection mode (url_path and query_param modes).
     // When no credential is configured, the path is forwarded unchanged.
+    //
+    // When the proxy-side injection mode differs from the upstream mode,
+    // strip proxy-side artifacts (path segment or query param containing the
+    // phantom token) before applying the upstream transform. Without this,
+    // the phantom token would leak to the upstream in the URL.
     let transformed_path = if let Some(cred) = cred {
+        let cleaned_path = strip_proxy_artifacts(
+            &upstream_path,
+            &cred.proxy_inject_mode,
+            &cred.inject_mode,
+            cred.proxy_path_pattern.as_deref(),
+            cred.proxy_query_param_name.as_deref(),
+        );
         transform_path_for_mode(
             &cred.inject_mode,
-            &upstream_path,
+            &cleaned_path,
             cred.path_pattern.as_deref(),
             cred.path_replacement.as_deref(),
             cred.query_param_name.as_deref(),
@@ -275,6 +287,13 @@ pub async fn handle_reverse_proxy(
     for (name, value) in &filtered_headers {
         request.push_str(&format!("{}: {}\r\n", name, value));
     }
+
+    // Force Connection: close so the upstream closes after responding.
+    // nono opens a fresh TCP+TLS connection per request and never reuses
+    // them, so keep-alive only wastes resources and — critically — causes
+    // the read-until-EOF response loop below to block indefinitely when
+    // the server holds the connection open.
+    request.push_str("Connection: close\r\n");
 
     // Content-Length for body
     if !body.is_empty() {
@@ -424,6 +443,7 @@ fn filter_headers(header_bytes: &[u8], cred_header: &str) -> Vec<(String, String
         let lower = line.to_lowercase();
         if lower.starts_with("host:")
             || lower.starts_with("content-length:")
+            || lower.starts_with("connection:")
             || lower.starts_with("proxy-authorization:")
             || (!cred_header_lower.is_empty() && lower.starts_with(&cred_header_lower))
             || line.trim().is_empty()
@@ -874,6 +894,114 @@ fn transform_query_param(
     }
 }
 
+/// Strip proxy-side artifacts from the path when proxy and upstream modes differ.
+///
+/// When the proxy validates the phantom token using a different injection mode
+/// than the upstream (e.g., proxy uses `url_path` or `query_param` while upstream
+/// uses `header`), the proxy-side token is embedded in the URL. This function
+/// removes it before the path is forwarded to the upstream, preventing phantom
+/// token leakage.
+///
+/// When both modes are the same, the upstream transform handles replacement
+/// (phantom → real credential), so no stripping is needed.
+fn strip_proxy_artifacts(
+    path: &str,
+    proxy_mode: &InjectMode,
+    upstream_mode: &InjectMode,
+    proxy_path_pattern: Option<&str>,
+    proxy_query_param_name: Option<&str>,
+) -> String {
+    // Only strip when modes differ — same-mode cases are handled by the
+    // upstream transform which replaces the phantom token with the real one.
+    if proxy_mode == upstream_mode {
+        return path.to_string();
+    }
+
+    match proxy_mode {
+        InjectMode::UrlPath => {
+            if let Some(pattern) = proxy_path_pattern {
+                strip_proxy_path_token(path, pattern)
+            } else {
+                path.to_string()
+            }
+        }
+        InjectMode::QueryParam => {
+            if let Some(param_name) = proxy_query_param_name {
+                strip_proxy_query_param(path, param_name)
+            } else {
+                path.to_string()
+            }
+        }
+        // Header and BasicAuth modes don't embed artifacts in the URL path.
+        InjectMode::Header | InjectMode::BasicAuth => path.to_string(),
+    }
+}
+
+/// Remove a phantom token path segment matched by the given pattern.
+///
+/// Example: path `/TOKEN123/api/v1/pods` with pattern `/{}/` → `/api/v1/pods`
+fn strip_proxy_path_token(path: &str, pattern: &str) -> String {
+    let parts: Vec<&str> = pattern.split("{}").collect();
+    if parts.len() != 2 {
+        return path.to_string();
+    }
+    let (prefix, suffix) = (parts[0], parts[1]);
+
+    if let Some(start) = path.find(prefix) {
+        let after_prefix = start + prefix.len();
+        let end_offset = if suffix.is_empty() {
+            path[after_prefix..]
+                .find(['/', '?'])
+                .unwrap_or(path[after_prefix..].len())
+        } else {
+            match path[after_prefix..].find(suffix) {
+                Some(offset) => offset,
+                None => return path.to_string(),
+            }
+        };
+
+        let before = &path[..start];
+        let after = &path[after_prefix + end_offset + suffix.len()..];
+
+        // Ensure the result has a leading slash
+        let result = format!("{}{}", before, after);
+        if result.is_empty() || !result.starts_with('/') {
+            format!("/{}", result)
+        } else {
+            result
+        }
+    } else {
+        path.to_string()
+    }
+}
+
+/// Remove a phantom token query parameter from the URL.
+///
+/// Example: path `/api/v1/pods?token=XXX&limit=10` → `/api/v1/pods?limit=10`
+fn strip_proxy_query_param(path: &str, param_name: &str) -> String {
+    if let Some(query_start) = path.find('?') {
+        let base_path = &path[..query_start];
+        let query = &path[query_start + 1..];
+
+        let remaining: Vec<&str> = query
+            .split('&')
+            .filter(|pair| {
+                pair.split_once('=')
+                    .map(|(name, _)| name != param_name)
+                    .unwrap_or(true)
+            })
+            .collect();
+
+        if remaining.is_empty() {
+            base_path.to_string()
+        } else {
+            format!("{}?{}", base_path, remaining.join("&"))
+        }
+    } else {
+        path.to_string()
+    }
+}
+
 /// Inject credential into request based on mode.
 ///
 /// For header/basic_auth modes, adds the credential header.
@@ -1232,5 +1360,217 @@ mod tests {
         .expect("query-param transform should succeed");
 
         assert_eq!(transformed, "/api/data?api_key=real_key");
+    }
+
+    // ========================================================================
+    // Proxy artifact stripping tests
+    // ========================================================================
+
+    #[test]
+    fn test_strip_proxy_path_token_basic() {
+        // Pattern: /{}/  — token is the first path segment
+        let result = strip_proxy_path_token("/PHANTOM123/api/v1/pods", "/{}/");
+        assert_eq!(result, "/api/v1/pods");
+    }
+
+    #[test]
+    fn test_strip_proxy_path_token_nested_pattern() {
+        // Pattern: /auth/{}/  — token is in a nested segment
+        let result = strip_proxy_path_token("/auth/PHANTOM123/api/v1/pods", "/auth/{}/");
+        assert_eq!(result, "/api/v1/pods");
+    }
+
+    #[test]
+    fn test_strip_proxy_path_token_no_trailing_slash() {
+        // Pattern: /{}  — token at end of path with no trailing content
+        let result = strip_proxy_path_token("/PHANTOM123", "/{}");
+        assert_eq!(result, "/");
+    }
+
+    #[test]
+    fn test_strip_proxy_path_token_preserves_query() {
+        // Pattern: /{}/  — should preserve query string after stripping
+        let result = strip_proxy_path_token("/PHANTOM123/api?limit=10", "/{}/");
+        assert_eq!(result, "/api?limit=10");
+    }
+
+    #[test]
+    fn test_strip_proxy_path_token_no_match() {
+        // Pattern doesn't match — return path unchanged
+        let result = strip_proxy_path_token("/api/v1/pods", "/auth/{}/");
+        assert_eq!(result, "/api/v1/pods");
+    }
+
+    #[test]
+    fn test_strip_proxy_query_param_only_param() {
+        let result = strip_proxy_query_param("/api/v1/pods?token=PHANTOM123", "token");
+        assert_eq!(result, "/api/v1/pods");
+    }
+
+    #[test]
+    fn test_strip_proxy_query_param_with_other_params() {
+        let result =
+            strip_proxy_query_param("/api/v1/pods?token=PHANTOM123&limit=10", "token");
+        assert_eq!(result, "/api/v1/pods?limit=10");
+    }
+
+    #[test]
+    fn test_strip_proxy_query_param_middle() {
+        let result = strip_proxy_query_param(
+            "/api/v1/pods?limit=10&token=PHANTOM123&watch=true",
+            "token",
+        );
+        assert_eq!(result, "/api/v1/pods?limit=10&watch=true");
+    }
+
+    #[test]
+    fn test_strip_proxy_query_param_no_match() {
+        let result = strip_proxy_query_param("/api/v1/pods?limit=10", "token");
+        assert_eq!(result, "/api/v1/pods?limit=10");
+    }
+
+    #[test]
+    fn test_strip_proxy_query_param_no_query_string() {
+        let result = strip_proxy_query_param("/api/v1/pods", "token");
+        assert_eq!(result, "/api/v1/pods");
+    }
+
+    #[test]
+    fn test_strip_proxy_artifacts_same_mode_noop() {
+        // When proxy and upstream use the same mode, no stripping (upstream transform handles it)
+        let path = "/PHANTOM123/api/v1/pods";
+        let result = strip_proxy_artifacts(
+            path,
+            &InjectMode::UrlPath,
+            &InjectMode::UrlPath,
+            Some("/{}/"),
+            None,
+        );
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn test_strip_proxy_artifacts_url_path_to_header() {
+        // Proxy uses url_path, upstream uses header — must strip path token
+        let result = strip_proxy_artifacts(
+            "/PHANTOM123/api/v1/pods",
+            &InjectMode::UrlPath,
+            &InjectMode::Header,
+            Some("/{}/"),
+            None,
+        );
+        assert_eq!(result, "/api/v1/pods");
+    }
+
+    #[test]
+    fn test_strip_proxy_artifacts_query_param_to_header() {
+        // Proxy uses query_param, upstream uses header — must strip query param
+        let result = strip_proxy_artifacts(
+            "/api/v1/pods?token=PHANTOM123",
+            &InjectMode::QueryParam,
+            &InjectMode::Header,
+            None,
+            Some("token"),
+        );
+        assert_eq!(result, "/api/v1/pods");
+    }
+
+    #[test]
+    fn test_strip_proxy_artifacts_header_to_query_param() {
+        // Proxy uses header, upstream uses query_param — no URL artifacts to strip
+        let path = "/api/v1/pods";
+        let result = strip_proxy_artifacts(
+            path,
+            &InjectMode::Header,
+            &InjectMode::QueryParam,
+            None,
+            None,
+        );
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn test_end_to_end_url_path_proxy_header_upstream() {
+        // Full flow: proxy validates via url_path, upstream injects via header.
+        // The path token must be stripped before forwarding.
+        let token = Zeroizing::new("session456".to_string());
+        let credential = Zeroizing::new("real_bearer_token".to_string());
+        let path = "/session456/api/v1/namespaces";
+
+        // 1. Proxy-side validation succeeds
+        assert!(validate_phantom_token_for_mode(
+            &InjectMode::UrlPath,
+            b"\r\n\r\n", // no auth header needed for url_path mode
+            path,
+            "Authorization",
+            Some("/{}/"),
+            None,
+            &token,
+        )
+        .is_ok());
+
+        // 2. Strip proxy artifacts
+        let cleaned = strip_proxy_artifacts(
+            path,
+            &InjectMode::UrlPath,
+            &InjectMode::Header,
+            Some("/{}/"),
+            None,
+        );
+        assert_eq!(cleaned, "/api/v1/namespaces");
+
+        // 3. Upstream transform (header mode = no path change)
+        let transformed = transform_path_for_mode(
+            &InjectMode::Header,
+            &cleaned,
+            None,
+            None,
+            None,
+            &credential,
+        )
+        .unwrap();
+        assert_eq!(transformed, "/api/v1/namespaces");
+    }
+
+    #[test]
+    fn test_end_to_end_query_param_proxy_header_upstream() {
+        // Full flow: proxy validates via query_param, upstream injects via header.
+        let token = Zeroizing::new("session789".to_string());
+        let credential = Zeroizing::new("real_bearer_token".to_string());
+        let path = "/api/v1/pods?token=session789&limit=100";
+
+        // 1. Proxy-side validation succeeds
+        assert!(validate_phantom_token_for_mode(
+            &InjectMode::QueryParam,
+            b"\r\n\r\n",
+            path,
+            "Authorization",
+            None,
+            Some("token"),
+            &token,
+        )
+        .is_ok());
+
+        // 2. Strip proxy artifacts
+        let cleaned = strip_proxy_artifacts(
+            path,
+            &InjectMode::QueryParam,
+            &InjectMode::Header,
+            None,
+            Some("token"),
+        );
+        assert_eq!(cleaned, "/api/v1/pods?limit=100");
+
+        // 3. Upstream transform (header mode = no path change)
+        let transformed = transform_path_for_mode(
+            &InjectMode::Header,
+            &cleaned,
+            None,
+            None,
+            None,
+            &credential,
+        )
+        .unwrap();
+        assert_eq!(transformed, "/api/v1/pods?limit=100");
     }
 }
