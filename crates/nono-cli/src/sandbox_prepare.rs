@@ -647,6 +647,49 @@ fn missing_cwd_prompt_must_fail(
     silent || (detached_launch && detached_prompt_response.is_none())
 }
 
+/// Grant the procfs paths that the NVIDIA driver needs for CUDA initialisation.
+///
+/// Scoped narrowly to the NVIDIA stack — not called on pure DRM render-node,
+/// AMD ROCm, or WSL `/dev/dxg` setups.
+///
+/// - `/proc/driver/nvidia`, `/proc/driver/nvidia-uvm` (read, when present):
+///   CUDA's UVM subsystem reads these during init. We grant each individually
+///   rather than the parent `/proc/driver` to avoid exposing metadata about
+///   unrelated kernel drivers.
+/// - `/proc/self` (read): CUDA init reads `/proc/self/maps`, `/proc/self/status`
+///   and other per-process files.
+/// - `/proc/self/task` (read+write): NVIDIA driver 570+ writes to
+///   `/proc/self/task/<tid>/comm` during thread startup to set thread names.
+///   Without write access this returns EACCES and the driver treats it as a
+///   fatal OS error, surfacing as CUDA Error 304 (`cudaErrorOperatingSystem`).
+///   Narrowing write access to the `task` subtree keeps other per-process
+///   procfs entries read-only.
+#[cfg(target_os = "linux")]
+fn grant_nvidia_gpu_procfs(caps: &mut CapabilitySet) -> Result<()> {
+    for name in ["nvidia", "nvidia-uvm"] {
+        let path = std::path::PathBuf::from("/proc/driver").join(name);
+        if path.is_dir() {
+            let cap = FsCapability::new_dir(&path, AccessMode::Read)?;
+            caps.add_fs(cap);
+        }
+    }
+
+    // /proc/self and /proc/self/task are guaranteed on Linux; propagate any
+    // error rather than silently skipping (fail-secure: if the kernel ever
+    // fails to present these, the sandbox should fail rather than grant
+    // less-than-intended access).
+    caps.add_fs(FsCapability::new_dir(
+        std::path::Path::new("/proc/self"),
+        AccessMode::Read,
+    )?);
+    caps.add_fs(FsCapability::new_dir(
+        std::path::Path::new("/proc/self/task"),
+        AccessMode::ReadWrite,
+    )?);
+
+    Ok(())
+}
+
 /// Returns true for `/dev/` filenames that correspond to NVIDIA compute device
 /// nodes that should be granted by `--allow-gpu`.
 ///
@@ -724,6 +767,7 @@ pub(crate) fn maybe_enable_gpu(
     // Note: nvidia-uvm has been the target of privilege escalation CVEs
     // (e.g. CVE-2024-0090). We grant it because CUDA doesn't work without it,
     // but this is a higher-risk surface than DRM render nodes.
+    let mut have_nvidia = false;
     if let Ok(dev_entries) = std::fs::read_dir("/dev") {
         let nvidia_devices: Vec<_> = dev_entries
             .filter_map(|e| e.ok())
@@ -731,6 +775,9 @@ pub(crate) fn maybe_enable_gpu(
             .map(|e| e.path())
             .collect();
         gpu_device_count = gpu_device_count.saturating_add(nvidia_devices.len());
+        if !nvidia_devices.is_empty() {
+            have_nvidia = true;
+        }
         for dev in &nvidia_devices {
             let cap = FsCapability::new_file(dev.clone(), AccessMode::ReadWrite)?;
             caps.add_fs(cap);
@@ -748,6 +795,11 @@ pub(crate) fn maybe_enable_gpu(
             caps_found += 1;
         }
         gpu_device_count = gpu_device_count.saturating_add(caps_found);
+        // MIG-only hosts (no plain /dev/nvidia* node, caps only) still need
+        // the NVIDIA procfs grants for CUDA init.
+        if caps_found > 0 {
+            have_nvidia = true;
+        }
     }
 
     // AMD KFD (Kernel Fusion Driver) for ROCm/HIP compute.
@@ -796,6 +848,11 @@ pub(crate) fn maybe_enable_gpu(
         }
     }
 
+    // NVIDIA-only procfs grants (see grant_nvidia_gpu_procfs for rationale).
+    if have_nvidia {
+        grant_nvidia_gpu_procfs(caps)?;
+    }
+
     warn!(
         "--allow-gpu enabled: allowing {} GPU device(s) on Linux",
         gpu_device_count
@@ -827,7 +884,10 @@ pub(crate) fn print_allow_gpu_warning(silent: bool) {
                 .yellow()
         );
         eprintln!(
-            "  This grants read/write access to /dev/dri/renderD* and NVIDIA compute devices."
+            "  This grants read/write access to /dev/dri/renderD* and NVIDIA compute devices.\n  \
+             On NVIDIA systems, additionally: read access to /proc/driver/nvidia,\n  \
+             /proc/driver/nvidia-uvm, and /proc/self; read/write access to\n  \
+             /proc/self/task (for CUDA thread-name initialisation)."
         );
     }
 }
