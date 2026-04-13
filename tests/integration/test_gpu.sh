@@ -224,6 +224,61 @@ print(f'OK: opened {len(caps)} nvidia-caps devices')
     else
         skip_test "nvidia-caps (MIG) access" "no /dev/nvidia-caps/ found"
     fi
+
+    # NVIDIA procfs grants — regression tests for the --allow-gpu CUDA-init
+    # fix. These paths are only granted when NVIDIA devices are present; the
+    # probes live inside has_nvidia_devices to match the scope of the grant.
+    echo ""
+    echo "--- NVIDIA procfs Grant Tests ---"
+
+    # /proc/self/task/<tid>/comm write — CUDA Error 304 root cause.
+    expect_failure "/proc/self/task/<tid>/comm write denied without --allow-gpu" \
+        "$NONO_BIN" run --silent --allow-cwd --allow "$TMPDIR" -- \
+        python3 -c "
+import os, sys
+tid = os.gettid() if hasattr(os, 'gettid') else os.getpid()
+try:
+    with open(f'/proc/self/task/{tid}/comm', 'wb') as f:
+        f.write(b'probe\n')
+    sys.exit(0)  # should not reach here
+except PermissionError:
+    sys.exit(1)  # expected: sandbox denied the write
+"
+    expect_success "/proc/self/task/<tid>/comm write allowed with --allow-gpu" \
+        "$NONO_BIN" run --silent --allow-cwd --allow "$TMPDIR" --allow-gpu -- \
+        python3 -c "
+import os
+tid = os.gettid() if hasattr(os, 'gettid') else os.getpid()
+with open(f'/proc/self/task/{tid}/comm', 'wb') as f:
+    f.write(b'probe\n')
+print('OK: wrote thread comm under --allow-gpu')
+"
+
+    # /proc/driver/nvidia — CUDA UVM init read. Only test if the driver is
+    # loaded (the grant itself skips the path when it doesn't exist).
+    if [[ -d /proc/driver/nvidia ]]; then
+        expect_failure "/proc/driver/nvidia read denied without --allow-gpu" \
+            "$NONO_BIN" run --silent --allow-cwd --allow "$TMPDIR" -- \
+            ls /proc/driver/nvidia
+        expect_success "/proc/driver/nvidia read allowed with --allow-gpu" \
+            "$NONO_BIN" run --silent --allow-cwd --allow "$TMPDIR" --allow-gpu -- \
+            ls /proc/driver/nvidia
+    else
+        skip_test "/proc/driver/nvidia read probe" "/proc/driver/nvidia not present (driver not loaded?)"
+    fi
+
+    # Least-privilege regression guard: --allow-gpu must NOT grant the
+    # parent /proc/driver directory (would expose metadata about unrelated
+    # kernel drivers). Listing /proc/driver should still fail.
+    #
+    # Caveat: `ls` exercises Landlock's READ_DIR access, which is distinct
+    # from READ_FILE under the current ABI. A future ABI that splits or
+    # renames these bits could change what this probe observes. The assertion
+    # remains valid for today's ABI; revisit if the kernel evolves its
+    # filesystem access vocabulary.
+    expect_failure "/proc/driver parent read denied even with --allow-gpu" \
+        "$NONO_BIN" run --silent --allow-cwd --allow "$TMPDIR" --allow-gpu -- \
+        ls /proc/driver
 else
     skip_test "NVIDIA device tests" "no /dev/nvidia0 found"
 fi

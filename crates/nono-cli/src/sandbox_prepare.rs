@@ -647,6 +647,72 @@ fn missing_cwd_prompt_must_fail(
     silent || (detached_launch && detached_prompt_response.is_none())
 }
 
+/// Grant the procfs paths that the NVIDIA driver needs for CUDA initialisation.
+///
+/// Scoped narrowly to the NVIDIA stack — not called on pure DRM render-node,
+/// AMD ROCm, or WSL `/dev/dxg` setups.
+///
+/// - `/proc/driver/nvidia`, `/proc/driver/nvidia-uvm` (read, when present):
+///   CUDA's UVM subsystem reads these during init. We grant each individually
+///   rather than the parent `/proc/driver` to avoid exposing metadata about
+///   unrelated kernel drivers.
+/// - `/proc/self` (read): CUDA init reads `/proc/self/maps`, `/proc/self/status`
+///   and other per-process files.
+/// - `/proc/self/task` (read+write): NVIDIA driver 570+ writes to
+///   `/proc/self/task/<tid>/comm` during thread startup to set thread names.
+///   Without write access this returns EACCES and the driver treats it as a
+///   fatal OS error, surfacing as CUDA Error 304 (`cudaErrorOperatingSystem`).
+///   Narrowing write access to the `task` subtree keeps other per-process
+///   procfs entries read-only.
+#[cfg(target_os = "linux")]
+fn grant_nvidia_gpu_procfs(caps: &mut CapabilitySet) -> Result<()> {
+    for name in ["nvidia", "nvidia-uvm"] {
+        let path = std::path::PathBuf::from("/proc/driver").join(name);
+        if path.is_dir() {
+            let cap = FsCapability::new_dir(&path, AccessMode::Read)?;
+            caps.add_fs(cap);
+        }
+    }
+
+    // /proc/self and /proc/self/task are guaranteed on Linux; propagate any
+    // error rather than silently skipping (fail-secure: if the kernel ever
+    // fails to present these, the sandbox should fail rather than grant
+    // less-than-intended access).
+    caps.add_fs(FsCapability::new_dir(
+        std::path::Path::new("/proc/self"),
+        AccessMode::Read,
+    )?);
+    caps.add_fs(FsCapability::new_dir(
+        std::path::Path::new("/proc/self/task"),
+        AccessMode::ReadWrite,
+    )?);
+
+    Ok(())
+}
+
+/// Returns true for `/dev/` filenames that correspond to NVIDIA compute device
+/// nodes that should be granted by `--allow-gpu`.
+///
+/// Matches:
+///   - `nvidiactl` — control device, required for all CUDA operations
+///   - `nvidia-uvm` — Unified Virtual Memory, required for CUDA managed memory
+///   - `nvidia-uvm-tools` — opened by driver 570+ during UVM init
+///   - `nvidia<N>` where `N` is one or more ASCII digits — per-GPU device nodes
+///
+/// Deliberately rejects `nvidia-modeset` (display, not compute) and any other
+/// non-enumerated `nvidia-*` suffix. Keep in sync with the comment block in
+/// `maybe_enable_gpu`.
+#[cfg(target_os = "linux")]
+fn is_nvidia_compute_device(name: &str) -> bool {
+    if name == "nvidiactl" || name == "nvidia-uvm" || name == "nvidia-uvm-tools" {
+        return true;
+    }
+    if let Some(suffix) = name.strip_prefix("nvidia") {
+        return !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn maybe_enable_gpu(
     caps: &mut CapabilitySet,
@@ -701,21 +767,17 @@ pub(crate) fn maybe_enable_gpu(
     // Note: nvidia-uvm has been the target of privilege escalation CVEs
     // (e.g. CVE-2024-0090). We grant it because CUDA doesn't work without it,
     // but this is a higher-risk surface than DRM render nodes.
+    let mut have_nvidia = false;
     if let Ok(dev_entries) = std::fs::read_dir("/dev") {
         let nvidia_devices: Vec<_> = dev_entries
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name().to_str().is_some_and(|n| {
-                    n == "nvidiactl"
-                        || n == "nvidia-uvm"
-                        || (n.starts_with("nvidia")
-                            && n[6..].bytes().all(|b| b.is_ascii_digit())
-                            && n.len() > 6)
-                })
-            })
+            .filter(|e| e.file_name().to_str().is_some_and(is_nvidia_compute_device))
             .map(|e| e.path())
             .collect();
         gpu_device_count = gpu_device_count.saturating_add(nvidia_devices.len());
+        if !nvidia_devices.is_empty() {
+            have_nvidia = true;
+        }
         for dev in &nvidia_devices {
             let cap = FsCapability::new_file(dev.clone(), AccessMode::ReadWrite)?;
             caps.add_fs(cap);
@@ -733,6 +795,11 @@ pub(crate) fn maybe_enable_gpu(
             caps_found += 1;
         }
         gpu_device_count = gpu_device_count.saturating_add(caps_found);
+        // MIG-only hosts (no plain /dev/nvidia* node, caps only) still need
+        // the NVIDIA procfs grants for CUDA init.
+        if caps_found > 0 {
+            have_nvidia = true;
+        }
     }
 
     // AMD KFD (Kernel Fusion Driver) for ROCm/HIP compute.
@@ -764,7 +831,8 @@ pub(crate) fn maybe_enable_gpu(
     if gpu_device_count == 0 {
         return Err(NonoError::SandboxInit(
             "--allow-gpu: no GPU devices found (checked /dev/dri/renderD*, \
-             /dev/nvidia*, /dev/kfd, /dev/dxg)"
+             /dev/nvidia* (incl. nvidiactl, nvidia-uvm, nvidia-uvm-tools), \
+             /dev/nvidia-caps/*, /dev/kfd, /dev/dxg)"
                 .to_string(),
         ));
     }
@@ -778,6 +846,11 @@ pub(crate) fn maybe_enable_gpu(
             let cap = FsCapability::new_dir(path, AccessMode::Read)?;
             caps.add_fs(cap);
         }
+    }
+
+    // NVIDIA-only procfs grants (see grant_nvidia_gpu_procfs for rationale).
+    if have_nvidia {
+        grant_nvidia_gpu_procfs(caps)?;
     }
 
     warn!(
@@ -811,7 +884,10 @@ pub(crate) fn print_allow_gpu_warning(silent: bool) {
                 .yellow()
         );
         eprintln!(
-            "  This grants read/write access to /dev/dri/renderD* and NVIDIA compute devices."
+            "  This grants read/write access to /dev/dri/renderD* and NVIDIA compute devices.\n  \
+             On NVIDIA systems, additionally: read access to /proc/driver/nvidia,\n  \
+             /proc/driver/nvidia-uvm, and /proc/self; read/write access to\n  \
+             /proc/self/task (for CUDA thread-name initialisation)."
         );
     }
 }
@@ -1136,6 +1212,113 @@ mod tests {
     #[cfg(target_os = "macos")]
     use std::fs;
     use tempfile::tempdir;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nvidia_compute_device_predicate_accepts_known_names() {
+        for name in [
+            "nvidiactl",
+            "nvidia-uvm",
+            "nvidia-uvm-tools",
+            "nvidia0",
+            "nvidia7",
+            "nvidia15",
+        ] {
+            assert!(
+                is_nvidia_compute_device(name),
+                "expected {name} to be granted"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn grant_nvidia_gpu_procfs_scopes_proc_self_reads_with_task_writes() {
+        // Regression test for the NVIDIA-scoped procfs grants:
+        //   /proc/self       Read        (CUDA init reads maps/status/etc.)
+        //   /proc/self/task  ReadWrite   (driver writes task/<tid>/comm)
+        // Plus any of /proc/driver/{nvidia,nvidia-uvm} that exist.
+        //
+        // /proc/self and /proc/self/task always exist on Linux, so those
+        // checks are unconditional. /proc/driver/nvidia entries are only
+        // present when the NVIDIA kernel module is loaded, so we just
+        // assert no unexpected /proc/driver parent grant was added.
+        //
+        // FsCapability.original is used instead of path_covered_with_access:
+        // /proc/self is a symlink to /proc/<pid> which canonicalizes
+        // per-process, and we want to verify the grant intent.
+        let mut caps = CapabilitySet::default();
+        grant_nvidia_gpu_procfs(&mut caps).expect("grant_nvidia_gpu_procfs failed");
+
+        let find = |p: &str| -> Option<&nono::FsCapability> {
+            caps.fs_capabilities()
+                .iter()
+                .find(|c| c.original == std::path::Path::new(p))
+        };
+
+        let proc_self = find("/proc/self")
+            .expect("/proc/self must be granted read so CUDA init can read maps/status");
+        assert_eq!(
+            proc_self.access,
+            AccessMode::Read,
+            "/proc/self must be read-only (writes are scoped to /proc/self/task)"
+        );
+        assert!(!proc_self.is_file);
+
+        let proc_self_task = find("/proc/self/task").expect(
+            "/proc/self/task must be granted read+write so the NVIDIA driver \
+             can write task/<tid>/comm (CUDA Error 304 root cause)",
+        );
+        assert_eq!(
+            proc_self_task.access,
+            AccessMode::ReadWrite,
+            "/proc/self/task must be granted read+write"
+        );
+        assert!(!proc_self_task.is_file);
+
+        // Least-privilege regression guard: no parent /proc/driver grant.
+        // Only /proc/driver/nvidia and /proc/driver/nvidia-uvm should appear
+        // (and only when their subdirectories exist).
+        assert!(
+            find("/proc/driver").is_none(),
+            "/proc/driver must not be granted as a parent (would leak other drivers)"
+        );
+        for entry in caps.fs_capabilities() {
+            if entry.original.starts_with("/proc/driver/") {
+                let name = entry
+                    .original
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                assert!(
+                    matches!(name, "nvidia" | "nvidia-uvm"),
+                    "unexpected /proc/driver grant: {}",
+                    entry.original.display()
+                );
+                assert_eq!(entry.access, AccessMode::Read);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nvidia_compute_device_predicate_rejects_non_compute_and_unknown() {
+        for name in [
+            "nvidia",           // bare prefix, no digits
+            "nvidia-modeset",   // display, not compute
+            "nvidia-nvswitch0", // not yet supported
+            "nvidia-uvm-other", // unknown -tools-style suffix
+            "nvidiaX",          // non-digit suffix
+            "nvidia0a",         // mixed suffix
+            "not-nvidia",       // wrong prefix
+            "",                 // empty
+        ] {
+            assert!(
+                !is_nvidia_compute_device(name),
+                "expected {name} to be rejected"
+            );
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
