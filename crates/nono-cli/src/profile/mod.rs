@@ -2098,6 +2098,19 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_env_credentials_accepts_keyring_uri_with_decode() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "keyring://gh:github.com/alice?decode=go-keyring": "GH_TOKEN"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        assert!(validate_env_credential_keys(&profile).is_ok());
+    }
+
+    #[test]
     fn test_validate_env_credentials_rejects_invalid_keyring_uri() {
         let json_str = r#"{
             "meta": { "name": "test-profile" },

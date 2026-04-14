@@ -341,21 +341,44 @@ pub fn is_keyring_uri(credential_ref: &str) -> bool {
     credential_ref.starts_with(KEYRING_URI_PREFIX)
 }
 
-/// Maximum byte length for a `keyring://` URI (scheme + service + account).
+/// Maximum byte length for a `keyring://` URI (scheme + service + account + query).
 ///
 /// Generous enough for real service/account names but prevents accidentally
 /// passing absurdly long strings to OS keyring APIs.
 const KEYRING_URI_MAX_LEN: usize = 1024;
 
+/// Post-load decoding to apply to a keyring value.
+///
+/// Some tools wrap stored credentials in their own encoding. This enum
+/// represents the supported `?decode=` transforms that can be requested
+/// via the `keyring://` URI query string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyringDecode {
+    /// No transform — return the raw stored value.
+    None,
+    /// Strip the `go-keyring-base64:` prefix and base64-decode the remainder.
+    ///
+    /// Used by Go tools built with `github.com/zalando/go-keyring` (e.g., `gh`).
+    GoKeyring,
+}
+
+/// The prefix that `zalando/go-keyring` prepends to stored values.
+const GO_KEYRING_PREFIX: &str = "go-keyring-base64:";
+
+/// Allowed values for the `?decode=` query parameter.
+const KEYRING_DECODE_GO_KEYRING: &str = "go-keyring";
+
 /// Validate a `keyring://` URI.
 ///
 /// Accepted formats:
 /// - `keyring://service/account` — look up by service and account
+/// - `keyring://service/account?decode=go-keyring` — with post-load decoding
 ///
 /// Rejects:
 /// - Empty service or account
 /// - Characters that could enable argument injection
-/// - URIs with query strings or fragments
+/// - Unknown query parameters or values
+/// - Fragment identifiers
 /// - Missing account segment
 /// - URIs exceeding 1024 bytes
 pub fn validate_keyring_uri(uri: &str) -> Result<()> {
@@ -373,21 +396,33 @@ pub fn validate_keyring_uri(uri: &str) -> Result<()> {
         ))
     })?;
 
-    if let Some(bad) = path.chars().find(|c| FORBIDDEN_URI_CHARS.contains(c)) {
+    // Reject fragments unconditionally.
+    if path.contains('#') {
+        return Err(NonoError::ConfigParse(format!(
+            "keyring URI must not contain fragment identifiers: {}",
+            uri
+        )));
+    }
+
+    // Split off the query string (if any) before validating the path.
+    let (path_part, query_part) = match path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path, None),
+    };
+
+    // Validate query parameters against the allowlist.
+    if let Some(query) = query_part {
+        validate_keyring_query(query, uri)?;
+    }
+
+    if let Some(bad) = path_part.chars().find(|c| FORBIDDEN_URI_CHARS.contains(c)) {
         return Err(NonoError::ConfigParse(format!(
             "keyring URI contains forbidden character {:?}: {}",
             bad, uri
         )));
     }
 
-    if path.contains('?') || path.contains('#') {
-        return Err(NonoError::ConfigParse(format!(
-            "keyring URI must not contain query strings or fragments: {}",
-            uri
-        )));
-    }
-
-    let segments: Vec<&str> = path.split('/').collect();
+    let segments: Vec<&str> = path_part.split('/').collect();
     if segments.len() != 2 {
         return Err(NonoError::ConfigParse(format!(
             "keyring URI must be 'keyring://service/account': {}",
@@ -405,7 +440,50 @@ pub fn validate_keyring_uri(uri: &str) -> Result<()> {
     Ok(())
 }
 
-fn parse_keyring_uri(uri: &str) -> Result<(&str, &str)> {
+/// Validate the query string of a `keyring://` URI.
+///
+/// Only `decode=go-keyring` is accepted. Unknown keys or values are rejected
+/// to prevent silent misconfiguration.
+fn validate_keyring_query(query: &str, full_uri: &str) -> Result<()> {
+    for param in query.split('&') {
+        let (key, value) = param.split_once('=').ok_or_else(|| {
+            NonoError::ConfigParse(format!(
+                "keyring URI query parameter missing value: '{}' in {}",
+                param, full_uri
+            ))
+        })?;
+
+        match key {
+            "decode" => match value {
+                KEYRING_DECODE_GO_KEYRING => {}
+                _ => {
+                    return Err(NonoError::ConfigParse(format!(
+                        "keyring URI has unknown decode value '{}'. \
+                         Supported: {}",
+                        value, KEYRING_DECODE_GO_KEYRING
+                    )));
+                }
+            },
+            _ => {
+                return Err(NonoError::ConfigParse(format!(
+                    "keyring URI has unknown query parameter '{}'. \
+                     Supported: decode",
+                    key
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parsed components of a `keyring://` URI.
+struct KeyringUriParts<'a> {
+    service: &'a str,
+    account: &'a str,
+    decode: KeyringDecode,
+}
+
+fn parse_keyring_uri(uri: &str) -> Result<KeyringUriParts<'_>> {
     validate_keyring_uri(uri)?;
     let path = uri.strip_prefix(KEYRING_URI_PREFIX).ok_or_else(|| {
         NonoError::ConfigParse(format!(
@@ -413,25 +491,52 @@ fn parse_keyring_uri(uri: &str) -> Result<(&str, &str)> {
             uri
         ))
     })?;
-    let mut segments = path.splitn(2, '/');
+
+    // Split off query string before parsing path segments.
+    let (path_part, query_part) = match path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path, None),
+    };
+
+    let mut segments = path_part.splitn(2, '/');
     let service = segments.next().ok_or_else(|| {
         NonoError::ConfigParse(format!("keyring URI missing service segment: {}", uri))
     })?;
     let account = segments.next().ok_or_else(|| {
         NonoError::ConfigParse(format!("keyring URI missing account segment: {}", uri))
     })?;
-    Ok((service, account))
+
+    let decode = match query_part {
+        Some(q) if q.contains(KEYRING_DECODE_GO_KEYRING) => KeyringDecode::GoKeyring,
+        _ => KeyringDecode::None,
+    };
+
+    Ok(KeyringUriParts {
+        service,
+        account,
+        decode,
+    })
 }
 
 /// Redact the account segment of a `keyring://` URI for safe logging.
 ///
 /// `keyring://service/account` → `keyring://service/<redacted>`
+/// `keyring://service/account?decode=go-keyring` → `keyring://service/<redacted>?decode=go-keyring`
 pub fn redact_keyring_uri(uri: &str) -> String {
     if let Some(path) = uri.strip_prefix(KEYRING_URI_PREFIX) {
-        let mut segments = path.splitn(2, '/');
+        // Split off query string so we can preserve it.
+        let (path_part, query_part) = match path.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (path, None),
+        };
+        let mut segments = path_part.splitn(2, '/');
         if let Some(service) = segments.next() {
             if !service.is_empty() && segments.next().is_some() {
-                return format!("keyring://{}/<redacted>", service);
+                let suffix = match query_part {
+                    Some(q) => format!("?{}", q),
+                    None => String::new(),
+                };
+                return format!("keyring://{}/<redacted>{}", service, suffix);
             }
         }
     }
@@ -942,12 +1047,15 @@ fn load_from_apple_password(uri: &str) -> Result<Zeroizing<String>> {
 /// Uses the `keyring` crate with the service and account parsed from a
 /// `keyring://service/account` URI. This is cross-platform: macOS Keychain
 /// (generic passwords), Linux Secret Service, Windows Credential Manager.
+///
+/// If `?decode=go-keyring` is specified, the stored value is unwrapped from
+/// the `go-keyring-base64:` encoding used by `github.com/zalando/go-keyring`.
 fn load_from_keyring_uri(uri: &str) -> Result<Zeroizing<String>> {
-    let (service, account) = parse_keyring_uri(uri)?;
+    let parts = parse_keyring_uri(uri)?;
     let redacted = redact_keyring_uri(uri);
     tracing::debug!("Loading secret from system keyring: {}", redacted);
 
-    let entry = keyring::Entry::new(service, account).map_err(|e| {
+    let entry = keyring::Entry::new(parts.service, parts.account).map_err(|e| {
         NonoError::KeystoreAccess(format!(
             "Failed to access keyring for '{}': {}",
             redacted, e
@@ -957,7 +1065,8 @@ fn load_from_keyring_uri(uri: &str) -> Result<Zeroizing<String>> {
     match entry.get_password() {
         Ok(password) => {
             tracing::debug!("Successfully loaded secret '{}'", redacted);
-            Ok(Zeroizing::new(password))
+            let decoded = apply_keyring_decode(password, parts.decode, &redacted)?;
+            Ok(decoded)
         }
         Err(keyring::Error::NoEntry) => Err(NonoError::SecretNotFound(format!(
             "keyring entry not found: '{}'. \
@@ -973,6 +1082,39 @@ fn load_from_keyring_uri(uri: &str) -> Result<Zeroizing<String>> {
             "Cannot access '{}': {}",
             redacted, e
         ))),
+    }
+}
+
+/// Apply the requested post-load decoding to a keyring value.
+fn apply_keyring_decode(
+    raw: String,
+    decode: KeyringDecode,
+    redacted_uri: &str,
+) -> Result<Zeroizing<String>> {
+    match decode {
+        KeyringDecode::None => Ok(Zeroizing::new(raw)),
+        KeyringDecode::GoKeyring => {
+            let encoded = raw.strip_prefix(GO_KEYRING_PREFIX).ok_or_else(|| {
+                NonoError::ConfigParse(format!(
+                    "keyring value for '{}' does not have the expected '{}' prefix. \
+                     Remove ?decode=go-keyring if this credential was not stored by a Go tool.",
+                    redacted_uri, GO_KEYRING_PREFIX
+                ))
+            })?;
+            let bytes = crate::trust::base64::base64_decode(encoded).map_err(|e| {
+                NonoError::ConfigParse(format!(
+                    "failed to base64-decode go-keyring value for '{}': {}",
+                    redacted_uri, e
+                ))
+            })?;
+            let decoded = String::from_utf8(bytes).map_err(|_| {
+                NonoError::ConfigParse(format!(
+                    "go-keyring decoded value for '{}' is not valid UTF-8",
+                    redacted_uri
+                ))
+            })?;
+            Ok(Zeroizing::new(decoded))
+        }
     }
 }
 
@@ -1639,10 +1781,44 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_keyring_uri_query_string_rejected() {
+    fn test_validate_keyring_uri_unknown_query_param_rejected() {
         let err = validate_keyring_uri("keyring://service/account?foo=bar")
-            .expect_err("should reject query string");
-        assert!(err.to_string().contains("query strings"), "got: {}", err);
+            .expect_err("should reject unknown query param");
+        assert!(
+            err.to_string().contains("unknown query parameter"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_keyring_uri_unknown_decode_value_rejected() {
+        let err = validate_keyring_uri("keyring://service/account?decode=unknown")
+            .expect_err("should reject unknown decode value");
+        assert!(
+            err.to_string().contains("unknown decode value"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_keyring_uri_fragment_rejected() {
+        let err = validate_keyring_uri("keyring://service/account#frag")
+            .expect_err("should reject fragment");
+        assert!(err.to_string().contains("fragment"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_keyring_uri_decode_go_keyring_accepted() {
+        assert!(validate_keyring_uri("keyring://gh:github.com/alice?decode=go-keyring").is_ok());
+    }
+
+    #[test]
+    fn test_validate_keyring_uri_query_param_missing_value() {
+        let err = validate_keyring_uri("keyring://service/account?decode")
+            .expect_err("should reject param without value");
+        assert!(err.to_string().contains("missing value"), "got: {}", err);
     }
 
     #[test]
@@ -1659,6 +1835,14 @@ mod tests {
         assert_eq!(
             redact_keyring_uri("keyring://gh:github.com/alice"),
             "keyring://gh:github.com/<redacted>"
+        );
+    }
+
+    #[test]
+    fn test_redact_keyring_uri_with_decode_query() {
+        assert_eq!(
+            redact_keyring_uri("keyring://gh:github.com/alice?decode=go-keyring"),
+            "keyring://gh:github.com/<redacted>?decode=go-keyring"
         );
     }
 
@@ -1680,6 +1864,59 @@ mod tests {
         assert_eq!(redact_keyring_uri("not-a-keyring-uri"), "keyring://***");
     }
 
+    // --- keyring:// ?decode=go-keyring tests ---
+
+    #[test]
+    fn test_apply_keyring_decode_none_passthrough() {
+        let result = apply_keyring_decode("raw-secret".to_string(), KeyringDecode::None, "test")
+            .expect("None decode should passthrough");
+        assert_eq!(result.as_str(), "raw-secret");
+    }
+
+    #[test]
+    fn test_apply_keyring_decode_go_keyring_valid() {
+        // "gho_testtoken" base64-encoded is "Z2hvX3Rlc3R0b2tlbg=="
+        let raw = "go-keyring-base64:Z2hvX3Rlc3R0b2tlbg==".to_string();
+        let result = apply_keyring_decode(raw, KeyringDecode::GoKeyring, "test")
+            .expect("should decode go-keyring value");
+        assert_eq!(result.as_str(), "gho_testtoken");
+    }
+
+    #[test]
+    fn test_apply_keyring_decode_go_keyring_missing_prefix() {
+        let err = apply_keyring_decode("plain-value".to_string(), KeyringDecode::GoKeyring, "test")
+            .expect_err("should reject missing go-keyring prefix");
+        assert!(
+            err.to_string().contains("go-keyring-base64:"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_apply_keyring_decode_go_keyring_invalid_base64() {
+        let raw = "go-keyring-base64:!!!not-base64!!!".to_string();
+        let err = apply_keyring_decode(raw, KeyringDecode::GoKeyring, "test")
+            .expect_err("should reject invalid base64");
+        assert!(err.to_string().contains("base64-decode"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_parse_keyring_uri_decode_go_keyring() {
+        let parts = parse_keyring_uri("keyring://gh:github.com/alice?decode=go-keyring")
+            .expect("should parse with decode param");
+        assert_eq!(parts.service, "gh:github.com");
+        assert_eq!(parts.account, "alice");
+        assert_eq!(parts.decode, KeyringDecode::GoKeyring);
+    }
+
+    #[test]
+    fn test_parse_keyring_uri_no_decode() {
+        let parts = parse_keyring_uri("keyring://gh:github.com/alice")
+            .expect("should parse without decode param");
+        assert_eq!(parts.decode, KeyringDecode::None);
+    }
+
     // --- keyring:// build_mappings_from_pairs tests ---
 
     #[test]
@@ -1691,6 +1928,20 @@ mod tests {
         let mappings = build_mappings_from_pairs(&pairs).expect("should accept valid keyring URI");
         assert_eq!(
             mappings.get("keyring://gh:github.com/alice"),
+            Some(&"GH_TOKEN".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_pairs_keyring_uri_with_decode() {
+        let pairs = vec![(
+            "keyring://gh:github.com/alice?decode=go-keyring".to_string(),
+            "GH_TOKEN".to_string(),
+        )];
+        let mappings =
+            build_mappings_from_pairs(&pairs).expect("should accept keyring URI with decode");
+        assert_eq!(
+            mappings.get("keyring://gh:github.com/alice?decode=go-keyring"),
             Some(&"GH_TOKEN".to_string())
         );
     }
