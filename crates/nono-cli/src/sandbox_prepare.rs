@@ -426,10 +426,21 @@ pub(crate) struct PreparedSandbox {
 }
 
 fn resolved_workdir(args: &SandboxArgs) -> PathBuf {
-    args.workdir
+    let path = args
+        .workdir
         .clone()
         .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // Ensure the path is absolute (preserving symlinks) so macOS Seatbelt
+    // always receives a literal absolute path.
+    if path.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    } else {
+        path
+    }
 }
 
 fn cwd_access_requirement(profile_workdir_access: Option<&WorkdirAccess>) -> Option<AccessMode> {
@@ -1147,7 +1158,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 "Auto-including CWD with {} access {}",
                 request.access, reason
             );
-            let cap = FsCapability::new_dir(request.cwd_canonical.clone(), request.access)?;
+            let cap = FsCapability::new_dir(&workdir, request.access)?;
             caps.add_fs(cap);
         } else if matches!(
             detached_prompt_response,
@@ -1159,7 +1170,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         } else {
             let confirmed = output::prompt_cwd_sharing(&request.cwd_canonical, &request.access)?;
             if confirmed {
-                let cap = FsCapability::new_dir(request.cwd_canonical.clone(), request.access)?;
+                let cap = FsCapability::new_dir(&workdir, request.access)?;
                 caps.add_fs(cap);
             } else {
                 info!("User declined CWD sharing. Continuing without automatic CWD access.");
@@ -1189,6 +1200,25 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             }
         }
         caps.deduplicate();
+    }
+
+    // On macOS, Seatbelt uses literal path matching rather than inode lookup,
+    // so a symlinked CWD (e.g. ~/project -> /real/path/project) requires an
+    // explicit rule for the symlink path even when the canonical target is
+    // already covered by a profile grant (in which case pending_cwd_access_request
+    // returns None and the block above is skipped entirely).
+    // deduplicate() preserves symlink originals when merging, so adding this cap
+    // on top of an existing profile cap is safe.
+    #[cfg(target_os = "macos")]
+    if let Ok(cwd_canonical) = workdir.canonicalize() {
+        if cwd_canonical != workdir {
+            if let Some(access) = cwd_access_requirement(profile_workdir_access.as_ref()) {
+                if let Ok(cap) = FsCapability::new_dir(&workdir, access) {
+                    caps.add_fs(cap);
+                    caps.deduplicate();
+                }
+            }
+        }
     }
 
     let active_groups = if let Some(profile) = loaded_profile
