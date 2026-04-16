@@ -333,6 +333,29 @@ impl PtyProxy {
         detached_terminal
     }
 
+    /// Release the local terminal for a final supervisor-owned prompt.
+    ///
+    /// This leaves the attach screen, restores cooked terminal mode, and
+    /// drops the terminal client so later teardown does not redraw or clear it.
+    pub fn release_terminal_for_prompt(&mut self) -> bool {
+        let had_terminal_client = self
+            .client
+            .as_ref()
+            .is_some_and(AttachedClient::is_terminal);
+        if !had_terminal_client {
+            return false;
+        }
+
+        leave_attach_screen();
+        self.restore_terminal();
+        self.client = None;
+        self.resize_notifier = None;
+        self.pending_detach_match_len = 0;
+        self.pending_detach_escape.clear();
+        self.persist_attachment_state(crate::session::SessionAttachment::Detached);
+        true
+    }
+
     /// Shut down the attach listener so no new connections can be accepted.
     ///
     /// Removes the socket file. This prevents the kernel from accepting new

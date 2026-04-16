@@ -32,6 +32,7 @@ mod policy_cmd;
 mod profile;
 mod profile_cmd;
 mod profile_runtime;
+mod profile_save_runtime;
 mod protected_paths;
 mod proxy_runtime;
 mod pty_proxy;
