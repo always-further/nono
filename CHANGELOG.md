@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.37.1] - 2026-04-17
+
+### Bug Fixes
+
+- *(macos)* Emit specific-op seatbelt rules for keychain DB allows
+
+- *(sandbox)* Allow Unix domain socket connections in restricted network modes
+
+- *(learn)* Print profile JSON as fallback when save fails
+
+
+### Documentation
+
+- Add github to credential route configuration
+
+
+### Miscellaneous
+
+- Upgrade rustls-webpki to 0.103.12 to fix RUSTSEC-2026-0098 and RUSTSEC-2026-0099
+
+- Upgrade rustls-webpki to 0.103.12 to fix RUSTSEC-2026-0098 and RUSTSEC-2026-0099
+
+
+### Style
+
+- Apply rustfmt
+
 ## [0.37.0] - 2026-04-16
 
 ### Bug Fixes
