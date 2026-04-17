@@ -782,6 +782,7 @@ fn profile_to_json(
         "block": profile.network.block,
         "network_profile": profile.network.resolved_network_profile(),
         "allow_domain": profile.network.allow_domain,
+        "reject_domain": profile.network.reject_domain,
         "credentials": profile.network.resolved_credentials(),
         "open_port": profile.network.open_port,
         "listen_port": profile.network.listen_port,
@@ -1533,6 +1534,7 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
                 "changed": p1.network.resolved_network_profile() != p2.network.resolved_network_profile(),
             },
             "allow_domain": diff_vec(&p1.network.allow_domain, &p2.network.allow_domain),
+            "reject_domain": diff_vec(&p1.network.reject_domain, &p2.network.reject_domain),
             "credentials": diff_vec(p1.network.resolved_credentials(), p2.network.resolved_credentials()),
             "open_port": {
                 "profile1": p1.network.open_port,

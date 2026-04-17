@@ -332,6 +332,10 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 executable_identity: executable_identity.as_ref(),
                 audit_signer: audit_signer.as_ref(),
                 silent: flags.silent,
+                approval_backend: active_proxy
+                    .approval_backend
+                    .as_ref()
+                    .map(|a| a.as_ref() as &dyn nono::ApprovalBackend),
             })?;
 
             cleanup_capability_state_file(&cap_file_path);

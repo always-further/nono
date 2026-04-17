@@ -14,6 +14,7 @@ pub(crate) struct PreparedProfile {
     pub(crate) rollback_exclude_globs: Vec<String>,
     pub(crate) network_profile: Option<String>,
     pub(crate) allow_domain: Vec<String>,
+    pub(crate) reject_domain: Vec<String>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
     pub(crate) upstream_proxy: Option<String>,
@@ -26,6 +27,8 @@ pub(crate) struct PreparedProfile {
     pub(crate) allow_parent_of_protected: bool,
     pub(crate) override_deny_paths: Vec<PathBuf>,
     pub(crate) allowed_env_vars: Option<Vec<String>>,
+    pub(crate) network_approval_mode: Option<String>,
+    pub(crate) network_approval_timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -330,6 +333,10 @@ fn prepare_profile_with_options(
             .as_ref()
             .map(|profile| profile.network.allow_domain.clone())
             .unwrap_or_default(),
+        reject_domain: loaded_profile
+            .as_ref()
+            .map(|profile| profile.network.reject_domain.clone())
+            .unwrap_or_default(),
         credentials: loaded_profile
             .as_ref()
             .and_then(|profile| profile.network.credentials.clone())
@@ -386,6 +393,12 @@ fn prepare_profile_with_options(
                 env_config.allow_vars.clone()
             })
         }),
+        network_approval_mode: loaded_profile
+            .as_ref()
+            .and_then(|profile| profile.network.approval_mode.clone()),
+        network_approval_timeout_secs: loaded_profile
+            .as_ref()
+            .and_then(|profile| profile.network.approval_timeout_secs),
         loaded_profile,
     })
 }

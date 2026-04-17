@@ -13,7 +13,7 @@ categories = ["network-programming", "web-programming"]
 
 [dependencies]
 nono = { version = "0.40.1", path = "../nono" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
 hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true
