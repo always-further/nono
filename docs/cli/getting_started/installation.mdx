@@ -22,6 +22,24 @@ wget https://github.com/always-further/nono/releases/download/v${VERSION}/nono-c
 sudo dpkg -i nono-cli_${VERSION}_${ARCH}.deb
 ```
 
+### Nix
+
+nono is available in [nixpkgs](https://search.nixos.org/packages?channel=unstable&show=nono) as `nono`:
+
+```nix
+# Installing in NixOS
+environment.systemPackages = [
+  pkgs.nono
+];
+```
+
+```bash
+# Loading in shell
+nix shell nixpkgs#nono
+# Or using the legacy CLI
+nix-shell -p nono
+```
+
 Other distributions are in the process of being packaged. In the meantime, you can use the prebuilt binaries or build from source.
 
 ## Building from Source
