@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- *(cli)* Consolidate `nono policy` subcommands under `nono profile` (#594 phase 1). The five migrated subcommands — `profile list`, `show`, `diff`, `validate`, `groups` — behave identically to the old `nono policy <sub>` forms. The `nono policy` namespace continues to work but prints a deprecation warning on each invocation and will be removed in a future release.
+
 ## [0.37.1] - 2026-04-17
 
 ### Bug Fixes

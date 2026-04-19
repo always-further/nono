@@ -43,9 +43,9 @@ fn test_init_creates_valid_profile() {
     );
     assert!(out.exists(), "profile file should be created");
 
-    // Validate the generated file with nono policy validate
+    // Validate the generated file with nono profile validate
     let validate = nono_bin()
-        .args(["policy", "validate"])
+        .args(["profile", "validate"])
         .arg(&out)
         .output()
         .expect("failed to run nono");

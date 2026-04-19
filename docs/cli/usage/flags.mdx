@@ -107,22 +107,25 @@ Set up nono on this system. Verifies installation, tests sandbox support, and op
 nono setup [OPTIONS]
 ```
 
-### `nono policy`
+### `nono profile`
 
-Inspect policy groups, profiles, and security rules.
+Create, inspect, and compare nono profiles.
 
 ```bash
-nono policy <SUBCOMMAND>
+nono profile <SUBCOMMAND>
 ```
 
 Subcommands:
-- `groups` - List policy groups or show details for a specific group
-- `profiles` - List all available profiles (built-in and user)
+- `init` - Generate a skeleton profile JSON file
+- `list` - List all available profiles (built-in and user)
 - `show` - Show a fully resolved profile
 - `diff` - Diff two profiles
 - `validate` - Validate a profile JSON file
+- `groups` - List policy groups or show details for a specific group
+- `schema` - Print the profile JSON Schema
+- `guide` - Print the profile authoring guide
 
-See [Policy Introspection](/cli/features/policy-introspection) for full documentation.
+See [Profile Introspection](/cli/features/profile-introspection) for full documentation of the inspection subcommands.
 
 ### `nono trust`
 

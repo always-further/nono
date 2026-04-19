@@ -1,4 +1,4 @@
-//! Integration tests for `nono policy` subcommands.
+//! Integration tests for canonical `nono profile` subcommands (inspection, comparison, validation).
 //!
 //! These run as separate processes, so they are fully isolated from unit tests.
 
@@ -11,7 +11,7 @@ fn nono_bin() -> Command {
 #[test]
 fn test_groups_list_output() {
     let output = nono_bin()
-        .args(["policy", "groups", "--all-platforms"])
+        .args(["profile", "groups", "--all-platforms"])
         .output()
         .expect("failed to run nono");
 
@@ -26,7 +26,7 @@ fn test_groups_list_output() {
 #[test]
 fn test_groups_detail_output() {
     let output = nono_bin()
-        .args(["policy", "groups", "deny_credentials"])
+        .args(["profile", "groups", "deny_credentials"])
         .output()
         .expect("failed to run nono");
 
@@ -45,7 +45,7 @@ fn test_groups_detail_output() {
 #[test]
 fn test_groups_unknown_exits_error() {
     let output = nono_bin()
-        .args(["policy", "groups", "nonexistent_group_xyz"])
+        .args(["profile", "groups", "nonexistent_group_xyz"])
         .output()
         .expect("failed to run nono");
 
@@ -53,9 +53,9 @@ fn test_groups_unknown_exits_error() {
 }
 
 #[test]
-fn test_profiles_list_output() {
+fn test_list_output() {
     let output = nono_bin()
-        .args(["policy", "profiles"])
+        .args(["profile", "list"])
         .output()
         .expect("failed to run nono");
 
@@ -74,7 +74,7 @@ fn test_profiles_list_output() {
 #[test]
 fn test_show_profile_output() {
     let output = nono_bin()
-        .args(["policy", "show", "default"])
+        .args(["profile", "show", "default"])
         .output()
         .expect("failed to run nono");
 
@@ -89,7 +89,7 @@ fn test_show_profile_output() {
 #[test]
 fn test_show_profile_json() {
     let output = nono_bin()
-        .args(["policy", "show", "default", "--json"])
+        .args(["profile", "show", "default", "--json"])
         .output()
         .expect("failed to run nono");
 
@@ -105,7 +105,7 @@ fn test_show_profile_json() {
 #[test]
 fn test_diff_output() {
     let output = nono_bin()
-        .args(["policy", "diff", "default", "claude-code"])
+        .args(["profile", "diff", "default", "claude-code"])
         .output()
         .expect("failed to run nono");
 
@@ -132,7 +132,7 @@ fn test_validate_valid_profile() {
     .expect("write");
 
     let output = nono_bin()
-        .args(["policy", "validate", path.to_str().expect("path")])
+        .args(["profile", "validate", path.to_str().expect("path")])
         .output()
         .expect("failed to run nono");
 
@@ -157,7 +157,7 @@ fn test_validate_invalid_group() {
     .expect("write");
 
     let output = nono_bin()
-        .args(["policy", "validate", path.to_str().expect("path")])
+        .args(["profile", "validate", path.to_str().expect("path")])
         .output()
         .expect("failed to run nono");
 
@@ -170,7 +170,7 @@ fn test_validate_invalid_group() {
 #[test]
 fn test_groups_json() {
     let output = nono_bin()
-        .args(["policy", "groups", "--json", "--all-platforms"])
+        .args(["profile", "groups", "--json", "--all-platforms"])
         .output()
         .expect("failed to run nono");
 
@@ -183,13 +183,13 @@ fn test_groups_json() {
 }
 
 // ---------------------------------------------------------------------------
-// nono policy show --format manifest
+// nono profile show --format manifest
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_show_format_manifest_default_profile() {
     let output = nono_bin()
-        .args(["policy", "show", "default", "--format", "manifest"])
+        .args(["profile", "show", "default", "--format", "manifest"])
         .output()
         .expect("failed to run nono");
 
@@ -215,7 +215,7 @@ fn test_show_format_manifest_default_profile() {
 #[test]
 fn test_show_format_manifest_claude_code_profile() {
     let output = nono_bin()
-        .args(["policy", "show", "claude-code", "--format", "manifest"])
+        .args(["profile", "show", "claude-code", "--format", "manifest"])
         .output()
         .expect("failed to run nono");
 
@@ -284,7 +284,7 @@ fn test_show_format_manifest_round_trip() {
 fn test_show_format_manifest_all_builtins_succeed() {
     // All built-in profiles should export without errors
     let list_output = nono_bin()
-        .args(["policy", "profiles", "--json"])
+        .args(["profile", "list", "--json"])
         .output()
         .expect("failed to run nono");
     assert!(list_output.status.success());
@@ -300,7 +300,7 @@ fn test_show_format_manifest_all_builtins_succeed() {
             .expect("profile name");
 
         let output = nono_bin()
-            .args(["policy", "show", name, "--format", "manifest"])
+            .args(["profile", "show", name, "--format", "manifest"])
             .output()
             .expect("failed to run nono");
 

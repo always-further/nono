@@ -1,34 +1,36 @@
 ---
-title: Policy Introspection
-description: Inspect, compare, and validate security policy from the command line
+title: Profile Introspection
+description: Inspect, compare, and validate nono profiles and the policy rules they reference
 ---
 
-The `nono policy` command lets you inspect the group-based security policy, explore profiles, compare configurations, and validate user-defined profiles. Every subcommand supports `--json` for programmatic consumption.
+The `nono profile` command lets you inspect the group-based security policy, explore profiles, compare configurations, and validate user-defined profiles. Every subcommand supports `--json` for programmatic consumption.
+
+> **Previously known as `nono policy`.** The `nono policy <sub>` namespace still works as a deprecated alias — it prints a warning on stderr and dispatches to the new command. Removal is tracked in upstream issue #594.
 
 ## Commands
 
-### `nono policy groups`
+### `nono profile groups`
 
 List all policy groups or show details for a specific group.
 
 ```bash
 # List groups for the current platform
-nono policy groups
+nono profile groups
 
 # List groups for all platforms
-nono policy groups --all-platforms
+nono profile groups --all-platforms
 
 # Show details for a specific group
-nono policy groups deny_credentials
+nono profile groups deny_credentials
 
 # Machine-readable output
-nono policy groups --json
+nono profile groups --json
 ```
 
 Example output:
 
 ```
-nono policy: 21 groups
+nono profile: 21 groups
 
   claude_code_macos                    Claude Code macOS-specific state and credential paths macos
   deny_credentials                     Block access to cryptographic keys, tokens, and cloud credentials cross-platform  required
@@ -41,7 +43,7 @@ nono policy: 21 groups
 Detailed view shows every path in the group, with variables expanded to their actual values:
 
 ```
-nono policy: group 'deny_credentials'
+nono profile: group 'deny_credentials'
 
   Description:  Block access to cryptographic keys, tokens, and cloud credentials
   Platform:     cross-platform
@@ -64,19 +66,19 @@ nono policy: group 'deny_credentials'
 | `--json` | Output as JSON |
 | `--all-platforms` | Show groups for all platforms, not just the current one |
 
-### `nono policy profiles`
+### `nono profile list`
 
 List all available profiles, showing built-in and user-defined profiles separately. User profiles that shadow a built-in name are flagged.
 
 ```bash
-nono policy profiles
-nono policy profiles --json
+nono profile list
+nono profile list --json
 ```
 
 Example output:
 
 ```
-nono policy: 15 profiles
+nono profile: 15 profiles
 
   Built-in:
     claude-code      Anthropic Claude Code CLI agent            extends default
@@ -108,31 +110,31 @@ Malformed user profiles are surfaced with their error instead of being silently 
 |--------|-------------|
 | `--json` | Output as JSON |
 
-### `nono policy show`
+### `nono profile show`
 
 Display a fully resolved profile, including all inherited groups, filesystem grants, network configuration, hooks, and rollback settings.
 
 ```bash
 # Show a built-in profile
-nono policy show default
+nono profile show default
 
 # Show a user profile
-nono policy show my-agent
+nono profile show my-agent
 
 # Show a profile by file path
-nono policy show ./profiles/custom.json
+nono profile show ./profiles/custom.json
 
 # Show raw paths (before variable expansion)
-nono policy show claude-code --raw
+nono profile show claude-code --raw
 
 # Machine-readable output
-nono policy show claude-code --json
+nono profile show claude-code --json
 ```
 
 Example output:
 
 ```
-nono policy: profile 'claude-code'
+nono profile: profile 'claude-code'
 
   Description:  Anthropic Claude Code CLI agent
   Extends:      default
@@ -175,25 +177,25 @@ The `--raw` flag shows path variables as written in the profile (e.g., `$HOME/.c
 | `--json` | Output as JSON |
 | `--raw` | Show raw paths before variable expansion |
 
-### `nono policy diff`
+### `nono profile diff`
 
 Compare two profiles side-by-side. Shows additions, removals, and changes across all profile sections: groups, filesystem, policy patches, security settings, network, hooks, rollback, open URLs, env credentials, and custom credentials.
 
 ```bash
 # Compare two built-in profiles
-nono policy diff default claude-code
+nono profile diff default claude-code
 
 # Compare a user profile against a built-in
-nono policy diff default ./my-profile.json
+nono profile diff default ./my-profile.json
 
 # Machine-readable output
-nono policy diff default claude-code --json
+nono profile diff default claude-code --json
 ```
 
 Example output:
 
 ```
-nono policy: diff 'default' vs 'claude-code'
+nono profile: diff 'default' vs 'claude-code'
 
   Groups:
     + claude_code_macos
@@ -240,13 +242,13 @@ When profiles are identical, the output shows `(no differences)`.
 | `<PROFILE2>` | Second profile name or path |
 | `--json` | Output as JSON |
 
-### `nono policy validate`
+### `nono profile validate`
 
 Validate a user profile JSON file against the embedded policy. Catches common mistakes before they cause runtime failures.
 
 ```bash
-nono policy validate ~/my-profile.json
-nono policy validate ./profiles/custom.json --json
+nono profile validate ~/my-profile.json
+nono profile validate ./profiles/custom.json --json
 ```
 
 Checks performed:
@@ -262,7 +264,7 @@ Checks performed:
 Example output for a valid profile:
 
 ```
-nono policy: validating /Users/luke/my-profile.json
+nono profile: validating /Users/luke/my-profile.json
 
   [ok]  JSON syntax valid
   [ok]  All 3 group references valid
@@ -273,7 +275,7 @@ nono policy: validating /Users/luke/my-profile.json
 Example output for an invalid profile:
 
 ```
-nono policy: validating /Users/luke/bad-profile.json
+nono profile: validating /Users/luke/bad-profile.json
 
   [ok]  JSON syntax valid
   [err]  Group 'nonexistent_group' not found in policy.json
@@ -296,16 +298,16 @@ All subcommands support `--json` for integration with scripts, CI pipelines, and
 
 ```bash
 # List groups and extract names
-nono policy groups --json | jq '.[].name'
+nono profile groups --json | jq '.[].name'
 
 # Check if a profile has network blocked
-nono policy show my-profile --json | jq '.network.block'
+nono profile show my-profile --json | jq '.network.block'
 
 # Get added groups between two profiles
-nono policy diff default claude-code --json | jq '.groups.added'
+nono profile diff default claude-code --json | jq '.groups.added'
 
 # Validate in CI and check result
-nono policy validate ./profile.json --json | jq '.valid'
+nono profile validate ./profile.json --json | jq '.valid'
 ```
 
 ## Use Cases
@@ -316,13 +318,13 @@ Review exactly what a profile grants before deploying it:
 
 ```bash
 # What does this profile actually allow?
-nono policy show claude-code
+nono profile show claude-code
 
 # What groups protect sensitive data?
-nono policy groups deny_credentials
+nono profile groups deny_credentials
 
 # How does our custom profile differ from the built-in?
-nono policy diff claude-code ./our-custom-profile.json
+nono profile diff claude-code ./our-custom-profile.json
 ```
 
 ### Debugging sandbox failures
@@ -331,13 +333,13 @@ When a sandboxed process fails because a path is blocked, trace the policy:
 
 ```bash
 # What groups apply to the current platform?
-nono policy groups
+nono profile groups
 
 # Does the profile include the needed runtime group?
-nono policy show my-profile | grep python_runtime
+nono profile show my-profile | grep python_runtime
 
 # Compare against a working profile
-nono policy diff my-profile claude-code
+nono profile diff my-profile claude-code
 ```
 
 ### CI/CD validation
@@ -347,7 +349,7 @@ Validate custom profiles before they ship:
 ```bash
 # Validate all profile files in a directory
 for f in profiles/*.json; do
-  nono policy validate "$f" --json || exit 1
+  nono profile validate "$f" --json || exit 1
 done
 ```
 
@@ -357,5 +359,5 @@ Check whether built-in profiles have been shadowed by user files:
 
 ```bash
 # JSON output flags the actual source
-nono policy profiles --json | jq '.[] | select(.source | contains("overrides"))'
+nono profile list --json | jq '.[] | select(.source | contains("overrides"))'
 ```

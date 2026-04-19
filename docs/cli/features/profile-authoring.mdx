@@ -125,7 +125,7 @@ The `init` command validates inputs before writing:
 After creating a profile, validate it:
 
 ```bash
-nono policy validate ~/.config/nono/profiles/my-agent.json
+nono profile validate ~/.config/nono/profiles/my-agent.json
 ```
 
 ## JSON Schema
@@ -200,17 +200,17 @@ A typical profile authoring workflow:
 
 3. **Validate** the profile:
    ```bash
-   nono policy validate ~/.config/nono/profiles/my-agent.json
+   nono profile validate ~/.config/nono/profiles/my-agent.json
    ```
 
 4. **Inspect** the resolved profile (after inheritance and group expansion):
    ```bash
-   nono policy show my-agent
+   nono profile show my-agent
    ```
 
 5. **Compare** against a baseline:
    ```bash
-   nono policy diff default my-agent
+   nono profile diff default my-agent
    ```
 
 6. **Test** the profile:
@@ -225,10 +225,10 @@ A typical profile authoring workflow:
 
 ## Available Groups
 
-Use `nono policy groups` to list all available security groups. To see details for a specific group:
+Use `nono profile groups` to list all available security groups. To see details for a specific group:
 
 ```bash
-nono policy groups deny_credentials
+nono profile groups deny_credentials
 ```
 
 Groups are referenced by name in the `security.groups` field. See [Profiles & Groups](/cli/features/profiles-groups#groups) for the full group taxonomy and built-in group list.

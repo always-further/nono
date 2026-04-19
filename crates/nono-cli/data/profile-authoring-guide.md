@@ -63,7 +63,7 @@ Inherit from another profile by name:
 
 | Field                 | Type            | Default      | Description |
 |-----------------------|-----------------|--------------|-------------|
-| `groups`              | array of string | `[]`         | Policy group names from `policy.json`. Use `nono policy groups` to list available groups. |
+| `groups`              | array of string | `[]`         | Policy group names from `policy.json`. Use `nono profile groups` to list available groups. |
 | `allowed_commands`    | array of string | `[]`         | Deprecated in v0.33.0. Startup-only command allowlist override. Not enforced for child processes. |
 | `signal_mode`         | string          | `"isolated"` | One of: `"isolated"`, `"allow_same_sandbox"`, `"allow_all"`. |
 | `process_info_mode`   | string          | `"isolated"` | One of: `"isolated"`, `"allow_same_sandbox"`, `"allow_all"`. |
@@ -390,7 +390,7 @@ Use `add_deny_access` to prevent an agent from reaching the Docker daemon or sim
 }
 ```
 
-On macOS, `add_deny_access` on a socket path also emits a Seatbelt `network-outbound` deny — Seatbelt treats `connect(2)` as a network operation so a file deny alone won't block it. Prefer path- and network-based controls; `add_deny_commands` remains as deprecated startup-only compatibility behavior and is visible in `nono policy show` under **Policy patches**.
+On macOS, `add_deny_access` on a socket path also emits a Seatbelt `network-outbound` deny — Seatbelt treats `connect(2)` as a network operation so a file deny alone won't block it. Prefer path- and network-based controls; `add_deny_commands` remains as deprecated startup-only compatibility behavior and is visible in `nono profile show` under **Policy patches**.
 
 ### Allowing parent-of-protected-root grants (macOS only)
 
@@ -461,10 +461,10 @@ Remove an inherited deny group that is too restrictive for your use case:
 Run these commands to verify a profile:
 
 ```
-nono policy validate <path>       # Check a profile file for errors
-nono policy show <name>           # Show the fully resolved profile (after inheritance)
-nono policy groups                # List available security groups
-nono policy diff <a> <b>          # Compare two profiles
+nono profile validate <path>      # Check a profile file for errors
+nono profile show <name>          # Show the fully resolved profile (after inheritance)
+nono profile groups               # List available security groups
+nono profile diff <a> <b>         # Compare two profiles
 ```
 
 ## 6. Variable Expansion

@@ -1,11 +1,11 @@
 use crate::audit_commands;
 use crate::cli::{Cli, Commands, RunArgs, SetupArgs};
 use crate::command_runtime::{run_sandbox, run_shell, run_wrap};
+use crate::deprecated_policy;
 use crate::learn_runtime::run_learn;
 use crate::open_url_runtime::run_open_url_helper;
 use crate::output;
 use crate::package_cmd;
-use crate::policy_cmd;
 use crate::profile_cmd;
 use crate::rollback_commands;
 use crate::session_commands;
@@ -82,7 +82,7 @@ fn dispatch_command(
             run_command_with_update(update_handle, silent, || session_commands::run_prune(&args))
         }
         Commands::Policy(args) => {
-            run_command_with_update(update_handle, silent, || policy_cmd::run_policy(args))
+            run_command_with_update(update_handle, silent, || deprecated_policy::dispatch(args))
         }
         Commands::Profile(args) => {
             run_command_with_update(update_handle, silent, || profile_cmd::run_profile(args))

@@ -433,7 +433,7 @@ IN-BAND DETACH:
     Prune(PruneArgs),
 
     // ── Policy & profiles ────────────────────────────────────────────────
-    /// Inspect policy groups, profiles, and security rules
+    /// [deprecated] Use 'nono profile' instead
     #[command(subcommand_help_heading = "COMMANDS")]
     #[command(help_template = "\
 {about}
@@ -441,19 +441,23 @@ IN-BAND DETACH:
 \x1b[1mUSAGE\x1b[0m
   nono policy <command>
 
+\x1b[1mNOTE\x1b[0m
+  These commands are deprecated. Use the corresponding 'nono profile'
+  form; every invocation of 'nono policy <sub>' prints a deprecation
+  warning to stderr.
+
 {all-args}
 {after-help}")]
     #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
-  nono policy groups                           # List all policy groups
-  nono policy groups deny_credentials          # Show details for a specific group
-  nono policy profiles                         # List all profiles (built-in and user)
-  nono policy show claude-code                 # Show a fully resolved profile
-  nono policy diff default claude-code         # Compare two profiles
-  nono policy validate ~/my-profile.json       # Validate a user profile file
+  nono policy groups        # deprecated -> use 'nono profile groups'
+  nono policy profiles      # deprecated -> use 'nono profile list'
+  nono policy show <name>   # deprecated -> use 'nono profile show <name>'
+  nono policy diff a b      # deprecated -> use 'nono profile diff a b'
+  nono policy validate <f>  # deprecated -> use 'nono profile validate <f>'
 ")]
-    Policy(PolicyArgs),
+    Policy(crate::deprecated_policy::PolicyArgs),
 
-    /// Create and manage nono profiles
+    /// Create, inspect, and compare nono profiles
     #[command(subcommand_help_heading = "COMMANDS")]
     #[command(help_template = "\
 {about}
@@ -468,8 +472,12 @@ IN-BAND DETACH:
   nono profile init my-agent --extends default --groups deny_credentials
                                                # Extend an existing profile
   nono profile init my-agent --full            # Generate a full skeleton
-  nono profile init my-agent --output ./my-profile.json
-                                               # Output to a specific file
+  nono profile list                            # List all profiles (built-in and user)
+  nono profile show claude-code                # Show a fully resolved profile
+  nono profile diff default claude-code        # Compare two profiles
+  nono profile validate ~/my-profile.json      # Validate a user profile file
+  nono profile groups                          # List all policy groups
+  nono profile groups deny_credentials         # Show details for a specific group
   nono profile schema                          # Print JSON Schema for editor validation
   nono profile guide                           # Print profile authoring guide
 ")]
@@ -670,90 +678,11 @@ pub struct OpenUrlHelperArgs {
     pub url: String,
 }
 
-#[derive(Parser, Debug)]
-#[command(disable_help_flag = true)]
-pub struct PolicyArgs {
-    #[command(subcommand)]
-    pub command: PolicyCommands,
-
-    /// Print help
-    #[arg(long, short = 'h', action = clap::ArgAction::Help, help_heading = "OPTIONS")]
-    pub help: Option<bool>,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum PolicyCommands {
-    /// List policy groups or show details for a specific group
-    Groups(PolicyGroupsArgs),
-    /// List all available profiles (built-in and user)
-    Profiles(PolicyProfilesArgs),
-    /// Show a fully resolved profile
-    Show(PolicyShowArgs),
-    /// Diff two profiles
-    Diff(PolicyDiffArgs),
-    /// Validate a profile JSON file
-    Validate(PolicyValidateArgs),
-}
-
-#[derive(Parser, Debug)]
-pub struct PolicyGroupsArgs {
-    /// Group name to show details for (omit to list all)
-    pub name: Option<String>,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-    /// Show all platforms (not just current)
-    #[arg(long)]
-    pub all_platforms: bool,
-}
-
-#[derive(Parser, Debug)]
-pub struct PolicyProfilesArgs {
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Parser, Debug)]
-pub struct PolicyShowArgs {
-    /// Profile name or path
-    pub profile: String,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-    /// Show raw paths before expansion (e.g., $HOME instead of /Users/luke)
-    #[arg(long)]
-    pub raw: bool,
-    /// Output format: 'profile' (default) or 'manifest' (capability manifest JSON)
-    #[arg(long, value_enum, value_name = "FORMAT")]
-    pub format: Option<PolicyShowFormat>,
-}
-
-#[derive(clap::ValueEnum, Clone, Debug)]
-pub enum PolicyShowFormat {
-    Profile,
-    Manifest,
-}
-
-#[derive(Parser, Debug)]
-pub struct PolicyDiffArgs {
-    /// First profile name or path
-    pub profile1: String,
-    /// Second profile name or path
-    pub profile2: String,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Parser, Debug)]
-pub struct PolicyValidateArgs {
-    /// Profile JSON file to validate
-    pub file: PathBuf,
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-}
+// NOTE: `PolicyArgs`, `PolicyCommands`, and `Policy*Args` types that
+// backed `nono policy <sub>` now live in `crate::deprecated_policy`. They
+// share their inner arg shapes with `ProfileGroupsArgs` / `ProfileListArgs`
+// / `ProfileShowArgs` / `ProfileDiffArgs` / `ProfileValidateArgs` via
+// `pub use` aliases so there is no parallel set of types to keep in sync.
 
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true)]
@@ -770,6 +699,16 @@ pub struct ProfileCmdArgs {
 pub enum ProfileCommands {
     /// Generate a skeleton profile JSON file
     Init(ProfileInitArgs),
+    /// List all available profiles (built-in and user)
+    List(ProfileListArgs),
+    /// Show a fully resolved profile
+    Show(ProfileShowArgs),
+    /// Diff two profiles
+    Diff(ProfileDiffArgs),
+    /// Validate a profile JSON file
+    Validate(ProfileValidateArgs),
+    /// List policy groups or show details for a specific group
+    Groups(ProfileGroupsArgs),
     /// Output the JSON Schema for profile files
     Schema(ProfileSchemaArgs),
     /// Print the profile authoring guide
@@ -809,6 +748,66 @@ pub struct ProfileSchemaArgs {
 
 #[derive(Parser, Debug)]
 pub struct ProfileGuideArgs {}
+
+#[derive(Parser, Debug)]
+pub struct ProfileListArgs {
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfileShowArgs {
+    /// Profile name or path
+    pub profile: String,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Show raw paths before expansion (e.g., $HOME instead of /Users/luke)
+    #[arg(long)]
+    pub raw: bool,
+    /// Output format: 'profile' (default) or 'manifest' (capability manifest JSON)
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub format: Option<ProfileShowFormat>,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum ProfileShowFormat {
+    Profile,
+    Manifest,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfileDiffArgs {
+    /// First profile name or path
+    pub profile1: String,
+    /// Second profile name or path
+    pub profile2: String,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfileValidateArgs {
+    /// Profile JSON file to validate
+    pub file: PathBuf,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfileGroupsArgs {
+    /// Group name to show details for (omit to list all)
+    pub name: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Show all platforms (not just current)
+    #[arg(long)]
+    pub all_platforms: bool,
+}
 
 #[derive(Parser, Debug, Clone, Default)]
 pub struct SandboxArgs {
@@ -2944,6 +2943,102 @@ mod tests {
     fn test_profile_no_subcommand() {
         let result = Cli::try_parse_from(["nono", "profile"]);
         assert!(result.is_err(), "profile without subcommand should fail");
+    }
+
+    #[test]
+    fn test_profile_list_parses() {
+        let cli = Cli::try_parse_from(["nono", "profile", "list", "--json"])
+            .expect("profile list --json must parse");
+        match cli.command {
+            Commands::Profile(args) => match args.command {
+                ProfileCommands::List(a) => assert!(a.json, "--json flag not set"),
+                _ => panic!("expected ProfileCommands::List"),
+            },
+            _ => panic!("expected Commands::Profile"),
+        }
+    }
+
+    #[test]
+    fn test_profile_show_parses_with_format_manifest() {
+        let cli =
+            Cli::try_parse_from(["nono", "profile", "show", "default", "--format", "manifest"])
+                .expect("profile show --format manifest must parse");
+        if let Commands::Profile(args) = cli.command {
+            if let ProfileCommands::Show(a) = args.command {
+                assert_eq!(a.profile, "default");
+                assert!(matches!(a.format, Some(ProfileShowFormat::Manifest)));
+                return;
+            }
+        }
+        panic!("expected Commands::Profile(Show(..))");
+    }
+
+    #[test]
+    fn test_profile_show_parses_with_json_and_raw() {
+        let cli = Cli::try_parse_from(["nono", "profile", "show", "default", "--json", "--raw"])
+            .expect("profile show --json --raw must parse");
+        if let Commands::Profile(args) = cli.command {
+            if let ProfileCommands::Show(a) = args.command {
+                assert!(a.json);
+                assert!(a.raw);
+                return;
+            }
+        }
+        panic!("expected Commands::Profile(Show(..))");
+    }
+
+    #[test]
+    fn test_profile_groups_parses() {
+        let cli = Cli::try_parse_from(["nono", "profile", "groups", "--json", "--all-platforms"])
+            .expect("profile groups --json --all-platforms must parse");
+        if let Commands::Profile(args) = cli.command {
+            if let ProfileCommands::Groups(a) = args.command {
+                assert!(a.json);
+                assert!(a.all_platforms);
+                return;
+            }
+        }
+        panic!("expected Commands::Profile(Groups(..))");
+    }
+
+    #[test]
+    fn test_profile_groups_with_name() {
+        let cli = Cli::try_parse_from(["nono", "profile", "groups", "deny_credentials"])
+            .expect("profile groups <name> must parse");
+        if let Commands::Profile(args) = cli.command {
+            if let ProfileCommands::Groups(a) = args.command {
+                assert_eq!(a.name.as_deref(), Some("deny_credentials"));
+                return;
+            }
+        }
+        panic!("expected Commands::Profile(Groups(..))");
+    }
+
+    #[test]
+    fn test_profile_diff_parses() {
+        let cli = Cli::try_parse_from(["nono", "profile", "diff", "a", "b"])
+            .expect("profile diff must parse");
+        if let Commands::Profile(args) = cli.command {
+            if let ProfileCommands::Diff(a) = args.command {
+                assert_eq!(a.profile1, "a");
+                assert_eq!(a.profile2, "b");
+                return;
+            }
+        }
+        panic!("expected Commands::Profile(Diff(..))");
+    }
+
+    #[test]
+    fn test_profile_validate_parses() {
+        let cli = Cli::try_parse_from(["nono", "profile", "validate", "/tmp/p.json"])
+            .expect("profile validate must parse");
+        if let Commands::Profile(args) = cli.command {
+            if let ProfileCommands::Validate(a) = args.command {
+                assert_eq!(a.file.to_string_lossy(), "/tmp/p.json");
+                return;
+            }
+        }
+        panic!("expected Commands::Profile(Validate(..))");
     }
 
     /// All subcommand names that must appear in the root help template.

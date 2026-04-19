@@ -79,7 +79,7 @@ else
 
     # Note: read-only enforcement is tested in test_fs_access.sh.
     # System paths grant /tmp write access, so read-only subdirs under /tmp
-    # are overridden — that's expected nono policy, not a WSL2 issue.
+    # are overridden — that's expected nono behavior, not a WSL2 issue.
 fi
 
 # =============================================================================

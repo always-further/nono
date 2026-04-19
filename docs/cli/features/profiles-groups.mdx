@@ -6,7 +6,7 @@ description: Pre-configured capability sets and composable security groups
 Profiles are pre-configured capability sets that define what a sandboxed process can access. Groups are the composable building blocks that profiles are made from. Together they codify security policy so you don't have to specify flags manually every time.
 
 <Tip>
-  Use `nono policy` to inspect, compare, and validate profiles and groups from the command line. See [Policy Introspection](/cli/features/policy-introspection) for details.
+  Use `nono profile` to inspect, compare, and validate profiles and groups from the command line. See [Profile Introspection](/cli/features/profile-introspection) for details.
 </Tip>
 
 ## Profiles
@@ -350,7 +350,7 @@ Use `nono profile init` to scaffold a new profile:
 nono profile init my-agent --extends default --groups node_runtime
 
 # Validate the generated profile
-nono policy validate ~/.config/nono/profiles/my-agent.json
+nono profile validate ~/.config/nono/profiles/my-agent.json
 
 # Use the profile
 nono run --profile my-agent -- my-agent-command
