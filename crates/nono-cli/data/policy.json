@@ -670,10 +670,11 @@
         "capability_elevation": false
       },
       "filesystem": {
-        "allow": ["$HOME/.claude", "$HOME/.cache/claude", "$HOME/.claude.lock", "$XDG_CONFIG_HOME/nono/profiles"],
+        "allow": ["$HOME/.claude", "$HOME/.cache/claude", "$XDG_CONFIG_HOME/nono/profiles"],
         "allow_file": [
           "$HOME/.claude.json",
-          "$HOME/.claude.json.lock"
+          "$HOME/.claude.json.lock",
+          "$HOME/.claude.lock"
         ]
       },
       "policy": {
