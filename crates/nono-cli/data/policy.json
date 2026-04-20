@@ -430,6 +430,9 @@
       "description": "Claude Code macOS-specific state and credential paths",
       "platform": "macos",
       "allow": {
+        "read": [
+          "$HOME/.local/share/claude"
+        ],
         "readwrite": [
           "$HOME/Library/Keychains/login.keychain-db",
           "$HOME/Library/Keychains/metadata.keychain-db"

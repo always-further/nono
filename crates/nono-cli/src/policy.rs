@@ -1494,6 +1494,12 @@ mod tests {
             .as_ref()
             .expect("claude_code_macos allow missing")
             .readwrite;
+        assert!(claude_code_macos
+            .allow
+            .as_ref()
+            .expect("claude_code_macos allow missing")
+            .read
+            .contains(&"$HOME/.local/share/claude".to_string()));
         assert!(claude_code_macos_paths
             .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
         assert!(claude_code_macos_paths
