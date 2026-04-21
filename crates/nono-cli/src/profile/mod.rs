@@ -4267,16 +4267,18 @@ mod tests {
 
         let profile = load_from_file(&profile_path).expect("load extended profile");
         assert_eq!(profile.meta.name, "ext-test");
-        // Should inherit codex's filesystem paths
-        assert!(
-            profile.filesystem.allow.len() > 1,
-            "Expected inherited paths from codex, got: {:?}",
-            profile.filesystem.allow
-        );
+        // Child's allow path is preserved.
         assert!(profile
             .filesystem
             .allow
             .contains(&"/tmp/ext-test".to_string()));
+        // Should inherit opencode's filesystem paths (which live under
+        // readwriteexecute so the bundled Bun TUI binary can be mmap-executed).
+        assert!(
+            !profile.filesystem.readwriteexecute.is_empty(),
+            "Expected inherited readwriteexecute paths from opencode, got: {:?}",
+            profile.filesystem.readwriteexecute
+        );
         // extends should be consumed
         assert!(profile.extends.is_none());
     }
@@ -5149,7 +5151,7 @@ mod tests {
         assert!(
             profile
                 .filesystem
-                .allow
+                .readwriteexecute
                 .iter()
                 .any(|path| path == "$HOME/.opencode"),
             "expected filesystem grants from opencode to still be inherited",

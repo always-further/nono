@@ -58,15 +58,21 @@ const EXT_CLASS_EXECUTE: &str = "com.apple.app-sandbox.execute";
 ///
 /// # Arguments
 /// * `path` - The filesystem path to grant access to
-/// * `access` - The access mode (Read -> read-only token, Write/ReadWrite -> read-write token, Execute -> execute token)
+/// * `access` - The access mode. Mapping (Seatbelt only ships three extension
+///   classes): `Read` → read-only, `Write`/`ReadWrite`/`ReadWriteExecute` →
+///   read-write, `Execute`/`ReadExecute` → execute (Apple's execute extension
+///   already implies read). Callers needing write+execute simultaneously must
+///   issue both a read-write token and an execute token.
 ///
 /// # Errors
 /// Returns an error if the path contains null bytes or if the kernel rejects the request.
 pub fn extension_issue_file(path: &Path, access: AccessMode) -> Result<String> {
     let class = match access {
         AccessMode::Read => EXT_CLASS_READ,
-        AccessMode::Write | AccessMode::ReadWrite => EXT_CLASS_READ_WRITE,
-        AccessMode::Execute => EXT_CLASS_EXECUTE,
+        AccessMode::Write | AccessMode::ReadWrite | AccessMode::ReadWriteExecute => {
+            EXT_CLASS_READ_WRITE
+        }
+        AccessMode::Execute | AccessMode::ReadExecute => EXT_CLASS_EXECUTE,
     };
 
     let class_c = CString::new(class)

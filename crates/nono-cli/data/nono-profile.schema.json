@@ -244,6 +244,21 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Single files with write-only access."
+        },
+        "execute": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Directories or files with execute-only access (no read or write)."
+        },
+        "readexecute": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Directories or files with read+execute access."
+        },
+        "readwriteexecute": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Directories or files with read+write+execute access."
         }
       }
     },
@@ -271,6 +286,21 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Additional read-write directories to allow."
+        },
+        "add_allow_execute": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional execute-only paths to allow."
+        },
+        "add_allow_readexecute": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional read+execute paths to allow."
+        },
+        "add_allow_readwriteexecute": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional read+write+execute paths to allow."
         },
         "add_deny_access": {
           "type": "array",

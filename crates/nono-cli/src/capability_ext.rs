@@ -845,6 +845,7 @@ impl CapabilitySetExt for CapabilitySet {
             &protected_roots,
             &mut caps,
             "Profile policy path",
+            allow_parent_of_protected,
         )?;
         apply_profile_dir_allows(
             &profile.policy.add_allow_readexecute,
@@ -853,6 +854,7 @@ impl CapabilitySetExt for CapabilitySet {
             &protected_roots,
             &mut caps,
             "Profile policy path",
+            allow_parent_of_protected,
         )?;
         apply_profile_dir_allows(
             &profile.policy.add_allow_readwriteexecute,
@@ -861,6 +863,7 @@ impl CapabilitySetExt for CapabilitySet {
             &protected_roots,
             &mut caps,
             "Profile policy path",
+            allow_parent_of_protected,
         )?;
 
         for path_template in &profile.policy.add_deny_access {

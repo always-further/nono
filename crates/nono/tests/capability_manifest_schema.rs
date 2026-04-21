@@ -170,7 +170,7 @@ fn rejects_filesystem_grant_invalid_access_mode() {
         "version": "0.1.0",
         "filesystem": {
             "grants": [
-                { "path": "/tmp", "access": "execute" }
+                { "path": "/tmp", "access": "delete" }
             ]
         }
     }"#;

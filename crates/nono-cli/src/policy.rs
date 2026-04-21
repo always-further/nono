@@ -834,7 +834,7 @@ pub fn apply_macos_keychain_db_exception(caps: &mut CapabilitySet) {
         // `deny_keychains_macos` group emits `(deny file-read-data (subpath ...))`).
         // Emitting the specific op with a literal path ensures the override wins.
         match access {
-            AccessMode::Read => {
+            AccessMode::Read | AccessMode::ReadExecute => {
                 allow_rules.push(format!("(allow file-read-data ({}))", filter));
                 allow_rules.push(format!("(allow file-read* ({}))", filter));
             }
@@ -842,12 +842,13 @@ pub fn apply_macos_keychain_db_exception(caps: &mut CapabilitySet) {
                 allow_rules.push(format!("(allow file-write-data ({}))", filter));
                 allow_rules.push(format!("(allow file-write* ({}))", filter));
             }
-            AccessMode::ReadWrite => {
+            AccessMode::ReadWrite | AccessMode::ReadWriteExecute => {
                 allow_rules.push(format!("(allow file-read-data ({}))", filter));
                 allow_rules.push(format!("(allow file-read* ({}))", filter));
                 allow_rules.push(format!("(allow file-write-data ({}))", filter));
                 allow_rules.push(format!("(allow file-write* ({}))", filter));
             }
+            AccessMode::Execute => {}
         }
     }
 
@@ -886,7 +887,7 @@ pub fn apply_macos_keychain_db_exception(caps: &mut CapabilitySet) {
         // the specific-op denies from deny_keychains_macos.
         for filter in filters {
             match access {
-                AccessMode::Read => {
+                AccessMode::Read | AccessMode::ReadExecute => {
                     allow_rules.push(format!("(allow file-read-data ({}))", filter));
                     allow_rules.push(format!("(allow file-read* ({}))", filter));
                 }
@@ -894,12 +895,13 @@ pub fn apply_macos_keychain_db_exception(caps: &mut CapabilitySet) {
                     allow_rules.push(format!("(allow file-write-data ({}))", filter));
                     allow_rules.push(format!("(allow file-write* ({}))", filter));
                 }
-                AccessMode::ReadWrite => {
+                AccessMode::ReadWrite | AccessMode::ReadWriteExecute => {
                     allow_rules.push(format!("(allow file-read-data ({}))", filter));
                     allow_rules.push(format!("(allow file-read* ({}))", filter));
                     allow_rules.push(format!("(allow file-write-data ({}))", filter));
                     allow_rules.push(format!("(allow file-write* ({}))", filter));
                 }
+                AccessMode::Execute => {}
             }
         }
     }
