@@ -91,6 +91,9 @@ pub(crate) fn run_why(args: WhyArgs) -> Result<()> {
             Some(WhyOp::Read) => AccessMode::Read,
             Some(WhyOp::Write) => AccessMode::Write,
             Some(WhyOp::ReadWrite) => AccessMode::ReadWrite,
+            Some(WhyOp::Execute) => AccessMode::Execute,
+            Some(WhyOp::ReadExecute) => AccessMode::ReadExecute,
+            Some(WhyOp::ReadWriteExecute) => AccessMode::ReadWriteExecute,
             None => AccessMode::Read,
         };
         query_path(path, op, &caps, &overridden_paths)?
