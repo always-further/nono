@@ -2246,6 +2246,21 @@ fn resolve_to_manifest(
             true,
         ),
         (
+            &prof.filesystem.execute,
+            manifest::AccessMode::Execute,
+            false,
+        ),
+        (
+            &prof.filesystem.readexecute,
+            manifest::AccessMode::Readexecute,
+            false,
+        ),
+        (
+            &prof.filesystem.readwriteexecute,
+            manifest::AccessMode::Readwriteexecute,
+            false,
+        ),
+        (
             &prof.policy.add_allow_read,
             manifest::AccessMode::Read,
             false,
@@ -2258,6 +2273,21 @@ fn resolve_to_manifest(
         (
             &prof.policy.add_allow_readwrite,
             manifest::AccessMode::Readwrite,
+            false,
+        ),
+        (
+            &prof.policy.add_allow_execute,
+            manifest::AccessMode::Execute,
+            false,
+        ),
+        (
+            &prof.policy.add_allow_readexecute,
+            manifest::AccessMode::Readexecute,
+            false,
+        ),
+        (
+            &prof.policy.add_allow_readwriteexecute,
+            manifest::AccessMode::Readwriteexecute,
             false,
         ),
     ];
@@ -2291,6 +2321,9 @@ fn resolve_to_manifest(
             nono::AccessMode::Read => manifest::AccessMode::Read,
             nono::AccessMode::Write => manifest::AccessMode::Write,
             nono::AccessMode::ReadWrite => manifest::AccessMode::Readwrite,
+            nono::AccessMode::Execute => manifest::AccessMode::Execute,
+            nono::AccessMode::ReadExecute => manifest::AccessMode::Readexecute,
+            nono::AccessMode::ReadWriteExecute => manifest::AccessMode::Readwriteexecute,
         };
         let path_str = cap.resolved.to_string_lossy().into_owned();
         grants.push(make_fs_grant(&path_str, access, cap.is_file)?);
@@ -2559,12 +2592,22 @@ fn wider_access(
     a: nono::manifest::AccessMode,
     b: nono::manifest::AccessMode,
 ) -> nono::manifest::AccessMode {
-    use nono::manifest::AccessMode::{Read, Readwrite, Write};
+    use nono::manifest::AccessMode::{
+        Execute, Read, Readexecute, Readwrite, Readwriteexecute, Write,
+    };
     match (a, b) {
+        (Readwriteexecute, _) | (_, Readwriteexecute) => Readwriteexecute,
+        (Write, Execute) | (Execute, Write) => Readwriteexecute,
+        (Readwrite, Execute) | (Execute, Readwrite) => Readwriteexecute,
+        (Readwrite, Readexecute) | (Readexecute, Readwrite) => Readwriteexecute,
+        (Readexecute, Write) | (Write, Readexecute) => Readwriteexecute,
         (Readwrite, _) | (_, Readwrite) => Readwrite,
         (Read, Write) | (Write, Read) => Readwrite,
+        (Readexecute, _) | (_, Readexecute) => Readexecute,
+        (Read, Execute) | (Execute, Read) => Readexecute,
         (Read, Read) => Read,
         (Write, Write) => Write,
+        (Execute, Execute) => Execute,
     }
 }
 

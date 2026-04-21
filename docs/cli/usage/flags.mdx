@@ -258,6 +258,24 @@ Grant write-only access to a single file.
 nono run --write-file ./output.log -- command
 ```
 
+#### `--execute`
+
+Grant execute access to a directory (recursive). Decouples execute permission
+from read permission — pair with `--read` if the sandboxed process also needs
+to read non-binary files in the directory.
+
+```bash
+nono run --execute /usr/bin -- command
+```
+
+#### `--execute-file`
+
+Grant execute access to a single file.
+
+```bash
+nono run --execute-file /usr/local/bin/myapp -- command
+```
+
 ### AF_UNIX Socket Permissions
 
 These flags grant `connect(2)` (and optionally `bind(2)`) on pathname AF_UNIX

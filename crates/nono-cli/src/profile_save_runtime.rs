@@ -618,6 +618,9 @@ fn build_run_profile_patch(
     let mut allow_file = BTreeSet::new();
     let mut read_file = BTreeSet::new();
     let mut write_file = BTreeSet::new();
+    let mut execute = BTreeSet::new();
+    let mut readexecute = BTreeSet::new();
+    let mut readwriteexecute = BTreeSet::new();
     let mut override_deny = BTreeSet::new();
 
     for (path, grant) in grants {
@@ -645,6 +648,15 @@ fn build_run_profile_patch(
             (AccessMode::ReadWrite, true) => {
                 allow_file.insert(shortened);
             }
+            (AccessMode::Execute, _) => {
+                execute.insert(shortened);
+            }
+            (AccessMode::ReadExecute, _) => {
+                readexecute.insert(shortened);
+            }
+            (AccessMode::ReadWriteExecute, _) => {
+                readwriteexecute.insert(shortened);
+            }
         }
     }
 
@@ -655,6 +667,9 @@ fn build_run_profile_patch(
     patch.filesystem.allow_file = allow_file.into_iter().collect();
     patch.filesystem.read_file = read_file.into_iter().collect();
     patch.filesystem.write_file = write_file.into_iter().collect();
+    patch.filesystem.execute = execute.into_iter().collect();
+    patch.filesystem.readexecute = readexecute.into_iter().collect();
+    patch.filesystem.readwriteexecute = readwriteexecute.into_iter().collect();
     patch.policy.override_deny = override_deny.into_iter().collect();
 
     Ok(Some(patch))
