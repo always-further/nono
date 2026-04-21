@@ -1660,6 +1660,10 @@ pub enum WhyOp {
     ReadWrite,
     /// Execute access
     Execute,
+    /// Read and execute access
+    ReadExecute,
+    /// Read, write, and execute access
+    ReadWriteExecute,
 }
 
 #[derive(Parser, Debug)]

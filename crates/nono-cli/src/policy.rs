@@ -418,13 +418,19 @@ fn resolve_single_group(
             add_fs_capability(group_name, path_str, AccessMode::ReadWrite, &source, caps)?;
         }
         for path_str in &allow.execute {
-            add_fs_capability(path_str, AccessMode::Execute, &source, caps)?;
+            add_fs_capability(group_name, path_str, AccessMode::Execute, &source, caps)?;
         }
         for path_str in &allow.readexecute {
-            add_fs_capability(path_str, AccessMode::ReadExecute, &source, caps)?;
+            add_fs_capability(group_name, path_str, AccessMode::ReadExecute, &source, caps)?;
         }
         for path_str in &allow.readwriteexecute {
-            add_fs_capability(path_str, AccessMode::ReadWriteExecute, &source, caps)?;
+            add_fs_capability(
+                group_name,
+                path_str,
+                AccessMode::ReadWriteExecute,
+                &source,
+                caps,
+            )?;
         }
     }
 
