@@ -51,6 +51,27 @@ pub struct FilesystemConfig {
     /// Single files with write-only access
     #[serde(default)]
     pub write_file: Vec<String>,
+    /// Single AF_UNIX socket paths — connect only.
+    /// Implies read access on the socket path. See issue #685.
+    #[serde(default)]
+    pub unix_socket: Vec<String>,
+    /// Single AF_UNIX socket paths — connect and bind.
+    /// Implies read+write access on the socket path when it exists, or
+    /// on its parent directory when it does not yet exist (the normal
+    /// `bind(2)` workflow — the syscall creates the socket file).
+    /// Dangling symlinks are rejected at grant time. For runtime-generated
+    /// filenames (e.g. PID-suffixed paths) prefer `unix_socket_dir_bind`
+    /// so the implied fs grant stays scoped to a dedicated directory.
+    #[serde(default)]
+    pub unix_socket_bind: Vec<String>,
+    /// Directories where any direct-child AF_UNIX socket may be connected to.
+    /// Non-recursive. Implies read access on the directory.
+    #[serde(default)]
+    pub unix_socket_dir: Vec<String>,
+    /// Directories where any direct-child AF_UNIX socket may be connected to
+    /// or bound. Non-recursive. Implies read+write access on the directory.
+    #[serde(default)]
+    pub unix_socket_dir_bind: Vec<String>,
 }
 
 /// Policy patch configuration in a profile.
@@ -1744,6 +1765,19 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             allow_file: dedup_append(&base.filesystem.allow_file, &child.filesystem.allow_file),
             read_file: dedup_append(&base.filesystem.read_file, &child.filesystem.read_file),
             write_file: dedup_append(&base.filesystem.write_file, &child.filesystem.write_file),
+            unix_socket: dedup_append(&base.filesystem.unix_socket, &child.filesystem.unix_socket),
+            unix_socket_bind: dedup_append(
+                &base.filesystem.unix_socket_bind,
+                &child.filesystem.unix_socket_bind,
+            ),
+            unix_socket_dir: dedup_append(
+                &base.filesystem.unix_socket_dir,
+                &child.filesystem.unix_socket_dir,
+            ),
+            unix_socket_dir_bind: dedup_append(
+                &base.filesystem.unix_socket_dir_bind,
+                &child.filesystem.unix_socket_dir_bind,
+            ),
         },
         policy: PolicyPatchConfig {
             exclude_groups: dedup_append(&base.policy.exclude_groups, &child.policy.exclude_groups),
@@ -3362,6 +3396,10 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec!["/base/file.txt".to_string()],
                 write_file: vec![],
+                unix_socket: vec![],
+                unix_socket_bind: vec![],
+                unix_socket_dir: vec![],
+                unix_socket_dir_bind: vec![],
             },
             policy: PolicyPatchConfig {
                 exclude_groups: vec!["base_excluded".to_string()],
@@ -3435,6 +3473,10 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec![],
                 write_file: vec![],
+                unix_socket: vec![],
+                unix_socket_bind: vec![],
+                unix_socket_dir: vec![],
+                unix_socket_dir_bind: vec![],
             },
             policy: PolicyPatchConfig {
                 exclude_groups: vec!["child_excluded".to_string()],

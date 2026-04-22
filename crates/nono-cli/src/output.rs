@@ -112,6 +112,58 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
         }
     }
 
+    // AF_UNIX socket capabilities (issue #685 / #696)
+    let unix_caps = caps.unix_socket_capabilities();
+    if !unix_caps.is_empty() {
+        let (user_caps, hidden_count) = if verbose > 0 {
+            (unix_caps.to_vec(), 0)
+        } else {
+            let user: Vec<_> = unix_caps
+                .iter()
+                .filter(|c| c.source.is_user_intent())
+                .cloned()
+                .collect();
+            let hidden = unix_caps.len() - user.len();
+            (user, hidden)
+        };
+
+        for cap in &user_caps {
+            let mode_badge = format_unix_socket_mode_badge(cap.mode);
+            let scope_suffix = if cap.is_directory {
+                "  (directory grant — sockets inside only, non-recursive)"
+            } else {
+                ""
+            };
+            if verbose > 0 {
+                let source_str = format!("{}", cap.source);
+                eprintln!(
+                    "  {} {} {}{}",
+                    mode_badge,
+                    theme::fg(&cap.resolved.display().to_string(), t.text),
+                    theme::fg(&format!("[{source_str}]"), t.subtext),
+                    theme::fg(scope_suffix, t.subtext),
+                );
+            } else {
+                eprintln!(
+                    "  {} {}{}",
+                    mode_badge,
+                    theme::fg(&cap.resolved.display().to_string(), t.text),
+                    theme::fg(scope_suffix, t.subtext),
+                );
+            }
+        }
+
+        if hidden_count > 0 {
+            eprintln!(
+                "       {}",
+                theme::fg(
+                    &format!("+ {hidden_count} system/group unix sockets (-v to show)"),
+                    t.subtext
+                )
+            );
+        }
+    }
+
     // Network status
     match caps.network_mode() {
         NetworkMode::Blocked => {
@@ -172,6 +224,15 @@ fn format_access_badge(access: &AccessMode) -> String {
         AccessMode::Read => theme::badge("  r  ", t.green, BADGE_FG_DARK),
         AccessMode::Write => theme::badge("  w  ", t.yellow, BADGE_FG_DARK),
         AccessMode::ReadWrite => theme::badge(" r+w ", t.brand, BADGE_FG_DARK),
+    }
+}
+
+/// Format a Unix socket mode as a fixed-width colored badge.
+fn format_unix_socket_mode_badge(mode: nono::UnixSocketMode) -> String {
+    let t = theme::current();
+    match mode {
+        nono::UnixSocketMode::Connect => theme::badge("sock ", t.green, BADGE_FG_DARK),
+        nono::UnixSocketMode::ConnectBind => theme::badge("sock+", t.brand, BADGE_FG_DARK),
     }
 }
 
@@ -757,9 +818,12 @@ pub fn print_profile_hint(program: &str, profile: &str, silent: bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        finish_status_line_for_handoff, normalize_terminal_line_endings, print_applying_sandbox,
+        finish_status_line_for_handoff, format_unix_socket_mode_badge,
+        normalize_terminal_line_endings, print_applying_sandbox, print_capabilities,
         print_profile_hint, render_diagnostic_footer, take_pending_status_line,
     };
+    use nono::{CapabilitySet, UnixSocketMode};
+    use tempfile::tempdir;
 
     #[test]
     fn normalize_terminal_line_endings_uses_crlf() {
@@ -792,5 +856,37 @@ mod tests {
         print_applying_sandbox(false);
         assert!(take_pending_status_line());
         assert!(!take_pending_status_line());
+    }
+
+    #[test]
+    fn unix_socket_mode_badges_are_fixed_width_and_distinct() {
+        let connect = format_unix_socket_mode_badge(UnixSocketMode::Connect);
+        let bind = format_unix_socket_mode_badge(UnixSocketMode::ConnectBind);
+        // Same rendered-width contract as format_access_badge (5 chars).
+        // We can't `strip_ansi` cleanly here, so check the printable payload
+        // is present rather than the raw length.
+        assert!(connect.contains("sock "));
+        assert!(bind.contains("sock+"));
+        assert_ne!(connect, bind);
+    }
+
+    #[test]
+    fn print_capabilities_with_unix_socket_does_not_panic() {
+        // Smoke test: constructing a CapabilitySet with both connect and
+        // connect+bind unix socket grants (one file, one directory) and
+        // rendering it must not panic. Silent=true keeps stderr quiet in
+        // test output. Dry-run-style `verbose=1` path is also exercised.
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("a.sock");
+        std::fs::write(&sock, b"").expect("create socket stub");
+
+        let caps = CapabilitySet::new()
+            .allow_unix_socket(&sock, UnixSocketMode::Connect)
+            .expect("connect grant")
+            .allow_unix_socket_dir(dir.path(), UnixSocketMode::ConnectBind)
+            .expect("bind dir grant");
+
+        print_capabilities(&caps, 0, true);
+        print_capabilities(&caps, 1, true);
     }
 }

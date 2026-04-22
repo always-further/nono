@@ -862,6 +862,30 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
     pub write_file: Vec<PathBuf>,
 
+    /// Allow connect() to an AF_UNIX socket at this path (implies --read-file)
+    #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on an AF_UNIX socket at this path.
+    /// If the path exists, implies --allow-file on the socket. If it
+    /// does not yet exist (the typical bind(2) case), implies --allow
+    /// on the parent directory so the kernel can create the socket
+    /// file. Prefer --allow-unix-socket-dir-bind for runtime-generated
+    /// filenames.
+    #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_bind: Vec<PathBuf>,
+
+    /// Allow connect() to any AF_UNIX socket directly within this directory
+    /// (non-recursive; implies --read)
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_dir: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on any AF_UNIX socket directly within this
+    /// directory (non-recursive; implies --allow). Use for runtime-generated
+    /// socket filenames (PID-derived paths, etc.).
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_dir_bind: Vec<PathBuf>,
+
     /// Override a deny rule for a path. Pair with --allow/--read/--write grant
     #[arg(long, value_name = "PATH", help_heading = "FILESYSTEM")]
     pub override_deny: Vec<PathBuf>,
@@ -1048,6 +1072,8 @@ pub struct SandboxArgs {
         value_name = "FILE",
         conflicts_with_all = &[
             "allow", "read", "write", "allow_file", "read_file", "write_file",
+            "allow_unix_socket", "allow_unix_socket_bind",
+            "allow_unix_socket_dir", "allow_unix_socket_dir_bind",
             "profile", "override_deny", "allow_cwd",
             "block_net", "allow_net", "network_profile", "allow_proxy",
             "allow_bind", "allow_port", "external_proxy", "proxy_port",
@@ -1110,6 +1136,30 @@ pub struct WrapSandboxArgs {
     /// Allow write-only access to a single file
     #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
     pub write_file: Vec<PathBuf>,
+
+    /// Allow connect() to an AF_UNIX socket at this path (implies --read-file)
+    #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on an AF_UNIX socket at this path.
+    /// If the path exists, implies --allow-file on the socket. If it
+    /// does not yet exist (the typical bind(2) case), implies --allow
+    /// on the parent directory so the kernel can create the socket
+    /// file. Prefer --allow-unix-socket-dir-bind for runtime-generated
+    /// filenames.
+    #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_bind: Vec<PathBuf>,
+
+    /// Allow connect() to any AF_UNIX socket directly within this directory
+    /// (non-recursive; implies --read)
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_dir: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on any AF_UNIX socket directly within this
+    /// directory (non-recursive; implies --allow). Use for runtime-generated
+    /// socket filenames (PID-derived paths, etc.).
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_dir_bind: Vec<PathBuf>,
 
     /// Override a deny rule for a path. Pair with --allow/--read/--write grant
     #[arg(long, value_name = "PATH", help_heading = "FILESYSTEM")]
@@ -1209,6 +1259,8 @@ pub struct WrapSandboxArgs {
         value_name = "FILE",
         conflicts_with_all = &[
             "allow", "read", "write", "allow_file", "read_file", "write_file",
+            "allow_unix_socket", "allow_unix_socket_bind",
+            "allow_unix_socket_dir", "allow_unix_socket_dir_bind",
             "profile", "override_deny", "allow_cwd",
             "block_net", "allow_bind", "allow_port",
             "env_credential", "env_credential_map",
@@ -1236,6 +1288,10 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             allow_file: args.allow_file,
             read_file: args.read_file,
             write_file: args.write_file,
+            allow_unix_socket: args.allow_unix_socket,
+            allow_unix_socket_bind: args.allow_unix_socket_bind,
+            allow_unix_socket_dir: args.allow_unix_socket_dir,
+            allow_unix_socket_dir_bind: args.allow_unix_socket_dir_bind,
             override_deny: args.override_deny,
             allow_cwd: args.allow_cwd,
             workdir: args.workdir,

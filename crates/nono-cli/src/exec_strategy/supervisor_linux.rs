@@ -981,6 +981,7 @@ mod tests {
                 detach_sequence: None,
                 open_url_origins: &[],
                 open_url_allow_localhost: false,
+                audit_recorder: None,
                 allow_launch_services_active: false,
                 proxy_port,
                 proxy_bind_ports,

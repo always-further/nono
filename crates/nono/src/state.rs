@@ -119,13 +119,31 @@ impl SandboxState {
                 }
             };
 
-            // Re-validate through the standard constructors to ensure
-            // canonicalisation and existence checks are applied.
+            // Reconstruct from the caller-supplied `original` so the
+            // stored alias survives the roundtrip (macOS Seatbelt uses
+            // it for dual-path emission when original != resolved).
+            // Then validate that canonicalisation produced the same
+            // `resolved` as was serialized. The check rejects two
+            // failure modes with one test:
+            //
+            // - Filesystem drift between save and reload (symlink moved,
+            //   ConnectBind pending path now exists, etc.).
+            // - Crafted JSON smuggling: attacker sets an evil `original`
+            //   and legit `resolved`; the reconstructed cap's actual
+            //   resolved won't match the crafted one, so we reject.
             let cap = if sock.is_directory {
                 UnixSocketCapability::new_dir(&sock.original, mode)?
             } else {
                 UnixSocketCapability::new_file(&sock.original, mode)?
             };
+            if cap.resolved != sock.resolved {
+                return Err(crate::error::NonoError::ConfigParse(format!(
+                    "unix socket grant canonical path drifted at state reload: \
+                     serialized resolved={}, actual resolved={}",
+                    sock.resolved.display(),
+                    cap.resolved.display(),
+                )));
+            }
             caps.add_unix_socket(cap);
         }
 
@@ -197,6 +215,48 @@ mod tests {
         assert!(
             state.to_caps().is_err(),
             "to_caps must reject invalid access modes"
+        );
+    }
+
+    #[test]
+    fn test_unix_socket_state_roundtrip_preserves_original_and_resolved() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("a.sock");
+        std::fs::write(&sock, b"").expect("stub");
+
+        let caps = CapabilitySet::new()
+            .allow_unix_socket(&sock, UnixSocketMode::Connect)
+            .expect("grant");
+        let state = SandboxState::from_caps(&caps);
+        let restored = state.to_caps().expect("to_caps");
+
+        let round = restored.unix_socket_capabilities();
+        assert_eq!(round.len(), 1);
+        let before = &caps.unix_socket_capabilities()[0];
+        let after = &round[0];
+        assert_eq!(after.resolved, before.resolved);
+        assert_eq!(after.original, before.original);
+        assert_eq!(after.mode, before.mode);
+        assert_eq!(after.is_directory, before.is_directory);
+    }
+
+    #[test]
+    fn test_unix_socket_state_rejects_invalid_mode() {
+        let json = r#"{
+            "fs": [],
+            "unix_sockets": [{
+                "original": "/tmp",
+                "resolved": "/tmp",
+                "is_directory": true,
+                "mode": "bind-only"
+            }],
+            "net_blocked": false
+        }"#;
+        let state = SandboxState::from_json(json).unwrap();
+        assert!(
+            state.to_caps().is_err(),
+            "to_caps must reject unknown unix socket modes"
         );
     }
 }

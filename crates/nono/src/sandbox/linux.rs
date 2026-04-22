@@ -2776,8 +2776,7 @@ mod tests {
         // emitted ERRNO, which skipped the supervisor entirely.
         assert_eq!(filter[17].code, BPF_RET | BPF_K);
         assert_eq!(
-            filter[17].k,
-            SECCOMP_RET_USER_NOTIF,
+            filter[17].k, SECCOMP_RET_USER_NOTIF,
             "bind must route to USER_NOTIF regardless of has_bind_ports so \
              the supervisor can permit AF_UNIX pathname bind (#685)"
         );
@@ -3072,10 +3071,7 @@ mod tests {
 
         // Unique per-test socket path under /tmp so parallel tests don't
         // collide.
-        let sock_path = format!(
-            "/tmp/nono-integ-af-unix-bind-{}.sock",
-            std::process::id()
-        );
+        let sock_path = format!("/tmp/nono-integ-af-unix-bind-{}.sock", std::process::id());
         let _ = std::fs::remove_file(&sock_path);
 
         let mut report_pipe = [0i32; 2];
@@ -3096,11 +3092,7 @@ mod tests {
                     // Seccomp unavailable — skip via sentinel.
                     let sentinel: [u8; 2] = [2, 2];
                     unsafe {
-                        libc::write(
-                            report_pipe[1],
-                            sentinel.as_ptr().cast(),
-                            sentinel.len(),
-                        );
+                        libc::write(report_pipe[1], sentinel.as_ptr().cast(), sentinel.len());
                         libc::close(report_pipe[1]);
                         libc::_exit(0);
                     }
@@ -3153,13 +3145,8 @@ mod tests {
             }
             let addrlen = (std::mem::size_of::<u16>() + bytes.len() + 1) as libc::socklen_t;
 
-            let rc = unsafe {
-                libc::bind(
-                    sock,
-                    (&addr as *const libc::sockaddr_un).cast(),
-                    addrlen,
-                )
-            };
+            let rc =
+                unsafe { libc::bind(sock, (&addr as *const libc::sockaddr_un).cast(), addrlen) };
             let errno = if rc < 0 {
                 std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
             } else {

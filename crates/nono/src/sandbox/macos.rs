@@ -306,6 +306,145 @@ fn escape_path(path: &str) -> Result<String> {
     Ok(result)
 }
 
+/// Escape a filesystem path for use inside a Seatbelt `regex` clause.
+///
+/// Used for non-recursive directory socket grants: a directory `/d` is
+/// emitted as `(regex "^<escaped>/[^/]+$")` so only direct-child sockets
+/// are matched.
+///
+/// Escaping strategy, by character:
+///
+/// | Char | Rendered Scheme source | Regex engine sees | Matches |
+/// |------|------------------------|-------------------|---------|
+/// | `.`, `+`, `*`, `?`, `(`, `)`, `{`, `}`, `|`, `^`, `$` | `[.]` etc. | char class | literal `.` etc. |
+/// | `[`  | `\\[`  | `\[`  | literal `[` |
+/// | `]`  | `\\]`  | `\]`  | literal `]` |
+/// | `\`  | `\\\\` | `\\`  | literal `\` |
+/// | `"`  | `\"`   | `"`   | literal `"` |
+/// | other | verbatim | verbatim | as written |
+///
+/// The character-class form (`[.]`) is unambiguous across both raw and
+/// cooked Scheme string readers (the §13 spike verified this for `.`).
+/// For the three chars that can't appear literally inside `[ ]` (`[`,
+/// `]`, `\`), we fall back to Scheme-level backslash escaping: the
+/// Scheme reader collapses `\\` → `\`, and the regex engine then
+/// interprets `\<char>` as a literal. Backslash itself needs a second
+/// layer of escaping (`\\\\` → `\\` → literal `\`).
+///
+/// Control characters are rejected outright, matching `escape_path`'s
+/// policy.
+fn regex_escape_path_for_seatbelt(path: &str) -> Result<String> {
+    for c in path.chars() {
+        if c.is_control() {
+            return Err(NonoError::SandboxInit(format!(
+                "path contains control character 0x{:02X}: {}",
+                c as u32, path
+            )));
+        }
+    }
+    let mut result = String::with_capacity(path.len() * 2);
+    for c in path.chars() {
+        match c {
+            '.' | '+' | '*' | '?' | '(' | ')' | '{' | '}' | '|' | '^' | '$' => {
+                result.push('[');
+                result.push(c);
+                result.push(']');
+            }
+            // `[`, `]`: can't appear in a character class literal. Emit
+            // `\\<char>` (3 source chars); Scheme reduces to `\<char>`
+            // which is a regex-literal match.
+            '[' | ']' => {
+                result.push('\\');
+                result.push('\\');
+                result.push(c);
+            }
+            // `\`: needs double escaping — emit `\\\\` (4 source chars).
+            // Scheme reduces to `\\`, which the regex engine interprets
+            // as a literal backslash.
+            '\\' => result.push_str("\\\\\\\\"),
+            // `"`: Scheme string escape only; regex engine sees the
+            // bare quote as a literal character.
+            '"' => result.push_str("\\\""),
+            _ => result.push(c),
+        }
+    }
+    Ok(result)
+}
+
+/// Emit Seatbelt `(allow network-outbound …)` and `(allow network-bind …)`
+/// rules for each [`UnixSocketCapability`] in `caps`.
+///
+/// On macOS, `connect(2)` and `bind(2)` are classified as **separate**
+/// Seatbelt operations (`network-outbound` and `network-bind`), so each
+/// needs its own allow-rule. Mode enforcement:
+///
+/// - `Connect` mode: emit `network-outbound` only. `bind(2)` stays
+///   denied by the base `(deny network*)` clause.
+/// - `ConnectBind` mode: emit **both** `network-outbound` and
+///   `network-bind`.
+///
+/// Path form:
+///
+/// - File-scoped grants emit `(… (path "…"))`.
+/// - Directory-scoped grants emit `(… (regex "^<dir>/[^/]+$"))` —
+///   non-recursive (direct children only), per §5 / §13 spike.
+///
+/// For both forms, the `original` path is emitted too when it differs
+/// from `resolved` (`/tmp` vs `/private/tmp`), preserving the dual-path
+/// symlink pattern.
+///
+/// `FsCapability` entries intentionally **do not** trigger either rule.
+/// Filesystem grants and unix-socket grants are orthogonal layers per
+/// #696; the CLI-side sugar in `nono-cli` auto-registers the fs grant
+/// that `bind(2)`/`connect(2)` need.
+fn emit_unix_socket_rules(profile: &mut String, caps: &CapabilitySet) -> Result<()> {
+    for cap in caps.unix_socket_capabilities() {
+        let resolved_str = cap.resolved.to_str().ok_or_else(|| {
+            NonoError::SandboxInit(format!(
+                "unix socket path contains non-UTF-8 bytes: {}",
+                cap.resolved.display()
+            ))
+        })?;
+        let original_str = if cap.original != cap.resolved {
+            cap.original.to_str()
+        } else {
+            None
+        };
+
+        // Always emit for connect (network-outbound). Bind (network-bind)
+        // is only emitted for ConnectBind — Connect-only grants intentionally
+        // leave `bind(2)` denied by the base `(deny network*)` clause.
+        let operations: &[&str] = if cap.mode.permits_bind() {
+            &["network-outbound", "network-bind"]
+        } else {
+            &["network-outbound"]
+        };
+
+        if cap.is_directory {
+            let escaped = regex_escape_path_for_seatbelt(resolved_str)?;
+            let escaped_orig = original_str
+                .map(regex_escape_path_for_seatbelt)
+                .transpose()?;
+            for op in operations {
+                profile.push_str(&format!("(allow {} (regex \"^{}/[^/]+$\"))\n", op, escaped));
+                if let Some(ref e) = escaped_orig {
+                    profile.push_str(&format!("(allow {} (regex \"^{}/[^/]+$\"))\n", op, e));
+                }
+            }
+        } else {
+            let escaped = escape_path(resolved_str)?;
+            let escaped_orig = original_str.map(escape_path).transpose()?;
+            for op in operations {
+                profile.push_str(&format!("(allow {} (path \"{}\"))\n", op, escaped));
+                if let Some(ref e) = escaped_orig {
+                    profile.push_str(&format!("(allow {} (path \"{}\"))\n", op, e));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Generate a Seatbelt profile from capabilities
 ///
 /// This is a pure primitive - it generates rules ONLY for paths in the CapabilitySet.
@@ -539,53 +678,12 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         NetworkMode::Blocked => {
             profile.push_str("(deny network*)\n");
             profile.push_str(MDNS_RULES);
-            // On macOS, connect(2) to a Unix domain socket is classified by Seatbelt
-            // as network-outbound. Emit per-path rules for all explicitly granted
-            // filesystem capabilities so that Unix sockets (IPC, notification daemons,
-            // etc.) remain reachable in restricted modes. See: #687
-            //
-            // Files   -> (allow network-outbound (path "..."))   literal socket path
-            // Dirs    -> (allow network-outbound (subpath "...")) sockets anywhere inside
-            //
-            // Both resolved and original paths are emitted to handle /tmp -> /private/tmp
-            // symlinks, matching the mDNSResponder dual-path pattern above.
-            for cap in caps.fs_capabilities() {
-                let (filter, resolved_str) = if cap.is_file {
-                    (
-                        "path",
-                        cap.resolved.to_str().ok_or_else(|| {
-                            NonoError::SandboxInit(format!(
-                                "path contains non-UTF-8 bytes: {}",
-                                cap.resolved.display()
-                            ))
-                        })?,
-                    )
-                } else {
-                    (
-                        "subpath",
-                        cap.resolved.to_str().ok_or_else(|| {
-                            NonoError::SandboxInit(format!(
-                                "path contains non-UTF-8 bytes: {}",
-                                cap.resolved.display()
-                            ))
-                        })?,
-                    )
-                };
-                let escaped = escape_path(resolved_str)?;
-                profile.push_str(&format!(
-                    "(allow network-outbound ({} \"{}\"))\n",
-                    filter, escaped
-                ));
-                if cap.original != cap.resolved {
-                    if let Some(orig_str) = cap.original.to_str() {
-                        let escaped_orig = escape_path(orig_str)?;
-                        profile.push_str(&format!(
-                            "(allow network-outbound ({} \"{}\"))\n",
-                            filter, escaped_orig
-                        ));
-                    }
-                }
-            }
+            // Unix socket grants (see #685 / #696). Only explicit
+            // UnixSocketCapability entries emit network-outbound rules;
+            // generic FsCapability grants no longer implicitly grant
+            // `connect()`/`bind()` to sockets inside them. Directory
+            // grants use a non-recursive regex.
+            emit_unix_socket_rules(&mut profile, caps)?;
             if !localhost_ports.is_empty() {
                 // Allow system-socket for TCP (required for connect/bind)
                 profile.push_str(
@@ -609,44 +707,8 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
             // Block all network, then allow only localhost TCP to the proxy port.
             profile.push_str("(deny network*)\n");
             profile.push_str(MDNS_RULES);
-            // Same Unix socket logic as Blocked mode above. See: #687
-            for cap in caps.fs_capabilities() {
-                let (filter, resolved_str) = if cap.is_file {
-                    (
-                        "path",
-                        cap.resolved.to_str().ok_or_else(|| {
-                            NonoError::SandboxInit(format!(
-                                "path contains non-UTF-8 bytes: {}",
-                                cap.resolved.display()
-                            ))
-                        })?,
-                    )
-                } else {
-                    (
-                        "subpath",
-                        cap.resolved.to_str().ok_or_else(|| {
-                            NonoError::SandboxInit(format!(
-                                "path contains non-UTF-8 bytes: {}",
-                                cap.resolved.display()
-                            ))
-                        })?,
-                    )
-                };
-                let escaped = escape_path(resolved_str)?;
-                profile.push_str(&format!(
-                    "(allow network-outbound ({} \"{}\"))\n",
-                    filter, escaped
-                ));
-                if cap.original != cap.resolved {
-                    if let Some(orig_str) = cap.original.to_str() {
-                        let escaped_orig = escape_path(orig_str)?;
-                        profile.push_str(&format!(
-                            "(allow network-outbound ({} \"{}\"))\n",
-                            filter, escaped_orig
-                        ));
-                    }
-                }
-            }
+            // Unix socket grants (see Blocked branch above).
+            emit_unix_socket_rules(&mut profile, caps)?;
             profile.push_str(&format!(
                 "(allow network-outbound (remote tcp \"localhost:{}\"))\n",
                 port
@@ -1221,27 +1283,28 @@ mod tests {
         assert!(!profile.contains("(deny network*)"));
     }
 
-    /// Regression test for #687: Unix domain socket paths explicitly granted via
-    /// --allow-file must remain reachable in ProxyOnly and Blocked modes.
-    /// On macOS, connect(2) to a Unix socket is classified as network-outbound by
-    /// Seatbelt, so (deny network*) blocks it unless a per-path rule is emitted.
+    /// Regression test for #687 (+ #696 narrowing): Unix domain socket
+    /// paths explicitly granted via `--allow-unix-socket` must remain
+    /// reachable in ProxyOnly and Blocked modes. On macOS, connect(2) to
+    /// a Unix socket is classified as network-outbound by Seatbelt, so
+    /// `(deny network*)` blocks it unless a per-path rule is emitted.
+    /// Only explicit `UnixSocketCapability` entries trigger the emission
+    /// — generic `FsCapability` grants no longer implicitly do.
     #[test]
     fn test_generate_profile_unix_socket_allowed_in_proxy_only_mode() {
         let mut caps = CapabilitySet::new().proxy_only(54321);
-        caps.add_fs(FsCapability {
+        caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/tmp/test.sock"),
             resolved: PathBuf::from("/private/tmp/test.sock"),
-            access: AccessMode::ReadWrite,
-            is_file: true,
+            is_directory: false,
+            mode: crate::UnixSocketMode::Connect,
             source: CapabilitySource::User,
         });
 
         let profile = generate_profile(&caps).unwrap();
 
-        // Must deny all network and then allow the proxy port
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:54321\"))"));
-        // Must allow outbound to the Unix socket path (both original and resolved)
         assert!(
             profile.contains("(allow network-outbound (path \"/private/tmp/test.sock\"))"),
             "must allow network-outbound to resolved socket path"
@@ -1255,38 +1318,109 @@ mod tests {
     #[test]
     fn test_generate_profile_unix_socket_allowed_in_blocked_mode() {
         let mut caps = CapabilitySet::new().block_network();
-        caps.add_fs(FsCapability {
+        caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/var/run/app.sock"),
             resolved: PathBuf::from("/private/var/run/app.sock"),
-            access: AccessMode::ReadWrite,
-            is_file: true,
+            is_directory: false,
+            mode: crate::UnixSocketMode::ConnectBind,
             source: CapabilitySource::User,
         });
 
         let profile = generate_profile(&caps).unwrap();
 
         assert!(profile.contains("(deny network*)"));
+        // ConnectBind must emit BOTH network-outbound (connect) AND
+        // network-bind (bind) — they're distinct Seatbelt operations.
         assert!(
             profile.contains("(allow network-outbound (path \"/private/var/run/app.sock\"))"),
-            "must allow network-outbound to resolved socket path in blocked mode"
+            "must allow network-outbound to resolved socket path"
         );
         assert!(
             profile.contains("(allow network-outbound (path \"/var/run/app.sock\"))"),
-            "must allow network-outbound to original socket path in blocked mode"
+            "must allow network-outbound to original socket path"
         );
-        // Must NOT open up general TCP outbound
+        assert!(
+            profile.contains("(allow network-bind (path \"/private/var/run/app.sock\"))"),
+            "ConnectBind must also allow network-bind on resolved path"
+        );
+        assert!(
+            profile.contains("(allow network-bind (path \"/var/run/app.sock\"))"),
+            "ConnectBind must also allow network-bind on original path"
+        );
         assert!(!profile.contains("(allow network-outbound)\n"));
     }
 
+    /// Regression: Connect-only mode must emit `network-outbound` but
+    /// NOT `network-bind`. bind(2) stays denied by the base
+    /// `(deny network*)` clause — this is the separate-read-write
+    /// invariant at the socket layer.
     #[test]
-    fn test_generate_profile_unix_socket_subpath_for_directories() {
-        // Directory capabilities should emit (subpath "...") network-outbound rules
-        // so that Unix sockets anywhere inside the directory remain reachable.
-        // e.g. --allow /var/run/ should allow connecting to /var/run/app.sock.
+    fn test_generate_profile_unix_socket_connect_only_does_not_emit_bind() {
+        let mut caps = CapabilitySet::new().block_network();
+        caps.add_unix_socket(crate::UnixSocketCapability {
+            original: PathBuf::from("/var/run/client.sock"),
+            resolved: PathBuf::from("/private/var/run/client.sock"),
+            is_directory: false,
+            mode: crate::UnixSocketMode::Connect,
+            source: CapabilitySource::User,
+        });
+
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(
+            profile.contains("(allow network-outbound (path \"/private/var/run/client.sock\"))"),
+            "Connect mode must emit network-outbound"
+        );
+        assert!(
+            !profile.contains("(allow network-bind"),
+            "Connect-only mode must NOT emit any network-bind rule: {profile}"
+        );
+    }
+
+    /// Directory-form unix socket grants must emit a NON-RECURSIVE
+    /// regex — `[^/]+$` matches only direct children, not grandchildren.
+    /// #696 scope tightening.
+    #[test]
+    fn test_generate_profile_unix_socket_dir_emits_non_recursive_regex() {
         let mut caps = CapabilitySet::new().proxy_only(54321);
-        caps.add_fs(FsCapability {
+        caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/tmp/mydir"),
             resolved: PathBuf::from("/private/tmp/mydir"),
+            is_directory: true,
+            mode: crate::UnixSocketMode::ConnectBind,
+            source: CapabilitySource::User,
+        });
+
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(
+            profile.contains("(allow network-outbound (regex \"^/private/tmp/mydir/[^/]+$\"))"),
+            "directory unix socket grants must emit non-recursive regex: {profile}"
+        );
+        assert!(
+            profile.contains("(allow network-outbound (regex \"^/tmp/mydir/[^/]+$\"))"),
+            "symlinked original must also emit regex form"
+        );
+        // ConnectBind mode also emits network-bind with matching regex.
+        assert!(
+            profile.contains("(allow network-bind (regex \"^/private/tmp/mydir/[^/]+$\"))"),
+            "ConnectBind directory grant must emit network-bind regex"
+        );
+        assert!(
+            !profile.contains("(allow network-outbound (subpath"),
+            "directory unix socket grants must NOT use recursive subpath"
+        );
+    }
+
+    /// #696 core contract: a plain `FsCapability` grant on a socket path
+    /// must NOT trigger any `network-outbound` or `network-bind` rule.
+    /// Only explicit `UnixSocketCapability` grants do.
+    #[test]
+    fn test_generate_profile_fs_capability_does_not_grant_network_outbound() {
+        let mut caps = CapabilitySet::new().block_network();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/var/run"),
+            resolved: PathBuf::from("/private/var/run"),
             access: AccessMode::ReadWrite,
             is_file: false,
             source: CapabilitySource::User,
@@ -1294,31 +1428,65 @@ mod tests {
 
         let profile = generate_profile(&caps).unwrap();
 
+        assert!(profile.contains("(deny network*)"));
         assert!(
-            profile.contains("(allow network-outbound (subpath \"/private/tmp/mydir\"))"),
-            "directory caps must emit subpath network-outbound rules"
+            !profile.contains("(allow network-outbound (subpath \"/private/var/run\"))"),
+            "FsCapability must not implicitly grant network-outbound on its subpath"
         );
         assert!(
-            profile.contains("(allow network-outbound (subpath \"/tmp/mydir\"))"),
-            "directory caps must emit subpath rule for original (symlink) path too"
+            !profile.contains("(allow network-outbound (path \"/var/run\"))"),
+            "FsCapability must not implicitly grant network-outbound on its path"
         );
-        // Must NOT use the literal-path form for directories
         assert!(
-            !profile.contains("(allow network-outbound (path \"/private/tmp/mydir\"))"),
-            "directories must not use (path ...) — that is for literal file sockets"
+            !profile.contains("(allow network-bind"),
+            "FsCapability must not implicitly grant any network-bind rule"
         );
     }
 
     #[test]
+    fn test_regex_escape_metacharacters_wrapped_in_character_class() {
+        // Literal `.` in a directory name must be wrapped as `[.]`.
+        let escaped = regex_escape_path_for_seatbelt("/tmp/foo.bar-1000").unwrap();
+        assert_eq!(escaped, "/tmp/foo[.]bar-1000");
+    }
+
+    #[test]
+    fn test_regex_escape_handles_bracket_and_backslash_via_backslash_escape() {
+        // These chars can't appear literally inside `[ ]` so we fall
+        // back to Scheme-level `\\<c>` → regex-level `\<c>` → literal.
+        assert_eq!(
+            regex_escape_path_for_seatbelt("/tmp/foo[bar").unwrap(),
+            "/tmp/foo\\\\[bar"
+        );
+        assert_eq!(
+            regex_escape_path_for_seatbelt("/tmp/foo]bar").unwrap(),
+            "/tmp/foo\\\\]bar"
+        );
+        // Literal backslash: `\\\\\\\\` in Rust source (4 chars emitted)
+        // → Scheme reads `\\`, regex engine sees `\\` → matches literal `\`.
+        assert_eq!(
+            regex_escape_path_for_seatbelt("/tmp/foo\\bar").unwrap(),
+            "/tmp/foo\\\\\\\\bar"
+        );
+    }
+
+    #[test]
+    fn test_regex_escape_rejects_control_characters() {
+        // Control characters stay rejected — escape_path's policy too.
+        assert!(regex_escape_path_for_seatbelt("/tmp/foo\x00bar").is_err());
+        assert!(regex_escape_path_for_seatbelt("/tmp/foo\nbar").is_err());
+    }
+
+    #[test]
     fn test_generate_profile_unix_socket_rules_not_emitted_in_allow_all() {
-        // AllowAll already permits all network-outbound — no per-path socket rules
-        // should be emitted (they would be redundant noise).
+        // AllowAll already permits all network-outbound — emit_unix_socket_rules
+        // is only called in Blocked/ProxyOnly branches, so there's no per-path noise.
         let mut caps = CapabilitySet::new(); // default = AllowAll
-        caps.add_fs(FsCapability {
+        caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/tmp/test.sock"),
             resolved: PathBuf::from("/private/tmp/test.sock"),
-            access: AccessMode::ReadWrite,
-            is_file: true,
+            is_directory: false,
+            mode: crate::UnixSocketMode::Connect,
             source: CapabilitySource::User,
         });
 
