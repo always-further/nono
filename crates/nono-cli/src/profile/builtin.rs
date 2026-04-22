@@ -37,7 +37,7 @@ mod tests {
             .contains(&"$HOME/.cache/claude".to_string()));
         assert!(profile
             .filesystem
-            .allow
+            .allow_file
             .contains(&"$HOME/.claude.lock".to_string()));
     }
 
@@ -63,7 +63,7 @@ mod tests {
             .contains(&"$HOME/.cache/claude".to_string()));
         assert!(profile
             .filesystem
-            .allow
+            .allow_file
             .contains(&"$HOME/.claude.lock".to_string()));
     }
 
@@ -117,7 +117,7 @@ mod tests {
         );
         assert!(profile
             .filesystem
-            .allow
+            .allow_file
             .contains(&"$HOME/.claude.lock".to_string()));
     }
 

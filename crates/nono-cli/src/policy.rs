@@ -1476,7 +1476,7 @@ mod tests {
             .contains(&"$HOME/Library/Keychains/metadata.keychain-db".to_string()));
         assert!(profile
             .filesystem
-            .allow
+            .allow_file
             .contains(&"$HOME/.claude.lock".to_string()));
     }
 
