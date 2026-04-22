@@ -620,11 +620,16 @@ impl CapabilitySetExt for CapabilitySet {
         add_cli_overrides(&mut caps, args, allow_parent_of_protected)?;
 
         // Expand profile-level override_deny paths for finalize_caps.
-        // Missing matching grants must fail closed in apply_deny_overrides
-        // rather than silently dropping the override.
+        // Existing override targets must fail closed in apply_deny_overrides
+        // when they lack a matching user-intent grant. Non-existent paths are
+        // skipped here to preserve platform-specific built-in profiles whose
+        // grants are intentionally absent on other OSes.
         let mut profile_overrides = Vec::with_capacity(profile.policy.override_deny.len());
         for path_template in &profile.policy.override_deny {
-            profile_overrides.push(expand_vars(path_template, workdir)?);
+            let path = expand_vars(path_template, workdir)?;
+            if path.exists() {
+                profile_overrides.push(path);
+            }
         }
 
         finalize_caps(
