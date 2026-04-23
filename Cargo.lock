@@ -2277,7 +2277,6 @@ dependencies = [
  "hyper 1.9.0",
  "hyper-rustls",
  "hyper-util",
- "keyring",
  "nono",
  "rustls",
  "rustls-pemfile",

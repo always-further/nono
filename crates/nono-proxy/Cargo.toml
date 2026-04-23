@@ -11,6 +11,12 @@ description = "Network filtering proxy for the nono sandbox"
 keywords = ["sandbox", "security", "proxy", "network"]
 categories = ["network-programming", "web-programming"]
 
+[features]
+default = []
+# Enables OS system keyring access (macOS Keychain / Linux Secret Service).
+# nono-cli controls this for the full binary build.
+system-keyring = ["nono/system-keyring"]
+
 [dependencies]
 nono = { version = "0.37.1", path = "../nono" }
 tokio.workspace = true
@@ -24,7 +30,6 @@ tracing.workspace = true
 zeroize.workspace = true
 sha2.workspace = true
 getrandom = "0.4"
-keyring = "3"
 base64 = "0.22"
 subtle = "2"
 url = "2"

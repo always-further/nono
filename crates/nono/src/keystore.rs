@@ -60,6 +60,7 @@ const KEYRING_URI_PREFIX: &str = "keyring://";
 const KEYRING_URI_MAX_LEN: usize = 1024;
 
 /// The prefix that `zalando/go-keyring` prepends to stored values.
+#[cfg(feature = "system-keyring")]
 const GO_KEYRING_PREFIX: &str = "go-keyring-base64:";
 
 /// Allowed value for the `?decode=` query parameter of a `keyring://` URI.
@@ -70,6 +71,7 @@ const KEYRING_DECODE_GO_KEYRING: &str = "go-keyring";
 /// Some tools wrap stored credentials in their own encoding. This enum
 /// represents the supported `?decode=` transforms that can be requested
 /// via the `keyring://` URI query string.
+#[cfg(feature = "system-keyring")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyringDecode {
     /// No transform — return the raw stored value.
@@ -479,12 +481,14 @@ fn validate_keyring_query(query: &str, full_uri: &str) -> Result<()> {
 }
 
 /// Parsed components of a `keyring://` URI.
+#[cfg(feature = "system-keyring")]
 struct KeyringUriParts<'a> {
     service: &'a str,
     account: &'a str,
     decode: KeyringDecode,
 }
 
+#[cfg(feature = "system-keyring")]
 fn parse_keyring_uri(uri: &str) -> Result<KeyringUriParts<'_>> {
     validate_keyring_uri(uri)?;
     let path = uri.strip_prefix(KEYRING_URI_PREFIX).ok_or_else(|| {
@@ -891,6 +895,7 @@ pub fn store_secret_file(path: &Path, secret: &str) -> Result<()> {
 /// intermediate heap allocations internally (e.g. during UTF-8 conversion)
 /// that are freed without being zeroed. This is a known limitation of the
 /// keyring crate that we cannot address from the caller side.
+#[cfg(feature = "system-keyring")]
 fn load_single_secret(service: &str, account: &str) -> Result<Zeroizing<String>> {
     let entry = keyring::Entry::new(service, account).map_err(|e| {
         NonoError::KeystoreAccess(format!(
@@ -923,6 +928,15 @@ fn load_single_secret(service: &str, account: &str) -> Result<Zeroizing<String>>
             e
         ))),
     }
+}
+
+#[cfg(not(feature = "system-keyring"))]
+fn load_single_secret(_service: &str, account: &str) -> Result<Zeroizing<String>> {
+    Err(NonoError::KeystoreAccess(format!(
+        "system keyring is not available (built without system-keyring feature); \
+         cannot load '{}'. Use env://, file://, or op:// credential references instead.",
+        account
+    )))
 }
 
 fn system_keystore_label() -> &'static str {
@@ -1087,6 +1101,7 @@ fn load_from_apple_password(uri: &str) -> Result<Zeroizing<String>> {
 ///
 /// If `?decode=go-keyring` is specified, the stored value is unwrapped from
 /// the `go-keyring-base64:` encoding used by `github.com/zalando/go-keyring`.
+#[cfg(feature = "system-keyring")]
 fn load_from_keyring_uri(uri: &str) -> Result<Zeroizing<String>> {
     let parts = parse_keyring_uri(uri)?;
     let redacted = redact_keyring_uri(uri);
@@ -1121,7 +1136,18 @@ fn load_from_keyring_uri(uri: &str) -> Result<Zeroizing<String>> {
     }
 }
 
+#[cfg(not(feature = "system-keyring"))]
+fn load_from_keyring_uri(uri: &str) -> Result<Zeroizing<String>> {
+    let redacted = redact_keyring_uri(uri);
+    Err(NonoError::KeystoreAccess(format!(
+        "system keyring is not available (built without system-keyring feature); \
+         cannot load '{}'. Use env://, file://, or op:// credential references instead.",
+        redacted
+    )))
+}
+
 /// Apply the requested post-load decoding to a keyring value.
+#[cfg(feature = "system-keyring")]
 fn apply_keyring_decode(
     raw: String,
     decode: KeyringDecode,

@@ -197,19 +197,30 @@ impl TrustKeyStore {
     fn contains(&self, service: &str, account: &str) -> Result<bool> {
         match self {
             Self::System => {
-                let entry = keyring::Entry::new(service, account).map_err(|e| {
-                    NonoError::KeystoreAccess(format!(
-                        "failed to access {}: {e}",
-                        system_keystore_label()
-                    ))
-                })?;
-                match entry.get_password() {
-                    Ok(_) => Ok(true),
-                    Err(keyring::Error::NoEntry) => Ok(false),
-                    Err(other) => Err(NonoError::KeystoreAccess(format!(
-                        "failed to access key '{account}' in {}: {other}",
-                        system_keystore_label()
-                    ))),
+                #[cfg(not(feature = "system-keyring"))]
+                {
+                    let _ = (service, account);
+                    return Err(NonoError::KeystoreAccess(
+                        "system keyring is not available (built without system-keyring feature)"
+                            .to_string(),
+                    ));
+                }
+                #[cfg(feature = "system-keyring")]
+                {
+                    let entry = keyring::Entry::new(service, account).map_err(|e| {
+                        NonoError::KeystoreAccess(format!(
+                            "failed to access {}: {e}",
+                            system_keystore_label()
+                        ))
+                    })?;
+                    match entry.get_password() {
+                        Ok(_) => Ok(true),
+                        Err(keyring::Error::NoEntry) => Ok(false),
+                        Err(other) => Err(NonoError::KeystoreAccess(format!(
+                            "failed to access key '{account}' in {}: {other}",
+                            system_keystore_label()
+                        ))),
+                    }
                 }
             }
             #[cfg(feature = "test-trust-overrides")]
@@ -221,25 +232,36 @@ impl TrustKeyStore {
     fn load(&self, service: &str, account: &str) -> Result<Zeroizing<String>> {
         match self {
             Self::System => {
-                let entry = keyring::Entry::new(service, account).map_err(|e| {
-                    NonoError::KeystoreAccess(format!(
-                        "failed to access {}: {e}",
-                        system_keystore_label()
-                    ))
-                })?;
-                entry
-                    .get_password()
-                    .map(Zeroizing::new)
-                    .map_err(|e| match e {
-                        keyring::Error::NoEntry => NonoError::SecretNotFound(format!(
-                            "key '{account}' not found in {}",
+                #[cfg(not(feature = "system-keyring"))]
+                {
+                    let _ = (service, account);
+                    return Err(NonoError::KeystoreAccess(
+                        "system keyring is not available (built without system-keyring feature)"
+                            .to_string(),
+                    ));
+                }
+                #[cfg(feature = "system-keyring")]
+                {
+                    let entry = keyring::Entry::new(service, account).map_err(|e| {
+                        NonoError::KeystoreAccess(format!(
+                            "failed to access {}: {e}",
                             system_keystore_label()
-                        )),
-                        other => NonoError::KeystoreAccess(format!(
-                            "failed to load key '{account}' from {}: {other}",
-                            system_keystore_label()
-                        )),
-                    })
+                        ))
+                    })?;
+                    entry
+                        .get_password()
+                        .map(Zeroizing::new)
+                        .map_err(|e| match e {
+                            keyring::Error::NoEntry => NonoError::SecretNotFound(format!(
+                                "key '{account}' not found in {}",
+                                system_keystore_label()
+                            )),
+                            other => NonoError::KeystoreAccess(format!(
+                                "failed to load key '{account}' from {}: {other}",
+                                system_keystore_label()
+                            )),
+                        })
+                }
             }
             #[cfg(feature = "test-trust-overrides")]
             Self::Directory(root) => {
@@ -270,18 +292,29 @@ impl TrustKeyStore {
     fn store(&self, service: &str, account: &str, secret: &str) -> Result<()> {
         match self {
             Self::System => {
-                let entry = keyring::Entry::new(service, account).map_err(|e| {
-                    NonoError::KeystoreAccess(format!(
-                        "failed to access {}: {e}",
-                        system_keystore_label()
-                    ))
-                })?;
-                entry.set_password(secret).map_err(|e| {
-                    NonoError::KeystoreAccess(format!(
-                        "failed to store key in {}: {e}",
-                        system_keystore_label()
-                    ))
-                })
+                #[cfg(not(feature = "system-keyring"))]
+                {
+                    let _ = (service, account, secret);
+                    return Err(NonoError::KeystoreAccess(
+                        "system keyring is not available (built without system-keyring feature)"
+                            .to_string(),
+                    ));
+                }
+                #[cfg(feature = "system-keyring")]
+                {
+                    let entry = keyring::Entry::new(service, account).map_err(|e| {
+                        NonoError::KeystoreAccess(format!(
+                            "failed to access {}: {e}",
+                            system_keystore_label()
+                        ))
+                    })?;
+                    entry.set_password(secret).map_err(|e| {
+                        NonoError::KeystoreAccess(format!(
+                            "failed to store key in {}: {e}",
+                            system_keystore_label()
+                        ))
+                    })
+                }
             }
             #[cfg(feature = "test-trust-overrides")]
             Self::Directory(root) => {
