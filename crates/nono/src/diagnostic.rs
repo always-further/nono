@@ -999,121 +999,11 @@ impl<'a> DiagnosticFormatter<'a> {
             lines.push("[nono]".to_string());
             self.format_follow_up_guidance(&mut lines, None);
         } else {
-            let policy_blocked = aggregate_denials_from(&all_denials, DenialReason::PolicyBlocked);
-            let insufficient_access =
-                aggregate_denials_from(&all_denials, DenialReason::InsufficientAccess);
-            let user_denied = aggregate_denials_from(&all_denials, DenialReason::UserDenied);
-            let rate_limited = aggregate_denials_from(&all_denials, DenialReason::RateLimited);
-            let backend_errors = aggregate_denials_from(&all_denials, DenialReason::BackendError);
-
-            let mut actionable = Vec::new();
-            actionable.extend(insufficient_access.iter().cloned());
-            actionable.extend(user_denied.iter().cloned());
-            actionable.extend(rate_limited.iter().cloned());
-            actionable.extend(backend_errors.iter().cloned());
-            let denial_count = policy_blocked.len()
-                + insufficient_access.len()
-                + user_denied.len()
-                + rate_limited.len()
-                + backend_errors.len();
-
-            if let Some(primary_denial) = actionable.first() {
-                self.format_primary_denial_guidance(&mut lines, primary_denial);
-            } else if let Some(primary_denial) = policy_blocked.first() {
-                self.format_primary_denial_guidance(&mut lines, primary_denial);
-            }
-
-            if denial_count > 1 {
-                lines.push("[nono]".to_string());
-
-                lines.push("[nono] Denied paths during this session:".to_string());
-
-                if !policy_blocked.is_empty() {
-                    for denial in &policy_blocked {
-                        lines.push(format!(
-                            "[nono]   {} ({}) - blocked by security policy",
-                            denial.path.display(),
-                            access_str(denial.access),
-                        ));
-                    }
-                }
-                if !insufficient_access.is_empty() {
-                    for denial in &insufficient_access {
-                        lines.push(format!(
-                            "[nono]   {} ({}) - path matched the sandbox, but the access mode was not granted",
-                            denial.path.display(),
-                            access_str(denial.access),
-                        ));
-                        if let Some(cap) =
-                            self.closest_covering_capability(&denial.path, denial.access)
-                        {
-                            lines.push(format!(
-                                "[nono]     closest grant: {} ({}, {})",
-                                cap.resolved.display(),
-                                access_str(cap.access),
-                                cap.source,
-                            ));
-                        }
-                    }
-                }
-                if !user_denied.is_empty() {
-                    for denial in &user_denied {
-                        lines.push(format!(
-                            "[nono]   {} ({}) - access declined at the prompt",
-                            denial.path.display(),
-                            access_str(denial.access),
-                        ));
-                    }
-                }
-                if !rate_limited.is_empty() {
-                    for denial in &rate_limited {
-                        lines.push(format!(
-                            "[nono]   {} ({}) - denied after too many approval requests",
-                            denial.path.display(),
-                            access_str(denial.access),
-                        ));
-                    }
-                }
-                if !backend_errors.is_empty() {
-                    for denial in &backend_errors {
-                        lines.push(format!(
-                            "[nono]   {} ({}) - denied because the approval backend failed",
-                            denial.path.display(),
-                            access_str(denial.access),
-                        ));
-                    }
-                }
-
-                lines.push("[nono]".to_string());
-            }
-
-            let has_policy_blocked = !policy_blocked.is_empty();
-            let has_user_denied = !user_denied.is_empty();
-            let has_insufficient_access = !insufficient_access.is_empty();
-
-            if denial_count > 1 {
-                if has_policy_blocked && actionable.is_empty() {
-                    lines.push(
-                        "[nono] Some paths are permanently restricted and cannot be granted with flags."
-                            .to_string(),
-                    );
-                } else if has_user_denied && !has_policy_blocked && !has_insufficient_access {
-                    lines.push(
-                        "[nono] Re-run the command and approve the prompt, or pre-grant the path with a flag below."
-                            .to_string(),
-                    );
-                } else if has_insufficient_access && !has_policy_blocked {
-                    lines.push(
-                        "[nono] Some paths were inside the sandbox, but the requested read/write mode was missing."
-                            .to_string(),
-                    );
-                } else if has_policy_blocked {
-                    lines.push(
-                        "[nono] Some paths are permanently restricted. Others can be fixed by granting the requested access mode."
-                            .to_string(),
-                    );
-                }
-            }
+            // Deduplicate by path, merging access modes. Classification into
+            // actionable vs. policy-blocked is done by the consolidated
+            // formatter using policy_explanations when available.
+            let deduped = dedupe_denials(&all_denials);
+            self.format_consolidated_denial_guidance(&mut lines, &deduped);
 
             // Show non-filesystem violations (mach-lookup, etc.) if any
             if !non_fs_violations.is_empty() {
@@ -1129,15 +1019,6 @@ impl<'a> DiagnosticFormatter<'a> {
         }
 
         lines.join("\n")
-    }
-
-    fn closest_covering_capability(
-        &self,
-        path: &Path,
-        requested: AccessMode,
-    ) -> Option<&crate::capability::FsCapability> {
-        self.closest_covering_capability_any(path)
-            .filter(|cap| !cap.access.contains(requested))
     }
 
     fn actionable_observed_path_hints(&self) -> Vec<ObservedPathHint> {
@@ -1303,91 +1184,123 @@ impl<'a> DiagnosticFormatter<'a> {
         );
     }
 
-    fn format_primary_denial_guidance(&self, lines: &mut Vec<String>, denial: &DenialRecord) {
-        lines.push("[nono] Sandbox denial:".to_string());
-        lines.push(format!(
-            "[nono]   {} ({})",
-            denial.path.display(),
-            access_str(denial.access),
-        ));
+    /// Render the consolidated denial block.
+    ///
+    /// Shows every denied path (truncated past `MAX_INLINE_LIST` entries) with
+    /// a `[permanently restricted]` marker for paths that are blocked by the
+    /// sensitive-path policy, and emits a single `Fix:` line combining the
+    /// `--read`/`--write`/`--allow` flags for all actionable denials.
+    ///
+    /// Classification: if a policy explanation with `reason == "sensitive_path"`
+    /// exists for a path, it is treated as policy-blocked and cannot be fixed
+    /// via flags. Everything else is actionable, including macOS Seatbelt
+    /// denials whose `DenialReason` defaults to `PolicyBlocked` (that reason
+    /// is over-broad on macOS — we trust the query_path result instead).
+    fn format_consolidated_denial_guidance(
+        &self,
+        lines: &mut Vec<String>,
+        denials: &[DenialRecord],
+    ) {
+        const MAX_INLINE_LIST: usize = 10;
 
-        // Look up policy explanation for this path
-        let explanation = self
-            .policy_explanations
-            .iter()
-            .find(|e| e.path == denial.path);
+        let total = denials.len();
+        let mut actionable: Vec<&DenialRecord> = Vec::new();
+        let mut policy_blocked: Vec<&DenialRecord> = Vec::new();
 
-        if let Some(expl) = explanation {
-            // Show inline policy details instead of asking user to run `nono why`
-            if let Some(ref details) = expl.details {
-                lines.push(format!("[nono]   {}", details));
-            }
-            if expl.reason == "sensitive_path" {
-                // Policy-blocked path: needs profile exception
-                lines.push("[nono]".to_string());
-                lines.push(
-                    "[nono] To override, create a user profile with policy.override_deny:"
-                        .to_string(),
-                );
-                lines.push("[nono]   ~/.config/nono/profiles/<name>.json:".to_string());
-                lines.push("[nono]   {".to_string());
-                lines.push(format!(
-                    "[nono]     \"policy\": {{ \"override_deny\": [\"{}\"] }},",
-                    denial.path.display()
-                ));
-                lines.push(format!(
-                    "[nono]     \"filesystem\": {{ \"{}\": [\"{}\"] }}",
-                    access_str(denial.access),
-                    denial.path.display()
-                ));
-                lines.push("[nono]   }".to_string());
-            } else if let Some(ref flag) = expl.suggested_flag {
-                lines.push(format!("[nono]   Fix: {}", flag));
-            }
-        } else {
-            // No policy explanation available — fall back to generic guidance
-            match denial.reason {
-                DenialReason::PolicyBlocked => {
-                    lines.push("[nono]   Blocked by security policy.".to_string());
-                }
-                DenialReason::InsufficientAccess => {
-                    if let Some(cap) = self.closest_covering_capability(&denial.path, denial.access)
-                    {
-                        lines.push(format!(
-                            "[nono]   Closest grant: {} ({}, {})",
-                            cap.resolved.display(),
-                            access_str(cap.access),
-                            cap.source,
-                        ));
-                    }
-                    lines.push(format!(
-                        "[nono]   Fix: {}",
-                        suggested_flag_for_path(&denial.path, denial.access)
-                    ));
-                }
-                DenialReason::UserDenied => {
-                    lines.push("[nono]   Access was declined at the prompt.".to_string());
-                    lines.push(format!(
-                        "[nono]   Fix: {}",
-                        suggested_flag_for_path(&denial.path, denial.access)
-                    ));
-                }
-                DenialReason::RateLimited => {
-                    lines.push("[nono]   Denied after too many approval requests.".to_string());
-                    lines.push(format!(
-                        "[nono]   Fix: {}",
-                        suggested_flag_for_path(&denial.path, denial.access)
-                    ));
-                }
-                DenialReason::BackendError => {
-                    lines.push("[nono]   Approval backend failed.".to_string());
-                    lines.push(format!(
-                        "[nono]   Fix: {}",
-                        suggested_flag_for_path(&denial.path, denial.access)
-                    ));
-                }
+        for denial in denials {
+            if self.is_denial_policy_blocked(denial) {
+                policy_blocked.push(denial);
+            } else {
+                actionable.push(denial);
             }
         }
+
+        let plural_s = if total == 1 { "" } else { "s" };
+        lines.push(format!(
+            "[nono] Sandbox denial: {} path{} blocked.",
+            total, plural_s
+        ));
+
+        for (idx, denial) in denials.iter().enumerate() {
+            if idx >= MAX_INLINE_LIST {
+                lines.push(format!("[nono]   … and {} more", total - idx));
+                break;
+            }
+            let suffix = if self.is_denial_policy_blocked(denial) {
+                "  [permanently restricted]"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "[nono]   {} ({}){}",
+                denial.path.display(),
+                access_str(denial.access),
+                suffix,
+            ));
+        }
+
+        if !actionable.is_empty() {
+            let flags: Vec<String> = actionable
+                .iter()
+                .map(|d| self.suggested_flag_for_denial(d))
+                .collect();
+            lines.push(format!("[nono] Fix: {}", flags.join(" ")));
+        }
+
+        if !policy_blocked.is_empty() {
+            let n = policy_blocked.len();
+            let (subject, verb) = if n == 1 {
+                ("1 path is", "")
+            } else {
+                ("paths are", "")
+            };
+            let count_prefix = if n == 1 {
+                String::from(subject)
+            } else {
+                format!("{} {}", n, subject)
+            };
+            lines.push("[nono]".to_string());
+            lines.push(format!(
+                "[nono] {}{} permanently restricted — override via a user profile with policy.override_deny.",
+                count_prefix, verb,
+            ));
+        }
+    }
+
+    /// Return true when the denial cannot be fixed by a path flag alone —
+    /// i.e. the path is blocked by the sensitive-path policy and requires a
+    /// profile with `policy.override_deny`.
+    fn is_denial_policy_blocked(&self, denial: &DenialRecord) -> bool {
+        if let Some(expl) = self
+            .policy_explanations
+            .iter()
+            .find(|e| e.path == denial.path)
+        {
+            return expl.reason == "sensitive_path";
+        }
+        // No explanation (e.g. Linux seccomp path without a matching lookup):
+        // trust the DenialRecord reason.
+        denial.reason == DenialReason::PolicyBlocked
+    }
+
+    /// Build the CLI flag suggestion for a single denial. Prefers the
+    /// explanation's `suggested_flag` (which knows about parent-directory
+    /// canonicalization) and falls back to a local computation otherwise.
+    fn suggested_flag_for_denial(&self, denial: &DenialRecord) -> String {
+        if let Some(flag) = self
+            .policy_explanations
+            .iter()
+            .find(|e| e.path == denial.path)
+            .and_then(|e| e.suggested_flag.clone())
+        {
+            // explanations' suggested_flag is of the form "--read /path".
+            // Strip any leading "Fix: " that callers may have prepended.
+            return flag
+                .strip_prefix("Fix: ")
+                .map(str::to_string)
+                .unwrap_or(flag);
+        }
+        suggested_flag_for_path(&denial.path, denial.access)
     }
 
     fn format_grant_help(&self, lines: &mut Vec<String>) {
@@ -1649,25 +1562,48 @@ fn format_non_fs_guidance(lines: &mut Vec<String>, violations: &[&SandboxViolati
     }
 }
 
-/// Aggregate denial records by reason, deduplicating by path and merging access modes.
-fn aggregate_denials_from(denials: &[DenialRecord], reason: DenialReason) -> Vec<DenialRecord> {
-    let mut aggregated = std::collections::BTreeMap::<PathBuf, AccessMode>::new();
+/// Deduplicate denials by path, merging access modes. When the same path
+/// appears with multiple reasons, the most restrictive reason wins
+/// (`PolicyBlocked` > `InsufficientAccess` > `UserDenied` > `RateLimited` >
+/// `BackendError`). Output is sorted by path for stable rendering.
+fn dedupe_denials(denials: &[DenialRecord]) -> Vec<DenialRecord> {
+    let mut by_path = std::collections::BTreeMap::<PathBuf, (AccessMode, DenialReason)>::new();
 
-    for denial in denials.iter().filter(|d| d.reason == reason) {
-        aggregated
+    for denial in denials {
+        by_path
             .entry(denial.path.clone())
-            .and_modify(|existing| *existing = merge_access_modes(*existing, denial.access))
-            .or_insert(denial.access);
+            .and_modify(|(access, reason)| {
+                *access = merge_access_modes(*access, denial.access);
+                *reason = stricter_reason(reason.clone(), denial.reason.clone());
+            })
+            .or_insert_with(|| (denial.access, denial.reason.clone()));
     }
 
-    aggregated
+    by_path
         .into_iter()
-        .map(|(path, access)| DenialRecord {
+        .map(|(path, (access, reason))| DenialRecord {
             path,
             access,
-            reason: reason.clone(),
+            reason,
         })
         .collect()
+}
+
+fn stricter_reason(a: DenialReason, b: DenialReason) -> DenialReason {
+    fn rank(r: &DenialReason) -> u8 {
+        match r {
+            DenialReason::PolicyBlocked => 5,
+            DenialReason::InsufficientAccess => 4,
+            DenialReason::UserDenied => 3,
+            DenialReason::RateLimited => 2,
+            DenialReason::BackendError => 1,
+        }
+    }
+    if rank(&a) >= rank(&b) {
+        a
+    } else {
+        b
+    }
 }
 
 /// Map a Seatbelt operation name to an `AccessMode`.
@@ -2635,8 +2571,11 @@ mod tests {
             .with_denials(&denials);
         let output = formatter.format_footer(1);
 
-        assert!(output.contains("/etc/shadow"));
-        assert!(output.contains("Blocked by security policy"));
+        assert!(output.contains("Sandbox denial: 1 path blocked."));
+        assert!(output.contains("/etc/shadow (read)  [permanently restricted]"));
+        assert!(output.contains("permanently restricted — override via a user profile"));
+        // Policy-blocked paths cannot be fixed with a path flag.
+        assert!(!output.contains("Fix: --read /etc/shadow"));
         assert!(!output.contains("--allow <path>"));
     }
 
@@ -2656,9 +2595,11 @@ mod tests {
             .with_denials(&denials);
         let output = formatter.format_footer(1);
 
+        assert!(output.contains("Sandbox denial: 1 path blocked."));
         assert!(output.contains(&denied_path.display().to_string()));
-        assert!(output.contains("Access was declined at the prompt."));
         assert!(output.contains(&format!("Fix: --read-file {}", denied_path.display())));
+        // User-denied paths are actionable, not policy-blocked.
+        assert!(!output.contains("[permanently restricted]"));
     }
 
     #[test]
@@ -2681,11 +2622,19 @@ mod tests {
             .with_denials(&denials);
         let output = formatter.format_footer(1);
 
-        assert!(output.contains("/etc/shadow"));
-        assert!(output.contains("/home/user/data.txt"));
-        assert!(output.contains("blocked by security policy"));
-        assert!(output.contains("access declined at the prompt"));
-        assert!(output.contains("Some paths are permanently restricted."));
+        assert!(output.contains("Sandbox denial: 2 paths blocked."));
+        // Policy-blocked path gets the marker.
+        assert!(output.contains("/etc/shadow (read)  [permanently restricted]"));
+        // Actionable path is listed without the marker.
+        assert!(output.contains("/home/user/data.txt (read)"));
+        assert!(!output.contains("/home/user/data.txt (read)  [permanently restricted]"));
+        // Consolidated Fix line covers only the actionable path. The suggested
+        // target falls back to the nearest existing parent directory since the
+        // path itself doesn't exist in the test environment.
+        assert!(output.contains("Fix: --read "));
+        assert!(!output.contains("Fix: --read /etc/shadow"));
+        // The permanent-restriction note appears once for the policy-blocked path.
+        assert!(output.contains("1 path is permanently restricted"));
     }
 
     #[test]
@@ -2711,6 +2660,76 @@ mod tests {
         let count = output.matches("/etc/shadow").count();
         assert_eq!(count, 1, "Path should be deduplicated");
         assert!(!output.contains("Denied paths during this session:"));
+    }
+
+    #[test]
+    fn test_supervised_consolidated_fix_combines_all_actionable() {
+        let caps = make_test_caps();
+        let dir = tempdir().expect("tempdir should be created");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, "a").expect("write a");
+        std::fs::write(&b, "b").expect("write b");
+        let denials = vec![
+            DenialRecord {
+                path: a.clone(),
+                access: AccessMode::Read,
+                reason: DenialReason::UserDenied,
+            },
+            DenialRecord {
+                path: b.clone(),
+                access: AccessMode::Write,
+                reason: DenialReason::InsufficientAccess,
+            },
+        ];
+        let formatter = DiagnosticFormatter::new(&caps)
+            .with_mode(DiagnosticMode::Supervised)
+            .with_denials(&denials);
+        let output = formatter.format_footer(1);
+
+        // Single Fix line covers both paths.
+        let fix_lines: Vec<&str> = output
+            .lines()
+            .filter(|line| line.contains("Fix: "))
+            .collect();
+        assert_eq!(
+            fix_lines.len(),
+            1,
+            "expected one consolidated Fix line: {output}"
+        );
+        assert!(fix_lines[0].contains(&format!("--read-file {}", a.display())));
+        assert!(fix_lines[0].contains(&format!("--write-file {}", b.display())));
+        assert!(!output.contains("[permanently restricted]"));
+    }
+
+    #[test]
+    fn test_supervised_consolidated_list_truncates_beyond_cap() {
+        // Zero-pad the index so paths sort in numeric order.
+        let caps = make_test_caps();
+        let denials: Vec<DenialRecord> = (0..15)
+            .map(|i| DenialRecord {
+                path: PathBuf::from(format!("/tmp/denied-{i:02}")),
+                access: AccessMode::Read,
+                reason: DenialReason::UserDenied,
+            })
+            .collect();
+        let formatter = DiagnosticFormatter::new(&caps)
+            .with_mode(DiagnosticMode::Supervised)
+            .with_denials(&denials);
+        let output = formatter.format_footer(1);
+
+        assert!(output.contains("Sandbox denial: 15 paths blocked."));
+        // First 10 paths listed, remaining 5 collapsed.
+        assert!(output.contains("/tmp/denied-00 "));
+        assert!(output.contains("/tmp/denied-09 "));
+        assert!(!output.contains("/tmp/denied-10 "));
+        assert!(output.contains("… and 5 more"));
+        // Fix line still covers all 15 paths.
+        assert_eq!(
+            output.lines().filter(|l| l.contains("Fix: ")).count(),
+            1,
+            "expected one consolidated Fix line"
+        );
     }
 
     #[test]
@@ -2743,8 +2762,13 @@ mod tests {
             .with_denials(&denials);
         let output = formatter.format_footer(1);
 
-        assert!(output.contains("/tmp/flood"));
-        assert!(output.contains("too many approval requests"));
+        assert!(output.contains("Sandbox denial: 1 path blocked."));
+        assert!(output.contains("/tmp/flood (read)"));
+        // Rate-limited denials are still actionable via a path flag. The
+        // suggested target falls back to the nearest existing parent since
+        // /tmp/flood itself doesn't exist.
+        assert!(output.contains("Fix: --read "));
+        assert!(!output.contains("[permanently restricted]"));
     }
 
     #[test]
@@ -2776,10 +2800,9 @@ mod tests {
             .with_denials(&denials);
         let output = formatter.format_footer(1);
 
-        assert!(output.contains(&format!(
-            "Closest grant: {} (read, group:project_read)",
-            dir_path.display()
-        )));
+        // The "Closest grant" hint moved out of the consolidated footer;
+        // users can recover it with `nono why` if they want the detail.
+        assert!(!output.contains("Closest grant:"));
         assert!(output.contains(&format!("Fix: --write-file {}", denied_path.display())));
         assert!(!output.contains("Denied paths during this session:"));
     }

@@ -1035,7 +1035,13 @@ pub fn execute_supervised(
 
             #[cfg(target_os = "macos")]
             let sandbox_log_collector = if supervisor.is_some() {
-                crate::sandbox_log::SandboxLogCollector::start(child.as_raw())
+                let command_name = config
+                    .command
+                    .first()
+                    .and_then(|c| std::path::Path::new(c).file_name())
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string);
+                crate::sandbox_log::SandboxLogCollector::start(child.as_raw(), command_name)
             } else {
                 None
             };
@@ -1605,10 +1611,16 @@ extern "C" fn forward_signal(sig: libc::c_int) {
                 libc::kill(child_raw, sig);
             }
         }
-    } else {
+    } else if matches!(
+        sig,
+        libc::SIGINT | libc::SIGTERM | libc::SIGHUP | libc::SIGQUIT
+    ) {
         // No child to forward to (e.g. during the post-exit profile-save prompt).
-        // Restore the default handler and re-raise so the signal takes its
-        // default action (terminating nono) rather than being swallowed.
+        // For termination signals, restore the default handler and re-raise so
+        // the signal takes its default action (terminating nono) rather than
+        // being swallowed. Non-termination signals (SIGWINCH, SIGUSR1) are
+        // ignored here — their forwarding targets (PTY master, pause pipe) are
+        // already torn down.
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
             libc::raise(sig);
