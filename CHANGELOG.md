@@ -1,5 +1,95 @@
 # Changelog
 
+## [0.40.0] - 2026-04-23
+
+### Bug Fixes
+
+- *(sandbox)* Downgrade unsafe seatbelt rules log from warn to info
+
+- Add unsafe_macos_seatbelt_rules to test Profile initializers
+
+- Address review feedback
+
+- *(reverse-proxy)* Disallow insecure http upstreams for unspecified local addresses
+
+- *(proxy)* Support local-only http upstreams safely
+
+- *(proxy)* Restrict insecure http upstreams to local-only targets
+
+- *(policy)* Update tests and claude-no-kc for allow_file move
+
+- *(policy)* Move .claude.lock to allow_file for least-privilege access
+
+- *(cli)* Skip non-existent profile deny overrides
+
+
+### Build
+
+- *(docker)* Harden user and create work dir
+
+
+### Dependencies
+
+- *(deps)* Update rustls-webpki
+
+- *(deps)* Bump rustls-webpki from 0.103.12 to 0.103.13
+
+
+### Documentation
+
+- *(agents)* Update agent contribution policy and project overview
+
+- Add documentation for agents and claude
+
+
+### Features
+
+- Add unsafe_macos_seatbelt_rules profile field
+
+- *(reverse-proxy)* Add http upstream support
+
+- *(audit)* Refine audit path derivation and documentation
+
+- *(audit)* Add audit attestation for session merkle roots
+
+- *(audit)* Record exec identity and unify audit integrity
+
+- *(audit)* Record executable identity and improve integrity
+
+- *(audit)* Add audit verify command for integrity checks
+
+- *(audit)* Add tamper-evident audit log integrity
+
+- *(rollback)* Refine snapshot exclusion and path tracking
+
+- *(audit)* Capture pre/post merkle roots in audit trail
+
+
+### Miscellaneous
+
+- *(cli)* Make path and policy messages informational
+
+- *(test-env)* Isolate integration tests from audit artifacts
+
+
+### Refactoring
+
+- *(docker)* Move dockerfiles and update build workflow
+
+- *(policy)* Enforce stricter policy for overrides, rollback
+
+
+### Testing
+
+- Improve profile and edge case test accuracy
+
+- *(profiles)* Add tests for missing codex profile
+
+
+### Style
+
+- Run cargo fmt
+
 ## [0.39.0] - 2026-04-21
 
 ### Bug Fixes
