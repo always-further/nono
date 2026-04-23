@@ -56,25 +56,25 @@ pub(crate) fn offer_save_run_profile(
     if let Some(existing_profile) = compared_profile
         .filter(|name| profile::is_valid_profile_name(name) && profile::is_user_override(name))
     {
-        let (prompt_text, default_yes) = if has_overrides {
-            (
-                format!(
-                    "Update existing user profile '{}' with these paths, including policy overrides? [y/N] ",
+        let confirmed = if has_overrides {
+            confirm_typed_word(
+                &format!(
+                    "Update existing user profile '{}' with these paths, including policy overrides? Type 'override' to confirm: ",
                     existing_profile
                 ),
-                false,
-            )
+                "override",
+            )?
         } else {
-            (
-                format!(
+            confirm(
+                &format!(
                     "Update existing user profile '{}' with denied paths? [Y/n] ",
                     existing_profile
                 ),
                 true,
-            )
+            )?
         };
 
-        if confirm(&prompt_text, default_yes)? {
+        if confirmed {
             let prepared = prepare_profile_save_from_patch(
                 &patch,
                 &cmd_name,
@@ -83,7 +83,6 @@ pub(crate) fn offer_save_run_profile(
             )?;
             write_profile(&prepared)?;
             print_profile_save(&prepared, command);
-            return Ok(());
         }
         return Ok(());
     }
@@ -115,14 +114,11 @@ pub(crate) fn offer_save_run_profile(
         return Ok(());
     }
 
-    if compared_profile
-        .filter(|name| profile::is_valid_profile_name(name) && !profile::is_user_override(name))
-        .is_some_and(|name| name == profile_name)
-    {
+    if would_shadow_builtin(profile_name) {
         prompt_println(&format!(
             "{}",
             format!(
-                "Cannot save '{}' as a derived user profile because it would shadow the built-in profile it extends. Choose a different name.",
+                "Cannot save '{}' as a user profile because it would shadow the built-in profile of the same name. Choose a different name.",
                 profile_name
             )
             .red()
@@ -131,9 +127,9 @@ pub(crate) fn offer_save_run_profile(
     }
 
     if has_overrides
-        && !confirm(
-            "Save profile with the policy overrides shown above? [y/N] ",
-            false,
+        && !confirm_typed_word(
+            "Save profile with the policy overrides shown above? Type 'override' to confirm: ",
+            "override",
         )?
     {
         return Ok(());
@@ -169,10 +165,37 @@ pub(crate) fn confirm(prompt: &str, default_yes: bool) -> Result<bool> {
     Ok(trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes"))
 }
 
+/// Confirm an irreversible/security-sensitive action by requiring the user to
+/// type an exact word (case-insensitive). A single `y` is not accepted.
+pub(crate) fn confirm_typed_word(prompt: &str, expected: &str) -> Result<bool> {
+    prompt_print(prompt, &[]);
+
+    let input = read_input_line()?;
+    Ok(input.trim().eq_ignore_ascii_case(expected))
+}
+
 pub(crate) fn suggested_profile_name(compared_profile: Option<&str>) -> Option<String> {
     compared_profile
         .filter(|name| profile::is_valid_profile_name(name) && !profile::is_user_override(name))
         .map(|name| format!("{}-local", name))
+}
+
+/// Return true when writing `~/.config/nono/profiles/<name>.json` would shadow
+/// a built-in profile of the same name. User files are loaded in preference to
+/// built-ins, so saving under a built-in's name silently reroutes all future
+/// `--profile <name>` invocations to the user file.
+fn would_shadow_builtin(profile_name: &str) -> bool {
+    // If a user file already exists at this name, the user has already chosen
+    // to override it — writing there is an explicit update, not a new shadow.
+    if profile::is_user_override(profile_name) {
+        return false;
+    }
+    match crate::policy::load_embedded_policy() {
+        Ok(policy) => policy.profiles.contains_key(profile_name),
+        // Treat load failure as fail-safe: refuse to save rather than risk
+        // silently shadowing a built-in we couldn't enumerate.
+        Err(_) => true,
+    }
 }
 
 pub(crate) fn write_profile(prepared: &PreparedProfileSave) -> Result<()> {
@@ -257,7 +280,7 @@ pub(crate) fn print_patch_preview(patch: &profile::Profile) {
         for path in *paths {
             let is_override = patch.policy.override_deny.contains(path);
             if is_override {
-                prompt_println(&format!("  {}  {} ({})", "⚠".yellow(), path, label));
+                prompt_println(&format!("  {}  {} ({})", "⚠".red(), path, label));
             } else {
                 prompt_println(&format!("  {}  ({})", path, label));
             }
@@ -267,12 +290,12 @@ pub(crate) fn print_patch_preview(patch: &profile::Profile) {
     if !patch.policy.override_deny.is_empty() {
         prompt_println(&format!(
             "{}",
-            "\n[nono] ⚠  The marked paths are normally blocked by security policy.".yellow()
+            "\n[nono] ⚠  The marked paths are normally blocked by security policy.".red()
         ));
         prompt_println(&format!(
             "{}",
             "[nono]    Saving them adds policy.override_deny, which weakens sandbox protection."
-                .yellow()
+                .red()
         ));
     }
 }
@@ -314,21 +337,33 @@ fn open_tty_writer() -> Option<std::fs::File> {
 fn prompt_read_line() -> Result<String> {
     let mut input = String::new();
     let tty = open_tty_prompt_device()?;
-    force_prompt_terminal_mode(&tty);
+    let saved_termios = force_prompt_terminal_mode(&tty);
     let mut reader = std::io::BufReader::new(tty);
-    reader
+    let read_result = reader
         .read_line(&mut input)
-        .map_err(|e| NonoError::LearnError(format!("Failed to read input: {}", e)))?;
+        .map_err(|e| NonoError::LearnError(format!("Failed to read input: {}", e)));
+    if let Some(saved) = saved_termios {
+        let _ = nix::sys::termios::tcsetattr(
+            reader.get_ref(),
+            nix::sys::termios::SetArg::TCSANOW,
+            &saved,
+        );
+    }
+    read_result?;
     Ok(input)
 }
 
-fn force_prompt_terminal_mode(tty: &std::fs::File) {
-    let Ok(mut termios) = nix::sys::termios::tcgetattr(tty) else {
-        return;
+fn force_prompt_terminal_mode(tty: &std::fs::File) -> Option<nix::sys::termios::Termios> {
+    let Ok(original) = nix::sys::termios::tcgetattr(tty) else {
+        return None;
     };
+    let mut termios = original.clone();
     configure_prompt_termios(&mut termios);
-    let _ = nix::sys::termios::tcsetattr(tty, nix::sys::termios::SetArg::TCSANOW, &termios);
+    if nix::sys::termios::tcsetattr(tty, nix::sys::termios::SetArg::TCSANOW, &termios).is_err() {
+        return None;
+    }
     let _ = nix::sys::termios::tcflush(tty, nix::sys::termios::FlushArg::TCIFLUSH);
+    Some(original)
 }
 
 pub(crate) fn configure_prompt_termios(termios: &mut nix::sys::termios::Termios) {
@@ -711,5 +746,51 @@ mod tests {
                 "~/.claude/settings.json".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn would_shadow_builtin_flags_known_builtin_names() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp_home = TempDir::new().expect("temp home");
+        let temp_config = TempDir::new().expect("temp config");
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", temp_home.path().to_str().expect("home path")),
+            (
+                "XDG_CONFIG_HOME",
+                temp_config.path().to_str().expect("config path"),
+            ),
+        ]);
+
+        // `claude-code` is a known built-in; writing to that user path would
+        // shadow it.
+        assert!(would_shadow_builtin("claude-code"));
+        // Names that don't exist as built-ins are fine.
+        assert!(!would_shadow_builtin("my-unique-saved-profile"));
+    }
+
+    #[test]
+    fn would_shadow_builtin_allows_update_of_existing_user_override() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp_home = TempDir::new().expect("temp home");
+        let temp_config = TempDir::new().expect("temp config");
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", temp_home.path().to_str().expect("home path")),
+            (
+                "XDG_CONFIG_HOME",
+                temp_config.path().to_str().expect("config path"),
+            ),
+        ]);
+
+        // Pre-create a user override of a built-in. A subsequent save to the
+        // same name is an update, not a new shadow, and must be allowed.
+        let path = profile::get_user_profile_path("claude-code").expect("profile path");
+        std::fs::create_dir_all(path.parent().expect("dir")).expect("mkdir");
+        std::fs::write(
+            &path,
+            "{\"meta\":{\"name\":\"claude-code\",\"version\":\"1.0.0\"}}\n",
+        )
+        .expect("write");
+
+        assert!(!would_shadow_builtin("claude-code"));
     }
 }

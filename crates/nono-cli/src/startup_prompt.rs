@@ -99,6 +99,10 @@ struct StartupPromptTerminalGuard {
 
 impl StartupPromptTerminalGuard {
     fn pause_without_pty(child: Pid) -> Self {
+        // SIGSTOP freezes the direct child so its output doesn't interleave with
+        // the prompt. Descendants keep running, and the child's network peers
+        // may time out if the prompt is answered "no". Acceptable tradeoff:
+        // the prompt only fires after the startup timeout already elapsed.
         let child_stopped = signal::kill(child, Signal::SIGSTOP).is_ok();
         if child_stopped {
             std::thread::sleep(Duration::from_millis(20));
