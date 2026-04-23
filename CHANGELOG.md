@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.40.1] - 2026-04-23
+
+### Bug Fixes
+
+- *(policy)* Improve unlink rules; add claude read path
+
+
+### Miscellaneous
+
+- Add gitignore entries and hiring badge
+
 ## [0.40.0] - 2026-04-23
 
 ### Bug Fixes
