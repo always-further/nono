@@ -8,6 +8,8 @@
 
 # misc
 proj/
+.worktrees
+.nono
 
 
 # Library tests

@@ -17,6 +17,9 @@
   <a href="https://discord.gg/pPcjYzGvbS">
     <img src="https://img.shields.io/badge/Chat-Join%20Discord-7289da?style=for-the-badge&logo=discord&logoColor=white" alt="Join Discord"/>
   </a>
+   <a href="https://alwaysfurther.ai/careers">
+      <img src="https://img.shields.io/badge/We're_Hiring-Join_the_team-ff4f00?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="We're hiring"/>
+  </a>
   <a href="https://github.com/marketplace/actions/agent-sign">
     <img src="https://img.shields.io/badge/Secure_Action-agent--sign-2088FF?style=for-the-badge&logo=github-actions&logoColor=white" alt="agent-sign GitHub Action"/>
   </a>
