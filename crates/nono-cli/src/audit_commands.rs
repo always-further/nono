@@ -10,6 +10,7 @@ use crate::audit_session::load_session;
 use crate::cli::{
     AuditArgs, AuditCleanupArgs, AuditCommands, AuditListArgs, AuditShowArgs, AuditVerifyArgs,
 };
+use crate::command_display::format_command_line;
 use crate::rollback_session::{discover_sessions, remove_session, SessionInfo};
 use crate::theme;
 use colored::Colorize;
@@ -381,7 +382,7 @@ fn cmd_show(args: AuditShowArgs) -> Result<()> {
     eprintln!(
         "  Command:  {}",
         theme::fg(
-            &session.metadata.command.join(" "),
+            &format_command_line(&session.metadata.command),
             theme::current().subtext
         )
     );
@@ -749,7 +750,7 @@ fn shorten_home(path: &Path) -> String {
 }
 
 fn truncate_command(cmd: &[String], max_len: usize) -> String {
-    let full = cmd.join(" ");
+    let full = format_command_line(cmd);
     if full.len() <= max_len {
         full
     } else {

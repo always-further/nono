@@ -1,3 +1,4 @@
+use crate::command_display::format_command_line;
 use crate::{profile, query_ext};
 use colored::Colorize;
 use nono::diagnostic::{ErrorObservation, PolicyExplanation};
@@ -321,7 +322,7 @@ pub(crate) fn print_profile_save(prepared: &PreparedProfileSave, command: &[Stri
         "Run with: {} {} -- {}",
         "nono run --profile".bold(),
         prepared.profile_name,
-        command.join(" ")
+        format_command_line(command)
     ));
 }
 

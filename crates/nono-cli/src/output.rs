@@ -4,6 +4,7 @@
 //!
 //! All colors are drawn from the active theme via `theme::current()`.
 
+use crate::command_display::format_command_line;
 use crate::theme::{self, badge, fg, Rgb};
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, NetworkMode, NonoError, Result};
@@ -539,7 +540,7 @@ pub fn print_dry_run(
     eprintln!(
         "  {} {}",
         fg("$", t.subtext),
-        fg(&command.join(" "), t.text)
+        fg(&format_command_line(&command), t.text)
     );
 }
 
