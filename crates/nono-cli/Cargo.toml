@@ -73,6 +73,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5.8"
 tempfile = "3"
 vt100 = "0.16.2"
+shlex = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", features = ["process", "signal", "fs", "user", "term"] }

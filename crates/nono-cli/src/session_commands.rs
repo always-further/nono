@@ -4,6 +4,7 @@
 //! `nono inspect`, and `nono prune`.
 
 use crate::cli::{AttachArgs, DetachArgs, InspectArgs, LogsArgs, PruneArgs, PsArgs, StopArgs};
+use crate::command_display::format_command_line;
 use crate::session::{self, SessionAttachment, SessionRecord, SessionStatus};
 use colored::Colorize;
 use nono::{NonoError, Result};
@@ -298,7 +299,7 @@ pub fn run_inspect(args: &InspectArgs) -> Result<()> {
     if let Some(code) = record.exit_code {
         println!("Exit code:  {}", code);
     }
-    println!("Command:    {}", record.command.join(" "));
+    println!("Command:    {}", format_command_line(&record.command));
     if let Some(ref profile) = record.profile {
         println!("Profile:    {}", profile);
     }
@@ -400,7 +401,7 @@ pub fn run_prune(args: &PruneArgs) -> Result<()> {
 
 /// Truncate command display to max_len characters.
 fn truncate_command(command: &[String], max_len: usize) -> String {
-    let full = command.join(" ");
+    let full = format_command_line(command);
     if full.len() <= max_len {
         full
     } else {

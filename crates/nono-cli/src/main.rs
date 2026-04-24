@@ -12,6 +12,7 @@ mod capability_ext;
 mod cli;
 mod cli_bootstrap;
 mod command_blocking_deprecation;
+mod command_display;
 mod command_runtime;
 mod config;
 mod credential_runtime;

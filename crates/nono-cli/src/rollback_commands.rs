@@ -6,6 +6,7 @@ use crate::cli::{
     RollbackArgs, RollbackCleanupArgs, RollbackCommands, RollbackListArgs, RollbackRestoreArgs,
     RollbackShowArgs, RollbackVerifyArgs,
 };
+use crate::command_display::format_command_line;
 use crate::config::user::load_user_config;
 use crate::rollback_base_exclusions;
 use crate::rollback_session::{
@@ -320,7 +321,7 @@ fn cmd_show(args: RollbackShowArgs) -> Result<()> {
         prefix(),
         session.metadata.session_id.white().bold(),
         theme::fg(
-            &session.metadata.command.join(" "),
+            &format_command_line(&session.metadata.command),
             theme::current().subtext
         )
     );
@@ -889,7 +890,7 @@ fn cmd_cleanup(args: RollbackCleanupArgs) -> Result<()> {
             eprintln!(
                 "  {} {} ({})",
                 s.metadata.session_id,
-                s.metadata.command.join(" ").truecolor(
+                format_command_line(&s.metadata.command).truecolor(
                     theme::current().subtext.0,
                     theme::current().subtext.1,
                     theme::current().subtext.2
