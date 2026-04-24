@@ -1839,7 +1839,7 @@ fn print_detach_notice(session_id: Option<&str>) {
             eprintln!("{dim}  nono attach {id}{reset}");
         }
         None => {
-            eprintln!("{dim}Detached from session.{reset}");
+            eprintln!("\n{dim}Detached from session.{reset}");
         }
     }
 }
