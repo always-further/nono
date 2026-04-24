@@ -667,7 +667,11 @@ impl PtyProxy {
         }
 
         self.saved_termios = set_terminal_raw();
-        enter_attach_screen();
+        // The replay bytes from `attach_replay_bytes` now include the
+        // alt-screen entry escape themselves when the child is in alt-screen,
+        // so no separate `enter_attach_screen()` call is needed. Staying in
+        // normal-screen mode for non-TUI sessions preserves the outer
+        // terminal's scrollback and mouse-wheel handling.
         let replay = self.attach_replay_bytes();
         if let Some(client) = self.client.as_ref() {
             let _ = write_all_fd(client.write_fd(), &replay);
@@ -820,11 +824,14 @@ impl PtyProxy {
     }
 
     fn attach_replay_bytes(&self) -> Vec<u8> {
+        let plaintext = self.screen.render_plaintext();
+        let raw_scrollback_present = !self.scrollback.is_empty();
         select_attach_replay_bytes(
             self.screen.alternate_screen_active(),
+            raw_scrollback_present,
             self.scrollback.iter().copied().collect(),
             self.scrollback_snapshot(),
-            self.screen.render_plaintext(),
+            &plaintext,
         )
     }
 
@@ -1096,26 +1103,85 @@ fn control_key_candidates(expected_key: u8) -> Option<[u32; 2]> {
     }
 }
 
-fn select_attach_replay_bytes(
+fn compose_replay_body(
     alternate_screen_active: bool,
     raw_scrollback: Vec<u8>,
     rendered_snapshot: Vec<u8>,
-    rendered_plaintext: String,
+    rendered_plaintext: &str,
 ) -> Vec<u8> {
-    if alternate_screen_active {
-        if raw_scrollback.is_empty() {
-            rendered_snapshot
-        } else if rendered_plaintext.trim().is_empty() {
-            raw_scrollback
-        } else {
-            let mut replay = raw_scrollback;
-            replay.extend_from_slice(&rendered_snapshot);
-            replay
-        }
-    } else if rendered_snapshot.is_empty() || rendered_plaintext.trim().is_empty() {
+    if raw_scrollback.is_empty() {
+        return rendered_snapshot;
+    }
+
+    if !alternate_screen_active {
+        // Normal-screen: the raw history already drove the child's vt100
+        // parser to its current state, so replaying it verbatim restores the
+        // outer terminal to that same state. We deliberately do NOT append
+        // `rendered_snapshot` here — vt100's `state_formatted` repaints the
+        // viewport with row text followed by `\r\n`, and each newline at the
+        // bottom scrolls the outer terminal, pushing the last screenful of
+        // content into the native scrollback a second time. The symptom is a
+        // visibly duplicated tail when the user scrolls up after reattach.
+        return raw_scrollback;
+    }
+
+    // Alt-screen: append the snapshot after the raw history so the alt buffer
+    // is painted to its current state even if the raw scrollback was
+    // truncated past the alt-screen entry. Duplication here is invisible
+    // because the alt-screen buffer doesn't feed the outer terminal's native
+    // scrollback.
+    if rendered_snapshot.is_empty() || rendered_plaintext.trim().is_empty() {
         raw_scrollback
     } else {
-        rendered_snapshot
+        let mut replay = raw_scrollback;
+        replay.extend_from_slice(&rendered_snapshot);
+        replay
+    }
+}
+
+/// `CSI 3 J` — erase saved lines (xterm). Wipes the outer terminal's native
+/// scrollback buffer without touching the currently visible area.
+const ERASE_NATIVE_SCROLLBACK: &[u8] = b"\x1b[3J";
+
+fn select_attach_replay_bytes(
+    alternate_screen_active: bool,
+    raw_scrollback_present: bool,
+    raw_scrollback: Vec<u8>,
+    rendered_snapshot: Vec<u8>,
+    rendered_plaintext: &str,
+) -> Vec<u8> {
+    let body = compose_replay_body(
+        alternate_screen_active,
+        raw_scrollback,
+        rendered_snapshot,
+        rendered_plaintext,
+    );
+    if alternate_screen_active {
+        // Only force the outer terminal into the alternate screen when the
+        // child is currently using it (vim, htop, etc.). For normal-mode
+        // sessions (shells, Claude Code) we stay in normal screen so the
+        // user's terminal-emulator scrollback and mouse-wheel behavior are
+        // preserved.
+        let mut out =
+            Vec::with_capacity(ATTACH_SCREEN_ENTER_ESCAPE.len().saturating_add(body.len()));
+        out.extend_from_slice(ATTACH_SCREEN_ENTER_ESCAPE);
+        out.extend_from_slice(&body);
+        out
+    } else if raw_scrollback_present {
+        // Normal-screen, session has produced output: wipe the outer
+        // terminal's native scrollback before replaying so the user doesn't
+        // end up with two copies of the session history stacked on top of
+        // each other (the first left behind by a prior live attach, the
+        // second delivered by this replay). We only do this when there is
+        // actually history to replay; a first-attach-before-any-output would
+        // otherwise lose the user's pre-session shell scrollback for no
+        // reason.
+        let mut out = Vec::with_capacity(ERASE_NATIVE_SCROLLBACK.len().saturating_add(body.len()));
+        out.extend_from_slice(ERASE_NATIVE_SCROLLBACK);
+        out.extend_from_slice(&body);
+        out
+    } else {
+        body
     }
 }
 
@@ -1257,7 +1323,59 @@ fn set_nonblocking(fd: RawFd) -> bool {
     set_fd_flags(fd, flags | libc::O_NONBLOCK)
 }
 
-fn drain_socket_replay(sock_fd: RawFd) {
+/// Client-side state machine that snoops outgoing bytes for alternate-screen
+/// enter (`\x1b[?1049h`) and exit (`\x1b[?1049l`) sequences so we can decide
+/// whether to emit a screen-clearing restore escape when the attach exits.
+///
+/// Keeping this on the client (rather than asking the supervisor over the
+/// protocol) keeps the change self-contained and also copes with the case
+/// where the socket closes unexpectedly.
+#[derive(Default)]
+struct AltScreenTracker {
+    in_alt_screen: bool,
+    /// Trailing bytes retained from the previous chunk so a 7-byte escape
+    /// split across two reads is still matched.
+    tail: Vec<u8>,
+}
+
+const ALT_SCREEN_ENTER_SEQ: &[u8] = b"\x1b[?1049h";
+const ALT_SCREEN_EXIT_SEQ: &[u8] = b"\x1b[?1049l";
+
+impl AltScreenTracker {
+    fn observe(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut combined = std::mem::take(&mut self.tail);
+        combined.extend_from_slice(bytes);
+
+        let seq_len = ALT_SCREEN_ENTER_SEQ.len();
+        let mut i = 0;
+        while i + seq_len <= combined.len() {
+            let window = &combined[i..i + seq_len];
+            if window == ALT_SCREEN_ENTER_SEQ {
+                self.in_alt_screen = true;
+                i += seq_len;
+            } else if window == ALT_SCREEN_EXIT_SEQ {
+                self.in_alt_screen = false;
+                i += seq_len;
+            } else {
+                i += 1;
+            }
+        }
+        // Preserve the tail (up to seq_len - 1 bytes) so a split match at the
+        // chunk boundary is detected on the next call.
+        self.tail = combined[i..].to_vec();
+    }
+}
+
+fn write_stdout_tracked(tracker: &mut AltScreenTracker, bytes: &[u8]) -> std::io::Result<()> {
+    write_all_fd(libc::STDOUT_FILENO, bytes)?;
+    tracker.observe(bytes);
+    Ok(())
+}
+
+fn drain_socket_replay(sock_fd: RawFd, tracker: &mut AltScreenTracker) {
     let original_flags = match get_fd_flags(sock_fd) {
         Some(flags) => flags,
         None => return,
@@ -1273,7 +1391,7 @@ fn drain_socket_replay(sock_fd: RawFd) {
         let n = unsafe { libc::read(sock_fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
 
         if n > 0 {
-            if write_all_fd(libc::STDOUT_FILENO, &buf[..n as usize]).is_err() {
+            if write_stdout_tracked(tracker, &buf[..n as usize]).is_err() {
                 break;
             }
             continue;
@@ -1392,16 +1510,6 @@ fn recv_attach_resize_socket(stream: &UnixStream) -> Result<Option<UnixDatagram>
         ));
     }
     Ok(Some(socket))
-}
-
-fn enter_attach_screen() {
-    unsafe {
-        libc::write(
-            libc::STDOUT_FILENO,
-            ATTACH_SCREEN_ENTER_ESCAPE.as_ptr().cast(),
-            ATTACH_SCREEN_ENTER_ESCAPE.len(),
-        );
-    }
 }
 
 fn leave_attach_screen() {
@@ -1757,9 +1865,9 @@ impl Drop for AttachResizeSignalGuard {
 }
 
 /// Attach to an already connected session socket.
-pub fn attach_to_stream(stream: UnixStream) -> Result<()> {
+pub fn attach_to_stream(stream: UnixStream, session_id: Option<&str>) -> Result<()> {
     let resize_socket = recv_attach_resize_socket(&stream)?;
-    attach_to_stream_with_init(stream, resize_socket, || Ok(()))
+    attach_to_stream_with_init(stream, resize_socket, session_id, || Ok(()))
 }
 
 /// Attach to an already connected session socket after running an init hook.
@@ -1767,9 +1875,13 @@ pub fn attach_to_stream(stream: UnixStream) -> Result<()> {
 /// The init hook runs after the local terminal has entered raw mode but before
 /// the attach loop starts, which is important for TUIs that probe the terminal
 /// immediately when they are resumed.
+///
+/// `session_id`, when provided, is used to print a resume-command hint in the
+/// post-detach notice so the user can reattach without hunting for the id.
 pub fn attach_to_stream_with_init<F>(
     stream: UnixStream,
     resize_socket: Option<UnixDatagram>,
+    session_id: Option<&str>,
     init: F,
 ) -> Result<()>
 where
@@ -1777,14 +1889,21 @@ where
 {
     let sock_fd = stream.as_raw_fd();
 
-    // Put our terminal in raw mode
+    // Put our terminal in raw mode. We deliberately do NOT enter the alternate
+    // screen here: the supervisor prepends the alt-screen entry escape to the
+    // replay bytes when the child is actually using alt-screen (vim, htop,
+    // etc.). For normal-mode sessions we leave the outer terminal in the
+    // normal screen so its native scrollback and mouse-wheel behavior work.
     let saved_termios = set_terminal_raw();
-    enter_attach_screen();
+
+    // Snoop outgoing bytes for alt-screen toggles so we can pick the right
+    // restore escape on detach (see below).
+    let mut alt_screen_tracker = AltScreenTracker::default();
 
     // Render any queued replay bytes before the child is resumed. This keeps
     // the restored screen and cursor state coherent before new live output
     // starts arriving from the PTY.
-    drain_socket_replay(sock_fd);
+    drain_socket_replay(sock_fd, &mut alt_screen_tracker);
 
     let init_result = init();
 
@@ -1794,12 +1913,42 @@ where
             sock_fd,
             resize_socket.as_ref(),
             Some(Duration::from_millis(250)),
+            &mut alt_screen_tracker,
         ),
         Err(e) => Err(e),
     };
 
-    // Restore terminal
-    leave_attach_screen();
+    // Restore the terminal. If the child was in alt-screen mode at detach
+    // (vim, htop, …), the `\x1b[?1049l` in the non-clearing restore escape
+    // already exits the alt buffer, which most terminals implement as
+    // "restore the saved main-screen contents" — exactly the pre-attach view
+    // the user wants back. In that case we must NOT clear, or we wipe that
+    // restored state. For normal-screen sessions (shells, Claude Code) the
+    // `\x1b[?1049l` is a no-op and the clear is what scrubs residual UI
+    // (half-drawn prompts, cursor blocks) that would otherwise be left
+    // behind. Then put termios back into cooked mode so the subsequent
+    // detach notice renders with proper \r\n handling.
+    let clear_on_restore = !alt_screen_tracker.in_alt_screen;
+    if clear_on_restore {
+        // Before we clear, push the current viewport into the native
+        // scrollback via SU (DEC Scroll Up) so the user can reach the full
+        // final view of the session by scrolling back after detach.
+        // Without this, TUIs like Claude Code that paint in place never
+        // cause the viewport to scroll out of the top during live use, so
+        // those lines never entered native scrollback — and the clear
+        // would wipe them permanently. With SU they land in scrollback
+        // first, then the clear operates on an empty viewport.
+        if let Some(winsize) = get_terminal_winsize() {
+            if winsize.ws_row > 0 {
+                let scroll_up = format!("\x1b[{}S", winsize.ws_row);
+                let _ = write_all_fd(libc::STDOUT_FILENO, scroll_up.as_bytes());
+            }
+        }
+    }
+    let _ = write_all_fd(
+        libc::STDOUT_FILENO,
+        terminal_restore_escape(clear_on_restore),
+    );
     if let Some(ref termios) = saved_termios {
         let _ = nix::sys::termios::tcsetattr(
             std::io::stdin(),
@@ -1811,7 +1960,43 @@ where
     // Keep stream alive until we're done
     drop(stream);
 
+    if result.is_ok() {
+        print_detach_notice(session_id);
+    }
+
     result
+}
+
+/// Print the post-detach resume hint in dim/faint text on stderr.
+///
+/// Uses ANSI SGR 2 ("faint") so the notice renders as a lighter gray than the
+/// terminal's default foreground, keeping the detach confirmation unobtrusive
+/// while still giving the user the exact command to reattach.
+fn print_detach_notice(session_id: Option<&str>) {
+    use std::io::IsTerminal;
+
+    let stderr = std::io::stderr();
+    let use_color = stderr.is_terminal();
+    let (dim, reset) = if use_color {
+        ("\x1b[2m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    // Leading blank line — when we didn't clear the screen on detach (the
+    // alt-screen → pre-attach-main-screen restoration path), this keeps the
+    // notice from landing on the same row as the last line of restored
+    // content. Harmless in the cleared-screen case (just an empty first row).
+    match session_id {
+        Some(id) => {
+            eprintln!();
+            eprintln!("{dim}Resume this session with:{reset}");
+            eprintln!("{dim}  nono attach {id}{reset}");
+        }
+        None => {
+            eprintln!();
+            eprintln!("{dim}Detached from session.{reset}");
+        }
+    }
 }
 
 /// Connect to a running session's attach socket and proxy I/O.
@@ -1831,7 +2016,7 @@ pub fn attach_to_session(session_id: &str) -> Result<()> {
         other => other?,
     };
     wait_for_attach_ready(stream.as_raw_fd(), 1000)?;
-    attach_to_stream(stream)
+    attach_to_stream(stream, Some(session_id))
 }
 
 /// Run the attach client I/O loop.
@@ -1839,6 +2024,7 @@ fn run_attach_loop(
     sock_fd: RawFd,
     resize_socket: Option<&UnixDatagram>,
     stdin_delay: Option<Duration>,
+    alt_screen_tracker: &mut AltScreenTracker,
 ) -> Result<()> {
     let resize_signal_guard = if resize_socket.is_some() {
         Some(AttachResizeSignalGuard::install()?)
@@ -1893,7 +2079,7 @@ fn run_attach_loop(
                 if warmup_pfd.revents & libc::POLLIN != 0 {
                     match read_fd_once(sock_fd, &mut buf) {
                         Ok(ReadFdOutcome::Data(n)) => {
-                            if let Err(err) = write_all_fd(libc::STDOUT_FILENO, &buf[..n]) {
+                            if let Err(err) = write_stdout_tracked(alt_screen_tracker, &buf[..n]) {
                                 return Err(NonoError::SandboxInit(format!(
                                     "attach stdout write failed: {}",
                                     err
@@ -1966,7 +2152,7 @@ fn run_attach_loop(
         if pfds[1].revents & libc::POLLIN != 0 {
             match read_fd_once(sock_fd, &mut buf) {
                 Ok(ReadFdOutcome::Data(n)) => {
-                    if let Err(err) = write_all_fd(libc::STDOUT_FILENO, &buf[..n]) {
+                    if let Err(err) = write_stdout_tracked(alt_screen_tracker, &buf[..n]) {
                         return Err(NonoError::SandboxInit(format!(
                             "attach stdout write failed: {}",
                             err
@@ -2016,7 +2202,6 @@ fn run_attach_loop(
         }
     }
 
-    eprintln!("\n[nono] Detached from session.");
     Ok(())
 }
 
@@ -2024,9 +2209,10 @@ fn run_attach_loop(
 mod tests {
     use super::{
         decode_attach_handshake, encode_attach_request_frame, read_fd_once,
-        select_attach_replay_bytes, terminal_restore_escape, write_all_fd, AttachedClient,
-        PtyProxy, ReadFdOutcome, ScreenState, ATTACH_HANDSHAKE_MAGIC, ATTACH_REQUEST_ATTACH,
-        DEFAULT_DETACH_SEQUENCE,
+        select_attach_replay_bytes, terminal_restore_escape, write_all_fd, AltScreenTracker,
+        AttachedClient, PtyProxy, ReadFdOutcome, ScreenState, ATTACH_HANDSHAKE_MAGIC,
+        ATTACH_REQUEST_ATTACH, ATTACH_SCREEN_ENTER_ESCAPE, DEFAULT_DETACH_SEQUENCE,
+        ERASE_NATIVE_SCROLLBACK,
     };
     use nix::libc;
     use std::collections::VecDeque;
@@ -2108,43 +2294,132 @@ mod tests {
         assert_eq!(decoded.ws_col, winsize.ws_col);
     }
 
-    #[test]
-    fn attach_replay_uses_rendered_snapshot_for_alternate_screen() {
-        let replay = select_attach_replay_bytes(
-            true,
-            b"raw".to_vec(),
-            b"rendered".to_vec(),
-            "visible text".to_string(),
-        );
-        assert_eq!(replay, b"rawrendered");
+    fn with_alt_prefix(body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ATTACH_SCREEN_ENTER_ESCAPE.len() + body.len());
+        out.extend_from_slice(ATTACH_SCREEN_ENTER_ESCAPE);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn with_normal_prefix(body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ERASE_NATIVE_SCROLLBACK.len() + body.len());
+        out.extend_from_slice(ERASE_NATIVE_SCROLLBACK);
+        out.extend_from_slice(body);
+        out
     }
 
     #[test]
-    fn attach_replay_uses_rendered_snapshot_for_normal_screen() {
+    fn attach_replay_prepends_alt_screen_escape_for_alternate_screen() {
         let replay = select_attach_replay_bytes(
-            false,
+            true,
+            true,
             b"raw".to_vec(),
             b"rendered".to_vec(),
-            "visible text".to_string(),
+            "visible text",
+        );
+        assert_eq!(replay, with_alt_prefix(b"rawrendered"));
+        assert!(!replay.starts_with(ERASE_NATIVE_SCROLLBACK));
+    }
+
+    #[test]
+    fn alt_screen_tracker_follows_single_chunk_toggles() {
+        let mut tracker = AltScreenTracker::default();
+        tracker.observe(b"hello");
+        assert!(!tracker.in_alt_screen);
+        tracker.observe(b"\x1b[?1049h");
+        assert!(tracker.in_alt_screen);
+        tracker.observe(b"\x1b[?1049l");
+        assert!(!tracker.in_alt_screen);
+    }
+
+    #[test]
+    fn alt_screen_tracker_handles_split_escape_across_chunks() {
+        let mut tracker = AltScreenTracker::default();
+        // Split `\x1b[?1049h` (7 bytes) into two reads.
+        tracker.observe(b"\x1b[?1");
+        assert!(!tracker.in_alt_screen);
+        tracker.observe(b"049h");
+        assert!(tracker.in_alt_screen);
+        // And the exit, split differently.
+        tracker.observe(b"\x1b[?10");
+        assert!(tracker.in_alt_screen);
+        tracker.observe(b"49l");
+        assert!(!tracker.in_alt_screen);
+    }
+
+    #[test]
+    fn alt_screen_tracker_ignores_other_escape_sequences() {
+        let mut tracker = AltScreenTracker::default();
+        tracker.observe(b"\x1b[2J\x1b[H\x1b[?25h\x1b[?1049h");
+        assert!(tracker.in_alt_screen);
+        tracker.observe(b"\x1b[?47l\x1b[?25l");
+        assert!(
+            tracker.in_alt_screen,
+            "unrelated ?47l must not toggle the 1049 state"
+        );
+    }
+
+    #[test]
+    fn attach_replay_emits_only_raw_history_for_normal_screen() {
+        // Appending the rendered snapshot after raw_scrollback duplicates the
+        // last screenful in the outer terminal's native scrollback, because
+        // vt100's state_formatted paints with scrolling writes. For
+        // normal-screen mode the raw history is authoritative on its own.
+        let replay = select_attach_replay_bytes(
+            false,
+            true,
+            b"raw".to_vec(),
+            b"rendered".to_vec(),
+            "visible text",
+        );
+        assert_eq!(replay, with_normal_prefix(b"raw"));
+        assert!(!replay.starts_with(ATTACH_SCREEN_ENTER_ESCAPE));
+    }
+
+    #[test]
+    fn attach_replay_erases_native_scrollback_before_normal_replay() {
+        // Prevents the "poem-twice" regression where reattaching to a session
+        // whose output the user already saw live during a previous attach
+        // leaves two copies in the outer terminal's native scrollback.
+        let replay = select_attach_replay_bytes(false, true, b"raw".to_vec(), Vec::new(), "");
+        assert!(replay.starts_with(ERASE_NATIVE_SCROLLBACK));
+    }
+
+    #[test]
+    fn attach_replay_skips_scrollback_erase_when_session_has_no_history() {
+        // First-attach-before-any-output case: don't erase the user's
+        // pre-session shell scrollback when there's nothing to replay.
+        let replay = select_attach_replay_bytes(
+            false,
+            false,
+            Vec::new(),
+            b"rendered".to_vec(),
+            "visible text",
         );
         assert_eq!(replay, b"rendered");
+        assert!(!replay.starts_with(ERASE_NATIVE_SCROLLBACK));
+        assert!(!replay.starts_with(ATTACH_SCREEN_ENTER_ESCAPE));
+    }
+
+    #[test]
+    fn attach_replay_falls_back_to_raw_if_normal_plaintext_is_blank() {
+        let replay =
+            select_attach_replay_bytes(false, true, b"raw".to_vec(), b"rendered".to_vec(), "   ");
+        assert_eq!(replay, with_normal_prefix(b"raw"));
+        assert!(!replay.starts_with(ATTACH_SCREEN_ENTER_ESCAPE));
     }
 
     #[test]
     fn attach_replay_falls_back_to_raw_if_alternate_snapshot_is_empty() {
-        let replay = select_attach_replay_bytes(true, b"raw".to_vec(), Vec::new(), "".to_string());
-        assert_eq!(replay, b"raw");
+        let replay = select_attach_replay_bytes(true, true, b"raw".to_vec(), Vec::new(), "");
+        assert_eq!(replay, with_alt_prefix(b"raw"));
     }
 
     #[test]
     fn attach_replay_falls_back_to_raw_if_alternate_plaintext_is_blank() {
-        let replay = select_attach_replay_bytes(
-            true,
-            b"raw".to_vec(),
-            b"rendered".to_vec(),
-            "   ".to_string(),
-        );
-        assert_eq!(replay, b"raw");
+        let replay =
+            select_attach_replay_bytes(true, true, b"raw".to_vec(), b"rendered".to_vec(), "   ");
+        assert_eq!(replay, with_alt_prefix(b"raw"));
     }
 
     #[test]
