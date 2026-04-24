@@ -821,6 +821,11 @@ pub struct NetworkConfig {
         alias = "allow_proxy"
     )]
     pub allow_domain: Vec<String>,
+    /// Domains to always reject, even if they appear in `allow_domain`.
+    /// Supports wildcards (`*.evil.com`). Canonical profile key:
+    /// `reject_domain`.
+    #[serde(default, rename = "reject_domain")]
+    pub reject_domain: Vec<String>,
     /// Credential services to enable via reverse proxy.
     /// Canonical profile key: `credentials` (legacy `proxy_credentials` accepted).
     ///
@@ -864,6 +869,15 @@ pub struct NetworkConfig {
     /// `external_proxy_bypass` accepted).
     #[serde(default, rename = "upstream_bypass", alias = "external_proxy_bypass")]
     pub upstream_bypass: Vec<String>,
+    /// How to handle requests to blocked hosts at runtime.
+    /// `"off"` (default) denies immediately; `"ask"` shows an OS notification
+    /// with action buttons (Deny / Allow once / Always allow).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
+    /// Seconds to wait for user approval before denying (default: 60).
+    /// Only applies when `approval_mode` is not `"off"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_timeout_secs: Option<u64>,
 }
 
 impl NetworkConfig {
@@ -1401,13 +1415,39 @@ pub fn load_profile_extends(name_or_path: &str) -> Option<Vec<String>> {
     None
 }
 
-/// Load a profile by name or file path
+/// Resolve the file path for a profile name or direct path.
+///
+/// Returns the resolved filesystem path if the profile is a user file,
+/// or `None` for built-in profiles or invalid names.
+///
+/// This is the same resolution logic used by [`load_profile`].
+pub fn resolve_profile_path(name_or_path: &str) -> Option<PathBuf> {
+    if name_or_path.contains('/') || name_or_path.ends_with(".json") {
+        let path = Path::new(name_or_path);
+        if path.exists() {
+            return Some(path.to_path_buf());
+        }
+        return None;
+    }
+
+    if !is_valid_profile_name(name_or_path) {
+        return None;
+    }
+
+    match get_user_profile_path(name_or_path) {
+        Ok(path) if path.exists() => Some(path),
+        _ => None,
+    }
+}
+
+/// Load a profile by name or file path.
 ///
 /// If `name_or_path` contains a path separator or ends with `.json`, it is
 /// treated as a direct file path. Otherwise it is resolved as a profile name.
 ///
 /// Name loading precedence:
-/// 1. User profiles from ~/.config/nono/profiles/<name>.json (allows customization)
+///
+/// 1. User profiles from ~/.config/nono/profiles/<name>.json
 /// 2. Built-in profiles (compiled into binary, fallback)
 pub fn load_profile(name_or_path: &str) -> Result<Profile> {
     // Registry reference (namespace/name) — detect before the file path check
@@ -1802,6 +1842,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 .network_profile
                 .merge(base.network.network_profile),
             allow_domain: dedup_append(&base.network.allow_domain, &child.network.allow_domain),
+            reject_domain: dedup_append(&base.network.reject_domain, &child.network.reject_domain),
             open_port: dedup_append(&base.network.open_port, &child.network.open_port),
             listen_port: dedup_append(&base.network.listen_port, &child.network.listen_port),
             // Child `Some([])` overrides parent credentials to empty (disables proxy).
@@ -1832,6 +1873,15 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &base.network.upstream_bypass,
                 &child.network.upstream_bypass,
             ),
+            approval_mode: child
+                .network
+                .approval_mode
+                .clone()
+                .or(base.network.approval_mode.clone()),
+            approval_timeout_secs: child
+                .network
+                .approval_timeout_secs
+                .or(base.network.approval_timeout_secs),
         },
         env_credentials: SecretsConfig {
             mappings: {
@@ -3409,12 +3459,15 @@ mod tests {
                 block: false,
                 network_profile: InheritableValue::Set("base-net".to_string()),
                 allow_domain: vec!["base.example.com".to_string()],
+                reject_domain: vec![],
                 open_port: vec![3000],
                 listen_port: vec![4000],
                 credentials: Some(vec!["base_cred".to_string()]),
                 custom_credentials: HashMap::new(),
                 upstream_proxy: None,
                 upstream_bypass: Vec::new(),
+                approval_mode: None,
+                approval_timeout_secs: None,
             },
             env_credentials: SecretsConfig {
                 mappings: {
@@ -3483,12 +3536,15 @@ mod tests {
                 block: false,
                 network_profile: InheritableValue::Inherit,
                 allow_domain: vec!["child.example.com".to_string()],
+                reject_domain: vec![],
                 open_port: vec![3000, 5000],
                 listen_port: vec![4000, 6000],
                 credentials: None,
                 custom_credentials: HashMap::new(),
                 upstream_proxy: None,
                 upstream_bypass: Vec::new(),
+                approval_mode: None,
+                approval_timeout_secs: None,
             },
             env_credentials: SecretsConfig {
                 mappings: {

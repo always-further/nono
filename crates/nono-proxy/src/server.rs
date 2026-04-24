@@ -13,13 +13,14 @@ use crate::connect;
 use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
 use crate::external;
-use crate::filter::ProxyFilter;
+use crate::filter::{ProxyFilter, RuntimeProxyFilter};
 use crate::reverse;
 use crate::route::RouteStore;
 use crate::token;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -166,6 +167,9 @@ impl ProxyHandle {
 /// Shared state for the proxy server.
 struct ProxyState {
     filter: ProxyFilter,
+    runtime_filter: Option<RuntimeProxyFilter>,
+    approval_tx: Option<tokio::sync::mpsc::Sender<connect::ApprovalChannelRequest>>,
+    approval_timeout: Duration,
     session_token: Zeroizing<String>,
     /// Route-level configuration (upstream, L7 filtering, custom TLS CA) for all routes.
     route_store: RouteStore,
@@ -182,6 +186,10 @@ struct ProxyState {
     /// Matcher for hosts that bypass the external proxy and route direct.
     /// Built once at startup from `ExternalProxyConfig.bypass_hosts`.
     bypass_matcher: external::BypassMatcher,
+    /// PID of the sandboxed child process (for approval requests).
+    child_pid: u32,
+    /// Session ID for correlating approval requests.
+    session_id: String,
 }
 
 /// Start the proxy server.
@@ -192,6 +200,22 @@ struct ProxyState {
 /// Returns a `ProxyHandle` with the assigned port and session token.
 /// The server runs until the handle is dropped or `shutdown()` is called.
 pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
+    start_with_approval(config, None, None, 0, "", Duration::from_secs(60)).await
+}
+
+/// Start the proxy server with optional network approval support.
+///
+/// When `runtime_filter` and `approval_tx` are provided, the proxy
+/// will request user approval for blocked hosts instead of immediately
+/// returning 403.
+pub async fn start_with_approval(
+    config: ProxyConfig,
+    runtime_filter: Option<RuntimeProxyFilter>,
+    approval_tx: Option<tokio::sync::mpsc::Sender<connect::ApprovalChannelRequest>>,
+    child_pid: u32,
+    session_id: &str,
+    approval_timeout: Duration,
+) -> Result<ProxyHandle> {
     // Generate session token
     let session_token = token::generate_session_token()?;
 
@@ -219,6 +243,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     } else {
         RouteStore::load(&config.routes)?
     };
+
     // Build shared TLS connector (root cert store is expensive to construct).
     // Use the ring provider explicitly to avoid ambiguity when multiple
     // crypto providers are in the dependency tree.
@@ -244,10 +269,10 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     let loaded_routes = credential_store.loaded_prefixes();
 
     // Build filter
-    let filter = if config.allowed_hosts.is_empty() {
+    let filter = if config.allowed_hosts.is_empty() && config.rejected_hosts.is_empty() {
         ProxyFilter::allow_all()
     } else {
-        ProxyFilter::new(&config.allowed_hosts)
+        ProxyFilter::new_with_reject(&config.allowed_hosts, &config.rejected_hosts)
     };
 
     // Build bypass matcher from external proxy config (once, not per-request)
@@ -306,6 +331,9 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
 
     let state = Arc::new(ProxyState {
         filter,
+        runtime_filter,
+        approval_tx,
+        approval_timeout,
         session_token: session_token.clone(),
         route_store,
         credential_store,
@@ -314,6 +342,8 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         active_connections: AtomicUsize::new(0),
         audit_log: Arc::clone(&audit_log),
         bypass_matcher,
+        child_pid,
+        session_id: session_id.to_string(),
     });
 
     // Spawn accept loop as a task within the current runtime.
@@ -506,18 +536,57 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             )
             .await
         } else if state.config.external_proxy.is_some() {
-            // Bypass route: enforce strict session token validation before
-            // routing direct. Without this, bypassed hosts would inherit
-            // connect::handle_connect()'s lenient auth (which tolerates
-            // missing Proxy-Authorization for Node.js undici compat).
             token::validate_proxy_auth(&header_bytes, &state.session_token)?;
-            connect::handle_connect(
+
+            if let (Some(rf), Some(tx)) =
+                (state.runtime_filter.as_ref(), state.approval_tx.as_ref())
+            {
+                let approval_ctx = connect::ApprovalContext {
+                    primary_filter: &state.filter,
+                    runtime_filter: rf,
+                    session_token: &state.session_token,
+                    audit_log: Some(&state.audit_log),
+                    approval_tx: tx,
+                    child_pid: state.child_pid,
+                    session_id: &state.session_id,
+                    approval_timeout: state.approval_timeout,
+                };
+                connect::handle_connect_with_approval(
+                    first_line,
+                    &mut stream,
+                    &header_bytes,
+                    &approval_ctx,
+                )
+                .await
+            } else {
+                connect::handle_connect(
+                    first_line,
+                    &mut stream,
+                    &state.filter,
+                    &state.session_token,
+                    &header_bytes,
+                    Some(&state.audit_log),
+                )
+                .await
+            }
+        } else if let (Some(rf), Some(tx)) =
+            (state.runtime_filter.as_ref(), state.approval_tx.as_ref())
+        {
+            let approval_ctx = connect::ApprovalContext {
+                primary_filter: &state.filter,
+                runtime_filter: rf,
+                session_token: &state.session_token,
+                audit_log: Some(&state.audit_log),
+                approval_tx: tx,
+                child_pid: state.child_pid,
+                session_id: &state.session_id,
+                approval_timeout: state.approval_timeout,
+            };
+            connect::handle_connect_with_approval(
                 first_line,
                 &mut stream,
-                &state.filter,
-                &state.session_token,
                 &header_bytes,
-                Some(&state.audit_log),
+                &approval_ctx,
             )
             .await
         } else {
