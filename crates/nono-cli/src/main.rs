@@ -28,7 +28,9 @@ mod learn;
 mod learn_runtime;
 mod legacy_cleanup;
 mod migration;
+mod network_approval;
 mod network_policy;
+mod notification;
 mod open_url_runtime;
 mod output;
 mod package;
@@ -239,6 +241,7 @@ mod tests {
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
             allow_domain: vec!["docs.python.org".to_string()],
+            reject_domain: vec![],
             credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
             upstream_proxy: None,
@@ -253,6 +256,8 @@ mod tests {
             open_url_allow_localhost: false,
             bypass_protection_paths: Vec::new(),
             allowed_env_vars: None,
+            profile_network_approval_mode: None,
+            profile_network_approval_timeout_secs: None,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -262,6 +267,7 @@ mod tests {
             EffectiveProxySettings {
                 network_profile: None,
                 allow_domain: Vec::new(),
+                reject_domain: Vec::new(),
                 credentials: Vec::new(),
             }
         );
@@ -282,6 +288,7 @@ mod tests {
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
             allow_domain: vec!["docs.python.org".to_string()],
+            reject_domain: vec![],
             credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
             upstream_proxy: None,
@@ -296,6 +303,8 @@ mod tests {
             open_url_allow_localhost: false,
             bypass_protection_paths: Vec::new(),
             allowed_env_vars: None,
+            profile_network_approval_mode: None,
+            profile_network_approval_timeout_secs: None,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -305,6 +314,7 @@ mod tests {
             EffectiveProxySettings {
                 network_profile: Some("minimal".to_string()),
                 allow_domain: vec!["docs.python.org".to_string(), "example.com".to_string()],
+                reject_domain: vec![],
                 credentials: vec!["github".to_string(), "openai".to_string()],
             }
         );
