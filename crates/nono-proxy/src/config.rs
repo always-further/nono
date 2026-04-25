@@ -47,6 +47,12 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub external_proxy: Option<ExternalProxyConfig>,
 
+    /// Outbound TCP ports that the sandbox allows direct connections on
+    /// (via Landlock ConnectTcp). Hosts whose resolved port is NOT in this
+    /// set must go through the proxy and should NOT appear in NO_PROXY.
+    #[serde(default)]
+    pub direct_connect_ports: Vec<u16>,
+
     /// Maximum concurrent connections (0 = unlimited).
     #[serde(default)]
     pub max_connections: usize,
@@ -60,6 +66,7 @@ impl Default for ProxyConfig {
             allowed_hosts: Vec::new(),
             routes: Vec::new(),
             external_proxy: None,
+            direct_connect_ports: Vec::new(),
             max_connections: 256,
         }
     }

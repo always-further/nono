@@ -190,7 +190,8 @@ pub(crate) fn start_proxy_runtime(
         });
     }
 
-    let proxy_config = build_proxy_config_from_flags(proxy)?;
+    let mut proxy_config = build_proxy_config_from_flags(proxy)?;
+    proxy_config.direct_connect_ports = caps.tcp_connect_ports().to_vec();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

@@ -261,16 +261,17 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let audit_log = audit::new_audit_log();
 
-    // Compute NO_PROXY hosts: allowed_hosts minus route upstreams.
-    // Non-route hosts bypass the proxy (direct connection, still
-    // Landlock-enforced). Route upstreams must go through the proxy
-    // for L7 path filtering and/or credential injection.
+    // Compute NO_PROXY hosts: allowed_hosts that can be reached via
+    // direct TCP connections (i.e. their port is in direct_connect_ports).
+    // Hosts without a direct TCP grant MUST go through the proxy —
+    // adding them to NO_PROXY would cause clients to attempt direct
+    // connections that the sandbox (Landlock / Seatbelt) denies.
     //
-    // On macOS this MUST be empty: Seatbelt's ProxyOnly mode generates
-    // `(deny network*) (allow network-outbound (remote tcp "localhost:PORT"))`
-    // which blocks ALL direct outbound. Tools that respect NO_PROXY would
-    // attempt direct connections that the sandbox denies (DNS lookup fails).
-    // All traffic must route through the proxy on macOS. See #580.
+    // Route upstreams are always excluded so their traffic goes through
+    // the proxy for L7 path filtering and/or credential injection.
+    //
+    // On macOS this MUST be empty regardless: Seatbelt's ProxyOnly mode
+    // blocks ALL direct outbound. See #580.
     let no_proxy_hosts: Vec<String> = if cfg!(target_os = "macos") {
         Vec::new()
     } else {
@@ -294,7 +295,16 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
                         format!("{}:443", h)
                     }
                 };
-                !route_hosts.contains(&normalised)
+                if route_hosts.contains(&normalised) {
+                    return false;
+                }
+                // Only bypass the proxy if the sandbox grants direct
+                // TCP on this host's port (via --allow-connect-port).
+                let port = normalised
+                    .rsplit_once(':')
+                    .and_then(|(_, p)| p.parse::<u16>().ok())
+                    .unwrap_or(443);
+                config.direct_connect_ports.contains(&port)
             })
             .cloned()
             .collect()
@@ -1035,5 +1045,53 @@ mod tests {
             no_proxy.1, "localhost,127.0.0.1",
             "NO_PROXY should only contain loopback when no bypass hosts"
         );
+    }
+
+    #[tokio::test]
+    async fn test_no_proxy_empty_without_direct_connect_ports() {
+        // When direct_connect_ports is empty (no --allow-connect-port),
+        // allowed_hosts should NOT appear in NO_PROXY because the sandbox
+        // blocks direct TCP and clients would fail to connect. See #760.
+        let config = ProxyConfig {
+            allowed_hosts: vec!["github.com".to_string()],
+            ..Default::default()
+        };
+        let handle = start(config).await.unwrap();
+
+        let vars = handle.env_vars();
+        let no_proxy = vars.iter().find(|(k, _)| k == "NO_PROXY").unwrap();
+        assert_eq!(
+            no_proxy.1, "localhost,127.0.0.1",
+            "allowed_hosts must not appear in NO_PROXY without direct_connect_ports"
+        );
+
+        handle.shutdown();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn test_no_proxy_includes_hosts_with_matching_connect_port() {
+        // When direct_connect_ports includes port 443, allowed_hosts on
+        // that port SHOULD appear in NO_PROXY (direct TCP is permitted).
+        // macOS always returns empty NO_PROXY (Seatbelt blocks all direct outbound).
+        let config = ProxyConfig {
+            allowed_hosts: vec!["github.com".to_string(), "server.internal:4222".to_string()],
+            direct_connect_ports: vec![443],
+            ..Default::default()
+        };
+        let handle = start(config).await.unwrap();
+
+        let vars = handle.env_vars();
+        let no_proxy = vars.iter().find(|(k, _)| k == "NO_PROXY").unwrap();
+        assert!(
+            no_proxy.1.contains("github.com"),
+            "host on port 443 should be in NO_PROXY when 443 is in direct_connect_ports"
+        );
+        assert!(
+            !no_proxy.1.contains("server.internal"),
+            "host on port 4222 should NOT be in NO_PROXY when only 443 is allowed"
+        );
+
+        handle.shutdown();
     }
 }

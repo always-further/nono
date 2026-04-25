@@ -55,7 +55,7 @@ fn try_new_unix_socket_file(
     match UnixSocketCapability::new_file(path, mode) {
         Ok(cap) => Ok(Some(cap)),
         Err(NonoError::PathNotFound(_)) => {
-            warn!("{}: {}", label, path.display());
+            info!("{}: {}", label, path.display());
             Ok(None)
         }
         Err(e) => Err(e),
@@ -71,7 +71,7 @@ fn try_new_unix_socket_dir(
     match UnixSocketCapability::new_dir(path, mode) {
         Ok(cap) => Ok(Some(cap)),
         Err(NonoError::PathNotFound(_)) => {
-            warn!("{}: {}", label, path.display());
+            info!("{}: {}", label, path.display());
             Ok(None)
         }
         Err(e) => Err(e),
