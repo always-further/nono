@@ -137,6 +137,7 @@ SUITES=(
     "test_system_paths.sh:System Paths"
     "test_binary_exec.sh:Binary Execution"
     "test_network.sh:Network"
+    "test_network_proxy.sh:Network Proxy"
     "test_commands.sh:Dangerous Commands"
     "test_edge_cases.sh:Edge Cases"
     "test_policy_queries.sh:Policy Queries"
@@ -183,17 +184,22 @@ launch_suite() {
     local output_file="$2"
 
     local exit_file="${output_file%.out}.exit"
+    local rc
 
     if command -v timeout >/dev/null 2>&1; then
+        set +e
         timeout "$SUITE_TIMEOUT" bash "$SCRIPT_DIR/integration/$script" > "$output_file" 2>&1
         rc=$?
+        set -e
         if [[ "$rc" -eq 124 ]]; then
             echo "" >> "$output_file"
             echo "SUITE TIMED OUT after ${SUITE_TIMEOUT}s" >> "$output_file"
         fi
         echo "$rc" > "$exit_file"
     else
+        set +e
         bash "$SCRIPT_DIR/integration/$script" > "$output_file" 2>&1; rc=$?
+        set -e
         echo "$rc" > "$exit_file"
     fi
 }

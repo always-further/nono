@@ -75,9 +75,6 @@ if command_exists curl; then
     expect_success "curl works by default" \
         "$NONO_BIN" run --allow "$TMPDIR" -- curl -s --max-time 10 https://example.com >/dev/null
 
-    expect_failure "proxy mode blocks direct curl bypass with --noproxy" \
-        "$NONO_BIN" run --allow "$TMPDIR" --allow-domain api.openai.com -- curl -s --noproxy '*' --max-time 10 https://example.com >/dev/null
-
     # Keep this assertion on a profile that still bundles a network_profile.
     # claude-code used to carry a profile-level proxy allowlist, but the current
     # built-in profile no longer sets network.network_profile in policy.json, so

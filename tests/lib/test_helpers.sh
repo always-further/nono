@@ -165,6 +165,108 @@ expect_output_not_contains() {
     fi
 }
 
+# Check command succeeds and output exactly matches a string after trimming CR.
+# Usage: expect_success_output_equals "test name" "expected output" command args...
+expect_success_output_equals() {
+    local name="$1"
+    local expected_str="$2"
+    shift 2
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+
+    set +e
+    local output
+    output=$("$@" </dev/null 2>&1)
+    local exit_code=$?
+    set -e
+
+    local normalized
+    normalized=$(printf '%s' "$output" | tr -d '\r')
+
+    if [[ "$exit_code" -eq 0 && "$normalized" == "$expected_str" ]]; then
+        echo -e "  ${GREEN}PASS${NC}: $name"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    fi
+
+    echo -e "  ${RED}FAIL${NC}: $name"
+    echo "       Expected exit code 0 and output: '$expected_str'"
+    echo "       Exit code: $exit_code"
+    if [[ -n "$output" ]]; then
+        local stripped
+        stripped=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
+        echo "       Actual output: ${stripped:0:2000}"
+    fi
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    return 1
+}
+
+# Check command succeeds and output contains a fixed string.
+# Usage: expect_success_output_contains "test name" "expected string" command args...
+expect_success_output_contains() {
+    local name="$1"
+    local expected_str="$2"
+    shift 2
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+
+    set +e
+    local output
+    output=$("$@" </dev/null 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [[ "$exit_code" -eq 0 ]] && printf '%s' "$output" | grep -Fq -- "$expected_str"; then
+        echo -e "  ${GREEN}PASS${NC}: $name"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    fi
+
+    echo -e "  ${RED}FAIL${NC}: $name"
+    echo "       Expected exit code 0 and output containing: '$expected_str'"
+    echo "       Exit code: $exit_code"
+    if [[ -n "$output" ]]; then
+        local stripped
+        stripped=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
+        echo "       Actual output: ${stripped:0:2000}"
+    fi
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    return 1
+}
+
+# Check command succeeds and output does not contain a fixed string.
+# Usage: expect_success_output_not_contains "test name" "unexpected string" command args...
+expect_success_output_not_contains() {
+    local name="$1"
+    local unexpected_str="$2"
+    shift 2
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+
+    set +e
+    local output
+    output=$("$@" </dev/null 2>&1)
+    local exit_code=$?
+    set -e
+
+    if [[ "$exit_code" -eq 0 ]] && ! printf '%s' "$output" | grep -Fq -- "$unexpected_str"; then
+        echo -e "  ${GREEN}PASS${NC}: $name"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    fi
+
+    echo -e "  ${RED}FAIL${NC}: $name"
+    echo "       Expected exit code 0 and output without: '$unexpected_str'"
+    echo "       Exit code: $exit_code"
+    if [[ -n "$output" ]]; then
+        local stripped
+        stripped=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
+        echo "       Actual output: ${stripped:0:2000}"
+    fi
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    return 1
+}
+
 # Skip a test with a message
 skip_test() {
     local name="$1"
