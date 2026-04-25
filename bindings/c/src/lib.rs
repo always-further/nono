@@ -124,6 +124,7 @@ pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
             NonoErrorCode::ErrConfigParse
         }
         nono::NonoError::NetworkFilterUnsupported { .. } => NonoErrorCode::ErrUnsupportedPlatform,
+        nono::NonoError::InvalidConfig { .. } => NonoErrorCode::ErrConfigParse,
     }
 }
 

@@ -53,6 +53,7 @@ pub mod manifest;
 pub mod manifest_convert;
 pub mod net_filter;
 pub mod query;
+pub mod runtime_filter;
 pub mod sandbox;
 pub mod state;
 pub mod supervisor;
@@ -76,12 +77,14 @@ pub use keystore::{
     validate_env_uri, validate_file_uri, validate_keyring_uri, validate_op_uri, LoadedSecret,
 };
 pub use net_filter::{FilterResult, HostFilter};
+pub use runtime_filter::RuntimeHostFilter;
 #[cfg(target_os = "linux")]
 pub use sandbox::{detect_abi, is_wsl2, DetectedAbi};
 pub use sandbox::{Sandbox, SupportInfo};
 pub use state::SandboxState;
 pub use supervisor::{
-    ApprovalBackend, ApprovalDecision, CapabilityRequest, SupervisorSocket, UrlOpenRequest,
+    ApprovalBackend, ApprovalDecision, ApprovalScope, CapabilityRequest, NetworkApprovalDecision,
+    NetworkApprovalRequest, SupervisorSocket, UrlOpenRequest,
 };
 pub use trust::{
     Enforcement, IncludePatterns, Publisher, SignerIdentity, TrustPolicy, VerificationOutcome,

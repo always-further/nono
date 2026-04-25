@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.42.0] - 2026-04-25
+
+### Bug Fixes
+
+- *(proxy)* Stop adding allow_domain hosts to NO_PROXY without direct TCP grants
+
+
+### Documentation
+
+- Add --allow-unix-socket* flags and profile fields
+
+
+### Features
+
+- *(cli)* Add --allow-unix-socket flag family + profile schema
+
+- *(capability)* Add UnixSocketCapability and UnixSocketMode
+
 ## [0.41.0] - 2026-04-24
 
 ### Bug Fixes
