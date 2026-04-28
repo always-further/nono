@@ -175,6 +175,21 @@
           "/Volumes",
           "/run",
           "/nix"
+        ],
+        "execute": [
+          "/bin",
+          "/sbin",
+          "/usr/bin",
+          "/usr/sbin",
+          "/usr/local/bin",
+          "/usr/lib",
+          "/usr/local/lib",
+          "/System/Library",
+          "/Library",
+          "/Library/Frameworks",
+          "/private/var/db/dyld",
+          "/var/db/dyld",
+          "/opt/homebrew"
         ]
       },
       "symlink_pairs": {
@@ -245,7 +260,26 @@
           "/proc/stat",
           "/proc/loadavg",
           "/proc/version",
-          "/proc/filesystems"
+          "/proc/filesystems",
+          "/home/linuxbrew/.linuxbrew"
+        ],
+        "execute": [
+          "/bin",
+          "/sbin",
+          "/usr/bin",
+          "/usr/sbin",
+          "/usr/local/bin",
+          "/lib",
+          "/lib64",
+          "/lib/x86_64-linux-gnu",
+          "/lib/aarch64-linux-gnu",
+          "/usr/lib",
+          "/usr/lib64",
+          "/usr/lib/x86_64-linux-gnu",
+          "/usr/lib/aarch64-linux-gnu",
+          "/usr/local/lib",
+          "/usr/local/lib64",
+          "/home/linuxbrew/.linuxbrew"
         ]
       }
     },
@@ -350,6 +384,9 @@
           "~/.local/share/man",
           "~/.local/share/bash-completion",
           "~/.local/share/zsh"
+        ],
+        "execute": [
+          "~/.local/bin"
         ]
       }
     },
@@ -357,13 +394,20 @@
       "description": "Node.js runtime and package manager paths",
       "allow": {
         "read": [
+          "~/.node",
+          "~/.node-gyp"
+        ],
+        "readexecute": [
           "~/.nvm",
           "~/.fnm",
-          "~/.npm",
-          "~/.node",
           "~/.local/share/fnm",
-          "/usr/local/lib/node_modules",
-          "~/Library/pnpm",
+          "/usr/local/lib/node_modules"
+        ],
+        "readwrite": [
+          "~/.npm",
+          "~/Library/pnpm"
+        ],
+        "readwriteexecute": [
           "~/.local/share/pnpm"
         ]
       }
@@ -374,6 +418,9 @@
       "allow": {
         "read": [
           "~/.opencode/bin"
+        ],
+        "execute": [
+          "~/.opencode/bin"
         ]
       }
     },
@@ -381,6 +428,12 @@
       "description": "Python runtime paths (pyenv, conda, uv)",
       "allow": {
         "read": [
+          "~/.pyenv",
+          "~/.local/lib",
+          "~/.local/share/uv",
+          "~/.conda"
+        ],
+        "execute": [
           "~/.pyenv",
           "~/.local/lib",
           "~/.local/share/uv",
@@ -394,6 +447,10 @@
         "read": [
           "~/.cargo",
           "~/.rustup"
+        ],
+        "execute": [
+          "~/.cargo",
+          "~/.rustup"
         ]
       }
     },
@@ -401,6 +458,10 @@
       "description": "Go toolchain paths",
       "allow": {
         "read": [
+          "~/go",
+          "/usr/local/go"
+        ],
+        "execute": [
           "~/go",
           "/usr/local/go"
         ]
@@ -411,6 +472,11 @@
       "platform": "macos",
       "allow": {
         "read": [
+          "/opt/homebrew",
+          "/usr/local/Cellar",
+          "/usr/local/opt"
+        ],
+        "execute": [
           "/opt/homebrew",
           "/usr/local/Cellar",
           "/usr/local/opt"
@@ -487,6 +553,13 @@
         "read": [
           "~/.nix-profile",
           "~/.nix-defexpr",
+          "/run/current-system/sw",
+          "/etc/profiles/per-user",
+          "/nix/var/nix/profiles",
+          "/nix/store"
+        ],
+        "execute": [
+          "~/.nix-profile",
           "/run/current-system/sw",
           "/etc/profiles/per-user",
           "/nix/var/nix/profiles",
@@ -618,8 +691,12 @@
         "signal_mode": "isolated"
       },
       "filesystem": {},
-      "network": { "block": false },
-      "workdir": { "access": "none" },
+      "network": {
+        "block": false
+      },
+      "workdir": {
+        "access": "none"
+      },
       "interactive": false
     },
     "linux-host-compat": {
@@ -639,8 +716,12 @@
         "signal_mode": "isolated"
       },
       "filesystem": {},
-      "network": { "block": false },
-      "workdir": { "access": "none" },
+      "network": {
+        "block": false
+      },
+      "workdir": {
+        "access": "none"
+      },
       "interactive": false
     },
     "claude-code": {
@@ -735,8 +816,12 @@
           "$HOME/.claude.lock"
         ]
       },
-      "network": { "block": false },
-      "workdir": { "access": "readwrite" },
+      "network": {
+        "block": false
+      },
+      "workdir": {
+        "access": "readwrite"
+      },
       "open_urls": {
         "allow_origins": [
           "https://claude.ai"
@@ -745,8 +830,15 @@
       },
       "allow_launch_services": true,
       "undo": {
-        "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
-        "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
+        "exclude_patterns": [
+          "node_modules",
+          ".next",
+          "__pycache__",
+          "target"
+        ],
+        "exclude_globs": [
+          "*.tmp.[0-9]*.[0-9]*"
+        ]
       },
       "interactive": true
     },
@@ -773,7 +865,9 @@
         "capability_elevation": false
       },
       "filesystem": {
-        "allow": ["$HOME/.codex"]
+        "allow": [
+          "$HOME/.codex"
+        ]
       },
       "open_urls": {
         "allow_origins": [
@@ -782,8 +876,12 @@
         "allow_localhost": true
       },
       "allow_launch_services": true,
-      "network": { "block": false },
-      "workdir": { "access": "readwrite" },
+      "network": {
+        "block": false
+      },
+      "workdir": {
+        "access": "readwrite"
+      },
       "interactive": true
     },
     "openclaw": {
@@ -795,7 +893,9 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["node_runtime"],
+        "groups": [
+          "node_runtime"
+        ],
         "signal_mode": "isolated"
       },
       "filesystem": {
@@ -805,10 +905,17 @@
           "$TMPDIR/openclaw-$UID"
         ]
       },
-      "network": { "block": false },
-      "workdir": { "access": "read" },
+      "network": {
+        "block": false
+      },
+      "workdir": {
+        "access": "read"
+      },
       "undo": {
-        "exclude_patterns": ["node_modules", ".next"]
+        "exclude_patterns": [
+          "node_modules",
+          ".next"
+        ]
       },
       "interactive": false
     },
@@ -821,11 +928,19 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "opencode_linux", "linux_sysfs_read", "git_config", "unlink_protection"],
+        "groups": [
+          "user_caches_macos",
+          "user_caches_linux",
+          "node_runtime",
+          "opencode_linux",
+          "linux_sysfs_read",
+          "git_config",
+          "unlink_protection"
+        ],
         "signal_mode": "isolated"
       },
       "filesystem": {
-        "allow": [
+        "readwriteexecute": [
           "$HOME/.opencode",
           "$HOME/.config/opencode",
           "$HOME/.cache/opencode",
@@ -835,10 +950,17 @@
           "$TMPDIR"
         ]
       },
-      "network": { "block": false },
-      "workdir": { "access": "readwrite" },
+      "network": {
+        "block": false
+      },
+      "workdir": {
+        "access": "readwrite"
+      },
       "undo": {
-        "exclude_patterns": ["node_modules", ".next"]
+        "exclude_patterns": [
+          "node_modules",
+          ".next"
+        ]
       },
       "interactive": true
     },
@@ -851,13 +973,20 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["python_runtime"],
+        "groups": [
+          "python_runtime"
+        ],
         "signal_mode": "isolated",
         "ipc_mode": "full"
       },
       "filesystem": {},
-      "network": { "block": false, "network_profile": "developer" },
-      "workdir": { "access": "readwrite" },
+      "network": {
+        "block": false,
+        "network_profile": "developer"
+      },
+      "workdir": {
+        "access": "readwrite"
+      },
       "interactive": false
     },
     "node-dev": {
@@ -869,12 +998,19 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["node_runtime"],
+        "groups": [
+          "node_runtime"
+        ],
         "signal_mode": "isolated"
       },
       "filesystem": {},
-      "network": { "block": false, "network_profile": "developer" },
-      "workdir": { "access": "readwrite" },
+      "network": {
+        "block": false,
+        "network_profile": "developer"
+      },
+      "workdir": {
+        "access": "readwrite"
+      },
       "interactive": false
     },
     "go-dev": {
@@ -886,12 +1022,19 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["go_runtime"],
+        "groups": [
+          "go_runtime"
+        ],
         "signal_mode": "isolated"
       },
       "filesystem": {},
-      "network": { "block": false, "network_profile": "developer" },
-      "workdir": { "access": "readwrite" },
+      "network": {
+        "block": false,
+        "network_profile": "developer"
+      },
+      "workdir": {
+        "access": "readwrite"
+      },
       "interactive": false
     },
     "rust-dev": {
@@ -903,12 +1046,19 @@
         "author": "nono-project"
       },
       "security": {
-        "groups": ["rust_runtime"],
+        "groups": [
+          "rust_runtime"
+        ],
         "signal_mode": "isolated"
       },
       "filesystem": {},
-      "network": { "block": false, "network_profile": "developer" },
-      "workdir": { "access": "readwrite" },
+      "network": {
+        "block": false,
+        "network_profile": "developer"
+      },
+      "workdir": {
+        "access": "readwrite"
+      },
       "interactive": false
     },
     "swival": {
@@ -938,11 +1088,21 @@
           "$HOME/.local/share/swival"
         ]
       },
-      "network": { "block": false },
-      "workdir": { "access": "readwrite" },
+      "network": {
+        "block": false
+      },
+      "workdir": {
+        "access": "readwrite"
+      },
       "undo": {
-        "exclude_patterns": ["node_modules", "__pycache__", ".swival"],
-        "exclude_globs": ["*.pyc"]
+        "exclude_patterns": [
+          "node_modules",
+          "__pycache__",
+          ".swival"
+        ],
+        "exclude_globs": [
+          "*.pyc"
+        ]
       },
       "interactive": true
     }

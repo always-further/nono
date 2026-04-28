@@ -197,11 +197,11 @@ mod tests {
         assert!(profile.interactive);
         assert!(profile
             .filesystem
-            .allow
+            .readwriteexecute
             .contains(&"$HOME/.opencode".to_string()));
         assert!(profile
             .filesystem
-            .allow
+            .readwriteexecute
             .contains(&"$HOME/.local/share/opentui".to_string()));
     }
 
@@ -380,15 +380,24 @@ mod tests {
     fn test_opencode_profile_includes_tmpdir_and_state_dir() {
         let policy = crate::policy::load_embedded_policy().expect("load embedded policy");
         let opencode = policy.profiles.get("opencode").expect("opencode profile");
+        // The opencode profile bundles its filesystem grants under
+        // `readwriteexecute` so the embedded Bun TUI binary can be mmap-executed
+        // from these dirs. Either `allow` or `readwriteexecute` satisfies the
+        // intent: the path is granted read+write at minimum.
+        let granted = |path: &str| {
+            opencode.filesystem.allow.iter().any(|p| p == path)
+                || opencode
+                    .filesystem
+                    .readwriteexecute
+                    .iter()
+                    .any(|p| p == path)
+        };
         assert!(
-            opencode.filesystem.allow.contains(&"$TMPDIR".to_string()),
+            granted("$TMPDIR"),
             "opencode profile should allow $TMPDIR for Bun TUI runtime extraction"
         );
         assert!(
-            opencode
-                .filesystem
-                .allow
-                .contains(&"$HOME/.local/state/opencode".to_string()),
+            granted("$HOME/.local/state/opencode"),
             "opencode profile should allow $HOME/.local/state/opencode"
         );
     }

@@ -3119,6 +3119,9 @@ fn open_canonical_path_no_symlinks(
         nono::AccessMode::Read => libc::O_RDONLY,
         nono::AccessMode::Write => libc::O_WRONLY,
         nono::AccessMode::ReadWrite => libc::O_RDWR,
+        nono::AccessMode::Execute => libc::O_RDONLY,
+        nono::AccessMode::ReadExecute => libc::O_RDONLY,
+        nono::AccessMode::ReadWriteExecute => libc::O_RDWR,
     } | libc::O_NOFOLLOW
         | libc::O_CLOEXEC;
 

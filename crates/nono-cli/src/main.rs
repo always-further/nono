@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_pre_exec_update_check_enabled_for_non_exec_commands() {
-        let why = Cli::parse_from(["nono", "why", "--path", "/tmp", "--op", "read"]);
+        let why = Cli::parse_from(["nono", "why", "/tmp", "--op", "read"]);
         assert!(allows_pre_exec_update_check(&why.command));
 
         let ps = Cli::parse_from(["nono", "ps"]);

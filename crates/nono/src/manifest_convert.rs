@@ -97,6 +97,9 @@ fn convert_access_mode(mode: AccessMode) -> InternalAccessMode {
         AccessMode::Read => InternalAccessMode::Read,
         AccessMode::Write => InternalAccessMode::Write,
         AccessMode::Readwrite => InternalAccessMode::ReadWrite,
+        AccessMode::Execute => InternalAccessMode::Execute,
+        AccessMode::Readexecute => InternalAccessMode::ReadExecute,
+        AccessMode::Readwriteexecute => InternalAccessMode::ReadWriteExecute,
     }
 }
 

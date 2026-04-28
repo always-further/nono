@@ -140,9 +140,18 @@ pub fn query_path(
 
         let sufficient = matches!(
             (cap.access, requested),
-            (AccessMode::ReadWrite, _)
+            (AccessMode::ReadWriteExecute, _)
+                | (
+                    AccessMode::ReadWrite,
+                    AccessMode::ReadWrite | AccessMode::Read | AccessMode::Write
+                )
+                | (
+                    AccessMode::ReadExecute,
+                    AccessMode::ReadExecute | AccessMode::Read | AccessMode::Execute
+                )
                 | (AccessMode::Read, AccessMode::Read)
                 | (AccessMode::Write, AccessMode::Write)
+                | (AccessMode::Execute, AccessMode::Execute)
         );
 
         if sufficient && score >= best_sufficient_score {
@@ -279,12 +288,16 @@ pub(crate) fn suggested_flag_parts(path: &Path, requested: AccessMode) -> (&'sta
             AccessMode::Read => "--read-file",
             AccessMode::Write => "--write-file",
             AccessMode::ReadWrite => "--allow-file",
+            AccessMode::Execute => "--execute-file",
+            AccessMode::ReadExecute | AccessMode::ReadWriteExecute => "--execute-file",
         }
     } else {
         match requested {
             AccessMode::Read => "--read",
             AccessMode::Write => "--write",
             AccessMode::ReadWrite => "--allow",
+            AccessMode::Execute => "--execute",
+            AccessMode::ReadExecute | AccessMode::ReadWriteExecute => "--execute",
         }
     };
 

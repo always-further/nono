@@ -204,11 +204,11 @@ pub enum Commands {
 {all-args}
 {after-help}")]
     #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
-  nono why --path ~/.ssh --op read             # Check if ~/.ssh is readable
-  nono why --path ./src --op write --allow .   # Check with capability context
-  nono why --json --path ~/.aws --op read      # JSON output for agents
+  nono why ~/.ssh --op read                    # Check if ~/.ssh is readable
+  nono why ./src --op write --allow .          # Check with capability context
+  nono why ~/.aws --op read --json             # JSON output for agents
   nono why --host api.openai.com --port 443    # Query network access
-  nono why --self --path /tmp --op write       # Inside sandbox, query own capabilities
+  nono why /tmp --op write --self              # Inside sandbox, query own capabilities
 ")]
     Why(Box<WhyArgs>),
 
@@ -885,6 +885,14 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
     pub allow_unix_socket_dir_bind: Vec<PathBuf>,
 
+    /// Allow execute-only access to a directory (recursive)
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub execute: Vec<PathBuf>,
+
+    /// Allow execute-only access to a single file
+    #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
+    pub execute_file: Vec<PathBuf>,
+
     /// Override a deny rule for a path. Pair with --allow/--read/--write grant
     #[arg(long, value_name = "PATH", help_heading = "FILESYSTEM")]
     pub override_deny: Vec<PathBuf>,
@@ -1168,6 +1176,14 @@ pub struct WrapSandboxArgs {
     #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
     pub allow_unix_socket_dir_bind: Vec<PathBuf>,
 
+    /// Allow execute-only access to a directory (recursive)
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub execute: Vec<PathBuf>,
+
+    /// Allow execute-only access to a single file
+    #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
+    pub execute_file: Vec<PathBuf>,
+
     /// Override a deny rule for a path. Pair with --allow/--read/--write grant
     #[arg(long, value_name = "PATH", help_heading = "FILESYSTEM")]
     pub override_deny: Vec<PathBuf>,
@@ -1300,6 +1316,8 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             allow: args.allow,
             read: args.read,
             write: args.write,
+            execute: args.execute,
+            execute_file: args.execute_file,
             allow_file: args.allow_file,
             read_file: args.read_file,
             write_file: args.write_file,
@@ -1512,7 +1530,7 @@ pub struct SetupArgs {
 #[command(disable_help_flag = true)]
 pub struct WhyArgs {
     /// Path to check
-    #[arg(long, help_heading = "QUERY")]
+    #[arg(help_heading = "QUERY")]
     pub path: Option<PathBuf>,
 
     /// Operation to check: read, write, or readwrite
@@ -1555,6 +1573,14 @@ pub struct WhyArgs {
     /// Single files to allow read-only access (for query context)
     #[arg(long, value_name = "FILE", help_heading = "CONTEXT")]
     pub read_file: Vec<PathBuf>,
+
+    /// Specific file or directory to allow execution (for query context)
+    #[arg(long, value_name = "PATH", help_heading = "CONTEXT")]
+    pub execute: Vec<PathBuf>,
+
+    /// Specific file to allow execution (for query context)
+    #[arg(long, value_name = "FILE", help_heading = "CONTEXT")]
+    pub execute_file: Vec<PathBuf>,
 
     /// Single files to allow write-only access (for query context)
     #[arg(long, value_name = "FILE", help_heading = "CONTEXT")]
@@ -1623,6 +1649,12 @@ pub enum WhyOp {
     /// Read and write access
     #[value(name = "readwrite")]
     ReadWrite,
+    /// Execute access
+    Execute,
+    /// Read and execute access
+    ReadExecute,
+    /// Read, write, and execute access
+    ReadWriteExecute,
 }
 
 #[derive(Parser, Debug)]

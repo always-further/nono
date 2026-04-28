@@ -275,7 +275,7 @@ fn access_to_landlock(access: AccessMode, abi: ABI) -> LandlockAccess {
     let available = AccessFs::from_all(abi);
 
     let desired = match access {
-        AccessMode::Read => AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
+        AccessMode::Read => AccessFs::ReadFile | AccessFs::ReadDir,
         AccessMode::Write => {
             AccessFs::WriteFile
                 | AccessFs::MakeChar
@@ -296,6 +296,15 @@ fn access_to_landlock(access: AccessMode, abi: ABI) -> LandlockAccess {
             return LandlockAccess {
                 effective: read.effective | write.effective,
                 dropped: read.dropped | write.dropped,
+            };
+        }
+        AccessMode::Execute => AccessFs::Execute.into(),
+        AccessMode::ReadExecute => AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute,
+        AccessMode::ReadWriteExecute => {
+            let rw = access_to_landlock(AccessMode::ReadWrite, abi);
+            return LandlockAccess {
+                effective: rw.effective | (available & AccessFs::Execute),
+                dropped: rw.dropped | (BitFlags::from(AccessFs::Execute) & !available),
             };
         }
     };
