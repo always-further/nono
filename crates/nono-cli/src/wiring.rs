@@ -674,11 +674,10 @@ fn read_pack_json(path: &Path, ctx: &WiringContext) -> Result<Value> {
 
 fn expand_json_strings(value: &mut Value, ctx: &WiringContext) -> Result<()> {
     match value {
-        Value::String(s) => {
-            if s.contains('$') {
-                *s = expand_vars(s, ctx)?;
-            }
+        Value::String(s) if s.contains('$') => {
+            *s = expand_vars(s, ctx)?;
         }
+        Value::String(_) => {}
         Value::Array(arr) => {
             for v in arr.iter_mut() {
                 expand_json_strings(v, ctx)?;
