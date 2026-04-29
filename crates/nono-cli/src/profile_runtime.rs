@@ -26,6 +26,7 @@ pub(crate) struct PreparedProfile {
     pub(crate) allow_parent_of_protected: bool,
     pub(crate) override_deny_paths: Vec<PathBuf>,
     pub(crate) allowed_env_vars: Option<Vec<String>>,
+    pub(crate) denied_env_vars: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -378,13 +379,29 @@ fn prepare_profile_with_options(
             workdir,
         ),
         allowed_env_vars: loaded_profile.as_ref().and_then(|profile| {
-            profile.environment.as_ref().map(|env_config| {
+            profile.environment.as_ref().and_then(|env_config| {
+                if env_config.allow_vars.is_empty() {
+                    return None;
+                }
                 if let Some(err) =
-                    crate::exec_strategy::validate_allow_vars_pattern(&env_config.allow_vars)
+                    crate::exec_strategy::validate_env_var_patterns(&env_config.allow_vars, "allow_vars")
                 {
                     eprintln!("Warning: {}", err);
                 }
-                env_config.allow_vars.clone()
+                Some(env_config.allow_vars.clone())
+            })
+        }),
+        denied_env_vars: loaded_profile.as_ref().and_then(|profile| {
+            profile.environment.as_ref().and_then(|env_config| {
+                if env_config.deny_vars.is_empty() {
+                    return None;
+                }
+                if let Some(err) =
+                    crate::exec_strategy::validate_env_var_patterns(&env_config.deny_vars, "deny_vars")
+                {
+                    eprintln!("Warning: {}", err);
+                }
+                Some(env_config.deny_vars.clone())
             })
         }),
         loaded_profile,
@@ -503,6 +520,8 @@ mod tests {
         );
         assert_eq!(runtime.allow_gpu, preflight.allow_gpu);
         assert_eq!(runtime.override_deny_paths, preflight.override_deny_paths);
+        assert_eq!(runtime.allowed_env_vars, preflight.allowed_env_vars);
+        assert_eq!(runtime.denied_env_vars, preflight.denied_env_vars);
         assert_eq!(
             runtime.loaded_profile.as_ref().map(|profile| {
                 (
