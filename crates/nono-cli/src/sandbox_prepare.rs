@@ -435,6 +435,7 @@ pub(crate) struct PreparedSandbox {
     pub(crate) open_url_allow_localhost: bool,
     pub(crate) override_deny_paths: Vec<PathBuf>,
     pub(crate) allowed_env_vars: Option<Vec<String>>,
+    pub(crate) denied_env_vars: Option<Vec<String>>,
 }
 
 fn resolved_workdir(args: &SandboxArgs) -> PathBuf {
@@ -1010,6 +1011,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 open_url_allow_localhost: false,
                 override_deny_paths: Vec::new(),
                 allowed_env_vars: None,
+                denied_env_vars: None,
             },
             args,
             silent,
@@ -1039,6 +1041,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         allow_parent_of_protected: profile_allow_parent_of_protected,
         override_deny_paths,
         allowed_env_vars: profile_allowed_env_vars,
+        denied_env_vars: profile_denied_env_vars,
     } = prepared_profile;
 
     if let Some(profile) = loaded_profile.as_ref() {
@@ -1279,6 +1282,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             open_url_allow_localhost,
             override_deny_paths,
             allowed_env_vars: profile_allowed_env_vars,
+            denied_env_vars: profile_denied_env_vars,
         },
         args,
         silent,
