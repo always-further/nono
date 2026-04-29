@@ -5,7 +5,7 @@
 
 use crate::config;
 use colored::Colorize;
-use nono::{AccessMode, CapabilitySet, NonoError, Result};
+use nono::{try_canonicalize, AccessMode, CapabilitySet, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -65,32 +65,10 @@ pub fn query_path(
     caps: &CapabilitySet,
     overridden_paths: &[std::path::PathBuf],
 ) -> Result<QueryResult> {
-    // Canonicalize the path for proper comparison
-    let canonical = if path.exists() {
-        path.canonicalize()
-            .map_err(|e| NonoError::PathCanonicalization {
-                path: path.to_path_buf(),
-                source: e,
-            })?
-    } else {
-        // For non-existent paths, try to canonicalize the parent
-        if let Some(parent) = path.parent() {
-            if parent.exists() {
-                let parent_canonical =
-                    parent
-                        .canonicalize()
-                        .map_err(|e| NonoError::PathCanonicalization {
-                            path: parent.to_path_buf(),
-                            source: e,
-                        })?;
-                parent_canonical.join(path.file_name().unwrap_or_default())
-            } else {
-                path.to_path_buf()
-            }
-        } else {
-            path.to_path_buf()
-        }
-    };
+    // Canonicalize the path for proper comparison using ancestor-walk fallback
+    // so that macOS symlinks (/tmp → /private/tmp) are resolved correctly even
+    // when the leaf path doesn't exist yet.
+    let canonical = try_canonicalize(path);
 
     // Check if this path is covered by an override_deny exemption
     let is_overridden = overridden_paths

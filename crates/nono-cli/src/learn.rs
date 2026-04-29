@@ -5,7 +5,7 @@
 //! to be allowed in a nono profile.
 
 use crate::cli::LearnArgs;
-use nono::{AccessMode, NonoError, Result};
+use nono::{try_canonicalize, AccessMode, NonoError, Result};
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -1588,7 +1588,7 @@ fn process_accesses(
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn canonicalize_existing_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    try_canonicalize(path)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

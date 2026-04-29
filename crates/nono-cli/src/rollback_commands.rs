@@ -15,7 +15,7 @@ use crate::rollback_session::{
 use crate::theme;
 use colored::Colorize;
 use nono::undo::{MerkleTree, ObjectStore, SnapshotManager};
-use nono::{NonoError, Result};
+use nono::{try_canonicalize, NonoError, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -30,8 +30,8 @@ type SessionChanges<'a> = (&'a SessionInfo, (usize, usize, usize));
 fn canonical_candidates(path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::with_capacity(2);
 
-    // Primary: canonicalize if possible, otherwise use as-is
-    let primary = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // Primary: canonicalize using ancestor-walk fallback
+    let primary = try_canonicalize(path);
     candidates.push(primary.clone());
 
     // macOS symlink aliases: try both directions
