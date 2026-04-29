@@ -2843,11 +2843,10 @@ mod tests {
             ..Default::default()
         };
         let merged = merge_profiles(base, child);
-        let env_config = merged.environment.expect("merged environment should be Some");
-        assert_eq!(
-            env_config.deny_vars,
-            vec!["GH_TOKEN", "ANTHROPIC_API_KEY"]
-        );
+        let env_config = merged
+            .environment
+            .expect("merged environment should be Some");
+        assert_eq!(env_config.deny_vars, vec!["GH_TOKEN", "ANTHROPIC_API_KEY"]);
     }
 
     #[test]
@@ -2867,11 +2866,10 @@ mod tests {
             ..Default::default()
         };
         let merged = merge_profiles(base, child);
-        let env_config = merged.environment.expect("merged environment should be Some");
-        assert_eq!(
-            env_config.deny_vars,
-            vec!["GH_TOKEN", "ANTHROPIC_API_KEY"]
-        );
+        let env_config = merged
+            .environment
+            .expect("merged environment should be Some");
+        assert_eq!(env_config.deny_vars, vec!["GH_TOKEN", "ANTHROPIC_API_KEY"]);
     }
 
     #[test]

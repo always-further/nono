@@ -383,9 +383,10 @@ fn prepare_profile_with_options(
                 if env_config.allow_vars.is_empty() {
                     return None;
                 }
-                if let Some(err) =
-                    crate::exec_strategy::validate_env_var_patterns(&env_config.allow_vars, "allow_vars")
-                {
+                if let Some(err) = crate::exec_strategy::validate_env_var_patterns(
+                    &env_config.allow_vars,
+                    "allow_vars",
+                ) {
                     eprintln!("Warning: {}", err);
                 }
                 Some(env_config.allow_vars.clone())
@@ -396,9 +397,10 @@ fn prepare_profile_with_options(
                 if env_config.deny_vars.is_empty() {
                     return None;
                 }
-                if let Some(err) =
-                    crate::exec_strategy::validate_env_var_patterns(&env_config.deny_vars, "deny_vars")
-                {
+                if let Some(err) = crate::exec_strategy::validate_env_var_patterns(
+                    &env_config.deny_vars,
+                    "deny_vars",
+                ) {
                     eprintln!("Warning: {}", err);
                 }
                 Some(env_config.deny_vars.clone())
