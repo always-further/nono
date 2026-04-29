@@ -186,6 +186,8 @@ To prevent the Windows-vs-macOS parity gap from re-opening as upstream ships v0.
 
 For the long-form runbook (output formats, categorization rules, fixture regeneration procedure, fork-divergence catalog rationale), see [`docs/cli/development/upstream-drift.mdx`](../docs/cli/development/upstream-drift.mdx).
 
+- **AIPC Unix futures** — see [docs/architecture/aipc-unix-futures.md](../docs/architecture/aipc-unix-futures.md) for the locked decision on which AIPC HandleKinds admit Unix backends (File / Socket / Pipe = yes via SCM_RIGHTS; JobObject / Event / Mutex = Windows-only by design).
+
 ## Evolution
 
 This document evolves at phase transitions and milestone boundaries.
