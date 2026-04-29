@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
-status: v2.3 in progress. Phase 25 Plan 25-02 (AIPC Unix Futures ADR) shipped 2026-04-29 (commit 30d6fdb1); REQ-AIPC-NIX-01 closed. Plan 25-01 (RESL Unix backends — cgroup v2 + setrlimit) deferred to a Linux/macOS-host session because integration test gates can't run from Windows. Phases 26–29 not yet planned.
-stopped_at: Plan 25-02 done (3/3 tasks, 7/7 verification gates). Plan 25-01 plan + CONTEXT committed (commit 3ed80d38) but execution awaiting Linux/macOS host coverage.
+status: v2.3 in progress. Phase 25 Plan 25-02 (AIPC Unix Futures ADR) shipped 2026-04-29 (commit 30d6fdb1); REQ-AIPC-NIX-01 closed. Phase 27 PARTIAL — Path B attempt 2026-04-29 surfaced 3 Windows-host test-harness blockers; REQ-AAH-01 re-deferred to v2.4 (commits c2247f79/16bae9ca/8aeabc08/329f313b; production code byte-identical preserved). Plan 25-01 awaiting Linux/macOS host. Phases 26/28/29 not yet planned.
+stopped_at: Phase 27 closed-with-deferral. Surfaced systemic Windows test-harness gap affecting any phase needing full integration tests (`dirs::home_dir()` ignores USERPROFILE; LOCALAPPDATA/USERPROFILE path-mismatch; audit-integrity exit-cleanup pre-existing).
 last_updated: "2026-04-29T00:00:00.000Z"
 last_activity: 2026-04-29
 progress:
@@ -22,7 +22,7 @@ See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 25 partially shipped — Plan 25-02 (AIPC Unix Futures ADR) closed REQ-AIPC-NIX-01 on 2026-04-29 (commit `30d6fdb1`). Plan 25-01 (RESL Unix backends) execution deferred until next session is on/has direct shell access to a Linux/macOS host so the cgroup v2 + `setrlimit` integration test gates can actually close.
+**Current Focus:** Two v2.3 phases attempted, both partially-blocked on host platform: Phase 25 (Plan 25-02 ADR shipped; Plan 25-01 RESL Unix needs Linux/macOS host) and Phase 27 (Path B attempt surfaced Windows test-harness blockers; REQ-AAH-01 re-deferred to v2.4). The systemic blocker is the `run_nono` integration-test pattern relying on `dirs::home_dir()` which ignores `USERPROFILE` on Windows. v2.4 candidate phase: "Windows test-harness HOME redirection" via a `NONO_TEST_HOME` production-code seam. Planning Phases 26/28/29 on Windows is fine; execution likely needs Linux/macOS host until the harness gap is closed.
 
 ## Current Position
 
@@ -194,24 +194,28 @@ Known deferred items at close: 20 (6 UAT bookkeeping gaps, 4 verification human_
 
 **Current Milestone:** v2.3 — Linux POC Unblock + Deferreds Closure (scope-locked 2026-04-29; in progress).
 **Last Activity:** 2026-04-29
-**Stopped At:** Phase 25 Plan 25-02 (AIPC Unix Futures ADR) shipped end-to-end (commit `30d6fdb1`, 3/3 tasks, 7/7 verification gates). REQ-AIPC-NIX-01 closed. ADR at `docs/architecture/aipc-unix-futures.md` (251 lines, locked verdicts on all 6 HandleKind discriminants). PROJECT.md cross-link added. Plan 25-01 (RESL Unix backends — cgroup v2 + setrlimit) plan + CONTEXT committed (commit `3ed80d38`) but execution awaits Linux/macOS-host session.
+**Stopped At:** Phase 27 Plan 27-01 (Audit-Attestation Hardening, Path B) attempted end-to-end on Windows; surfaced 3 systemic Windows test-harness blockers (`dirs::home_dir()` ignores USERPROFILE; LOCALAPPDATA/USERPROFILE mismatch; audit-integrity exit-cleanup "Session not found" pre-existing at v2.2 baseline). REQ-AAH-01 re-deferred to v2.4 with concrete resumption path documented (commits `c2247f79`/`16bae9ca`/`8aeabc08`/`329f313b`); production code in `crates/nono-cli/src/audit_attestation.rs` byte-identical preserved; redesigned Test 1 body preserved in-tree under `#[ignore]` for v2.4 resumption. Earlier 2026-04-29: Phase 25 Plan 25-02 (AIPC Unix Futures ADR) shipped end-to-end (commit `30d6fdb1`, REQ-AIPC-NIX-01 closed). Plan 25-01 (RESL Unix backends) plan + CONTEXT committed (commit `3ed80d38`) but execution awaits Linux/macOS-host session.
 
 **Next Steps (when on Linux/macOS host):**
 - Run `/gsd-execute-plan 25-01-RESL-NIX-PLAN` (or `/gsd-execute-phase 25` to pick up the remaining plan). Plan 25-01 has 8 tasks; integration tests require real cgroup v2 and `setrlimit` enforcement, both of which are unreachable from Windows.
-- Phase 25 is then complete; Phases 26–29 can proceed in any order (no structural dependencies between them).
+- Run `/gsd-execute-plan 27-01-AAH-PLAN` (resumption). On Linux/macOS, `dirs::home_dir()` honors `HOME` env override — the in-tree redesigned Test 1 body should pass cleanly without further test-harness work. Closes REQ-AAH-01.
+- Phase 25 + Phase 27 then both complete; Phases 26/28/29 can proceed in any order (no structural dependencies).
 
-**Next Steps (Windows-host options):**
-- Phase 27 (audit-attestation hardening — REQ-AAH-01) is Windows-host-friendly: it's primarily a sigstore-rs vs in-tree pkcs8 architectural decision + 2 fixture-driven tests. Run `/gsd-plan-phase 27` to scope it next.
-- Phase 28 (Authenticode chain-walker — REQ-AUDC-01..03) is **Windows-host-required** because it touches `windows-sys` features and `WinVerifyTrust` chain walking — Windows is the right host for this.
-- Phase 26 (PKG streaming follow-up — REQ-PKGS-01..04) is cross-platform but the integration tests benefit from a real Linux/macOS host for streaming verification; can plan on Windows but defer execution similar to 25-01.
-- Phase 29 (WR-01 reject-stage unification — REQ-WRU-01..02) is product-decision-first; can plan on any host.
+**Next Steps (Windows-host options) — note systemic harness gap:**
+- The `run_nono` integration-test pattern that spawns the actual `nono` binary fails to redirect HOME on Windows (`dirs::home_dir()` ignores `USERPROFILE` env override). Affects ANY phase needing full e2e integration tests.
+- **Phase 28 (Authenticode chain-walker — REQ-AUDC-01..03)** is the most Windows-host-friendly remaining work because most of its testing is Windows-API unit tests against `WinVerifyTrust` rather than `run_nono` e2e patterns. Run `/gsd-plan-phase 28` next.
+- **Phase 29 (WR-01 reject-stage unification — REQ-WRU-01..02)** is primarily product-decision + ledger-test-update; can plan on Windows; execution may hit similar harness blockers if it needs full e2e tests.
+- **Phase 26 (PKG streaming follow-up — REQ-PKGS-01..04)** has full e2e integration test scope; planning on Windows is fine, execution will likely need Linux/macOS host similar to 25-01 and 27-01 resumption.
+- **Candidate v2.4 phase: "Windows test-harness HOME redirection"** — adds `NONO_TEST_HOME` production-code seam to the supervisor's `dirs::home_dir()` callsites so integration tests can redirect home cleanly on Windows. Unblocks all v2.3+ test work on Windows hosts. Rule-4 architectural change but small surface (~5-10 callsites).
 
-**v2.3 recommended phase order (revised after Plan 25-02 completion):**
-1. Phase 25 Plan 25-01 (RESL Unix backends) — execute when on Linux/macOS host. Closes the Linux POC credibility issue.
-2. Phase 27 (audit-attestation hardening) — Windows-host-friendly; closes v2.2 attestation production-readiness gap.
-3. Phase 28 (Authenticode chain-walker) — Windows-host-required; lights up v2.2 AUD-03 partial.
-4. Phase 26 (PKG streaming follow-up) — closes v2.2 PKG-01 partial; integration tests prefer Linux/macOS host.
-5. Phase 29 (WR-01 unification) — last; product decision builds on whatever the audit-ledger surface looks like after the others land.
+**v2.3 recommended phase order (revised after Phase 27 partial close):**
+1. Phase 28 (Authenticode chain-walker) — Windows-host-friendly; lights up v2.2 AUD-03 partial; least exposed to the test-harness gap.
+2. Phase 29 (WR-01 unification) — product decision can land on Windows; ledger-test updates.
+3. Phase 25 Plan 25-01 (RESL Unix backends) — Linux/macOS host required.
+4. Phase 27 Plan 27-01 (resumption) — Linux/macOS host or `NONO_TEST_HOME` seam.
+5. Phase 26 (PKG streaming follow-up) — Linux/macOS host preferred for streaming verification.
+
+The host-coverage gap is now the dominant v2.3 schedule constraint, not implementation difficulty.
 
 **Status of Phase 19 CLEAN items:**
 

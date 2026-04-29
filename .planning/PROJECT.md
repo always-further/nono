@@ -102,16 +102,20 @@ Windows security must be as structurally impossible and feature-complete as Unix
 
 ### Active (v2.3)
 
-- **REQ-RESL-NIX-01..03 + REQ-AIPC-NIX-01** — Phase 25: Cross-Platform RESL + AIPC Unix Design.
+- **REQ-AIPC-NIX-01** — ✓ closed via Phase 25 Plan 25-02 (ADR shipped 2026-04-29).
+- **REQ-RESL-NIX-01..03** — Phase 25 Plan 25-01 (deferred to Linux/macOS-host session).
 - **REQ-PKGS-01..04** — Phase 26: PKG Streaming Follow-Up.
-- **REQ-AAH-01** — Phase 27: Audit-Attestation Hardening.
 - **REQ-AUDC-01..03** — Phase 28: Authenticode Chain-Walker Subject Extraction.
 - **REQ-WRU-01..02** — Phase 29: WR-01 Reject-Stage Unification.
 
+(REQ-AAH-01 was Phase 27 active scope but re-deferred to v2.4 on 2026-04-29 after the Path B Windows-host attempt surfaced systemic test-harness blockers — see Deferred section below.)
+
 ### Deferred (v2.4+)
 
-The five major v2.2-deferred items (PKG streaming, audit-attestation hardening, Authenticode chain-walker, WR-01 reject-stage unification, cross-platform RESL Unix backends) have been pulled into v2.3 as Phases 25–29. The deferral list below is what remains for v2.4+.
+The five major v2.2-deferred items (PKG streaming, audit-attestation hardening, Authenticode chain-walker, WR-01 reject-stage unification, cross-platform RESL Unix backends) were pulled into v2.3 as Phases 25–29. After v2.3 execution started, audit-attestation hardening was re-deferred. The deferral list below is what remains for v2.4+.
 
+- **REQ-AAH-01 (audit-attestation hardening) — re-deferred from v2.3 Phase 27** (2026-04-29). Path B fixture redesign attempted on Windows; surfaced 3 systemic test-harness blockers (`dirs::home_dir()` ignores `USERPROFILE` on Windows, `LOCALAPPDATA`/`USERPROFILE` path-mismatch under partial env redirection, pre-existing v2.2-baseline audit-integrity exit-cleanup "Session not found"). Production code in `crates/nono-cli/src/audit_attestation.rs` byte-identical preserved; redesigned Test 1 body preserved in-tree under `#[ignore]` for v2.4 resumption. Resumption requires either (a) Linux/macOS host where `dirs::home_dir()` honors `HOME` env override, or (b) `NONO_TEST_HOME` production-code seam. See `.planning/phases/27-audit-attestation-hardening/27-01-SUMMARY.md`.
+- **Windows test-harness HOME redirection** (new candidate v2.4 phase, surfaced 2026-04-29 by Phase 27). Add `NONO_TEST_HOME` env-var override to `dirs::home_dir()` callsites in `crates/nono-cli/src/` so integration tests can redirect home cleanly on Windows. Rule-4 architectural change with small surface (~5-10 callsites). Unblocks v2.3 test work on Windows hosts. Should land before any further v2.3 phase execution on Windows.
 - **Upstream v0.41–v0.43 ingestion** (deferred at v2.3 scope-lock 2026-04-29) — first real load of the DRIFT-01/02 tooling shipped in v2.2 Phase 24. Skipped in v2.3 to keep the milestone shippable in 2 weeks; tooling stays warm regardless.
 - **AIPC G-04 wire-protocol compile-time tightening** — `Approved(ResourceGrant)` inline at the wire type so `(Approved, grant=None)` becomes a compile-time error (deferred from v2.1 Plan 18.1-02; reaffirmed at v2.3 scope-lock). Cascades into `aipc_sdk.rs` child SDK demultiplexer + 23 pre-existing tests.
 - **`windows-squash` → `main` merge** — re-deferred 2026-04-29 per quick-260428-rsu (commit `7911ef0e`); gated on PR-583 maintainer response. Cannot be pulled into v2.3 until that gate moves.
@@ -206,4 +210,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-29 at v2.3 milestone scope-lock. v2.3 — Linux POC Unblock + Deferreds Closure — 5 phases (25–29), 14 requirements across RESL-NIX / AIPC-NIX / PKGS / AAH / AUDC / WRU. Trigger: Linux POC gap analysis (`.planning/quick/260429-gap-v039-linux-poc-vs-windows-fork-tip/PLAN.md`) showed RESL flags emit "not enforced on linux" warnings — credibility issue for the demo. Phase 25 closes those via cgroup v2 (Linux) + setrlimit (macOS) backends and ships the AIPC Unix futures ADR. Phases 26–28 close v2.2's three deferred items (PKG streaming, audit-attestation hardening, Authenticode chain-walker). Phase 29 lands the WR-01 product decision deferred since v2.1. Out of scope to v2.4: upstream v0.41–v0.43 ingestion, AIPC G-04 compile-time tightening, windows-squash→main merge, cross-platform drift QA, docs pass. v3.0-deferred: WR-02 EDR HUMAN-UAT. Earlier v2.2 close 2026-04-29: 3 phases (22–24), 9 plans, 21 requirements; 146 commits since `v2.1`; +33,153 / −835 LOC.*
+*Last updated: 2026-04-29 after Phase 27 partial close. v2.3 progress: REQ-AIPC-NIX-01 closed via Phase 25 Plan 25-02 (ADR shipped, commit `30d6fdb1`). Phase 27 Plan 27-01 attempted on Windows; surfaced 3 systemic test-harness blockers (`dirs::home_dir()` ignores `USERPROFILE`, LOCALAPPDATA/USERPROFILE mismatch, audit-integrity exit-cleanup pre-existing). REQ-AAH-01 re-deferred to v2.4 with concrete resumption path; production code byte-identical preserved; redesigned Test 1 body preserved in-tree for v2.4. v2.4 candidate: "Windows test-harness HOME redirection" via `NONO_TEST_HOME` production-code seam — unblocks all v2.3+ Windows-host integration testing. Recommended next phases on Windows: 28 (Authenticode chain-walker, mostly Windows-API unit tests, least exposed to harness gap), then 29 (WR-01 unification). Phases 25-01 + 27-01 resumption + 26 prefer Linux/macOS host. Earlier 2026-04-29 v2.2 close: 3 phases (22–24), 9 plans, 21 requirements; 146 commits since `v2.1`; +33,153 / −835 LOC.*

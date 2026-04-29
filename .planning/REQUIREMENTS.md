@@ -247,7 +247,7 @@ To be filled by gsd-roadmapper at v2.3 phase scope-lock (currently at REQUIREMEN
 | PKGS-02 | Phase 26 | Active |
 | PKGS-03 | Phase 26 | Active |
 | PKGS-04 | Phase 26 | Active |
-| AAH-01 | Phase 27 | Active |
+| AAH-01 | Phase 27 (PARTIAL) | Re-deferred to v2.4 (2026-04-29) — Path B Windows attempt surfaced 3 systemic test-harness blockers; production code byte-identical preserved; redesigned Test 1 body preserved in-tree under `#[ignore]` for v2.4 resumption. See `.planning/phases/27-audit-attestation-hardening/27-01-SUMMARY.md`. |
 | AUDC-01 | Phase 28 | Active |
 | AUDC-02 | Phase 28 | Active |
 | AUDC-03 | Phase 28 | Active |
