@@ -315,17 +315,17 @@ Mapped by gsd-roadmapper 2026-04-24 at v2.2 milestone scope-lock.
 | POLY-01 | Phase 22 (Plan 22-02) | Complete (commits 0d83a1e2 + a47c5962; orphan override_deny fails closed via NonoError::SandboxInit + .exists() pre-filter cross-platform safety) |
 | POLY-02 | Phase 22 (Plan 22-02) | Complete (commit 490a8a5c integration test; clap conflicts_with at cli.rs:1602 was already in fork — CONTRADICTION-B confirmed) |
 | POLY-03 | Phase 22 (Plan 22-02) | Complete (commit ef0facdc; .claude.lock in filesystem.allow_file for both claude-code and claude-no-kc) |
-| PKG-01 | Phase 22 (Plan 22-03) | Pending |
-| PKG-02 | Phase 22 (Plan 22-03) | Pending |
-| PKG-03 | Phase 22 (Plan 22-03) | Pending |
-| PKG-04 | Phase 22 (Plan 22-03) | Pending |
-| OAUTH-01 | Phase 22 (Plan 22-04) | Pending |
-| OAUTH-02 | Phase 22 (Plan 22-04) | Pending |
-| OAUTH-03 | Phase 22 (Plan 22-04) | Pending |
-| AUD-01 | Phase 22 (Plan 22-05) | Pending |
-| AUD-02 | Phase 22 (Plan 22-05) | Pending |
-| AUD-03 | Phase 22 (Plan 22-05) | Pending |
-| AUD-04 | Phase 22 (Plan 22-05) | Pending |
+| PKG-01 | Phase 22 (Plan 22-03) | Complete-partial (6/8 cherry-picks landed; PKG streaming follow-up deferred to v2.3 — needs `ArtifactType::Plugin` + `bundle_json` field + Rule-4 architectural call on `validate_path_within` belt-and-suspenders) |
+| PKG-02 | Phase 22 (Plan 22-03) | Complete (`nono remove` flat top-level subcommand; hook unregistration via fork's `hooks.rs`) |
+| PKG-03 | Phase 22 (Plan 22-03) | Complete (`nono pull` flat top-level + Claude-Code hook registration via fork's `hooks.rs`) |
+| PKG-04 | Phase 22 (Plan 22-03) | Complete (`nono search` + `nono list` flat top-level subcommands; signed-artifact verification at install time) |
+| OAUTH-01 | Phase 22 (Plan 22-04) | Complete (commit 5c8df06a; `OAuth2Config` + `nono-proxy/src/oauth2.rs` client-credentials Bearer-token injection) |
+| OAUTH-02 | Phase 22 (Plan 22-04) | Complete (`custom_credentials.oauth2` parses in profile; PROF-04 `claude-no-kc` builtin verified) |
+| OAUTH-03 | Phase 22 (Plan 22-04) | Complete (reverse-proxy HTTP upstream loopback-only by default + `--allow-domain` strict-proxy composition; CL-03-M literal `client_secret` warning + CL-04-M manifest-export skip + HG-01-M Debug redaction) |
+| AUD-01 | Phase 22 (Plan 22-05a) | Complete (commit d15a3ab6; `--audit-integrity` produces hash-chained Merkle-rooted ledger; `audit-events.ndjson` per session; AuditRecorder lifecycle integrated into supervisor; pre/post-merkle roots captured) |
+| AUD-02 | Phase 22 (Plan 22-05a) | Complete (`nono audit verify <id>` recomputes per-event leaves + chain head + Merkle root with fail-closed mismatch detection; `--public-key-file <PATH>` flag; HG-01-H upgrade landed cryptographic DSSE bundle verification — commit cffb43b1; 2 fixture-driven tests `#[ignore]`'d pending sigstore-rs `KeyPair::from_pkcs8` re-enablement deferred to v2.3) |
+| AUD-03 | Phase 22 (Plan 22-05a SHA-256 + Plan 22-05b Authenticode) | Complete-partial (`executable_identity` SHA-256 portion shipped; on Windows, `WinVerifyTrust` records `Valid` / `Unsigned` / `InvalidSignature{hresult}` discriminant; chain-walker subject extraction deferred to v2.3 — `windows-sys 0.59` does not expose `WTHelperProvDataFromStateData` without `Win32_Security_Cryptography_Catalog` + `Win32_Security_Cryptography_Sip` features) |
+| AUD-04 | Phase 22 (Plan 22-05b) | Complete (commit b5640cd4; `prune` → `session cleanup` rename with v2.1 CLEAN-04 byte-identical preservation guaranteed by formal `applied_labels_guard::audit_flush_before_drop` 83 LOC regression test; 5 rename lifecycle items: new `nono session cleanup` + peer `nono audit cleanup` + hidden `nono prune` with stderr deprecation + ALL_SUBCOMMANDS test + `NONO_CAP_FILE` no-op preserved; live UAT 10/10 verified 2026-04-28) |
 | AUD-05 | Phase 23 | Pending |
 | DRIFT-01 | Phase 24 | Complete (2026-04-27) |
 | DRIFT-02 | Phase 24 | Complete (2026-04-27) |

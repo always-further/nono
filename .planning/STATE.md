@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
 status: planned
-stopped_at: Phase 22 all 6 plans complete (22-01, 22-02, 22-03 partial, 22-04, 22-05a, 22-05b); ready for /gsd-secure-phase 22 + /gsd-code-review 22 + phase verification. Plan 22-05b AUD-RENAME landed 6 fork-only commits (5d41a71c..a17eb307) + SUMMARY. T-22-05-04 ABSOLUTE STOP guard held end-to-end (CLEAN-04 invariants byte-identical AFTER every source-code commit; session_commands*.rs zero diff per Decision 2 LOCKED reframe — upstream-faithful Cmd::Session+#[command(hide)] shape, NOT Cmd::Prune→SessionCleanup rename). T-22-05-05 mitigated via formal applied_labels_guard::audit_flush_before_drop regression test (83 LOC). Decision 4 fallback: Authenticode discriminant recorded (Valid/Unsigned/InvalidSignature{hresult}); chain-walker subject extraction deferred to v2.3 backlog. AUD-04 #1/#2/#3/#4/#5 + AUD-03 Windows portion landed on v2.1 fork. Phase 22 implementation done.
-last_updated: "2026-04-28T20:00:00.000Z"
+stopped_at: Phase 22 COMPLETE (2026-04-28). All 6 plans landed (22-01 PROF, 22-02 POLY, 22-03 PKG partial 6/8 with 2 deferred to v2.3, 22-04 OAUTH, 22-05a AUD-CORE, 22-05b AUD-RENAME). Phase-level closure pipeline GREEN end-to-end — SECURITY.md SECURED (threats 41/41 closed), REVIEW-FIX.md 7/7 in-scope findings landed (commit 33229adc), UAT 10/10 passed + 1 spec-error skipped (commit e60ab093). Phase 24 already shipped 2026-04-27. Only Phase 23 (Windows Audit-Event Retrofit, AUD-05, 0/1 plan, depends on 22-05's ledger) remains in v2.2. Next action — /gsd-discuss-phase 23 or /gsd-plan-phase 23 to scope AIPC broker audit emissions.
+last_updated: "2026-04-29T01:35:00.000Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 25
-  completed_phases: 21
-  total_plans: 70
-  completed_plans: 70
+  completed_phases: 23
+  total_plans: 71
+  completed_plans: 71
   percent: 100
 ---
 
@@ -22,14 +22,14 @@ See: .planning/PROJECT.md (updated 2026-04-24 at v2.2 milestone start)
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 24 complete (2026-04-27). Awaiting next phase selection in v2.2 milestone.
+**Current Focus:** Phase 22 complete (2026-04-28). Phase 23 (Windows Audit-Event Retrofit, AUD-05) is the only outstanding phase in v2.2.
 
 ## Current Position
 
-Phase: 24 (parity-drift-prevention) — COMPLETE (2026-04-27)
-Plan: 2 of 2 complete
-Status: Phase 24 complete; pick next phase (22 or 23 remain in v2.2)
-Milestone: v2.2 — 0/3 phases, 0/8 plans. Phase numbering continues from v2.1's Phase 21 → v2.2 starts at Phase 22.
+Phase: 23 (windows-audit-event-retrofit) — Ready to plan
+Plan: 0 of 1 (not started)
+Status: Awaiting `/gsd-discuss-phase 23` or `/gsd-plan-phase 23`. Depends on Phase 22's audit ledger (now landed); wires AIPC broker audit emissions into the 5 `handle_*_request` paths in `crates/nono-cli/src/exec_strategy_windows/supervisor.rs`.
+Milestone: v2.2 — 2/3 phases complete (Phase 22 ✓ 2026-04-28, Phase 24 ✓ 2026-04-27), 8/9 plans complete. Phase 23 is the last gate to v2.2 ship.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
   - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` local; merge-to-main pending on pre-milestone quick task).
@@ -44,14 +44,14 @@ v2.2 finalized phase structure (locked 2026-04-24 by gsd-roadmapper):
 
 Next actions:
 
-  - Run the pre-milestone quick task: merge `windows-squash` → `main` before Phase 22 cherry-picks begin.
-  - Invoke `/gsd-plan-phase 22` to decompose Phase 22 into the 5 locked plans.
-  - Phase 24 may be started in parallel with Phase 22 (independent dependency chain).
+  - `/gsd-discuss-phase 23` or `/gsd-plan-phase 23` — scope AUD-05 (Windows AIPC broker audit emissions) as the last v2.2 phase. Plan 23-01 threads ledger-append calls into each `handle_*_request` in `crates/nono-cli/src/exec_strategy_windows/supervisor.rs` (File, Socket, Pipe, JobObject, Event, Mutex), preserves WR-01 reject-stage asymmetry, and survives `AppliedLabelsGuard` Drop flush.
+  - After Phase 23 closes, `/gsd-complete-milestone v2.2` to archive the milestone.
+  - Pre-merge `windows-squash` → `main` quick task remains a candidate for milestone-close timing.
 
-Last activity: 2026-04-28 -- Phase 24 execution started
+Last activity: 2026-04-28 — Phase 22 closed end-to-end (UAT 10/10 + 1 spec-error skipped, commit e60ab093).
 
 ```
-Progress: [██████████] 100% (62/62 plans implementation-complete — Phase 21 closed 2026-04-20; supervisor-pipe debug RESOLVED via 3-commit fix chain; Phase 18.1 Plan 18.1-01 (G-02 CONIN$ prompt routing) complete 2026-04-21; Phase 18.1 Plan 18.1-02 (G-03 JobObject CreateJobObjectW + G-04 broker-failure flip) complete 2026-04-21; Phase 18.1 Plan 18.1-03 (G-06 profile widening end-to-end wiring, Plan 18-03 Deferred Issue #1 RESOLVED) complete 2026-04-21; Phase 18.1 Plan 18.1-04 (G-05 WR-01 reject-stage verification, commit 1699339) complete 2026-04-21 — all 5 HUMAN-UAT gaps G-02..G-06 closed. Remaining gate to v2.1 milestone tag: gsd-verifier phase-level sign-off on Phase 18.1)
+Progress: [██████████] 100% (71/71 plans complete — Phase 22 closed 2026-04-28 via UAT 10/10; SECURITY 41/41 closed; REVIEW-FIX 7/7 in-scope landed)
 ```
 
 ## Accumulated Context
