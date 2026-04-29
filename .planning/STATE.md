@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Windows/macOS Parity Sweep
-status: planned
-stopped_at: Phase 22 COMPLETE (2026-04-28). All 6 plans landed (22-01 PROF, 22-02 POLY, 22-03 PKG partial 6/8 with 2 deferred to v2.3, 22-04 OAUTH, 22-05a AUD-CORE, 22-05b AUD-RENAME). Phase-level closure pipeline GREEN end-to-end — SECURITY.md SECURED (threats 41/41 closed), REVIEW-FIX.md 7/7 in-scope findings landed (commit 33229adc), UAT 10/10 passed + 1 spec-error skipped (commit e60ab093). Phase 24 already shipped 2026-04-27. Only Phase 23 (Windows Audit-Event Retrofit, AUD-05, 0/1 plan, depends on 22-05's ledger) remains in v2.2. Next action — /gsd-discuss-phase 23 or /gsd-plan-phase 23 to scope AIPC broker audit emissions.
-last_updated: "2026-04-29T01:35:00.000Z"
+status: Awaiting `/gsd-discuss-phase 23` or `/gsd-plan-phase 23`. Depends on Phase 22's audit ledger (now landed); wires AIPC broker audit emissions into the 5 `handle_*_request` paths in `crates/nono-cli/src/exec_strategy_windows/supervisor.rs`.
+stopped_at: v2.1 milestone close complete. All planning docs updated and committed. Awaiting next milestone scope.
+last_updated: "2026-04-29T03:18:15.896Z"
 last_activity: 2026-04-28
 progress:
-  total_phases: 25
-  completed_phases: 23
-  total_plans: 71
-  completed_plans: 71
-  percent: 100
+  total_phases: 29
+  completed_phases: 24
+  total_plans: 82
+  completed_plans: 80
+  percent: 98
 ---
 
 # Project State: nono — v2.2 Windows/macOS Parity Sweep
