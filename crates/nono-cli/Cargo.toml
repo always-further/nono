@@ -63,7 +63,7 @@ keyring = { version = "3", optional = true }
 sigstore-sign = "0.6.5"
 tokio = { version = "1", features = ["rt", "net", "io-util"] }
 
-ureq = "3"
+ureq = { version = "3", features = ["platform-verifier"] }
 semver = "1"
 regress = "0.11"
 

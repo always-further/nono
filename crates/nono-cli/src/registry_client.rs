@@ -24,18 +24,29 @@ pub struct RegistryClient {
 }
 
 impl RegistryClient {
+    /// Build a registry client whose TLS verifier delegates to the OS-native
+    /// trust store at handshake time (SecTrust on macOS, system CA stores on
+    /// Linux). This picks up corporate or MDM-installed root CAs — including
+    /// the kind injected by VPN-based TLS-inspecting proxies — that the bundled
+    /// webpki roots wouldn't recognize, without any startup-time enumeration of
+    /// the keychain (which can spuriously fail in restricted environments).
     #[must_use]
     pub fn new(base_url: String) -> Self {
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+            .build();
+        let http = ureq::Agent::config_builder()
+            .timeout_global(Some(REGISTRY_CALL_TIMEOUT))
+            .timeout_resolve(Some(REGISTRY_CONNECT_TIMEOUT))
+            .timeout_connect(Some(REGISTRY_CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(REGISTRY_RESPONSE_TIMEOUT))
+            .timeout_recv_body(Some(REGISTRY_BODY_TIMEOUT))
+            .tls_config(tls_config)
+            .build()
+            .new_agent();
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: ureq::Agent::config_builder()
-                .timeout_global(Some(REGISTRY_CALL_TIMEOUT))
-                .timeout_resolve(Some(REGISTRY_CONNECT_TIMEOUT))
-                .timeout_connect(Some(REGISTRY_CONNECT_TIMEOUT))
-                .timeout_recv_response(Some(REGISTRY_RESPONSE_TIMEOUT))
-                .timeout_recv_body(Some(REGISTRY_BODY_TIMEOUT))
-                .build()
-                .new_agent(),
+            http,
         }
     }
 
@@ -506,5 +517,14 @@ mod tests {
             }
         }
         0
+    }
+
+    /// Upstream `cb6b199c` smoke test — base URL normalization (trailing slash
+    /// strip). Construction is infallible because TLS verification is delegated
+    /// to the OS verifier at handshake time (rustls-platform-verifier).
+    #[test]
+    fn registry_client_normalizes_base_url() {
+        let client = RegistryClient::new("https://example.invalid/".to_string());
+        assert_eq!(client.base_url, "https://example.invalid");
     }
 }
