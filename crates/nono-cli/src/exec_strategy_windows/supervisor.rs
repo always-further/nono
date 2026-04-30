@@ -2173,14 +2173,25 @@ mod capability_handler_tests {
     //! show the user the approval prompt BEFORE ultimately denying,
     //! while Event/Mutex/JobObject deny silently without prompting.
     //!
-    //! Per CONTEXT.md D-14 (Phase 18.1) + 18-HUMAN-UAT Test 2 result,
-    //! the WR-01 stage-unification fix (routing Pipe direction + Socket
-    //! role/port through the same pre-broker gate as
-    //! Event/Mutex/JobObject) is explicitly **deferred to v2.2 as a
-    //! product decision**. Phase 18.1 only verifies + documents the
-    //! current behavior; the `wr01_*` tests below lock the matrix above
-    //! into regression guards so any future refactor that accidentally
-    //! moves a mask check pre/post-broker breaks CI.
+    //! **Phase 29 (v2.3) — locked as permanent design property (Option c).**
+    //! The mask-gate-before-prompt vs broker-failure-flip-after-prompt
+    //! distinction is a structural reflection of what is checkable
+    //! upfront (O(1) profile lookup against the supervisor's mask
+    //! allowlist) vs only via OS interaction (O(syscall) post-approval —
+    //! Pipe direction requires `GetNamedPipeInfo`; Socket privileged-port
+    //! + role allowlist requires `bind()` to attempt the kernel op). It
+    //! is NOT a bug to unify. Forcing pre-prompt rejection for Pipe/Socket
+    //! would require re-implementing kernel checks in supervisor space
+    //! (security regression — violates defense-in-depth) or deferring all
+    //! approval prompts until after broker attempts (UX regression —
+    //! breaks the approval-then-action contract Phase 18 shipped).
+    //!
+    //! See `.planning/PROJECT.md § Key Decisions — WR-01 reject-stage
+    //! asymmetry` for the locked verdict and `.planning/phases/29-wr01-
+    //! reject-stage-unification/` for the closure record. The `wr01_*`
+    //! tests below remain regression guards on the locked matrix; any
+    //! future refactor that accidentally moves a mask check pre/post-
+    //! broker still breaks CI.
 
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -4316,6 +4327,7 @@ mod capability_handler_tests {
     ///
     /// Contrast with Pipe/Socket, which currently reject AFTER approval
     /// per the WR-01 deviation (see module docstring).
+    /// Locked at Phase 29 as permanent design property (Option c) — see PROJECT.md § Key Decisions.
     #[test]
     fn wr01_event_rejects_before_prompt_on_out_of_allowlist_mask() {
         let backend = CountingGrantBackend::new();
@@ -4414,6 +4426,7 @@ mod capability_handler_tests {
     /// Same enforcement site + contract as
     /// [`wr01_event_rejects_before_prompt_on_out_of_allowlist_mask`]; this
     /// test locks the `HandleKind::Mutex` branch of the pre-broker gate.
+    /// Locked at Phase 29 as permanent design property (Option c) — see PROJECT.md § Key Decisions.
     #[test]
     fn wr01_mutex_rejects_before_prompt_on_out_of_allowlist_mask() {
         let backend = CountingGrantBackend::new();
@@ -4512,6 +4525,7 @@ mod capability_handler_tests {
     /// docstring. The existing test carries the WR-01 G-05 narrative
     /// comment above its `backend.calls() == 0` assertion; this test is
     /// the co-located regression guard that pairs with it.
+    /// Locked at Phase 29 as permanent design property (Option c) — see PROJECT.md § Key Decisions.
     #[test]
     fn wr01_job_object_rejects_before_prompt_on_terminate_mask() {
         let backend = CountingGrantBackend::new();
@@ -4615,6 +4629,7 @@ mod capability_handler_tests {
     /// pairing with [`wr01_event_rejects_before_prompt_on_out_of_allowlist_mask`]
     /// — both rows of the verdict matrix covered by named tests whose
     /// identifiers encode the expected stage.
+    /// Locked at Phase 29 as permanent design property (Option c) — see PROJECT.md § Key Decisions.
     #[test]
     fn wr01_pipe_rejects_after_prompt_on_readwrite_default_profile() {
         let backend = CountingGrantBackend::new();
@@ -4718,6 +4733,7 @@ mod capability_handler_tests {
     /// port check has been moved to the pre-broker gate — update BOTH
     /// the assertion here AND the module-docstring verdict-matrix row
     /// for Socket. This is a semantic change worth explicit bookkeeping.
+    /// Locked at Phase 29 as permanent design property (Option c) — see PROJECT.md § Key Decisions.
     #[test]
     fn wr01_socket_privileged_port_rejects_after_prompt_empirical() {
         let backend = CountingGrantBackend::new();

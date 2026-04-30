@@ -44,6 +44,17 @@ pub(crate) const MERKLE_SCHEME_LABEL: &str = "alpha";
 /// Future kinds may extend this; until then the matrix is locked by the
 /// WR-01 verdict matrix in `exec_strategy_windows/supervisor.rs`'s
 /// `capability_handler_tests` module docstring (lines 2034-2076).
+///
+/// **Phase 29 (v2.3) — locked as permanent design property.** Stage
+/// classification is structural: mask-gate kinds (Event/Mutex/JobObject)
+/// reject `BeforePrompt` because the supervisor's profile fully describes
+/// the mask allowlist (O(1) lookup); broker-failure-flip kinds (Pipe/
+/// Socket) reject `AfterPrompt` because the failure mode is only
+/// observable when the broker attempts the kernel op (O(syscall) post-
+/// approval). Future kinds inherit this taxonomy: if their checkability
+/// is upfront, they reject `BeforePrompt`; if only OS-observable, they
+/// reject `AfterPrompt`. This is not unifiable without security or UX
+/// regression — see `.planning/PROJECT.md § Key Decisions` and Phase 29.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum RejectStage {
@@ -75,6 +86,7 @@ enum AuditEventPayload {
         /// G-04 broker-failure flip at supervisor.rs:1997 denies after
         /// approval (Pipe direction allowlist + Socket privileged port /
         /// role allowlist).
+        /// Stage asymmetry is locked as permanent design property at Phase 29 — see RejectStage docstring.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reject_stage: Option<RejectStage>,
     },
