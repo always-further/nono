@@ -53,10 +53,10 @@ use std::path::Path;
 
 use windows_sys::Win32::Security::Cryptography::{
     CertGetCertificateContextProperty, CertGetNameStringW, CERT_CONTEXT, CERT_HASH_PROP_ID,
-    CERT_NAME_RDN_TYPE,
+    CERT_NAME_RDN_TYPE, CERT_X500_NAME_STR,
 };
 use windows_sys::Win32::Security::WinTrust::{
-    WinVerifyTrust, WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData,
+    WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
     CRYPT_PROVIDER_CERT, CRYPT_PROVIDER_DATA, CRYPT_PROVIDER_SGNR,
     WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
     WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
@@ -249,19 +249,28 @@ impl Drop for WinTrustCloseGuard {
 fn parse_signer_subject(wtd: &WINTRUST_DATA) -> Result<String> {
     let leaf_cert = leaf_cert_from(wtd)?;
 
+    // For CERT_NAME_RDN_TYPE, `pvTypePara` is treated as a `*const DWORD`
+    // pointing to a CERT_STRING_TYPE flag controlling the RDN serialization
+    // format. CERT_X500_NAME_STR (= 3) yields the keyed RDN format
+    // "CN=..., O=..., C=..." (the format REQ-AUDC-01 must-haves expect for
+    // the CN= substring assertion). Without this flag, the default behavior
+    // emits a comma-separated value-only string with no attribute keys.
+    let str_type_flag: u32 = CERT_X500_NAME_STR;
+    let str_type_ptr = &str_type_flag as *const u32 as *mut c_void;
+
     // First call: query the required UTF-16 buffer length (returns
     // wide-char count INCLUDING the null terminator).
     // SAFETY: `leaf_cert` is a non-NULL CERT_CONTEXT pointer obtained from
-    // `leaf_cert_from` (which returns Err on NULL). Passing NULL/0 for
-    // pvTypePara/pszNameString/cchNameString returns the required size.
-    // CERT_NAME_RDN_TYPE produces an X.500 RDN string (e.g.
-    // "CN=Microsoft Corporation, O=...").
+    // `leaf_cert_from` (which returns Err on NULL). `str_type_ptr` points
+    // to a stack-local DWORD live for the duration of this function.
+    // Passing NULL/0 for pszNameString/cchNameString returns the required
+    // size in wide chars including the null terminator.
     let cch_required = unsafe {
         CertGetNameStringW(
             leaf_cert,
             CERT_NAME_RDN_TYPE,
             0,
-            std::ptr::null_mut(),
+            str_type_ptr,
             std::ptr::null_mut(),
             0,
         )
@@ -277,14 +286,15 @@ fn parse_signer_subject(wtd: &WINTRUST_DATA) -> Result<String> {
     // Second call: actually read the wide string.
     // SAFETY: buffer is sized to `cch_required` u16 elements per the
     // first-call result; `CertGetNameStringW` writes UP TO `cch_required`
-    // wide chars including the null terminator.
+    // wide chars including the null terminator. `str_type_ptr` is the
+    // same valid stack pointer as the first call.
     let mut buf: Vec<u16> = vec![0u16; cch_required as usize];
     let written = unsafe {
         CertGetNameStringW(
             leaf_cert,
             CERT_NAME_RDN_TYPE,
             0,
-            std::ptr::null_mut(),
+            str_type_ptr,
             buf.as_mut_ptr(),
             cch_required,
         )
@@ -501,6 +511,28 @@ fn sanitize_for_terminal(input: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Microsoft-signed system binary fixture. Probed via the
+    /// `_probe_embedded_signed_candidates` test below on a Windows 11 host:
+    /// `C:\Windows\explorer.exe` is **EMBEDDED-signed** (not catalog-signed).
+    /// `notepad.exe`, `cmd.exe`, and `powershell.exe` are catalog-signed on
+    /// modern Windows 10/11 builds (their signatures live in `.cat` files,
+    /// not in the PE itself), so `WinVerifyTrust(WTD_CHOICE_FILE)` returns
+    /// `TRUST_E_NOSIGNATURE` for them — that's why we use `explorer.exe`
+    /// here. `taskmgr.exe`, `dllhost.exe`, `svchost.exe`, `wuauclt.exe`,
+    /// `wermgr.exe` are also reliable embedded-signed fallbacks if a future
+    /// Windows SKU drops `explorer.exe`.
+    const FIXTURE_PATH: &str = r"C:\Windows\explorer.exe";
+
+    /// Substring expected in the leaf-cert RDN for the FIXTURE_PATH binary.
+    /// Lowercased for case-insensitive comparison via `to_lowercase()`.
+    const EXPECTED_SUBJECT_SUBSTRING: &str = "microsoft";
+
+    // REQ-AUDC-03 fail-closed contract: structurally enforced via
+    // ?-propagation in query_authenticode_status (Task 4 wiring); no
+    // programmable test fixture exists for "Valid + chain-walk-fails"
+    // because constructing one requires FFI mocking. Code review of the
+    // two `?` operators is the authoritative evidence.
+
     #[test]
     fn unsigned_temp_file_returns_unsigned_or_invalid() {
         // A short tempfile that LOOKS like a PE start but has no signature.
@@ -533,5 +565,127 @@ mod tests {
                 "expected QueryFailed/InvalidSignature/Unsigned/Err for missing path, got: {other:?}"
             ),
         }
+    }
+
+    /// REQ-AUDC-01 acceptance: chain walker extracts a populated, RDN-shaped
+    /// subject from a known-Microsoft-signed system binary. Replaces the
+    /// v2.2 "<unknown>" sentinel with a real CN= prefix.
+    #[test]
+    fn signed_system_binary_extracts_cn_subject() {
+        let path = Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            // Defense-in-depth: graceful skip on unusual Windows SKUs.
+            eprintln!("Skipping: fixture {FIXTURE_PATH} not present on this host.");
+            return;
+        }
+
+        let status = query_authenticode_status(path)
+            .expect("query_authenticode_status must succeed on a Microsoft-signed system binary");
+
+        match status {
+            AuthenticodeStatus::Valid {
+                signer_subject, ..
+            } => {
+                assert!(
+                    !signer_subject.is_empty(),
+                    "signer_subject must be non-empty on Valid signature; got: {signer_subject:?}"
+                );
+                assert!(
+                    signer_subject.to_lowercase().contains("cn="),
+                    "signer_subject should be RDN-formatted with a CN= component; got: {signer_subject:?}"
+                );
+                assert!(
+                    signer_subject
+                        .to_lowercase()
+                        .contains(EXPECTED_SUBJECT_SUBSTRING),
+                    "signer_subject should contain '{EXPECTED_SUBJECT_SUBSTRING}' for fixture {FIXTURE_PATH}; got: {signer_subject:?}"
+                );
+            }
+            other => panic!(
+                "expected AuthenticodeStatus::Valid for Microsoft-signed fixture {FIXTURE_PATH}, got: {other:?}"
+            ),
+        }
+    }
+
+    /// REQ-AUDC-01 acceptance: chain walker extracts a 40-character UPPERCASE
+    /// hex thumbprint from a known-Microsoft-signed system binary. Replaces
+    /// the v2.2 empty-string sentinel with the SHA-1 of the leaf signing cert.
+    #[test]
+    fn signed_system_binary_extracts_40_char_hex_thumbprint() {
+        let path = Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("Skipping: fixture {FIXTURE_PATH} not present on this host.");
+            return;
+        }
+
+        let status = query_authenticode_status(path).expect("query Authenticode");
+        match status {
+            AuthenticodeStatus::Valid { thumbprint, .. } => {
+                assert_eq!(
+                    thumbprint.len(),
+                    40,
+                    "SHA-1 thumbprint must be exactly 40 hex chars; got {} chars: {thumbprint:?}",
+                    thumbprint.len()
+                );
+                assert!(
+                    thumbprint
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit()
+                            && (c.is_ascii_digit() || c.is_ascii_uppercase())),
+                    "thumbprint must be UPPERCASE hex (REQ-AUDC-01 must-haves.truths anchor); got: {thumbprint:?}"
+                );
+            }
+            other => panic!("expected Valid for fixture {FIXTURE_PATH}, got: {other:?}"),
+        }
+    }
+
+    /// REQ-AUDC-02 acceptance #1 (re-enabled in Phase 28 Plan 28-01 from the
+    /// v2.2 Plan 22-05b deferral). Substring-matches a known-signed
+    /// Windows-shipped binary's signer subject. Relocated inline here from
+    /// `crates/nono-cli/tests/exec_identity_windows.rs` (PATH-4 per
+    /// 28-CONTEXT.md): the integration-test target previously couldn't reach
+    /// the bin's `query_authenticode_status` directly, so the test has been
+    /// moved to live alongside the unit tests that exercise the same surface.
+    /// The integration test file retains the `nono --version` linkage probe.
+    #[test]
+    fn authenticode_signed_records_subject() {
+        let path = Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            // Graceful skip on hosts where the fixture is missing
+            // (e.g., Windows Nano server, ARM64 dev images).
+            eprintln!("Skipping: fixture {FIXTURE_PATH} not present on this host.");
+            return;
+        }
+        let status = query_authenticode_status(path)
+            .expect("query_authenticode_status against signed system binary should succeed");
+        match status {
+            AuthenticodeStatus::Valid { signer_subject, .. } => {
+                assert!(
+                    signer_subject.to_lowercase().contains("microsoft"),
+                    "expected signer subject to contain 'microsoft'; got: {signer_subject}"
+                );
+            }
+            other => panic!("expected Valid status; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_for_terminal_strips_ansi_escape_sequences() {
+        // T-28-01 mitigation: a malicious cert subject with an ANSI escape
+        // sequence must not survive into the audit ledger.
+        let attacker_input = "CN=Evil\x1b[2JCorp, O=Evil";
+        let cleaned = sanitize_for_terminal(attacker_input);
+        assert!(
+            !cleaned.contains('\x1b'),
+            "ESC byte must be stripped; got: {cleaned:?}"
+        );
+        assert!(
+            cleaned.contains("CN=Evil"),
+            "non-control text must survive; got: {cleaned:?}"
+        );
+        assert!(
+            cleaned.contains("Corp"),
+            "post-escape text must survive (escape sequence consumed); got: {cleaned:?}"
+        );
     }
 }
