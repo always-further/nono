@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub(crate) const AUDIT_EVENTS_FILENAME: &str = "audit-events.ndjson";
 const EVENT_DOMAIN: &[u8] = b"nono.audit.event.alpha\n";
@@ -186,6 +187,40 @@ impl AuditRecorder {
         self.previous_chain = Some(chain_hash);
         self.leaf_hashes.push(leaf_hash);
         Ok(())
+    }
+}
+
+/// Streaming sink that forwards each network audit event into an
+/// `AuditRecorder` as it arrives, instead of buffering until session exit.
+///
+/// Errors are logged (not propagated) because audit recording must never
+/// abort an in-flight network request — a poisoned mutex or transient I/O
+/// failure should drop a single event rather than break the proxy.
+pub(crate) struct RecorderStreamingSink {
+    recorder: Arc<Mutex<AuditRecorder>>,
+}
+
+impl RecorderStreamingSink {
+    pub(crate) fn new(recorder: Arc<Mutex<AuditRecorder>>) -> Self {
+        Self { recorder }
+    }
+}
+
+impl nono_proxy::audit::NetworkAuditSink for RecorderStreamingSink {
+    fn record(&self, event: &NetworkAuditEvent) {
+        match self.recorder.lock() {
+            Ok(mut recorder) => {
+                if let Err(e) = recorder.record_network_event(event.clone()) {
+                    tracing::warn!("Failed to stream network audit event: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Audit recorder mutex poisoned while streaming network event: {}",
+                    e
+                );
+            }
+        }
     }
 }
 
@@ -554,6 +589,60 @@ mod tests {
         let verified = verify_audit_log(dir.path(), Some(&summary)).unwrap();
         assert_eq!(verified.event_count, 5);
         assert_eq!(verified.merkle_scheme, "alpha");
+        assert!(verified.records_verified);
+    }
+
+    #[test]
+    fn recorder_streaming_sink_writes_events_to_ndjson() {
+        use nono_proxy::audit::NetworkAuditSink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(Mutex::new(
+            AuditRecorder::new(dir.path().to_path_buf()).unwrap(),
+        ));
+        recorder
+            .lock()
+            .unwrap()
+            .record_session_started("2026-04-21T00:00:00Z".to_string(), vec!["pwd".to_string()])
+            .unwrap();
+
+        let sink = RecorderStreamingSink::new(Arc::clone(&recorder));
+        sink.record(&NetworkAuditEvent {
+            timestamp_unix_ms: 1000,
+            mode: NetworkAuditMode::Connect,
+            decision: NetworkAuditDecision::Allow,
+            target: "api.example.com".to_string(),
+            port: Some(443),
+            method: Some("CONNECT".to_string()),
+            path: None,
+            status: None,
+            reason: None,
+        });
+        sink.record(&NetworkAuditEvent {
+            timestamp_unix_ms: 2000,
+            mode: NetworkAuditMode::Connect,
+            decision: NetworkAuditDecision::Deny,
+            target: "evil.example".to_string(),
+            port: Some(443),
+            method: None,
+            path: None,
+            status: None,
+            reason: Some("blocked".to_string()),
+        });
+
+        recorder
+            .lock()
+            .unwrap()
+            .record_session_ended("2026-04-21T00:00:02Z".to_string(), 0)
+            .unwrap();
+
+        let summary = recorder.lock().unwrap().finalize().unwrap();
+        assert_eq!(
+            summary.event_count, 4,
+            "session_started + 2 network + session_ended"
+        );
+        let verified = verify_audit_log(dir.path(), Some(&summary)).unwrap();
+        assert_eq!(verified.event_count, 4);
         assert!(verified.records_verified);
     }
 
