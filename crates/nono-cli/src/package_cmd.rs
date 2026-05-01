@@ -674,18 +674,20 @@ fn install_manifest_artifact(
             write_bytes(&path, bytes)?;
             ensure_executable(&path)?;
             path
-        } // NOTE: upstream ec49a7af also adds an ArtifactType::Plugin arm here.
-          // Fork's ArtifactType enum does not yet have Plugin (introduced by a
-          // later upstream commit not in Plan 22-03's cherry-pick chain). When
-          // that variant lands, restore upstream's Plugin arm verbatim:
-          //
-          //     ArtifactType::Plugin => {
-          //         if artifact.path.contains("..") { return Err(...) }
-          //         let path = staging_root.join(&artifact.path);
-          //         write_bytes(&path, bytes)?;
-          //         validate_path_within(staging_root, &path)?;
-          //         ...
-          //     }
+        }
+        ArtifactType::Plugin => {
+            // REQ-PKGS-03: place under staging_root/plugins/<file_name>.
+            // No special handling beyond staging-path placement; the
+            // pre-match validate_relative_path(&artifact.path)? above
+            // rejects `..`/absolute/Windows-drive shapes, and the
+            // post-match validate_path_within(staging_root, &store_path)?;
+            // below covers symlink-traversal post-resolution.
+            let path = staging_root
+                .join("plugins")
+                .join(file_name(&artifact.path)?);
+            write_bytes(&path, bytes)?;
+            path
+        }
     };
 
     // Defense-in-depth (Rule 2): every artifact path must remain inside the
