@@ -345,8 +345,7 @@ mod tests {
         // attribute handles the shape automatically.
         let json = serde_json::to_string(&ArtifactType::Plugin).expect("serialize");
         assert_eq!(json, "\"plugin\"");
-        let parsed: ArtifactType =
-            serde_json::from_str("\"plugin\"").expect("deserialize");
+        let parsed: ArtifactType = serde_json::from_str("\"plugin\"").expect("deserialize");
         assert_eq!(parsed, ArtifactType::Plugin);
     }
 
@@ -356,11 +355,9 @@ mod tests {
         // Schema-rejection on the JSON deserializer (NOT the filename-based
         // fallback at package_cmd.rs:967-972, which is a different code path
         // operating on filenames not on user-supplied JSON).
-        let bad: std::result::Result<ArtifactType, _> =
-            serde_json::from_str("\"made_up_variant\"");
+        let bad: std::result::Result<ArtifactType, _> = serde_json::from_str("\"made_up_variant\"");
         assert!(bad.is_err());
-        let bad2: std::result::Result<ArtifactType, _> =
-            serde_json::from_str("\"PLUGIN\"");
+        let bad2: std::result::Result<ArtifactType, _> = serde_json::from_str("\"PLUGIN\"");
         assert!(bad2.is_err()); // case-sensitive — uppercase is not "plugin"
         let bad3: std::result::Result<ArtifactType, _> = serde_json::from_str("42");
         assert!(bad3.is_err()); // non-string fails
