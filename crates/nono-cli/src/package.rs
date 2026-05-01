@@ -91,6 +91,7 @@ pub enum ArtifactType {
     TrustPolicy,
     Groups,
     Script,
+    Plugin,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
