@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
-status: v2.3 in progress. Phase 26 Plan 26-01 closed 2026-05-01 (commits e5e1f2d7/dd7b28b3/797f3295/8ff89923/1f47d0ee/464cd4d4); REQ-PKGS-02 + REQ-PKGS-03 closed; Plan 26-02 (PKGS-01 streaming + PKGS-04 auto-pull) plan + CONTEXT committed (86efcdeb), execution queued for Linux/macOS host. Earlier 2026-04-30: Phase 29 closed (REQ-WRU-01..02 — locked design property), Phase 28 closed (REQ-AUDC-01..03). Earlier 2026-04-29: Phase 25 Plan 25-02 (REQ-AIPC-NIX-01); Phase 27 PARTIAL (REQ-AAH-01 re-deferred to v2.4). 9/14 v2.3 reqs closed; remaining: RESL-NIX-01..03 (Plan 25-01 awaits Linux/macOS host), AAH-01 (deferred), PKGS-01 + PKGS-04 (Plan 26-02 awaits host).
-stopped_at: Plan 26-01 closed end-to-end. 6 atomic commits, all verification gates pass (clippy documented-skip per Phase 23 precedent). D-20 manual replay used for Task 1 — cherry-pick `58b5a24e` would have deleted fork's `validate_path_within` (a security regression); both validators preserved as defense-in-depth. ArtifactType::Plugin added as 7th variant (Script missed in v2.3 scope-lock); 1 match-arm site cascade-driven. D-19 byte-identical preservation of crates/nono/ verified.
-last_updated: "2026-04-29T00:00:00.000Z"
+status: completed
+stopped_at: Phase 27.1 context gathered
+last_updated: "2026-05-04T18:07:49.544Z"
 last_activity: 2026-04-29
 progress:
-  total_phases: 34
-  completed_phases: 28
-  total_plans: 89
-  completed_plans: 86
-  percent: 83
+  total_phases: 6
+  completed_phases: 3
+  total_plans: 7
+  completed_plans: 5
+  percent: 71
 ---
 
 # Project State: nono — v2.3 Linux POC Unblock + Deferreds Closure
@@ -117,6 +117,7 @@ Progress: [██████████] 100% (Phase 23 complete 2026-04-29; v
 
 ### Roadmap Evolution
 
+- 2026-05-02: Phase 27.1 (NONO_TEST_HOME Seam) inserted after Phase 27 (URGENT). Pulls forward the v2.4 candidate identified at Phase 27's 2026-04-29 partial close — small Rule-4 production-code change adding `NONO_TEST_HOME` env-var override to `dirs::home_dir()` callsites in `crates/nono-cli/src/`. Once landed, Phase 27 redesigned Test 1 (under `#[ignore]`) plus queued v2.3 plans (Phase 26-02 PKGS-01/04 and similar) execute on Windows host. Plans TBD during `/gsd-plan-phase 27.1`.
 - 2026-04-20: Phase 21 (Windows Single-File Filesystem Grants) added to close the Windows-only limitation exposed by the `claude-code` profile's `git_config` group failing with `WindowsUnsupportedIssueKind::SingleFileGrant` (`.gitconfig`, `.config/git/ignore`, etc.). Extends `crates/nono/src/sandbox/windows.rs` to enforce file-scoped capability grants without silently degrading to broader directory grants. Plans TBD during `/gsd-plan-phase 21`.
 - 2026-04-19: Phase 20 (Upstream Parity Sync, UPST) added after Phase 19 completion. Research quick-task `260419-cmp-upstream-036-windows-parity/COMPARISON.md` (commit `7180f23`) established the fork is pinned at crate version `0.30.1` while upstream has shipped 0.31–0.37.1. Phase 20 back-ports missing Unix/macOS functionality (keyring URIs, `--allow-gpu`, GitLab trust tokens, macOS Seatbelt refinements) and, critically, the rustls-webpki RUSTSEC-2026-0098/0099 security upgrade landed upstream in 0.37. Plans TBD during `/gsd-plan-phase 20` — likely grouped by upstream version range + dedicated security-upgrade plan.
 - 2026-04-17: Phase 14 (v1.0 Fix Pass) added after Phase 13 UAT surfaced three blocking gaps — detached console-child STATUS_DLL_INIT_FAILED (blocks 4 UAT items), setup help-text drift (blocks P07-HV-2), P09-HV-1 runbook flag bug. Phase 14 plans: 3 (one per gap; plan 03 also re-runs the blocked UAT items and finishes Phase 13 Task 3 upstream promotion).
@@ -194,14 +195,16 @@ Known deferred items at close: 20 (6 UAT bookkeeping gaps, 4 verification human_
 
 **Current Milestone:** v2.3 — Linux POC Unblock + Deferreds Closure (scope-locked 2026-04-29; in progress).
 **Last Activity:** 2026-04-29
-**Stopped At:** Phase 27 Plan 27-01 (Audit-Attestation Hardening, Path B) attempted end-to-end on Windows; surfaced 3 systemic Windows test-harness blockers (`dirs::home_dir()` ignores USERPROFILE; LOCALAPPDATA/USERPROFILE mismatch; audit-integrity exit-cleanup "Session not found" pre-existing at v2.2 baseline). REQ-AAH-01 re-deferred to v2.4 with concrete resumption path documented (commits `c2247f79`/`16bae9ca`/`8aeabc08`/`329f313b`); production code in `crates/nono-cli/src/audit_attestation.rs` byte-identical preserved; redesigned Test 1 body preserved in-tree under `#[ignore]` for v2.4 resumption. Earlier 2026-04-29: Phase 25 Plan 25-02 (AIPC Unix Futures ADR) shipped end-to-end (commit `30d6fdb1`, REQ-AIPC-NIX-01 closed). Plan 25-01 (RESL Unix backends) plan + CONTEXT committed (commit `3ed80d38`) but execution awaits Linux/macOS-host session.
+**Stopped At:** Phase 27.1 context gathered
 
 **Next Steps (when on Linux/macOS host):**
+
 - Run `/gsd-execute-plan 25-01-RESL-NIX-PLAN` (or `/gsd-execute-phase 25` to pick up the remaining plan). Plan 25-01 has 8 tasks; integration tests require real cgroup v2 and `setrlimit` enforcement, both of which are unreachable from Windows.
 - Run `/gsd-execute-plan 27-01-AAH-PLAN` (resumption). On Linux/macOS, `dirs::home_dir()` honors `HOME` env override — the in-tree redesigned Test 1 body should pass cleanly without further test-harness work. Closes REQ-AAH-01.
 - Phase 25 + Phase 27 then both complete; Phases 26/28/29 can proceed in any order (no structural dependencies).
 
 **Next Steps (Windows-host options) — note systemic harness gap:**
+
 - The `run_nono` integration-test pattern that spawns the actual `nono` binary fails to redirect HOME on Windows (`dirs::home_dir()` ignores `USERPROFILE` env override). Affects ANY phase needing full e2e integration tests.
 - **Phase 28 (Authenticode chain-walker — REQ-AUDC-01..03)** is the most Windows-host-friendly remaining work because most of its testing is Windows-API unit tests against `WinVerifyTrust` rather than `run_nono` e2e patterns. Run `/gsd-plan-phase 28` next.
 - **Phase 29 (WR-01 reject-stage unification — REQ-WRU-01..02)** is primarily product-decision + ledger-test-update; can plan on Windows; execution may hit similar harness blockers if it needs full e2e tests.
@@ -209,6 +212,7 @@ Known deferred items at close: 20 (6 UAT bookkeeping gaps, 4 verification human_
 - **Candidate v2.4 phase: "Windows test-harness HOME redirection"** — adds `NONO_TEST_HOME` production-code seam to the supervisor's `dirs::home_dir()` callsites so integration tests can redirect home cleanly on Windows. Unblocks all v2.3+ test work on Windows hosts. Rule-4 architectural change but small surface (~5-10 callsites).
 
 **v2.3 recommended phase order (revised after Phase 27 partial close):**
+
 1. Phase 28 (Authenticode chain-walker) — Windows-host-friendly; lights up v2.2 AUD-03 partial; least exposed to the test-harness gap.
 2. Phase 29 (WR-01 unification) — product decision can land on Windows; ledger-test updates.
 3. Phase 25 Plan 25-01 (RESL Unix backends) — Linux/macOS host required.
