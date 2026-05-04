@@ -407,6 +407,10 @@ mod tests {
             recommended_builtin_profile(Path::new("/usr/local/bin/codex")),
             Some("codex")
         );
+        assert_eq!(
+            recommended_builtin_profile(Path::new("/usr/local/bin/openclaw")),
+            Some("openclaw")
+        );
     }
 
     #[test]
