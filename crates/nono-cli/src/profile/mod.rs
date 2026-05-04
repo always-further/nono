@@ -5280,9 +5280,9 @@ mod tests {
         );
     }
 
+    // End-to-end: parse a profile JSON with a file:// custom credential
     #[test]
     fn test_profile_json_with_file_uri_custom_credential_parses() {
-        // End-to-end: parse a profile JSON with a file:// custom credential
         let dir = tempdir().expect("tmpdir");
         let profile_path = dir.path().join("file-cred.json");
         std::fs::write(
