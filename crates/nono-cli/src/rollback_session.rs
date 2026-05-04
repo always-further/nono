@@ -37,7 +37,7 @@ pub fn rollback_root() -> Result<PathBuf> {
     }
 
     #[cfg(not(target_os = "windows"))]
-    let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+    let home = crate::config::nono_home_dir()?;
     #[cfg(not(target_os = "windows"))]
     Ok(home.join(".nono").join("rollbacks"))
 }

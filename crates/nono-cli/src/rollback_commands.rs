@@ -242,7 +242,7 @@ fn group_by_project<'a>(
 /// Replace the home directory prefix with ~ for display
 fn shorten_home(path: &Path) -> String {
     let s = path.display().to_string();
-    if let Some(home) = dirs::home_dir() {
+    if let Ok(home) = crate::config::nono_home_dir() {
         let home_str = home.display().to_string();
         if let Some(rest) = s.strip_prefix(&home_str) {
             return format!("~{rest}");
@@ -1516,8 +1516,10 @@ mod tests {
 
     #[test]
     fn shorten_home_replaces_prefix() {
-        // This test is best-effort since it depends on the actual home dir
-        if let Some(home) = dirs::home_dir() {
+        // This test is best-effort since it depends on the actual home dir.
+        // Phase 27.1: route through the helper so NONO_TEST_HOME-aware
+        // tests see a consistent home value (test still tolerates None).
+        if let Ok(home) = crate::config::nono_home_dir() {
             let path = home.join("dev").join("project");
             let result = shorten_home(&path);
             #[cfg(target_os = "windows")]

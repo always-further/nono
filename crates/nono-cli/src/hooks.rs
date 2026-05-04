@@ -70,7 +70,7 @@ fn install_claude_code_hook(
     profile_name: Option<&str>,
     config: &HookConfig,
 ) -> Result<HookInstallResult> {
-    let home = xdg_home::home_dir().ok_or(NonoError::HomeNotFound)?;
+    let home = crate::config::nono_home_dir()?;
     let hooks_dir = home.join(".claude").join("hooks");
     let script_path = hooks_dir.join(&config.script);
     let settings_path = home.join(".claude").join("settings.json");

@@ -172,7 +172,7 @@ fn unregister_package_hooks(package_ref: &PackageRef, install_dir: &Path) {
 
 /// Remove a hook entry from Claude Code's ~/.claude/settings.json.
 fn unregister_claude_code_hook(script_filename: &str) -> Result<()> {
-    let home = xdg_home::home_dir().ok_or(NonoError::HomeNotFound)?;
+    let home = crate::config::nono_home_dir()?;
     let settings_path = home.join(".claude").join("settings.json");
     if !settings_path.exists() {
         return Ok(());
@@ -1009,10 +1009,10 @@ fn ensure_executable(path: &Path) -> Result<()> {
 
 fn expand_tilde(path: &str) -> Result<PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
-        let home = xdg_home::home_dir().ok_or(NonoError::HomeNotFound)?;
+        let home = crate::config::nono_home_dir()?;
         Ok(home.join(rest))
     } else if path == "~" {
-        xdg_home::home_dir().ok_or(NonoError::HomeNotFound)
+        crate::config::nono_home_dir()
     } else {
         Ok(PathBuf::from(path))
     }

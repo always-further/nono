@@ -199,7 +199,7 @@ pub(crate) fn create_audit_state(
         let rollback_root = match rollback_destination {
             Some(path) => path.clone(),
             None => {
-                let home = dirs::home_dir().ok_or(nono::NonoError::HomeNotFound)?;
+                let home = crate::config::nono_home_dir()?;
                 home.join(".nono").join("rollbacks")
             }
         };

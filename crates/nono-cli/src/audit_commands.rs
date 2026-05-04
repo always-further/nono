@@ -722,7 +722,7 @@ fn group_by_project(sessions: &[SessionInfo]) -> BTreeMap<PathBuf, Vec<&SessionI
 
 fn shorten_home(path: &Path) -> String {
     let s = path.display().to_string();
-    if let Some(home) = dirs::home_dir() {
+    if let Ok(home) = crate::config::nono_home_dir() {
         let home_str = home.display().to_string();
         if let Some(rest) = s.strip_prefix(&home_str) {
             return format!("~{rest}");

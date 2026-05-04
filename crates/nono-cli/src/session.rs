@@ -407,7 +407,7 @@ fn load_reconciled_session_file(path: &Path) -> Result<SessionRecord> {
 ///
 /// Use [`ensure_sessions_dir()`] when writing session files.
 pub fn sessions_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| {
+    let home = crate::config::nono_home_dir().map_err(|_| {
         NonoError::ConfigParse("Cannot determine home directory for session registry".to_string())
     })?;
     Ok(home.join(".nono").join("sessions"))

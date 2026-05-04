@@ -1975,9 +1975,10 @@ pub(crate) fn resolve_user_config_dir() -> Result<PathBuf> {
     Ok(home_base.join(".config"))
 }
 
-/// Get home directory path using xdg-home
+/// Get home directory path. Honors `NONO_TEST_HOME` via the central
+/// `crate::config::nono_home_dir()` helper (Phase 27.1 D-27.1-03).
 fn home_dir() -> Result<PathBuf> {
-    xdg_home::home_dir().ok_or(NonoError::HomeNotFound)
+    crate::config::nono_home_dir()
 }
 
 /// Validate profile name (alphanumeric + hyphen only, no path traversal)

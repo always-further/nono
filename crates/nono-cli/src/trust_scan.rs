@@ -479,11 +479,11 @@ pub fn run_pre_exec_scan(
 /// directory cannot be determined.
 fn expand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Ok(home) = crate::config::nono_home_dir() {
             return home.join(rest).to_string_lossy().into_owned();
         }
     } else if path == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Ok(home) = crate::config::nono_home_dir() {
             return home.to_string_lossy().into_owned();
         }
     }

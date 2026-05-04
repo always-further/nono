@@ -40,7 +40,7 @@ impl ProtectedRoots {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+            let home = crate::config::nono_home_dir()?;
             let state_root = resolve_path(&home.join(".nono"));
             Ok(Self {
                 roots: vec![state_root],

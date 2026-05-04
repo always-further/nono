@@ -33,7 +33,7 @@ pub struct SessionInfo {
 
 /// Get the audit root directory (`~/.nono/audit/`)
 pub fn audit_root() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+    let home = crate::config::nono_home_dir()?;
     Ok(home.join(".nono").join("audit"))
 }
 
