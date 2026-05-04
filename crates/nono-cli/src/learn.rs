@@ -1562,10 +1562,10 @@ fn process_accesses(
 
     for (path, entry) in learned_entries {
         match (entry.access, entry.is_file) {
-            (AccessMode::Read, true) => {
+            (AccessMode::Read | AccessMode::Execute | AccessMode::ReadExecute, true) => {
                 result.read_files.insert(path);
             }
-            (AccessMode::Read, false) => {
+            (AccessMode::Read | AccessMode::Execute | AccessMode::ReadExecute, false) => {
                 result.read_paths.insert(path);
             }
             (AccessMode::Write, true) => {
@@ -1574,10 +1574,10 @@ fn process_accesses(
             (AccessMode::Write, false) => {
                 result.write_paths.insert(path);
             }
-            (AccessMode::ReadWrite, true) => {
+            (AccessMode::ReadWrite | AccessMode::ReadWriteExecute, true) => {
                 result.readwrite_files.insert(path);
             }
-            (AccessMode::ReadWrite, false) => {
+            (AccessMode::ReadWrite | AccessMode::ReadWriteExecute, false) => {
                 result.readwrite_paths.insert(path);
             }
         }

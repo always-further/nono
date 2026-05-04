@@ -72,6 +72,15 @@ pub struct FilesystemConfig {
     /// or bound. Non-recursive. Implies read+write access on the directory.
     #[serde(default)]
     pub unix_socket_dir_bind: Vec<String>,
+    /// Directories or files with execute access
+    #[serde(default)]
+    pub execute: Vec<String>,
+    /// Directories or files with read+execute access
+    #[serde(default)]
+    pub readexecute: Vec<String>,
+    /// Directories or files with read+write+execute access
+    #[serde(default)]
+    pub readwriteexecute: Vec<String>,
 }
 
 /// Policy patch configuration in a profile.
@@ -93,6 +102,15 @@ pub struct PolicyPatchConfig {
     /// Additional read-write directories to allow.
     #[serde(default)]
     pub add_allow_readwrite: Vec<String>,
+    /// Additional execute directories to allow.
+    #[serde(default)]
+    pub add_allow_execute: Vec<String>,
+    /// Additional read-execute directories to allow.
+    #[serde(default)]
+    pub add_allow_readexecute: Vec<String>,
+    /// Additional read-write-execute directories to allow.
+    #[serde(default)]
+    pub add_allow_readwriteexecute: Vec<String>,
     /// Additional deny.access paths to apply.
     #[serde(default)]
     pub add_deny_access: Vec<String>,
@@ -2053,6 +2071,12 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &base.filesystem.unix_socket_dir_bind,
                 &child.filesystem.unix_socket_dir_bind,
             ),
+            execute: dedup_append(&base.filesystem.execute, &child.filesystem.execute),
+            readexecute: dedup_append(&base.filesystem.readexecute, &child.filesystem.readexecute),
+            readwriteexecute: dedup_append(
+                &base.filesystem.readwriteexecute,
+                &child.filesystem.readwriteexecute,
+            ),
         },
         policy: PolicyPatchConfig {
             exclude_groups: dedup_append(&base.policy.exclude_groups, &child.policy.exclude_groups),
@@ -2064,6 +2088,18 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             add_allow_readwrite: dedup_append(
                 &base.policy.add_allow_readwrite,
                 &child.policy.add_allow_readwrite,
+            ),
+            add_allow_execute: dedup_append(
+                &base.policy.add_allow_execute,
+                &child.policy.add_allow_execute,
+            ),
+            add_allow_readexecute: dedup_append(
+                &base.policy.add_allow_readexecute,
+                &child.policy.add_allow_readexecute,
+            ),
+            add_allow_readwriteexecute: dedup_append(
+                &base.policy.add_allow_readwriteexecute,
+                &child.policy.add_allow_readwriteexecute,
             ),
             add_deny_access: dedup_append(
                 &base.policy.add_deny_access,
@@ -3789,6 +3825,9 @@ mod tests {
                 allow: vec!["/base/rw".to_string()],
                 read: vec!["/base/read".to_string()],
                 write: vec![],
+                execute: vec![],
+                readexecute: vec![],
+                readwriteexecute: vec![],
                 allow_file: vec![],
                 read_file: vec!["/base/file.txt".to_string()],
                 write_file: vec![],
@@ -3802,6 +3841,9 @@ mod tests {
                 add_allow_read: vec!["/base/policy-read".to_string()],
                 add_allow_write: vec![],
                 add_allow_readwrite: vec![],
+                add_allow_execute: vec![],
+                add_allow_readexecute: vec![],
+                add_allow_readwriteexecute: vec![],
                 add_deny_access: vec!["/base/policy-deny".to_string()],
                 add_deny_commands: vec![],
                 override_deny: vec!["/base/override-deny".to_string()],
@@ -3868,6 +3910,9 @@ mod tests {
                 allow: vec!["/child/rw".to_string()],
                 read: vec![],
                 write: vec![],
+                execute: vec![],
+                readexecute: vec![],
+                readwriteexecute: vec![],
                 allow_file: vec![],
                 read_file: vec![],
                 write_file: vec![],
@@ -3881,6 +3926,9 @@ mod tests {
                 add_allow_read: vec![],
                 add_allow_write: vec!["/child/policy-write".to_string()],
                 add_allow_readwrite: vec!["/child/policy-rw".to_string()],
+                add_allow_execute: vec![],
+                add_allow_readexecute: vec![],
+                add_allow_readwriteexecute: vec![],
                 add_deny_access: vec!["/child/policy-deny".to_string()],
                 add_deny_commands: vec![],
                 override_deny: vec!["/child/override-deny".to_string()],
@@ -4219,16 +4267,18 @@ mod tests {
 
         let profile = load_from_file(&profile_path).expect("load extended profile");
         assert_eq!(profile.meta.name, "ext-test");
-        // Should inherit codex's filesystem paths
-        assert!(
-            profile.filesystem.allow.len() > 1,
-            "Expected inherited paths from codex, got: {:?}",
-            profile.filesystem.allow
-        );
+        // Child's allow path is preserved.
         assert!(profile
             .filesystem
             .allow
             .contains(&"/tmp/ext-test".to_string()));
+        // Should inherit opencode's filesystem paths (which live under
+        // readwriteexecute so the bundled Bun TUI binary can be mmap-executed).
+        assert!(
+            !profile.filesystem.readwriteexecute.is_empty(),
+            "Expected inherited readwriteexecute paths from opencode, got: {:?}",
+            profile.filesystem.readwriteexecute
+        );
         // extends should be consumed
         assert!(profile.extends.is_none());
     }
@@ -5101,7 +5151,7 @@ mod tests {
         assert!(
             profile
                 .filesystem
-                .allow
+                .readwriteexecute
                 .iter()
                 .any(|path| path == "$HOME/.opencode"),
             "expected filesystem grants from opencode to still be inherited",

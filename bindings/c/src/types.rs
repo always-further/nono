@@ -14,6 +14,9 @@ use std::os::raw::c_char;
 pub const NONO_ACCESS_MODE_READ: u32 = 0;
 pub const NONO_ACCESS_MODE_WRITE: u32 = 1;
 pub const NONO_ACCESS_MODE_READ_WRITE: u32 = 2;
+pub const NONO_ACCESS_MODE_EXECUTE: u32 = 3;
+pub const NONO_ACCESS_MODE_READ_EXECUTE: u32 = 4;
+pub const NONO_ACCESS_MODE_READ_WRITE_EXECUTE: u32 = 5;
 /// Sentinel value returned on error (NULL pointer, out-of-bounds index).
 pub const NONO_ACCESS_MODE_INVALID: u32 = u32::MAX;
 
@@ -25,6 +28,9 @@ pub fn validate_access_mode(raw: u32) -> Option<nono::AccessMode> {
         NONO_ACCESS_MODE_READ => Some(nono::AccessMode::Read),
         NONO_ACCESS_MODE_WRITE => Some(nono::AccessMode::Write),
         NONO_ACCESS_MODE_READ_WRITE => Some(nono::AccessMode::ReadWrite),
+        NONO_ACCESS_MODE_EXECUTE => Some(nono::AccessMode::Execute),
+        NONO_ACCESS_MODE_READ_EXECUTE => Some(nono::AccessMode::ReadExecute),
+        NONO_ACCESS_MODE_READ_WRITE_EXECUTE => Some(nono::AccessMode::ReadWriteExecute),
         _ => None,
     }
 }
@@ -36,6 +42,9 @@ pub fn access_mode_to_raw(mode: nono::AccessMode) -> u32 {
         nono::AccessMode::Read => NONO_ACCESS_MODE_READ,
         nono::AccessMode::Write => NONO_ACCESS_MODE_WRITE,
         nono::AccessMode::ReadWrite => NONO_ACCESS_MODE_READ_WRITE,
+        nono::AccessMode::Execute => NONO_ACCESS_MODE_EXECUTE,
+        nono::AccessMode::ReadExecute => NONO_ACCESS_MODE_READ_EXECUTE,
+        nono::AccessMode::ReadWriteExecute => NONO_ACCESS_MODE_READ_WRITE_EXECUTE,
     }
 }
 

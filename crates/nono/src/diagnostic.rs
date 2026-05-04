@@ -1663,6 +1663,9 @@ fn access_str(access: AccessMode) -> &'static str {
         AccessMode::Read => "read",
         AccessMode::Write => "write",
         AccessMode::ReadWrite => "read+write",
+        AccessMode::Execute => "execute",
+        AccessMode::ReadExecute => "read+execute",
+        AccessMode::ReadWriteExecute => "read+write+execute",
     }
 }
 
@@ -1689,12 +1692,18 @@ fn suggested_flag_for_existing_target(
             AccessMode::Read => "--read-file",
             AccessMode::Write => "--write-file",
             AccessMode::ReadWrite => "--allow-file",
+            AccessMode::Execute => "",
+            AccessMode::ReadExecute => "",
+            AccessMode::ReadWriteExecute => "",
         }
     } else {
         match requested {
             AccessMode::Read => "--read",
             AccessMode::Write => "--write",
             AccessMode::ReadWrite => "--allow",
+            AccessMode::Execute => "",
+            AccessMode::ReadExecute => "",
+            AccessMode::ReadWriteExecute => "",
         }
     };
 
@@ -1707,12 +1716,18 @@ fn suggested_flag_parts(path: &Path, requested: AccessMode) -> (&'static str, Pa
             AccessMode::Read => "--read-file",
             AccessMode::Write => "--write-file",
             AccessMode::ReadWrite => "--allow-file",
+            AccessMode::Execute => "",
+            AccessMode::ReadExecute => "",
+            AccessMode::ReadWriteExecute => "",
         }
     } else {
         match requested {
             AccessMode::Read => "--read",
             AccessMode::Write => "--write",
             AccessMode::ReadWrite => "--allow",
+            AccessMode::Execute => "",
+            AccessMode::ReadExecute => "",
+            AccessMode::ReadWriteExecute => "",
         }
     };
 

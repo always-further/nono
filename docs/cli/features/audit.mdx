@@ -5,7 +5,7 @@ description: Session tracking, filtering, and compliance reporting
 
 Every `nono run` session is recorded by default. nono records the command that ran, the audit events observed during the session, optional filesystem changes, and network events outside the sandbox in the trusted parent process. This gives you a history of agent activity for debugging, compliance, and forensics.
 
-The details of how that record is protected are explained in the [Security Model](/docs/cli/internals/security-model): the trusted supervisor records the session, the event log is committed with a Merkleized integrity structure, and optional signing lets a key holder attest to the completed session.
+The details of how that record is protected are explained in the [Security Model](/cli/internals/security-model): the trusted supervisor records the session, the event log is committed with a Merkleized integrity structure, and optional signing lets a key holder attest to the completed session.
 
 ## How It Works
 
