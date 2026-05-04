@@ -95,15 +95,88 @@ pub fn validated_tmpdir() -> Result<String> {
     }
 }
 
+/// Resolve the user's home directory, honoring the `NONO_TEST_HOME` test seam.
+///
+/// When `NONO_TEST_HOME` is set:
+///   - If the value is an absolute path, returns it directly.
+///   - If the value is not absolute, returns `NonoError::EnvVarValidation`
+///     (fail-closed; no silent fallthrough — see CLAUDE.md § Path Handling).
+///
+/// When `NONO_TEST_HOME` is unset, falls through to `dirs::home_dir()` and
+/// maps `None` to `NonoError::HomeNotFound` (matches the `?`-shape used by
+/// the 10 existing `dirs::home_dir().ok_or(NonoError::HomeNotFound)?`
+/// callsites that this helper replaces).
+///
+/// On first successful override resolution, emits exactly one
+/// `tracing::warn!` per process containing the resolved path. This provides
+/// a forensic mark in logs without changing the security model — the
+/// override is always-on in release binaries (Phase 27.1 D-27.1-08).
+///
+/// # Errors
+///
+/// - `NonoError::EnvVarValidation` if `NONO_TEST_HOME` is set but not absolute.
+/// - `NonoError::HomeNotFound` if `NONO_TEST_HOME` is unset and
+///   `dirs::home_dir()` returns `None`.
+#[allow(dead_code)]
+pub fn nono_home_dir() -> Result<PathBuf> {
+    if let Ok(value) = std::env::var("NONO_TEST_HOME") {
+        let path = PathBuf::from(&value);
+        if !path.is_absolute() {
+            return Err(NonoError::EnvVarValidation {
+                var: "NONO_TEST_HOME".to_string(),
+                reason: format!("must be an absolute path, got: {}", value),
+            });
+        }
+        warn_once_test_home(&path);
+        return Ok(path);
+    }
+    dirs::home_dir().ok_or(NonoError::HomeNotFound)
+}
+
+#[allow(dead_code)]
+fn warn_once_test_home(path: &Path) {
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if WARNED.get().is_none() {
+        tracing::warn!("NONO_TEST_HOME override active: {}", path.display());
+        // Another thread may race; OnceLock keeps the first set, the rest
+        // become no-ops. Worst case: warn fires twice across racing threads.
+        let _ = WARNED.set(());
+    }
+}
+
 /// Get the user config directory path
 #[allow(dead_code)]
 pub fn user_config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("nono"))
 }
 
-/// Get the user state directory path (for version tracking)
+/// Get the user state directory path (for version tracking).
+///
+/// When `NONO_TEST_HOME` is set, returns `<NONO_TEST_HOME>/.nono` so that
+/// `rollback_root()` and `audit_root()` co-locate under one parent (Phase
+/// 27.1 D-27.1-05 — closes the Windows path-mismatch bug class surfaced
+/// by Phase 27 Blocker 2). The `.nono` segment mirrors the production
+/// layout that the `dirs::home_dir()`-based callsites already use, so
+/// tests get predictable production-mirroring paths (D-27.1-06).
+///
+/// When `NONO_TEST_HOME` is unset, behavior is byte-identical to the
+/// status quo: `dirs::state_dir()` falling through to
+/// `dirs::data_local_dir()`, with `nono` appended.
 #[allow(dead_code)]
 pub fn user_state_dir() -> Option<PathBuf> {
+    if let Ok(value) = std::env::var("NONO_TEST_HOME") {
+        let path = PathBuf::from(&value);
+        if path.is_absolute() {
+            return Some(path.join(".nono"));
+        }
+        // Non-absolute override: fall through to platform default rather
+        // than panicking. The next call to nono_home_dir() will emit
+        // NonoError::EnvVarValidation, which is the fail-closed surface
+        // for invalid overrides. Returning None here would mask the error
+        // upstream; falling through to the platform default at least
+        // keeps the system functional while the validation error fires
+        // on the actual home-dir lookup.
+    }
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .map(|p| p.join("nono"))
@@ -307,5 +380,82 @@ mod tests {
 
         let home = validated_home().expect("USERPROFILE should be accepted on Windows");
         assert_eq!(home, r"C:\Users\tester");
+    }
+
+    // Phase 27.1 REQ-NTH-01 + REQ-NTH-02 — NONO_TEST_HOME helper coverage.
+    // The unit tests use the established test_env::EnvVarGuard + ENV_LOCK
+    // pattern (CLAUDE.md § Coding Standards: tests must save/restore env
+    // vars for parallel-test safety).
+
+    #[test]
+    fn nono_home_dir_returns_override_when_set() {
+        let _guard = test_env_lock().lock().expect("env lock");
+        #[cfg(target_os = "windows")]
+        let abs = r"C:\nono-test-home-override-1";
+        #[cfg(not(target_os = "windows"))]
+        let abs = "/tmp/nono-test-home-override-1";
+        let _env = EnvVarGuard::set_all(&[("NONO_TEST_HOME", abs)]);
+
+        let home = nono_home_dir().expect("override should be honored");
+        assert_eq!(home, PathBuf::from(abs));
+    }
+
+    #[test]
+    fn nono_home_dir_rejects_non_absolute_override() {
+        let _guard = test_env_lock().lock().expect("env lock");
+        let _env = EnvVarGuard::set_all(&[("NONO_TEST_HOME", "relative/path")]);
+
+        let err = nono_home_dir().expect_err("non-absolute override must fail closed");
+        match err {
+            NonoError::EnvVarValidation { var, reason } => {
+                assert_eq!(var, "NONO_TEST_HOME");
+                assert!(
+                    reason.contains("must be an absolute path"),
+                    "reason should mention absolute-path requirement, got: {reason}"
+                );
+            }
+            other => panic!("expected EnvVarValidation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nono_home_dir_falls_through_when_unset() {
+        let _guard = test_env_lock().lock().expect("env lock");
+        // Set a sentinel value so set_all captures the original, then
+        // remove it so the helper sees an unset env var and falls
+        // through to dirs::home_dir(). EnvVarGuard::Drop restores the
+        // original on test exit.
+        let _env = EnvVarGuard::set_all(&[("NONO_TEST_HOME", "sentinel-removed-immediately")]);
+        _env.remove("NONO_TEST_HOME");
+
+        // Helper must not panic; result depends on dirs::home_dir() but
+        // should be either Ok(<dirs::home_dir() value>) or
+        // Err(NonoError::HomeNotFound). Either is acceptable as
+        // status-quo fallthrough behavior — assert the helper does NOT
+        // return EnvVarValidation, which would indicate the override
+        // branch fired incorrectly.
+        let result = nono_home_dir();
+        if let Err(NonoError::EnvVarValidation { .. }) = result {
+            panic!("unset NONO_TEST_HOME must not trigger EnvVarValidation");
+        }
+        // If dirs::home_dir() returns Some, helper returns Ok with that
+        // value verbatim.
+        if let Some(expected) = dirs::home_dir() {
+            assert_eq!(
+                result.expect("should be Ok when dirs::home_dir() is Some"),
+                expected
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn user_state_dir_honors_nono_test_home() {
+        let _guard = test_env_lock().lock().expect("env lock");
+        let abs = r"C:\nono-test-state-override";
+        let _env = EnvVarGuard::set_all(&[("NONO_TEST_HOME", abs)]);
+
+        let state = user_state_dir().expect("override should produce Some on Windows");
+        assert_eq!(state, PathBuf::from(r"C:\nono-test-state-override\.nono"));
     }
 }
