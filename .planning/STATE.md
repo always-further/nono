@@ -4,14 +4,14 @@ milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
 status: executing
 stopped_at: Phase 27.1 context gathered
-last_updated: "2026-05-04T21:54:12.049Z"
-last_activity: 2026-05-04
+last_updated: "2026-05-05T18:42:00.673Z"
+last_activity: 2026-05-05
 progress:
   total_phases: 6
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 10
-  completed_plans: 5
-  percent: 50
+  completed_plans: 8
+  percent: 80
 ---
 
 # Project State: nono — v2.3 Linux POC Unblock + Deferreds Closure
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 
 ## Current Position
 
-Phase: 27.1 (nono-test-home-seam) — EXECUTING
-Plan: 1 of 3
+Phase: 28
+Plan: Not started
 Status: Executing Phase 27.1
 Milestone: v2.2 — 3/3 phases complete (Phase 22 ✓ 2026-04-28, Phase 23 ✓ 2026-04-29, Phase 24 ✓ 2026-04-27), 9/9 plans complete. v2.2 ready to ship.
 
@@ -194,7 +194,7 @@ Known deferred items at close: 20 (6 UAT bookkeeping gaps, 4 verification human_
 ## Session Continuity
 
 **Current Milestone:** v2.3 — Linux POC Unblock + Deferreds Closure (scope-locked 2026-04-29; in progress).
-**Last Activity:** 2026-05-04
+**Last Activity:** 2026-05-05
 **Stopped At:** Phase 27.1 context gathered
 
 **Next Steps (when on Linux/macOS host):**
