@@ -147,12 +147,12 @@ Full details: `.planning/milestones/v2.2-ROADMAP.md`.
 
 **Requirements:** REQ-NTH-01, REQ-NTH-02, REQ-NTH-03 (3 reqs; locked at `/gsd-plan-phase 27.1` 2026-05-04). See `.planning/REQUIREMENTS.md` § NTH for full acceptance criteria.
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] 27.1-01-PLAN.md — `nono_home_dir()` helper + `user_state_dir()` extension + 4 unit tests (REQ-NTH-01 + REQ-NTH-02; foundation, Wave 1)
 - [x] 27.1-02-PLAN.md — Migrate 15 home-dir callsites + remove `xdg-home` dep (REQ-NTH-01 reachability; Wave 2, depends on 27.1-01)
-- [ ] 27.1-03-PLAN.md — Re-enable Phase 27 audit-attestation tests via `NONO_TEST_HOME` seam (REQ-NTH-03; Wave 3, depends on 27.1-01 + 27.1-02; closes REQ-AAH-01 transitively)
+- [x] 27.1-03-PLAN.md — Re-enable Phase 27 audit-attestation tests via `NONO_TEST_HOME` seam (REQ-NTH-03; Wave 3, depends on 27.1-01 + 27.1-02; closes REQ-AAH-01 transitively)
 
 **Cross-cutting constraints:**
 - crates/nono/ remains byte-identical (D-19 invariant).
@@ -228,7 +228,7 @@ Plans:
 | 25. Cross-Platform RESL + AIPC Unix Design | v2.3 | 1/2 | In progress (25-02 ADR done; 25-01 RESL Unix deferred to Linux/macOS host) | 25-02: 2026-04-29 |
 | 26. PKG Streaming Follow-Up | v2.3 | 1/2 | Partial — Plan 26-01 PKGS-02 + PKGS-03 closed (D-20 manual replay; defense-in-depth preserved); Plan 26-02 PKGS-01 + PKGS-04 queued for Linux/macOS host | 26-01: 2026-05-01 |
 | 27. Audit-Attestation Hardening | v2.3 | 0/1 | PARTIAL — Path B attempt 2026-04-29 surfaced 3 Windows-host test-harness blockers; REQ-AAH-01 deferred to v2.4 (production code byte-identical preserved; redesigned test body preserved in-tree under `#[ignore]` for v2.4 resumption) | 2026-04-29 (deferred) |
-| 27.1. NONO_TEST_HOME Seam (INSERTED) | v2.3 | 2/3 | In Progress|  |
+| 27.1. NONO_TEST_HOME Seam (INSERTED) | v2.3 | 3/3 | Complete   | 2026-05-05 |
 | 28. Authenticode Chain-Walker Subject Extraction | v2.3 | 1/1 | Complete (REQ-AUDC-01..03 closed; D-AUDC-02 SandboxInit fallback + D-AUDC-03 explorer.exe fixture switch) | 2026-04-30 |
 | 29. WR-01 Reject-Stage Unification | v2.3 | 1/1 | Complete (REQ-WRU-01..02 closed; Option c locked as permanent design property) | 2026-04-30 |
 
