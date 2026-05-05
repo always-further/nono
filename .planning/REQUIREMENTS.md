@@ -201,6 +201,53 @@ The cleanest cross-platform unblock — explicitly proposed at Phase 27 SUMMARY 
 
 ---
 
+## AAHX — Audit-Attestation Test Re-Enablement (Phase 27.2)
+
+Context: Phase 27.1 invoked the D-27.1-14 large-fix branch when both audit-attestation tests failed verification despite the `NONO_TEST_HOME` seam reaching the supervisor. Two distinct production-code gaps were surfaced:
+- **FU-1:** `crates/nono-cli/src/audit_commands.rs:12` uses `rollback_session::load_session` to resolve audit verification targets, which can't find audit-only sessions (the audit-aware `audit_session::load_session` already exists with correct dual-root semantics but is gated behind `#[allow(dead_code)]`).
+- **FU-2:** `--rollback`-active sessions write the bundle to `<rollback_root>/<id>/audit-attestation.bundle`, but Test 2 asserts the bundle lives at `<audit_root>/<id>/audit-attestation.bundle`. Either the production code mirrors to audit_dir, or it signs to session_dir and `audit verify` learns to look in both, or the test's expected path changes — this is a design decision, not a missed callsite.
+
+Both follow-ups are documented in `.planning/phases/27.1-nono-test-home-seam/deferred-items.md` (v2.4-FU-1, v2.4-FU-2) and surfaced in `.planning/phases/27.1-nono-test-home-seam/27.1-03-SUMMARY.md`. Phase 27.2 closes them in v2.3.
+
+### REQ-AAHX-01 — `cmd_verify` audit-loader correctness for audit-only sessions
+
+- **What:** Swap the loader call in `crates/nono-cli/src/audit_commands.rs::cmd_verify` (line 12 region) from `rollback_session::load_session(...)` to `audit_session::load_session(...)` when the session was created with `--audit-integrity` but without `--rollback` (or with `--rollback` if the bundle-target decision in REQ-AAHX-02 says audit-loader should be the primary). Preserve correctness for rollback-only and dual-target sessions per the chosen architecture.
+- **Enforcement:** Cross-platform — both `audit_session::load_session` and `rollback_session::load_session` already honor `nono_home_dir()` post-Phase-27.1.
+- **Security:** Loader chosen must NOT widen the path-resolution surface beyond what `nono_home_dir()` already validates. Fail-closed on missing session: surface the canonical `Session not found` error rather than silently falling back to a different root (avoids confused-deputy across the audit/rollback discriminator).
+- **Acceptance:**
+  1. `audit_commands::cmd_verify` resolves audit-only sessions correctly (no `Session not found` for sessions written by `nono run --audit-integrity --audit-sign-key <key> -- <cmd>`).
+  2. Rollback-only and dual-target sessions retain their existing verification correctness (no regressions in any pre-existing rollback verify path).
+  3. `#[allow(dead_code)]` removed from `audit_session::load_session` once it has live consumers (mirrors Phase 27.1 Plan 02 D-19 pattern of removing the attr when migration consumers land).
+- **Maps to:** Phase 27.1 D-27.1-14 v2.4-FU-1; closes the Test 1 path of REQ-NTH-03 acceptance #2 once the loader swap lands.
+
+### REQ-AAHX-02 — Bundle-target architecture decision (ADR + implementation)
+
+- **What:** Pick one of three bundle-target architectures and record the decision as an ADR (e.g. `docs/architecture/audit-bundle-target.md`):
+  - **Option A:** Mirror to `<audit_root>/<id>/audit-attestation.bundle` regardless of `--rollback` flag (production code change in the supervisor sign-target routing).
+  - **Option B:** Sign to `<rollback_root>/<id>/audit-attestation.bundle` only when `--rollback` is set, sign to `<audit_root>/<id>/...` otherwise; `audit verify` learns dual-root lookup.
+  - **Option C:** Test rewrite — the test (Test 2) accepts the production behavior of writing to `<rollback_root>/<id>/...` when `--rollback` is set. Production unchanged.
+- **Enforcement:** Cross-platform; relevant on every host where `nono run --audit-integrity --audit-sign-key <key> --rollback -- <cmd>` produces a bundle.
+- **Security:** Audit logs and rollback artifacts are co-tenant on the same filesystem under `<NONO_TEST_HOME>/.nono/` (Phase 27.1 REQ-NTH-02). Whichever option is chosen must not weaken existing access-mode separation between `audit_root()` (append-mostly) and `rollback_root()` (mutable). If Option A or B introduces cross-root access, the access patterns must be SECURITY-reviewed in Phase 27.2 secure-phase.
+- **Acceptance:**
+  1. ADR file exists at the chosen path documenting the decision, alternatives considered, and rationale (matches Phase 25-02 AIPC ADR convention).
+  2. Implementation matches the ADR's chosen path; `--audit-integrity --audit-sign-key` (with and without `--rollback`) produces a verifiable bundle at the documented canonical location.
+  3. Test 2 (`rollback_signed_session_verifies_from_audit_dir_bundle`) asserts the canonical path per the ADR; no conditional `#[cfg]` shapes.
+- **Maps to:** Phase 27.1 D-27.1-14 v2.4-FU-2.
+
+### REQ-AAHX-03 — Audit-attestation tests re-enabled and passing on Windows host
+
+- **What:** Remove the two `#[ignore]` attributes in `crates/nono-cli/tests/audit_attestation.rs` (currently re-`#[ignore]`'d per Phase 27.1 D-27.1-14). Both `audit_verify_reports_signed_attestation_with_pinned_public_key` and `rollback_signed_session_verifies_from_audit_dir_bundle` must pass on Windows host with `NONO_TEST_HOME` set. Includes converting the bare `std::env::set_var`/`remove_var` calls (Phase 27.1 REVIEW WR-05) to a RAII guard so a panic in `run_nono` doesn't leak the env var.
+- **Enforcement:** Windows host verification (matches Phase 27 + 27.1 enforcement pattern). Linux/macOS pass is also expected since the seam is cross-platform.
+- **Security:** No new security surface. RAII env-var guard reduces test-side flakiness only.
+- **Acceptance:**
+  1. Both `#[ignore]` attributes removed from `crates/nono-cli/tests/audit_attestation.rs`.
+  2. `cargo test -p nono-cli --test audit_attestation` exits 0 with `2 passed; 0 failed; 0 ignored` on Windows host.
+  3. Test 1's JSON-shape assertion at `tests/audit_attestation.rs:534-538` (Phase 27.1 REVIEW WR-04) either matches `cmd_verify`'s actual output, OR `cmd_verify` is updated to emit the nested `attestation` object the test expects — whichever is more consistent with the REQ-AAHX-02 ADR.
+  4. Phase 27.1 `27.1-HUMAN-UAT.md` Test 1 (`Windows-host audit-attestation tests with v2.4-FU-1 + v2.4-FU-2 production fixes applied`) marks `result: passed` on `/gsd-verify-work 27.1` after Phase 27.2 closes.
+- **Maps to:** Phase 27 REQ-AAH-01 (closes fully on Windows host); Phase 27.1 REQ-NTH-03 (full closure replacing the partial closure D-27.1-14 contingency outcome).
+
+---
+
 ## AUDC — Authenticode Chain-Walker Subject Extraction
 
 Context: v2.2 Plan 22-05b ports `WinVerifyTrust` discriminant-only on Windows because `windows-sys 0.59` does not expose `WTHelperProvDataFromStateData` / `WTHelperGetProvSignerFromChain` without `Win32_Security_Cryptography_Catalog` + `Win32_Security_Cryptography_Sip` features (`CRYPT_PROVIDER_DATA` shape is gated). Records `Valid` / `Unsigned` / `InvalidSignature{hresult}` only, sets `signer_subject = "<unknown>"` and empty thumbprint on Valid signatures. v2.3 lights up the chain walker.

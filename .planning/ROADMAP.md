@@ -75,7 +75,7 @@ Full details: `.planning/milestones/v2.2-ROADMAP.md`.
 
 **Trigger:** Linux POC gap analysis (2026-04-29, `.planning/quick/260429-gap-v039-linux-poc-vs-windows-fork-tip/PLAN.md`) showed RESL flags emit "not enforced on linux" warnings — credibility issue for the demo. v2.3 closes those + lands the WR-01 product decision deferred since v2.1.
 
-**Requirement coverage:** 14 requirements across 6 categories (RESL-NIX, AIPC-NIX, PKGS, AAH, AUDC, WRU). All mapped; zero orphans.
+**Requirement coverage:** 20 requirements across 8 categories (RESL-NIX, AIPC-NIX, PKGS, AAH, NTH, AAHX, AUDC, WRU). All mapped; zero orphans. Phase 27.1 (NTH-01..03) and Phase 27.2 (AAHX-01..03) inserted post-scope-lock — both pulled forward into v2.3 to close REQ-AAH-01 fully on Windows host without v2.4 deferral.
 
 - [ ] **Phase 25: Cross-Platform RESL + AIPC Unix Design** (1/2 plans complete, 2026-04-29) — REQ-RESL-NIX-01..03 + REQ-AIPC-NIX-01. Plan 25-02 (AIPC Unix Futures ADR) shipped 2026-04-29 closing REQ-AIPC-NIX-01 (commit `30d6fdb1`); ADR at `docs/architecture/aipc-unix-futures.md` locks verdicts for all 6 HandleKind discriminants. Plan 25-01 (cgroup v2 Linux + setrlimit macOS RESL backends — REQ-RESL-NIX-01..03) execution deferred until next session has Linux/macOS-host coverage; plan + CONTEXT committed (commit `3ed80d38`). Subsumes v2.3 backlog row "Cross-platform RESL Unix backends" verbatim.
 - [⚠️] **Phase 26: PKG Streaming Follow-Up** (1/2 plans, partial 2026-05-01) — REQ-PKGS-02 + REQ-PKGS-03 closed via Plan 26-01 (commits `e5e1f2d7`/`dd7b28b3`/`797f3295`/`8ff89923`/`1f47d0ee`/`464cd4d4`); Plan 26-02 (REQ-PKGS-01 streaming + REQ-PKGS-04 auto-pull) plan + CONTEXT committed (`86efcdeb`) with execution queued for Linux/macOS host. Plan 26-01 used D-20 manual replay for `58b5a24e` (cherry-pick would have deleted fork's `validate_path_within`, a security regression); both validators preserved as belt-and-suspenders. `ArtifactType::Plugin` added as 7th variant (Script was missed in v2.3 scope-lock).
@@ -162,6 +162,30 @@ Plans:
 1. `dirs::home_dir()` callsites in `crates/nono-cli/src/` honor `NONO_TEST_HOME` when set, fall through to platform default otherwise.
 2. Phase 27 redesigned Test 1 body (preserved under `#[ignore]`) runs to completion on Windows host with `NONO_TEST_HOME` set.
 3. No production-path behavior change when `NONO_TEST_HOME` is unset (security-equivalent to status quo).
+
+### Phase 27.2: Audit-Attestation Test Re-Enablement (INSERTED)
+
+**Goal:** Close v2.4-FU-1 (audit-loader swap in `crates/nono-cli/src/audit_commands.rs:12` from `rollback_session::load_session` → `audit_session::load_session` for audit-only sessions) and v2.4-FU-2 (bundle-target architecture decision: mirror to audit_dir vs sign-to-session_dir vs dual-root verify), then remove the two `#[ignore]` attributes on `crates/nono-cli/tests/audit_attestation.rs` (FU-3) so REQ-AAH-01 (Phase 27) and REQ-NTH-03 (Phase 27.1) close fully on Windows host. Builds on the Phase 27.1 `NONO_TEST_HOME` seam.
+
+**Depends on:** Phase 27.1 (NONO_TEST_HOME seam at `crates/nono-cli/src/config/mod.rs::nono_home_dir()`); Phase 27 (Path B redesigned test bodies preserved in-tree). Surfaced by Phase 27.1 D-27.1-14 large-fix branch — see `.planning/phases/27.1-nono-test-home-seam/27.1-03-SUMMARY.md` § "v2.4 production follow-ups" and `deferred-items.md`.
+
+**Requirements:** REQ-AAHX-01 (audit-loader correctness for audit-only sessions), REQ-AAHX-02 (bundle-target architecture decision + ADR), REQ-AAHX-03 (audit-attestation test re-enablement closes REQ-AAH-01 + REQ-NTH-03 transitively). To be locked at `/gsd-plan-phase 27.2` per the planning-time requirements convention. See `.planning/REQUIREMENTS.md` § AAHX for full acceptance criteria.
+
+**Plans:** 0 plans (run `/gsd-plan-phase 27.2` to break down)
+
+Plans:
+- [ ] TBD (run `/gsd-plan-phase 27.2` to break down)
+
+**Cross-cutting constraints:**
+- `crates/nono/` remains byte-identical (D-19 invariant).
+- No regression on the seam: `nono_home_dir()` semantics from Phase 27.1 must not change.
+- WR-01 split-brain disposition (Phase 27.1 review finding, accepted as intentional) is not in scope here — this phase is loader/bundle-target only.
+
+**Success Criteria:**
+
+1. `cargo test -p nono-cli --test audit_attestation` returns `2 passed; 0 failed; 0 ignored` on Windows host with `NONO_TEST_HOME` set.
+2. `cmd_verify` in `audit_commands.rs` correctly resolves audit-only sessions via `audit_session::load_session`; rollback-only and dual-target sessions retain their existing loader correctness (no regressions).
+3. Bundle-target architecture decision recorded as an ADR (e.g. `docs/architecture/audit-bundle-target.md`); chosen path implemented; `--audit-integrity --audit-sign-key --rollback` and `--audit-integrity --audit-sign-key` (no rollback) flows both produce verifiable bundles at the documented canonical path.
 
 ### Phase 28: Authenticode Chain-Walker Subject Extraction
 
