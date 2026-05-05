@@ -557,7 +557,11 @@ Can be specified multiple times.
 </Warning>
 
 <Note>
-  `--override-deny` without a matching grant (`--allow`, `--read`, `--write`, etc.) is a hard error. This prevents silent no-ops on Linux and unintended implicit grants on macOS.
+  `--override-deny` (and its canonical alias `--bypass-protection`) without a matching grant (`--allow`, `--read`, `--write`, etc.) is a hard error. This prevents silent no-ops on Linux and unintended implicit grants on macOS.
+</Note>
+
+<Note>
+  **Renamed in upstream v0.47.0 (#594).** The canonical name for this flag is `--bypass-protection`; the fork accepts both `--override-deny` (the original v2.3 name) and `--bypass-protection` (the canonical name) as a clap `visible_alias`. Both names continue to work in v2.3 with no behavior difference; future major releases may remove the legacy name.
 </Note>
 
 ### Credential Options

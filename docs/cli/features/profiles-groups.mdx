@@ -104,7 +104,7 @@ The `policy` section provides fine-grained, additive and subtractive composition
 | `add_allow_readwrite` | Additional read+write directories to allow |
 | `add_deny_access` | Additional deny rules to apply (block read and write content). On macOS, Unix socket paths also emit a `network-outbound` deny so that `connect(2)` to the socket is blocked. |
 | `add_deny_commands` | Command names (basename only) to block execution of. Complements `add_deny_access` for defense-in-depth against tools like `docker`, `kubectl`, etc. |
-| `override_deny` | Paths to exempt from deny groups (must also have a matching grant) |
+| `override_deny` | Paths to exempt from deny groups (must also have a matching grant). **As of v0.47.0 (#594)**, the canonical key is `bypass_protection`; the legacy `override_deny` continues to deserialize for backwards compatibility, emitting a one-time stderr deprecation warning per process. The full canonical-schema migration (canonical sections `groups`, `commands`, `filesystem`) is tracked as a follow-up plan. Legacy keys will be removed in a future major release. |
 
 #### Adding a Deny Rule to an Inherited Profile
 
