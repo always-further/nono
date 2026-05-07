@@ -2265,7 +2265,6 @@ fn run_supervisor_loop(
         iterations: 0,
         sock_inactive_at: None,
     };
-
     let sock_fd = sock.as_raw_fd();
     let notify_raw_fd = seccomp_fd.map(|fd| fd.as_raw_fd());
     let proxy_notify_raw_fd = proxy_seccomp_fd.map(|fd| fd.as_raw_fd());
