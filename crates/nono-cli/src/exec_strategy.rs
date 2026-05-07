@@ -10,7 +10,7 @@
 //! until `exec()`. This module carefully prepares all data in the parent (where
 //! allocation is safe) and uses only raw libc calls in the child.
 
-mod env_sanitization;
+pub(crate) mod env_sanitization;
 #[cfg(target_os = "linux")]
 mod supervisor_linux;
 

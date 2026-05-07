@@ -264,7 +264,6 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
             command_policies,
             caps.allowed_commands(),
             caps.blocked_commands(),
-            &resolved_program,
             &caps,
             &requested_workdir,
         )?;
@@ -287,7 +286,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     if let Some(runtime) = eti_runtime.as_ref() {
-        if let Some(err) = runtime.direct_initial_exec_denial(&command[0], &resolved_program)? {
+        if let Some(err) = runtime.validate_initial_exec(&command[0], &resolved_program)? {
             return Err(err);
         }
     }

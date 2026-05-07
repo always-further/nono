@@ -20,7 +20,9 @@ pub use macos::{extension_consume, extension_issue_file, extension_release};
 
 // Re-export Linux Landlock ABI detection and scope policy reporting
 #[cfg(target_os = "linux")]
-pub use linux::{DetectedAbi, LandlockScopePolicy, detect_abi, landlock_scope_policy};
+pub use linux::{
+    DetectedAbi, LandlockScopePolicy, detect_abi, landlock_scope_policy, restrict_execute,
+};
 
 // Re-export Linux WSL2 detection
 #[cfg(target_os = "linux")]
@@ -150,6 +152,18 @@ impl Sandbox {
         abi: &DetectedAbi,
     ) -> Result<linux::SeccompNetFallback> {
         linux::apply_with_abi(caps, abi)
+    }
+
+    /// Stack a second Landlock layer that restricts execute to the given paths (Linux only).
+    ///
+    /// Must be called after `apply()`. See [`linux::restrict_execute`] for semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the restriction cannot be applied.
+    #[cfg(target_os = "linux")]
+    pub fn restrict_execute(paths: &[impl AsRef<std::path::Path>]) -> Result<()> {
+        linux::restrict_execute(paths)
     }
 
     /// Check if sandboxing is supported on this platform

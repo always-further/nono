@@ -771,6 +771,66 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
     Ok(seccomp_net_fallback)
 }
 
+/// Apply a second Landlock layer that restricts execute access to the given paths.
+///
+/// Landlock rulesets stack: each `restrict_self()` call adds an immutable layer.
+/// The effective permission for any access right is the intersection of what
+/// every layer grants. This function handles ONLY `AccessFs::Execute`, so paths
+/// not listed here lose execute permission even if the main sandbox granted it
+/// via `AccessMode::Read`. Read/write grants from the main ruleset are unaffected.
+///
+/// Call this after `apply()` / `apply_with_abi()` to lock down which binaries
+/// an already-sandboxed process can exec.
+pub fn restrict_execute(paths: &[impl AsRef<Path>]) -> Result<()> {
+    let mut ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(AccessFs::Execute)
+        .map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "ETI execute restriction: kernel does not support Landlock Execute: {e}"
+            ))
+        })?
+        .set_compatibility(CompatLevel::BestEffort)
+        .create()
+        .map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "ETI execute restriction: ruleset create failed: {e}"
+            ))
+        })?;
+
+    for path in paths {
+        let p = path.as_ref();
+        let fd = PathFd::new(p).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "ETI execute restriction: cannot open {}: {e}",
+                p.display()
+            ))
+        })?;
+        ruleset = ruleset
+            .add_rule(PathBeneath::new(fd, AccessFs::Execute))
+            .map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "ETI execute restriction: add_rule for {}: {e}",
+                    p.display()
+                ))
+            })?;
+    }
+
+    let status = ruleset.restrict_self().map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "ETI execute restriction: restrict_self failed: {e}"
+        ))
+    })?;
+
+    if matches!(status.ruleset, landlock::RulesetStatus::NotEnforced) {
+        return Err(NonoError::SandboxInit(
+            "ETI execute restriction: Landlock was not enforced".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 // ==========================================================================
 // Seccomp user notification (SECCOMP_RET_USER_NOTIF) for transparent
 // capability expansion. These primitives install a BPF filter on

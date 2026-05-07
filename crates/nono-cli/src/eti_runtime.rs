@@ -59,7 +59,7 @@ mod linux {
         DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt,
     };
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -157,7 +157,6 @@ mod linux {
         config: CommandPoliciesConfig,
         resolved: ResolvedCommandBinaries,
         deny_only: BTreeMap<String, ResolvedDenyOnlyCommand>,
-        original_exec_dirs: Vec<PathBuf>,
         allowed_direct_bypasses: Vec<PathBuf>,
         allowed_direct_bypass_ids: HashSet<FileId>,
     }
@@ -228,6 +227,21 @@ mod linux {
         cwd: Vec<u8>,
         stdio_mode: String,
         caps: ChildCapsSpec,
+        // Explicit execute allowlist applied as a second Landlock layer after
+        // the main sandbox. AccessMode::Read includes AccessFs::Execute, so
+        // fs_read/fs_write grants would otherwise let the child exec arbitrary
+        // workspace binaries. This list restricts execute to the command binary,
+        // interpreter (if any), and ETI shims only.
+        allowed_exec_paths: Vec<Vec<u8>>,
+        // Expected identity captured at plan-build time. The launcher opens
+        // the binary with O_RDONLY|O_NOFOLLOW, verifies dev/ino/size/mtime/sha256
+        // against these values, and execs via execveat on that fd to close the
+        // path-based TOCTOU.
+        expected_dev: u64,
+        expected_ino: u64,
+        expected_size: u64,
+        expected_mtime_nanos: i128,
+        expected_sha256: String,
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -269,8 +283,13 @@ mod linux {
             let path_env = std::env::var_os("PATH");
             let resolved =
                 crate::command_policy::resolve_policy_command_binaries(config, path_env.clone())?;
-            let original_exec_dirs = command_search_dirs(config, path_env)?;
-            validate_trusted_executable_dirs(&original_exec_dirs)?;
+            // Validate that PATH directories used by the deny_only resolver are
+            // not group/world writable. We no longer sweep PATH into the outer
+            // exec gate, but resolve_deny_only_commands still uses these dirs to
+            // shadow dangerous binaries with deny shims, so the trust still
+            // matters.
+            let search_dirs = command_search_dirs(config, path_env)?;
+            validate_trusted_executable_dirs(&search_dirs)?;
             let deny_only = resolve_deny_only_commands(config, blocked_commands, allowed_commands)?;
             validate_controlled_binary_immutability(&resolved, &deny_only, outer_caps)?;
             let governance_denies = resolve_governance_denies(config)?;
@@ -281,7 +300,6 @@ mod linux {
                 config: config.clone(),
                 resolved,
                 deny_only,
-                original_exec_dirs,
                 allowed_direct_bypasses,
                 allowed_direct_bypass_ids,
             })
@@ -293,7 +311,6 @@ mod linux {
             config: &CommandPoliciesConfig,
             allowed_commands: &[String],
             blocked_commands: &[String],
-            resolved_program: &Path,
             outer_caps: &CapabilitySet,
             policy_root: &Path,
         ) -> Result<Self> {
@@ -331,17 +348,6 @@ mod linux {
                 start_credentials.elapsed()
             );
 
-            let mut excluded_ids: HashSet<FileId> = plan
-                .resolved
-                .commands
-                .values()
-                .map(|binary| FileId {
-                    dev: binary.dev,
-                    ino: binary.ino,
-                })
-                .collect();
-            excluded_ids.extend(plan.deny_only.values().map(|entry| entry.id));
-
             let start_shims = std::time::Instant::now();
             let mut shims_by_command = BTreeMap::new();
             let mut shims_by_path = BTreeMap::new();
@@ -362,11 +368,9 @@ mod linux {
 
             let start_outer_exec = std::time::Instant::now();
             let allowed_outer_exec_files = build_outer_exec_files(
-                &excluded_ids,
-                &plan.original_exec_dirs,
-                resolved_program,
                 shims_by_command.values(),
                 &plan.allowed_direct_bypasses,
+                &shim_source,
             )?;
             eti_profile_log!(
                 "prepare:build_outer_exec_files: {:?} ({} paths)",
@@ -469,14 +473,29 @@ mod linux {
                 .map(|identity| identity.path.as_path())
         }
 
-        pub(crate) fn direct_initial_exec_denial(
+        /// Default-deny gate for the initial command when ETI is active.
+        ///
+        /// Allowed cases:
+        /// - bare command name (no `/`) that is a policy command — runs through its shim
+        /// - any path or name whose canonical inode is in `allow_direct_exec_bypass`
+        ///
+        /// Everything else is rejected. In particular, this prevents
+        /// `session_can_use` from being bypassed by invoking a non-policy
+        /// executable on `PATH` (e.g. `python`, `node`, `openssl`) or by
+        /// targeting a controlled / deny-only binary directly by path.
+        pub(crate) fn validate_initial_exec(
             &self,
             original_program: &str,
             resolved_program: &Path,
         ) -> Result<Option<NonoError>> {
-            if !original_program.contains('/') {
+            // Bare name in shims_by_command resolves through a shim (policy or
+            // deny-only — denied by select_effective_policy if the latter).
+            if !original_program.contains('/')
+                && self.inner.shims_by_command.contains_key(original_program)
+            {
                 return Ok(None);
             }
+
             let canonical = resolved_program.canonicalize().map_err(|source| {
                 NonoError::PathCanonicalization {
                     path: resolved_program.to_path_buf(),
@@ -488,30 +507,14 @@ mod linux {
                 source,
             })?;
             let id = file_id(&metadata);
-            if self.inner.plan.allowed_direct_bypass_ids.contains(&id) {
-                return Ok(None);
-            }
-            for (name, command) in &self.inner.plan.resolved.commands {
-                if command.dev == id.dev && command.ino == id.ino {
-                    return Ok(Some(NonoError::BlockedCommand {
-                        command: original_program.to_string(),
-                        reason: format!(
-                            "ETI direct exec bypass denied for policy-controlled command '{name}'"
-                        ),
-                    }));
-                }
-            }
-            for (name, command) in &self.inner.plan.deny_only {
-                if command.id == id {
-                    return Ok(Some(NonoError::BlockedCommand {
-                        command: original_program.to_string(),
-                        reason: format!(
-                            "ETI direct exec denied for legacy blocked command '{name}'"
-                        ),
-                    }));
-                }
-            }
-            Ok(None)
+            Ok(check_exec_gate(
+                &self.inner.plan.allowed_direct_bypass_ids,
+                &self.inner.plan.resolved.commands,
+                &self.inner.plan.deny_only,
+                original_program,
+                resolved_program,
+                id,
+            ))
         }
 
         pub(crate) fn listener_fd(&self) -> i32 {
@@ -786,11 +789,20 @@ mod linux {
                 )));
             }
         }
-        let real_binary = OsString::from_vec(spec.real_binary);
-        let cwd = OsString::from_vec(spec.cwd);
+        let real_binary = OsString::from_vec(spec.real_binary.clone());
+        let cwd = OsString::from_vec(spec.cwd.clone());
         std::env::set_current_dir(&cwd).map_err(|err| {
             NonoError::SandboxInit(format!("ETI child chdir failed before sandbox: {err}"))
         })?;
+
+        // R3: Open the binary with O_RDONLY|O_NOFOLLOW, verify identity by
+        // fstat'ing and hashing the SAME fd we will exec, then execveat via
+        // that fd. The supervisor's earlier verify_binary_identity is only a
+        // pre-flight; THIS check is the integrity boundary because the fd we
+        // open here is the inode the kernel will execute (via AT_EMPTY_PATH).
+        let start_verify = std::time::Instant::now();
+        let binary_fd = open_and_verify_binary(&real_binary, &spec)?;
+        eti_profile_log!("launcher:verify_binary_fd: {:?}", start_verify.elapsed());
 
         let start_caps_from = std::time::Instant::now();
         let caps = caps_from_spec(&spec.caps)?;
@@ -801,21 +813,88 @@ mod linux {
             "launcher:sandbox_apply: {:?}",
             start_sandbox_apply.elapsed()
         );
+
+        // Stack a second Landlock layer restricting execute access.
+        // AccessMode::Read maps to AccessFs::Execute in the Linux sandbox, so
+        // any fs_read dir grant (e.g. fs_read:["."] in the git profile) would
+        // otherwise let the child exec arbitrary workspace binaries. This layer
+        // confines exec to the specific binary, interpreter (if any), and ETI
+        // shims listed in allowed_exec_paths by the supervisor.
+        let exec_paths: Vec<PathBuf> = spec
+            .allowed_exec_paths
+            .iter()
+            .map(|bytes| PathBuf::from(OsString::from_vec(bytes.clone())))
+            .collect();
+        let start_exec_restrict = std::time::Instant::now();
+        Sandbox::restrict_execute(&exec_paths)?;
+        eti_profile_log!(
+            "launcher:restrict_execute: {:?}",
+            start_exec_restrict.elapsed()
+        );
         eti_profile_log!("launcher:total_to_exec: {:?}", start_launcher.elapsed());
 
-        let mut command = Command::new(&real_binary);
-        command.env_clear();
-        for entry in spec.env {
-            if let Some((key, value)) = split_env_entry(&entry) {
-                command.env(OsStr::from_bytes(key), OsStr::from_bytes(value));
+        // Build argv / envp as CString arrays. NUL-byte rejection is enforced
+        // earlier (validate_ipc_request, env builder) but we re-check defensively.
+        let mut argv_c: Vec<CString> = Vec::with_capacity(spec.argv.len());
+        for arg in &spec.argv {
+            argv_c.push(
+                CString::new(arg.as_slice())
+                    .map_err(|_| NonoError::SandboxInit("ETI argv contains NUL".to_string()))?,
+            );
+        }
+        let argv_ptrs: Vec<*const libc::c_char> = argv_c
+            .iter()
+            .map(|s| s.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+
+        let mut envp_c: Vec<CString> = Vec::with_capacity(spec.env.len());
+        for entry in &spec.env {
+            envp_c.push(
+                CString::new(entry.as_slice()).map_err(|_| {
+                    NonoError::SandboxInit("ETI env entry contains NUL".to_string())
+                })?,
+            );
+        }
+        let envp_ptrs: Vec<*const libc::c_char> = envp_c
+            .iter()
+            .map(|s| s.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+
+        let empty_path = CString::new("").map_err(|_| {
+            NonoError::SandboxInit("ETI: failed to build empty path CString".to_string())
+        })?;
+
+        // For shebang scripts, execveat(AT_EMPTY_PATH) passes the fd to the
+        // interpreter via /proc/self/fd/<N>. FD_CLOEXEC would close the fd at
+        // the execveat boundary, making that path inaccessible to the
+        // interpreter (ENOENT). Clear the flag now; the fd is fully verified
+        // and is about to be exec'd — the leak window is the exec itself.
+        if spec.executable_kind == "ShebangScript" {
+            unsafe {
+                libc::fcntl(binary_fd.as_raw_fd(), libc::F_SETFD, 0);
             }
         }
-        for arg in spec.argv.into_iter().skip(1) {
-            command.arg(OsString::from_vec(arg));
-        }
-        command.arg0(&real_binary);
 
-        let err = command.exec();
+        // execveat(fd, "", argv, envp, AT_EMPTY_PATH) — the kernel uses the
+        // open fd as the binary, so a path-based swap between verification and
+        // exec cannot redirect us to a different inode.
+        //
+        // The libc binding on Linux GNU declares argv/envp as *const *mut c_char
+        // (POSIX convention: outer pointer is const, inner is mutable) while
+        // CString::as_ptr() yields *const c_char. The kernel does not mutate
+        // the strings; cast at the call site to satisfy the type checker.
+        unsafe {
+            libc::execveat(
+                binary_fd.as_raw_fd(),
+                empty_path.as_ptr(),
+                argv_ptrs.as_ptr().cast::<*mut libc::c_char>(),
+                envp_ptrs.as_ptr().cast::<*mut libc::c_char>(),
+                libc::AT_EMPTY_PATH,
+            );
+        }
+        let err = std::io::Error::last_os_error();
         if spec.executable_kind == "ShebangScript" {
             let interpreter = spec
                 .interpreter
@@ -823,12 +902,99 @@ mod linux {
                 .map(|value| value.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "<unknown>".to_string());
             return Err(NonoError::SandboxInit(format!(
-                "ETI exec failed for script {} using interpreter {}: {err}. The selected child policy must grant the script, interpreter, interpreter ELF dependencies, and any required language runtime/package directories.",
+                "ETI execveat failed for script {} using interpreter {}: {err}. The selected child policy must grant the script, interpreter, interpreter ELF dependencies, and any required language runtime/package directories.",
                 PathBuf::from(real_binary).display(),
                 interpreter
             )));
         }
         Err(NonoError::CommandExecution(err))
+    }
+
+    /// Open the binary with `O_RDONLY|O_NOFOLLOW`, verify dev/ino/size/mtime
+    /// against the supervisor's plan-build snapshot, then read content from the
+    /// same fd to verify the SHA-256 captured at plan-build. The returned fd is
+    /// what `execveat(AT_EMPTY_PATH)` runs — verified-object equals
+    /// executed-object, no path-based TOCTOU window.
+    fn open_and_verify_binary(path: &OsStr, spec: &EtiChildLaunchSpec) -> Result<OwnedFd> {
+        use std::io::Read;
+
+        let path_c = CString::new(path.as_bytes())
+            .map_err(|_| NonoError::SandboxInit("ETI binary path contains NUL".to_string()))?;
+        let raw_fd = unsafe {
+            libc::open(
+                path_c.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if raw_fd < 0 {
+            return Err(NonoError::ConfigRead {
+                path: PathBuf::from(path),
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        let fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI fstat failed for {}: {}",
+                PathBuf::from(path).display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        if (st.st_dev as u64) != spec.expected_dev || (st.st_ino as u64) != spec.expected_ino {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI binary inode changed before launch: {}",
+                PathBuf::from(path).display()
+            )));
+        }
+        if (st.st_size as u64) != spec.expected_size {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI binary size changed before launch: {}",
+                PathBuf::from(path).display()
+            )));
+        }
+        let mtime_nanos = (st.st_mtime as i128)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(st.st_mtime_nsec as i128);
+        if mtime_nanos != spec.expected_mtime_nanos {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI binary mtime changed before launch: {}",
+                PathBuf::from(path).display()
+            )));
+        }
+
+        // Hash content via a duplicate fd so the original fd's offset stays at 0
+        // for execveat. (execveat doesn't actually depend on offset, but keeping
+        // the original untouched avoids relying on undocumented kernel behavior.)
+        let dup_fd = fd
+            .try_clone()
+            .map_err(|err| NonoError::SandboxInit(format!("ETI fd dup for hash: {err}")))?;
+        let mut file = std::fs::File::from(dup_fd);
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|err| NonoError::SandboxInit(format!("ETI binary fd read: {err}")))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let actual_sha256: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        if actual_sha256 != spec.expected_sha256 {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI binary content changed before launch: {}",
+                PathBuf::from(path).display()
+            )));
+        }
+
+        Ok(fd)
     }
 
     fn handle_shim_stream(
@@ -1340,6 +1506,50 @@ mod linux {
         caps.deduplicate();
 
         let env = filter_child_env(state, request, policy)?;
+
+        // Build the execute allowlist. AccessMode::Read includes
+        // AccessFs::Execute in the Landlock mapping; without an explicit
+        // execute restriction, fs_read:["."] grants exec on arbitrary workspace
+        // binaries. We list only what the child is permitted to exec.
+        //
+        // For dynamically-linked ELF binaries the kernel must also exec the ELF
+        // interpreter (dynamic linker, e.g. ld-linux-x86-64.so.2) recorded in
+        // PT_INTERP. The Landlock Execute layer applies to that exec too; if the
+        // linker path is not in the allowlist, the kernel returns ENOENT and the
+        // shell reports "command not found" (exit 127). Include the full ELF
+        // dependency closure (which the baseline cache already captures) so
+        // every dynamically-linked binary we permit to exec can actually load.
+        let mut allowed_exec_paths: Vec<Vec<u8>> =
+            vec![binary.canonical_path.as_os_str().as_bytes().to_vec()];
+        if let Some(closure) = state.baseline_cache.closures.get(&binary.canonical_path) {
+            for dep in closure {
+                allowed_exec_paths.push(dep.as_os_str().as_bytes().to_vec());
+            }
+        }
+        if let Some(interp) = binary.shape.interpreter.as_ref() {
+            allowed_exec_paths.push(interp.as_os_str().as_bytes().to_vec());
+            if let Ok(canonical_interp) = interp.canonicalize() {
+                if let Some(closure) = state.baseline_cache.closures.get(&canonical_interp) {
+                    for dep in closure {
+                        allowed_exec_paths.push(dep.as_os_str().as_bytes().to_vec());
+                    }
+                }
+            }
+        }
+        for shim in state.shims_by_command.values() {
+            allowed_exec_paths.push(shim.path.as_os_str().as_bytes().to_vec());
+        }
+        // All shims are hard links to the same nono binary; include the shim's
+        // ELF dependency closure once so the dynamic linker can be exec'd when
+        // a child process (e.g. sh) execs a shim.
+        if let Some(shim) = state.shims_by_command.values().next() {
+            if let Some(closure) = state.baseline_cache.closures.get(&shim.path) {
+                for dep in closure {
+                    allowed_exec_paths.push(dep.as_os_str().as_bytes().to_vec());
+                }
+            }
+        }
+
         Ok(EtiChildLaunchSpec {
             real_binary: binary.canonical_path.as_os_str().as_bytes().to_vec(),
             executable_kind: format!("{:?}", binary.shape.kind),
@@ -1354,6 +1564,12 @@ mod linux {
             cwd: cwd.as_os_str().as_bytes().to_vec(),
             stdio_mode: selected_stdio_mode(request).to_string(),
             caps: caps_to_spec(&caps),
+            allowed_exec_paths,
+            expected_dev: binary.dev,
+            expected_ino: binary.ino,
+            expected_size: binary.size,
+            expected_mtime_nanos: binary.mtime_nanos,
+            expected_sha256: binary.sha256.clone(),
         })
     }
 
@@ -1676,6 +1892,13 @@ mod linux {
             if key_str.starts_with("NONO_") {
                 continue;
             }
+            // Drop linker/shell/interpreter injection vectors regardless of policy
+            // allow_vars. A broad pattern like "*" or "LD_*" must NOT let
+            // LD_PRELOAD / PYTHONPATH / NODE_OPTIONS / BASH_ENV / etc. through to
+            // a credential-bearing ETI child.
+            if crate::exec_strategy::env_sanitization::is_dangerous_env_var(key_str) {
+                continue;
+            }
             if key_str == "PATH" {
                 has_path = true;
             }
@@ -1735,6 +1958,14 @@ mod linux {
             {
                 return Err(NonoError::ConfigParse(format!(
                     "invalid ETI environment.set_vars entry '{name}'"
+                )));
+            }
+            // Refuse known code-injection vectors even if a policy explicitly
+            // names them in set_vars. There is no legitimate reason for a policy
+            // to set LD_PRELOAD / BASH_ENV / PYTHONPATH / NODE_OPTIONS / etc.
+            if crate::exec_strategy::env_sanitization::is_dangerous_env_var(name) {
+                return Err(NonoError::ConfigParse(format!(
+                    "ETI environment.set_vars rejects dangerous key '{name}'"
                 )));
             }
             let prefix = format!("{name}=");
@@ -2469,13 +2700,23 @@ mod linux {
         Ok(dirs.into_iter().collect())
     }
 
+    /// PATH directories used by the deny-only resolver must not be writable by
+    /// other users. Group/world-writable directories allow an untrusted user to
+    /// plant a binary that shadows a deny-only name, causing the deny shim to
+    /// resolve to the planted inode; the actual system binary then lacks a
+    /// deny-inode match. User-owned writable directories (e.g. `~/.cargo/bin`,
+    /// `~/.local/bin`) are intentionally permitted: ETI's threat model trusts
+    /// the human user who owns the session, and the default-deny exec gate in
+    /// `validate_initial_exec` blocks any binary not explicitly in the policy
+    /// regardless of PATH shadowing.
     fn validate_trusted_executable_dirs(dirs: &[PathBuf]) -> Result<()> {
         for dir in dirs {
             let metadata = fs::metadata(dir).map_err(|source| NonoError::ConfigRead {
                 path: dir.clone(),
                 source,
             })?;
-            if metadata.permissions().mode() & 0o022 != 0 {
+            let mode = metadata.permissions().mode();
+            if mode & 0o022 != 0 {
                 return Err(NonoError::SandboxInit(format!(
                     "ETI executable directory is group/world writable: {}",
                     dir.display()
@@ -2711,79 +2952,36 @@ mod linux {
         Ok(None)
     }
 
+    /// Build the Landlock execute allow-list applied in the supervised child.
+    ///
+    /// When ETI is active we deliberately do NOT sweep `PATH`. The supervised
+    /// child only execs one of: a shim (for policy commands) or an explicit
+    /// `allow_direct_exec_bypass` path. Allowing every executable on `PATH`
+    /// would let non-policy binaries (python, node, openssl, …) run under
+    /// outer caps, bypassing `session_can_use`, and would also trust binaries
+    /// that the session may have outer write access to (e.g. `~/.local/bin`).
     fn build_outer_exec_files<'a>(
-        excluded_ids: &HashSet<FileId>,
-        original_exec_dirs: &[PathBuf],
-        resolved_program: &Path,
         shims: impl Iterator<Item = &'a ShimIdentity>,
         allowed_direct_bypasses: &[PathBuf],
+        shim_source: &Path,
     ) -> Result<Vec<PathBuf>> {
         let mut seen = HashSet::new();
         let mut files = Vec::new();
-        for dir in original_exec_dirs {
-            add_executable_files_in_dir(&mut files, &mut seen, excluded_ids, dir)?;
-        }
-        add_exact_exec_file_unless_excluded(&mut files, &mut seen, excluded_ids, resolved_program)?;
         for shim in shims {
-            add_exact_exec_path(&mut files, &shim.path)?;
+            add_exact_exec_file(&mut files, &mut seen, &shim.path)?;
+        }
+        // Include the shim binary's ELF dependency closure (dynamic linker, glibc,
+        // etc.) so the kernel can load them when the supervised child execs a shim.
+        // All shims are hard links to shim_source, so one closure covers all.
+        let shim_closure = elf_dependency_closure(shim_source)?;
+        for dep in &shim_closure {
+            let _ = add_exact_exec_file(&mut files, &mut seen, dep);
         }
         for bypass in allowed_direct_bypasses {
             add_exact_exec_file(&mut files, &mut seen, bypass)?;
         }
         files.sort();
         Ok(files)
-    }
-
-    fn add_executable_files_in_dir(
-        files: &mut Vec<PathBuf>,
-        seen: &mut HashSet<FileId>,
-        excluded_ids: &HashSet<FileId>,
-        dir: &Path,
-    ) -> Result<()> {
-        for entry in fs::read_dir(dir).map_err(|source| NonoError::ConfigRead {
-            path: dir.to_path_buf(),
-            source,
-        })? {
-            let entry = entry.map_err(|source| NonoError::ConfigRead {
-                path: dir.to_path_buf(),
-                source,
-            })?;
-            let path = entry.path();
-            let Ok(metadata) = fs::metadata(&path) else {
-                continue;
-            };
-            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-                continue;
-            }
-            add_exact_exec_file_unless_excluded(files, seen, excluded_ids, &path)?;
-        }
-        Ok(())
-    }
-
-    fn add_exact_exec_file_unless_excluded(
-        files: &mut Vec<PathBuf>,
-        seen: &mut HashSet<FileId>,
-        excluded_ids: &HashSet<FileId>,
-        path: &Path,
-    ) -> Result<()> {
-        let canonical = path
-            .canonicalize()
-            .map_err(|source| NonoError::PathCanonicalization {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        let metadata = fs::metadata(&canonical).map_err(|source| NonoError::ConfigRead {
-            path: canonical.clone(),
-            source,
-        })?;
-        let id = file_id(&metadata);
-        if excluded_ids.contains(&id) {
-            return Ok(());
-        }
-        if seen.insert(id) {
-            files.push(canonical);
-        }
-        Ok(())
     }
 
     fn add_exact_exec_file(
@@ -2803,26 +3001,6 @@ mod linux {
         })?;
         let id = file_id(&metadata);
         if seen.insert(id) {
-            files.push(canonical);
-        }
-        Ok(())
-    }
-
-    fn add_exact_exec_path(files: &mut Vec<PathBuf>, path: &Path) -> Result<()> {
-        let canonical = path
-            .canonicalize()
-            .map_err(|source| NonoError::PathCanonicalization {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        let metadata = fs::metadata(&canonical).map_err(|source| NonoError::ConfigRead {
-            path: canonical.clone(),
-            source,
-        })?;
-        if !metadata.is_file() {
-            return Err(NonoError::ExpectedFile(canonical));
-        }
-        if !files.contains(&canonical) {
             files.push(canonical);
         }
         Ok(())
@@ -2919,6 +3097,50 @@ mod linux {
             dev: metadata.dev(),
             ino: metadata.ino(),
         }
+    }
+
+    /// Core gate for `validate_initial_exec` after the caller has resolved the
+    /// canonical path to a `FileId`. Extracted so the ordering invariant (bypass
+    /// before policy-command rejection) can be tested without touching the
+    /// filesystem.
+    fn check_exec_gate(
+        allowed_bypass_ids: &HashSet<FileId>,
+        resolved_commands: &BTreeMap<String, ResolvedCommandBinary>,
+        deny_only: &BTreeMap<String, ResolvedDenyOnlyCommand>,
+        original_program: &str,
+        resolved_program: &Path,
+        id: FileId,
+    ) -> Option<NonoError> {
+        if allowed_bypass_ids.contains(&id) {
+            return None;
+        }
+        for (name, command) in resolved_commands {
+            if command.dev == id.dev && command.ino == id.ino {
+                return Some(NonoError::BlockedCommand {
+                    command: original_program.to_string(),
+                    reason: format!(
+                        "ETI direct exec bypass denied for policy-controlled command '{name}'"
+                    ),
+                });
+            }
+        }
+        for (name, command) in deny_only {
+            if command.id == id {
+                return Some(NonoError::BlockedCommand {
+                    command: original_program.to_string(),
+                    reason: format!("ETI direct exec denied for legacy blocked command '{name}'"),
+                });
+            }
+        }
+        Some(NonoError::BlockedCommand {
+            command: original_program.to_string(),
+            reason: format!(
+                "ETI denies non-policy initial exec of '{}'; add the command name to \
+                 command_policies.session_can_use or its canonical path to \
+                 allow_direct_exec_bypass",
+                resolved_program.display()
+            ),
+        })
     }
 
     fn is_tty(fd: i32) -> bool {
@@ -3393,6 +3615,173 @@ mod linux {
         Ok(u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::command_policy::{
+            CommandEnvironmentConfig, CommandSandboxConfig, ResolvedCommandBinaries,
+            ResolvedCommandBinary, ResolvedExecutableKind, ResolvedExecutableShape,
+        };
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        fn make_binary(dev: u64, ino: u64) -> ResolvedCommandBinary {
+            ResolvedCommandBinary {
+                name: "cmd".to_string(),
+                canonical_path: PathBuf::from("/usr/bin/cmd"),
+                dev,
+                ino,
+                size: 0,
+                mtime_nanos: 0,
+                sha256: String::new(),
+                duplicate_paths: vec![],
+                shape: ResolvedExecutableShape {
+                    kind: ResolvedExecutableKind::Elf,
+                    interpreter: None,
+                    interpreter_args: vec![],
+                },
+            }
+        }
+
+        fn make_deny_only(dev: u64, ino: u64) -> ResolvedDenyOnlyCommand {
+            ResolvedDenyOnlyCommand {
+                path: PathBuf::from("/usr/bin/cmd"),
+                id: FileId { dev, ino },
+            }
+        }
+
+        // ── check_exec_gate: bypass ordering ──────────────────────────────────
+
+        #[test]
+        fn bypass_wins_over_policy_command_same_inode() {
+            // The resolver ensures bypass IDs can equal policy command inodes.
+            // After the fix, bypass is checked first so the exec is allowed.
+            let id = FileId { dev: 1, ino: 42 };
+            let mut bypass = HashSet::new();
+            bypass.insert(id);
+            let mut resolved = BTreeMap::new();
+            resolved.insert("python".to_string(), make_binary(1, 42));
+            let deny_only = BTreeMap::new();
+
+            let result = check_exec_gate(
+                &bypass,
+                &resolved,
+                &deny_only,
+                "/usr/bin/python3",
+                Path::new("/usr/bin/python3"),
+                id,
+            );
+            assert!(result.is_none(), "bypass id must be allowed: {result:?}");
+        }
+
+        #[test]
+        fn policy_command_without_bypass_is_blocked() {
+            let id = FileId { dev: 1, ino: 99 };
+            let bypass = HashSet::new();
+            let mut resolved = BTreeMap::new();
+            resolved.insert("node".to_string(), make_binary(1, 99));
+            let deny_only = BTreeMap::new();
+
+            let result = check_exec_gate(
+                &bypass,
+                &resolved,
+                &deny_only,
+                "/usr/bin/node",
+                Path::new("/usr/bin/node"),
+                id,
+            );
+            assert!(result.is_some(), "policy command must be blocked");
+        }
+
+        #[test]
+        fn deny_only_command_is_blocked() {
+            let id = FileId { dev: 2, ino: 77 };
+            let bypass = HashSet::new();
+            let resolved = BTreeMap::new();
+            let mut deny_only = BTreeMap::new();
+            deny_only.insert("bash".to_string(), make_deny_only(2, 77));
+
+            let result = check_exec_gate(
+                &bypass,
+                &resolved,
+                &deny_only,
+                "/bin/bash",
+                Path::new("/bin/bash"),
+                id,
+            );
+            assert!(result.is_some(), "deny_only command must be blocked");
+        }
+
+        #[test]
+        fn unknown_inode_is_blocked() {
+            let id = FileId { dev: 3, ino: 1 };
+            let bypass = HashSet::new();
+            let resolved = BTreeMap::new();
+            let deny_only = BTreeMap::new();
+
+            let result = check_exec_gate(
+                &bypass,
+                &resolved,
+                &deny_only,
+                "/tmp/unknown",
+                Path::new("/tmp/unknown"),
+                id,
+            );
+            assert!(result.is_some(), "unknown inode must be blocked");
+        }
+
+        // ── apply_environment_set_vars: dangerous key rejection ───────────────
+
+        fn policy_with_set_var(key: &str, val: &str) -> CommandSandboxConfig {
+            let mut set_vars = BTreeMap::new();
+            set_vars.insert(key.to_string(), val.to_string());
+            CommandSandboxConfig {
+                fs_read: vec![],
+                fs_read_file: vec![],
+                fs_write: vec![],
+                fs_write_file: vec![],
+                use_credentials: vec![],
+                argv_prepend: vec![],
+                network: None,
+                environment: Some(CommandEnvironmentConfig {
+                    allow_vars: None,
+                    set_vars,
+                }),
+                allow_raw_file_credentials_in_chained_policy: false,
+            }
+        }
+
+        #[test]
+        fn set_vars_rejects_ld_preload() {
+            let policy = policy_with_set_var("LD_PRELOAD", "/evil.so");
+            let result = apply_environment_set_vars(&mut vec![], &policy);
+            assert!(result.is_err(), "LD_PRELOAD in set_vars must be rejected");
+        }
+
+        #[test]
+        fn set_vars_rejects_pythonpath() {
+            let policy = policy_with_set_var("PYTHONPATH", "/evil");
+            let result = apply_environment_set_vars(&mut vec![], &policy);
+            assert!(result.is_err(), "PYTHONPATH in set_vars must be rejected");
+        }
+
+        #[test]
+        fn set_vars_rejects_node_options() {
+            let policy = policy_with_set_var("NODE_OPTIONS", "--require /evil.js");
+            let result = apply_environment_set_vars(&mut vec![], &policy);
+            assert!(result.is_err(), "NODE_OPTIONS in set_vars must be rejected");
+        }
+
+        #[test]
+        fn set_vars_allows_safe_var() {
+            let policy = policy_with_set_var("MY_APP_CONFIG", "value");
+            let mut env = vec![];
+            let result = apply_environment_set_vars(&mut env, &policy);
+            assert!(result.is_ok());
+            assert!(env.iter().any(|e| e == b"MY_APP_CONFIG=value"));
+        }
     }
 }
 
