@@ -944,8 +944,14 @@ pub fn apply_deny_overrides(
 ///
 /// **Must be called after all paths are finalized** (groups + profile + CLI overrides).
 pub fn apply_unlink_overrides(caps: &mut CapabilitySet) {
-    if cfg!(target_os = "linux") {
-        return; // Unlink overrides are Seatbelt-specific
+    if !cfg!(target_os = "macos") {
+        // Unlink overrides emit Seatbelt-syntax `(allow file-write-unlink ...)`
+        // rules; only macOS Seatbelt can enforce them. On Linux, Landlock has
+        // no deny semantics, so the rules would be ignored. On Windows, they
+        // would be retained as platform_rules and trip the live-run gate at
+        // `crates/nono/src/sandbox/windows.rs` (preview_runtime_status), even
+        // though the rule text is meaningless to the Windows backend.
+        return;
     }
 
     let mut unlink_rules = Vec::new();
@@ -2662,6 +2668,35 @@ mod tests {
             )),
             "expected literal unlink override for writable file cap, got: {}",
             rules
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn test_apply_unlink_overrides_no_op_on_non_macos() {
+        // Regression: `apply_unlink_overrides` is Seatbelt-only and must early-return
+        // on Linux and Windows. Previously the early-return condition was
+        // `cfg!(target_os = "linux")`, which let Windows fall through and emit
+        // Seatbelt-syntax rules into `platform_rules`. Those rules are unenforceable
+        // on Windows but tripped the preview_runtime_status live-run gate
+        // (sandbox/windows.rs:179-181), causing the claude-code profile to fail
+        // `nono shell` / `nono run` with a "platform-specific sandbox rules" error.
+        let mut caps = CapabilitySet::new();
+        let path = PathBuf::from("/tmp/test-unlink-target");
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path,
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::Profile,
+        });
+
+        apply_unlink_overrides(&mut caps);
+
+        assert!(
+            caps.platform_rules().is_empty(),
+            "apply_unlink_overrides must be a no-op on non-macOS (Seatbelt-specific); got rules: {:?}",
+            caps.platform_rules()
         );
     }
 
