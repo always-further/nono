@@ -279,14 +279,17 @@ if ($EmitOnly) {
 
 $wix = Get-Command wix -ErrorAction SilentlyContinue
 if ($null -eq $wix) {
-    throw "WiX CLI was not found on PATH. Install WiX v4 and rerun the packaging script."
+    throw "WiX CLI was not found on PATH. Install WiX v7 (e.g. ``dotnet tool install --global wix --version 7.0.0``) and rerun the packaging script."
 }
 
 if (Test-Path -LiteralPath $msiPath) {
     Remove-Item -LiteralPath $msiPath -Force
 }
 
-& $wix.Source build $wxsPath -arch x64 -out $msiPath
+# -acceptEula wix7 acknowledges the FireGiant OSMF EULA non-interactively.
+# Required by WiX v7 (enforced via WIX7015); our usage is below the OSMF $10K/yr
+# revenue threshold so no fee is owed, but explicit acceptance is still required.
+& $wix.Source build $wxsPath -arch x64 -out $msiPath -acceptEula wix7
 if ($LASTEXITCODE -ne 0) {
     throw "WiX failed while building '$msiPath'."
 }

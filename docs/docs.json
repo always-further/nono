@@ -96,6 +96,7 @@
           "cli/development/windows-installer-strategy",
           "cli/development/windows-signing-guide",
           "cli/development/windows-preview-pilot",
+          "cli/development/windows-poc-handoff",
           "cli/development/windows-preview-validation",
           "cli/development/windows-release-candidate-checklist",
           "cli/development/windows-win-1706-decision-package",

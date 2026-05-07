@@ -1,0 +1,240 @@
+---
+title: Windows POC Handoff Cookbook
+description: Step-by-step recipe for testing the current Windows nono binary with Claude Code before shipping to a small POC group
+---
+
+Use this cookbook to validate a Windows nono build with Claude Code on your own machine, then package it for a 3–5 user POC group. It is the operator-side complement to [Windows Preview Pilot](/cli/development/windows-preview-pilot) — that doc describes the contract; this one walks you through the build, install, validate, distribute loop end-to-end.
+
+Scope: the **current** Windows supported command surface (`run`, `shell`, `wrap` via ConPTY, file/network grants enforced by Job Objects + per-path mandatory integrity labels). For the broader contract and what is intentionally unsupported, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract) and [Windows Feature Gap Matrix](/cli/development/windows-feature-gap-matrix).
+
+<Note>
+**Doc-vs-binary drift check.** Some legacy Windows docs still describe profile-backed runs and `nono shell`/`nono wrap` as intentionally blocked on Windows. The 0.37.x binary's own `setup --check-only` reports the opposite: profile-backed runs go live, and both `shell` and `wrap` are supported on Windows 10 build 17763+ via ConPTY. **Trust the binary.** When in doubt, run `nono setup --check-only` on the actual artifact you are shipping and quote its output, not the docs.
+</Note>
+
+## Prerequisites
+
+- Windows 10 build 17763+ or Windows 11 on the **test** machine (clean VM strongly preferred for the dress rehearsal).
+- Rust toolchain (matches `rust-toolchain.toml` in this repo) on the **build** machine.
+- For MSI packaging: WiX 7 or later (`dotnet tool install --global wix --version 7.0.0`). WiX 7 requires the .NET 8 SDK, which the GitHub `windows-latest` runner already ships. The build script passes `-acceptEula wix7` to acknowledge the [FireGiant OSMF](https://docs.firegiant.com/wix/osmf/) EULA non-interactively (required by v7 enforcement of `WIX7015`; nono is below the $10K/yr fee threshold).
+- A Claude Code installation on the test machine (`claude --version` works in PowerShell).
+
+## Step 1 — Pick or produce a binary
+
+Three paths, in order of formality.
+
+### Option A: Use a binary already in this tree
+
+Fast, dev-box only. Do **not** ship a `target/`-built binary to POC users — give them a versioned MSI or zip.
+
+```powershell
+.\target\release\nono.exe --version
+# nono 0.37.1
+```
+
+### Option B: Fresh release build on this machine
+
+```powershell
+make build-release-cli
+# or, equivalently:
+cargo build -p nono-cli --release
+```
+
+Result: `target\release\nono.exe`.
+
+### Option C: Versioned MSI for POC users
+
+Per-user is the right choice for a POC — no admin install, no machine-wide footprint, no service registration to undo.
+
+```powershell
+# Build for the explicit Windows MSVC target
+cargo build -p nono-cli --release --target x86_64-pc-windows-msvc
+
+# Per-user MSI
+.\scripts\build-windows-msi.ps1 `
+  -VersionTag v0.37.1-poc.1 `
+  -BinaryPath .\target\x86_64-pc-windows-msvc\release\nono.exe `
+  -Scope user `
+  -OutputDir dist\windows
+```
+
+Output: `dist\windows\nono-v0.37.1-poc.1-x86_64-pc-windows-msvc-user.msi`.
+
+<Warning>
+The **machine** MSI (`-Scope machine`) tries to register `nono-wfp-service` and expects `nono-wfp-service.exe` to live next to `nono.exe`. The current public release lane does not produce that binary, so machine MSI builds fail or install with a missing-service. Stay on `-Scope user` for the POC.
+</Warning>
+
+If you want a portable archive instead of MSI:
+
+```powershell
+Compress-Archive `
+  -Path .\target\x86_64-pc-windows-msvc\release\nono.exe `
+  -DestinationPath .\dist\nono-v0.37.1-poc.1-x86_64-pc-windows-msvc.zip
+```
+
+POC users extract to a stable directory (e.g. `C:\Tools\nono`) and add it to PATH.
+
+## Step 2 — Stage on the test machine
+
+For the **dev-box** validation pass, drop the binary on PATH for one shell:
+
+```powershell
+$env:Path = "$PWD\target\x86_64-pc-windows-msvc\release;$env:Path"
+nono --version
+```
+
+For a **clean test machine** (recommended before POC handoff — your dev box has muddy state from prior runs), install the way a POC user would:
+
+```powershell
+# Per-user MSI install. No elevation prompt.
+msiexec /i .\nono-v0.37.1-poc.1-x86_64-pc-windows-msvc-user.msi
+# Open a fresh PowerShell so PATH picks up the new entry, then:
+nono --version
+```
+
+## Step 3 — Pre-flight checks
+
+```powershell
+nono setup --check-only
+```
+
+What you should see (paraphrased from a real run on a Standard User session):
+
+- `nono binary found at <path>`, `Version: 0.37.x`, `Platform: Windows (restricted execution)`
+- `Support status: supported`
+- `Job Object creation: OK`, `Token Integrity level support: OK`, `BFE service status: OK`
+- `WFP readiness: missing binary` — **expected** for the POC. The `claude-code` profile does not require WFP; this only matters for domain-level network filtering, which is out of scope for the POC.
+- `35 sensitive paths blocked by default`, `26 dangerous commands blocked by default`
+- `claude-code` listed under built-in profiles.
+
+### One-time fix: `.claude.json` symlink warning
+
+The first time Claude Code is run under `nono` on a fresh user profile, you will see:
+
+```text
+WARN Failed to create ~/.claude.json symlink on Windows
+     (C:\Users\<u>\.claude.json -> .claude\claude.json):
+     A required privilege is not held by the client. (os error 1314);
+     claude-code token refresh may require manual setup or Developer Mode
+```
+
+This is **fail-open** — Claude still works, but token refresh writes land outside the sandbox-allowed `~/.claude\` tree. Pick one fix:
+
+1. **Enable Developer Mode** (preferred for POC users, no admin needed): `Settings → System → For developers → Developer Mode = On`. Symlink creation then succeeds for that user.
+2. **Run the first hook install elevated** (admin shell, just once): run `nono setup` (without `--check-only`) once as admin to create the symlink. Subsequent runs are unprivileged.
+
+Communicate one of these in your POC handoff. Do not let users discover the warning themselves.
+
+## Step 4 — First Claude Code run (installs the hook)
+
+```powershell
+# Dry-run first — verify the policy is what you expect
+nono run --dry-run --profile claude-code -- claude
+```
+
+Expected output shape:
+
+```text
+nono v0.37.x
+  Updating claude-code hook (new version available)
+  Capabilities:
+   r+w  \\?\C:\Users\<u>\.claude (dir)
+   r+w  \\?\C:\Users\<u>\.cache\claude (dir)
+       + 6 system/group paths (-v to show)
+   net  outbound allowed
+  dry-run sandbox would be applied with above capabilities
+  $ claude
+```
+
+The `Updating claude-code hook` line indicates that `~/.claude/hooks/nono-hook.sh` and the upfront sandbox section in `~/.claude/CLAUDE.md` were written. The install is idempotent and is skipped on subsequent runs unless the hook version changed.
+
+Then go live:
+
+```powershell
+nono run --profile claude-code -- claude
+```
+
+You should land in the Claude Code TUI with the sandbox active. Try a benign blocked operation (e.g. ask Claude to read `C:\Users\<u>\.ssh\id_rsa`) and confirm the hook injects the `[NONO SANDBOX - PERMISSION DENIED]` text instead of a bare error message — that confirms the hook is wired correctly.
+
+## Step 5 — Smoke checklist
+
+Run these from a fresh PowerShell. Capture stdout, stderr, and `nono --version` for each — that is the minimum triage payload from [Windows Preview Pilot § Debugging Inputs](/cli/development/windows-preview-pilot#debugging-inputs).
+
+### Must-pass
+
+```powershell
+# Identity & support
+nono --version
+nono --help | Select-String "shell|wrap|run"
+nono setup --check-only
+
+# Dry-run shapes (verify capability lists print as expected)
+nono run --dry-run --profile claude-code -- claude
+nono run --dry-run --allow . --read $env:USERPROFILE\.claude -- claude
+
+# Live, narrowest grant — works without profile
+nono run --allow . -- cmd /c echo hello
+
+# Live with profile
+nono run --profile claude-code -- claude --version
+
+# Exact-file grant (Windows supports this)
+$tmp = New-TemporaryFile
+"hello" | Out-File $tmp.FullName
+nono run --read-file $tmp.FullName -- cmd /c type $tmp.FullName
+
+# Block-net works on Windows without WFP service (Job Object + token-level)
+nono run --profile claude-code --block-net -- claude --version
+
+# Why-query: structured policy introspection
+nono why --path $env:USERPROFILE\.ssh\id_rsa --op read
+nono why --json --path $env:USERPROFILE\.aws --op read
+```
+
+### Must-fail loudly
+
+These flows depend on the WFP backend. They must surface a backend-readiness diagnostic — not silently allow the request — when the WFP service is not installed:
+
+```powershell
+# Domain-level filtering (proxy/WFP)
+nono run --profile claude-code --network-profile claude-code -- claude --version
+
+# Domain allowlist add
+nono run --profile claude-code --allow-domain api.openai.com -- claude --version
+```
+
+If either of those silently runs, **stop the POC**. That is a fail-closed regression and worth a bug report before any user sees it.
+
+## Step 6 — POC user handoff content
+
+Drop the table below into the README you ship alongside the MSI. These are the items POC users will hit and need to know about.
+
+| Item | What to tell users |
+|------|---|
+| Install | `msiexec /i nono-vX-x86_64-pc-windows-msvc-user.msi`, then open a fresh PowerShell |
+| First-time symlink warning | Enable Developer Mode (`Settings → System → For developers`); benign if skipped, but token refresh writes leak outside `~/.claude\` |
+| Happy path | `nono run --profile claude-code -- claude` |
+| Read-only review mode | `nono run --read . --read $env:USERPROFILE\.claude --allow-file $env:USERPROFILE\.claude.json -- claude` |
+| Offline | `nono run --profile claude-code --block-net -- claude` |
+| Triage payload on a bug | Exact command line, full stdout, full stderr, `nono --version` output, `nono setup --check-only` output, whether WFP was reported missing |
+| Not yet supported on this build | Domain-level network filtering (`--network-profile`, `--allow-domain`) — needs WFP service, which the per-user MSI does not ship today. Use `--block-net` for offline or unrestricted network for online. |
+| Uninstall | Apps & Features → "nono" → Uninstall (MSI). For zip: delete the extracted directory and remove from PATH. |
+
+## Step 7 — Loop yourself before shipping
+
+A reasonable validation order on your build box:
+
+1. `make build-release-cli` (or use an existing `target\release\nono.exe` if it is current).
+2. Build the per-user MSI per Step 1 Option C with a real version tag (e.g. `v0.37.1-poc.1`).
+3. Install the MSI on this machine **or a separate VM**. A clean VM is the only way to catch missing-PATH and missing-Developer-Mode footguns that your dev box hides.
+4. Run the full Step 5 checklist from a **fresh** PowerShell window.
+5. If any negative test in Step 5 silently passes → stop, fix, rebuild. Do not ship.
+6. Hand the MSI plus the Step 6 table to the first POC user and watch their first `setup --check-only` over their shoulder. The first 10 minutes of the first POC user's session will surface anything the dress rehearsal missed.
+
+## Related docs
+
+- [Windows Preview Pilot](/cli/development/windows-preview-pilot) — packaging contract, supported surface, debugging inputs
+- [Windows Preview Validation](/cli/development/windows-preview-validation) — release-candidate checklist
+- [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract) — what file boundary semantics are guaranteed
+- [Windows Feature Gap Matrix](/cli/development/windows-feature-gap-matrix) — current parity vs Linux/macOS
+- [Windows Installer Strategy](/cli/development/windows-installer-strategy) — MSI scope contracts
+- [Claude Code client guide](/cli/clients/claude-code) — profile shape, hook semantics, custom profile patterns

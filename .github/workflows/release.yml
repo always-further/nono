@@ -17,7 +17,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-  WIX_VERSION: 4.0.6
+  WIX_VERSION: 7.0.0
 
 jobs:
   build:
