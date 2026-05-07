@@ -8,7 +8,7 @@ This roadmap tracks the path to full Windows/Unix parity and ongoing quality-of-
 - ✅ **v2.0 Windows Gap Closure** — Phases 5–15 (shipped 2026-04-18; tag `v2.0`)
 - ✅ **v2.1 Resource Limits, Extended IPC, Attach-Streaming & Cleanup** — Phases 16–21 + 18.1 (shipped 2026-04-21; tag `v2.1`)
 - ✅ **v2.2 Windows/macOS Parity Sweep** — Phases 22–24 (shipped 2026-04-29; tag `v2.2`)
-- 🏗️ **v2.3 Linux POC Unblock + Deferreds Closure** — Phases 25–29 + 27.1 (started 2026-04-29)
+- 🏗️ **v2.3 Linux POC Unblock + Deferreds Closure** — Phases 25–30 + 27.1 (started 2026-04-29)
 
 ## Phases
 
@@ -69,7 +69,7 @@ Full details: `.planning/milestones/v2.2-ROADMAP.md`.
 
 </details>
 
-### 🏗️ v2.3 Linux POC Unblock + Deferreds Closure (Phases 25–29) — IN PROGRESS
+### 🏗️ v2.3 Linux POC Unblock + Deferreds Closure (Phases 25–30) — IN PROGRESS
 
 **Goal:** A Linux user running fork-Linux-build sees real enforcement (not silent no-ops) for `--memory` / `--cpu-percent` / `--timeout` / `--max-processes`, and v2.2's deferred items (PKG streaming, audit-attestation hardening, Authenticode chain-walker) ship as production-ready surfaces.
 
@@ -82,6 +82,7 @@ Full details: `.planning/milestones/v2.2-ROADMAP.md`.
 - [⚠️] **Phase 27: Audit-Attestation Hardening** (1 plan, PARTIAL — REQ-AAH-01 deferred to v2.4) — Path B fixture redesign attempted on Windows 2026-04-29 (commits `c2247f79`, `16bae9ca`, `8aeabc08`, `329f313b`); 3 Windows-host test-harness blockers surfaced (`dirs::home_dir()` ignores `USERPROFILE`; `LOCALAPPDATA`/`USERPROFILE` path-mismatch under partial env redirection; pre-existing v2.2-baseline audit-integrity exit-cleanup "Session not found" issue). Tests re-`#[ignore]`'d with v2.4-deferral note; redesigned Test 1 body preserved in-tree for resumption; production code in `audit_attestation.rs` byte-identical preserved. Resumption path documented in `.planning/phases/27-audit-attestation-hardening/27-01-SUMMARY.md` — Linux/macOS host verification OR `NONO_TEST_HOME` production-code seam.
 - [x] **Phase 28: Authenticode Chain-Walker Subject Extraction** (1/1 plan, 2026-04-30) — REQ-AUDC-01..03 all closed. 5 commits (`67ba4a99`/`70593110`/`5a4a8443`/`279c1b86`/`91a3f64a`). Chain walker live; replaces v2.2 Plan 22-05b Decision 4 `<unknown>` sentinel with `WTHelperProvDataFromStateData` → `WTHelperGetProvSignerFromChain` → `CertGetNameStringW(CERT_X500_NAME_STR)` + `CertGetCertificateContextProperty(CERT_HASH_PROP_ID)`. Fail-closed `?` propagation on chain-walk failure when `WinVerifyTrust=Valid` (REQ-AUDC-03 acceptance #2). Deferred test moved inline (PATH-4 per CONTEXT override; closes REQ-AUDC-02 fully). 4 new unit tests pass against `C:\Windows\explorer.exe` fixture (`notepad.exe` is catalog-signed on Win11 — D-AUDC-03 fixture switch). Reuses `NonoError::SandboxInit` (D-AUDC-02: `AuditIntegrity` variant doesn't exist on fork). 11 SAFETY blocks; D-19/D-21 invariants hold.
 - [x] **Phase 29: WR-01 Reject-Stage Unification** (1/1 plan, 2026-04-30) — REQ-WRU-01..02 closed. 3 commits (`a3734bb3`/`9fcdf123` + SUMMARY). Locked as permanent design property (Option c): mask-gate vs broker-failure-flip is O(1) profile lookup vs O(syscall) post-approval; asymmetry is structural, not unifiable without security or UX regression. No behavior change, no wire-shape change, no test-assertion change — chosen verdict matrix is the existing matrix. All 5 `wr01_*` regression tests preserved as guards on the locked matrix.
+- [ ] **Phase 30: Windows nono shell Interactive Enforcement Architecture** (planning, 2026-05-07) — Driver: debug session `nono-shell-status-dll-init-failed.md` (`nono shell --profile claude-code` on Windows fails with `STATUS_DLL_INIT_FAILED (0xC0000142)`); SHELL-01's "validated" claim is wrong and must be reality-checked. Wave 1 = Option 3 field-test (Low-IL primary token + ConPTY, no WRITE_RESTRICTED, no session-SID). Wave 2 (conditional) = ProcMon-driven Win32 investigation if Wave 1 fails. Either ships a working `nono shell` Windows path with mandatory-label NO_WRITE_UP write-deny intact, OR documents evidence that no user-mode token shape can deliver both ConPTY + write-deny (deferred to v3.0 kernel-driver work). See `.planning/phases/30-windows-nono-shell-architecture/30-CONTEXT.md` for D-01..D-10.
 
 ## Phase Details (v2.3)
 
@@ -223,6 +224,27 @@ Plans:
 3. `audit_integrity_records_5_handle_kinds_in_ledger` (Phase 23 multi-kind E2E) passes; ledger reflects the chosen matrix.
 4. PROJECT.md key-decisions table updated.
 
+### Phase 30: Windows nono shell Interactive Enforcement Architecture
+
+**Goal:** Land OS-enforced filesystem write protection AND interactive TUI rendering for `nono shell --profile <name>` on Windows 10/11; either ship a working path that launches PowerShell 5.1 / cmd.exe under ConPTY with mandatory-label write enforcement intact, OR document evidence that no user-mode token shape can deliver both (deferred to v3.0 kernel mini-filter driver work).
+
+**Depends on:** v2.0 Phase 8 (ConPTY shell — invalidated SHELL-01 claim being reality-checked); v2.0 Phase 15 (detached console + WRITE_RESTRICTED+ConPTY 0xC0000142 precedent + token-cascade pattern Wave 1 extends).
+
+**Requirements:** No formal REQ-IDs at scope-lock; phase tracked via CONTEXT.md decisions D-01..D-10 (token shape, investigation gating, TUI/security envelope acceptance, POC ship gating, bookkeeping correction). Decision-coverage gate enforces D-01..D-10 through plans.
+
+**Plans:** TBD (locked at `/gsd-plan-phase 30`).
+
+**Success Criteria:**
+
+1. `.\nono.exe shell --profile claude-code --allow-cwd` on Windows 10/11 launches a sandboxed shell (no `0xC0000142`, no silent exit) — verified on the test box.
+2. `claude` runs inside the sandboxed shell with full TUI rendering (alternate screen buffer, cursor positioning, raw-mode input).
+3. From inside the sandboxed shell, `Out-File` (or any direct write) to a path outside the grant set fails with "Access is denied" at OS level (mandatory-label NO_WRITE_UP enforcement, NOT just hook-level interception).
+4. From inside the sandboxed shell, reads of granted paths (e.g. `~/.claude\claude.json`) still succeed.
+5. PROJECT.md's SHELL-01 entry reflects current reality (validated / needs-rework / deferred — whichever this phase ships).
+6. `docs/cli/development/windows-poc-handoff.mdx` describes the security envelope honestly: which token shape, what's enforced at OS level, what relies on the Claude Code hook.
+
+**Failure mode (explicit):** If Wave 2 (ProcMon) exhausts without surfacing a workable option, the phase ships with a documented finding that `nono shell` on Windows is structurally incompatible with simultaneous WRITE_RESTRICTED + ConPTY at user-mode and remains a v3.0 / kernel-driver concern. Cookbook reverts the `nono shell` recommendation; SHELL-01 status flips to "deferred to v3.0."
+
 ## Progress Table
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -258,6 +280,7 @@ Plans:
 | 27.1. NONO_TEST_HOME Seam (INSERTED) | v2.3 | 3/3 | Complete    | 2026-05-05 |
 | 28. Authenticode Chain-Walker Subject Extraction | v2.3 | 1/1 | Complete (REQ-AUDC-01..03 closed; D-AUDC-02 SandboxInit fallback + D-AUDC-03 explorer.exe fixture switch) | 2026-04-30 |
 | 29. WR-01 Reject-Stage Unification | v2.3 | 1/1 | Complete (REQ-WRU-01..02 closed; Option c locked as permanent design property) | 2026-04-30 |
+| 30. Windows nono shell Interactive Enforcement Architecture | v2.3 | 0/0 | Planning (CONTEXT locked 2026-05-07; D-01 Wave 1 = Low-IL primary token + ConPTY, Wave 2 ProcMon conditional) | — |
 
 ## Backlog (v2.4 carry-forward)
 
