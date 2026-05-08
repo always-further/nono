@@ -2,16 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
-status: milestone_complete
-stopped_at: "Phase 30 closed as failure-mode finding 2026-05-08; same-day broker-process PoC (quick-260508-m99) PASSED on Windows test box, empirically validating RESEARCH.md A1; SHELL-01 promoted from v3.0 deferral to Phase 31 candidate; ready to /gsd-phase add 31 + /gsd-discuss-phase 31"
-last_updated: "2026-05-08T20:30:00.000Z"
-last_activity: 2026-05-07
+status: executing
+last_updated: "2026-05-08T23:22:02.141Z"
+last_activity: 2026-05-08
 progress:
   total_phases: 8
   completed_phases: 5
   total_plans: 19
-  completed_plans: 8
-  percent: 63
+  completed_plans: 13
+  percent: 68
 ---
 
 # Project State: nono — v2.3 Linux POC Unblock + Deferreds Closure
@@ -28,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 
 Phase: 30
 Plan: Not started
-Status: Milestone complete
+Status: Ready to execute
 Milestone: v2.2 — 3/3 phases complete (Phase 22 ✓ 2026-04-28, Phase 23 ✓ 2026-04-29, Phase 24 ✓ 2026-04-27), 9/9 plans complete. v2.2 ready to ship.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
@@ -48,7 +47,7 @@ Next actions:
   - After Phase 23 closes, `/gsd-complete-milestone v2.2` to archive the milestone.
   - Pre-merge `windows-squash` → `main` quick task remains a candidate for milestone-close timing.
 
-Last activity: 2026-05-07 -- Phase 30 execution started
+Last activity: 2026-05-08 -- Phase 31 planning complete
 
 Prior activity: 2026-04-28 — Phase 22 closed end-to-end (UAT 10/10 + 1 spec-error skipped, commit e60ab093). Quick task 260428-rsu created as deferred runbook for upstream-stack rebase (awaiting trigger).
 
@@ -121,6 +120,7 @@ Progress: [██████████] 100% (Phase 23 complete 2026-04-29; v
 
 ### Roadmap Evolution
 
+- 2026-05-08: Phase 31 (Broker-Process Architecture (SHELL-01)) added after Phase 30. Productionizes the broker-pattern PoC validated on the Windows test box (commits e15fbed9, 98d38ed9, 17d87c7f) — SHELL-01 follow-up to Phase 30's Windows nono shell interactive enforcement architecture. Plans TBD during `/gsd-plan-phase 31`.
 - 2026-05-02: Phase 27.1 (NONO_TEST_HOME Seam) inserted after Phase 27 (URGENT). Pulls forward the v2.4 candidate identified at Phase 27's 2026-04-29 partial close — small Rule-4 production-code change adding `NONO_TEST_HOME` env-var override to `dirs::home_dir()` callsites in `crates/nono-cli/src/`. Once landed, Phase 27 redesigned Test 1 (under `#[ignore]`) plus queued v2.3 plans (Phase 26-02 PKGS-01/04 and similar) execute on Windows host. Plans TBD during `/gsd-plan-phase 27.1`.
 - 2026-04-20: Phase 21 (Windows Single-File Filesystem Grants) added to close the Windows-only limitation exposed by the `claude-code` profile's `git_config` group failing with `WindowsUnsupportedIssueKind::SingleFileGrant` (`.gitconfig`, `.config/git/ignore`, etc.). Extends `crates/nono/src/sandbox/windows.rs` to enforce file-scoped capability grants without silently degrading to broader directory grants. Plans TBD during `/gsd-plan-phase 21`.
 - 2026-04-19: Phase 20 (Upstream Parity Sync, UPST) added after Phase 19 completion. Research quick-task `260419-cmp-upstream-036-windows-parity/COMPARISON.md` (commit `7180f23`) established the fork is pinned at crate version `0.30.1` while upstream has shipped 0.31–0.37.1. Phase 20 back-ports missing Unix/macOS functionality (keyring URIs, `--allow-gpu`, GitLab trust tokens, macOS Seatbelt refinements) and, critically, the rustls-webpki RUSTSEC-2026-0098/0099 security upgrade landed upstream in 0.37. Plans TBD during `/gsd-plan-phase 20` — likely grouped by upstream version range + dedicated security-upgrade plan.
@@ -202,9 +202,10 @@ Known deferred items at close: 20 (6 UAT bookkeeping gaps, 4 verification human_
 
 ## Session Continuity
 
-**Current Milestone:** v2.3 — Linux POC Unblock + Deferreds Closure (scope-locked 2026-04-29; in progress).
+**Current Milestone:** v2.3 — Linux POC Unblock + Deferreds Closure (scope-locked 2026-04-29; in progress; status=gaps_found per audit).
 **Last Activity:** 2026-05-08
-**Stopped At:** Phase 30 (Windows nono shell Interactive Enforcement Architecture) context gathered. The `nono shell` 0xC0000142 field-failure became a planning checkpoint via `/gsd-discuss-phase`; CONTEXT.md captures the locked decisions: Wave 1 is Option 3 (Low-IL primary token + ConPTY), Wave 2 is ProcMon investigation conditional on Wave 1 failure. TUI rendering and OS-level write-deny are both locked acceptance criteria; Phase 15's detached-path waiver is explicitly rejected for the long-lived interactive shell. Phase 30 is NOT yet in ROADMAP.md — user decides v2.3 vs v2.4 placement via `/gsd-phase add 30`.
+**Resumed:** 2026-05-08 — user chose Phase 31 broker-process commitment over v2.3 gap-fill. Next: `/gsd-phase add 31` to insert Phase 31 (broker-process implementation, SHELL-01) into ROADMAP.md, then `/gsd-discuss-phase 31` with validated PoC (`quick-260508-m99`) + 370-line RESEARCH.md (`quick-260508-lqh`) as locked scoping inputs. Effort: ~7 days execution. v2.3 audit gaps (5 missing VERIFICATION.md + Phase 27.2 disposition) deferred — to be addressed before milestone close, but not blocking Phase 31 start.
+**Stopped At (prior session, retained for context):** Phase 30 (Windows nono shell Interactive Enforcement Architecture) context gathered. The `nono shell` 0xC0000142 field-failure became a planning checkpoint via `/gsd-discuss-phase`; CONTEXT.md captures the locked decisions: Wave 1 is Option 3 (Low-IL primary token + ConPTY), Wave 2 is ProcMon investigation conditional on Wave 1 failure. TUI rendering and OS-level write-deny are both locked acceptance criteria; Phase 15's detached-path waiver is explicitly rejected for the long-lived interactive shell. Phase 30 is NOT yet in ROADMAP.md — user decides v2.3 vs v2.4 placement via `/gsd-phase add 30`.
 
 **Resolved debug session (architecture decided):** `.planning/debug/nono-shell-status-dll-init-failed.md` — full investigation trail. Status: `architecture-decided-pending-implementation`. Resolution doc: `.planning/phases/30-windows-nono-shell-architecture/30-CONTEXT.md`.
 

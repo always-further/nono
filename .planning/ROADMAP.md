@@ -326,11 +326,20 @@ The four major v2.2-deferred items (PKG streaming, audit-attestation hardening, 
 **Plans:** 6 plans
 
 Plans:
+**Wave 1**
 - [ ] 31-01-PLAN.md — Foundation: D-06 lift (`create_low_integrity_primary_token` + `OwnedHandle` to `crates/nono/src/sandbox/windows.rs`) + D-07 `NonoError::BrokerNotFound` variant + Wave-0 harness `Out-File`→`Set-Content` fix (Wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 31-02-PLAN.md — `crates/nono-shell-broker/` workspace member + production `main.rs` (D-05, D-08, D-01: 8-step PoC sequence + argv-only IPC + HANDLE_LIST broker→child) (Wave 2; depends on 31-01)
 - [ ] 31-03-PLAN.md — `WindowsTokenArm::BrokerLaunch` cascade arm in `launch.rs` + PROC_THREAD_ATTRIBUTE_HANDLE_LIST nono.exe→broker discipline + Job Object containment (D-04) + sibling broker resolution via `current_exe()` (D-07) + rewrite `pty_token_gate_tests` for new dispatch (D-15) (Wave 2; depends on 31-01)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 31-04-PLAN.md — Cross-compile + signed-binary release pipeline updates: `release.yml` builds/signs/verifies/uploads `nono-shell-broker.exe` alongside `nono.exe`; `build-windows-msi.ps1` packages broker as sibling MSI component (Wave 3; depends on 31-02 + 31-03)
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 31-05-PLAN.md — Field-test reproduction of Acceptance #1-#4 + #7 on user's Windows test box (`autonomous: false` per CONTEXT D-14 single-box validation) + Job Object containment test lift (D-04 runtime acceptance via `IsProcessInJob`) (Wave 4; depends on 31-04)
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 31-06-PLAN.md — Branched close-out (`autonomous: false`): SUCCESS path = cookbook security-envelope paragraph + PROJECT.md/STATE.md/ROADMAP.md SHELL-01 → ✔ validated v2.3 Phase 31; FAILURE path (D-16) = cookbook reverts + SHELL-01 → ✘ deferred to v3.0 (Wave 5; depends on 31-05)
 
 **Success Criteria** (what must be TRUE when Phase 31 completes on the SUCCESS path):
