@@ -33,3 +33,6 @@ host.nono_binary.commit
 # Plan-execution scratch directory (per-plan staging of upstream files for manual port)
 .tmp/
 
+# Sysinternals ProcMon traces (Phase 30 Plan 30-05) — large binaries, evidence is in CSV/MD
+*.pml
+
