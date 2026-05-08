@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.50.1] - 2026-05-08
+
+### Bug Fixes
+
+- Use native types for iotcl integers
+
 ## [0.50.0] - 2026-05-08
 
 ### Features
