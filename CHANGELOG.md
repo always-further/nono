@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.50.0] - 2026-05-08
+
+### Features
+
+- *(profile)* Support env:// URI in custom_credentials credential_key
+
+
+### Refactoring
+
+- *(cli)* Optimize ps command column width calculation
+
+- *(cli/ps)* Improve ps command display with dynamic columns
+
+## [0.49.0] - 2026-05-07
+
+### Bug Fixes
+
+- *(trust)* Treat empty parent() as CWD when deriving scan_root
+
+- *(trust)* Reject symlink-escape in multi-subject bundle subject names
+
+- *(trust)* Reject path traversal in multi-subject bundle subject names
+
+- *(yaml-merge)* Pin serde_yaml_ng to 0.10.0 and add reversal failure test
+
+
+### Dependencies
+
+- *(deps)* Bump tokio from 1.52.1 to 1.52.2
+
+
+### Features
+
+- *(wiring)* Add yaml_merge directive for YAML config patching
+
+
+### Miscellaneous
+
+- Add PR template requiring linked issue
+
+
+### Style
+
+- Apply rustfmt to trust_cmd and trust_scan
+
+- Apply rustfmt
+
+
 ## [0.48.0] - 2026-05-07
 
 ### Bug Fixes
