@@ -82,7 +82,7 @@ Full details: `.planning/milestones/v2.2-ROADMAP.md`.
 - [⚠️] **Phase 27: Audit-Attestation Hardening** (1 plan, PARTIAL — REQ-AAH-01 deferred to v2.4) — Path B fixture redesign attempted on Windows 2026-04-29 (commits `c2247f79`, `16bae9ca`, `8aeabc08`, `329f313b`); 3 Windows-host test-harness blockers surfaced (`dirs::home_dir()` ignores `USERPROFILE`; `LOCALAPPDATA`/`USERPROFILE` path-mismatch under partial env redirection; pre-existing v2.2-baseline audit-integrity exit-cleanup "Session not found" issue). Tests re-`#[ignore]`'d with v2.4-deferral note; redesigned Test 1 body preserved in-tree for resumption; production code in `audit_attestation.rs` byte-identical preserved. Resumption path documented in `.planning/phases/27-audit-attestation-hardening/27-01-SUMMARY.md` — Linux/macOS host verification OR `NONO_TEST_HOME` production-code seam.
 - [x] **Phase 28: Authenticode Chain-Walker Subject Extraction** (1/1 plan, 2026-04-30) — REQ-AUDC-01..03 all closed. 5 commits (`67ba4a99`/`70593110`/`5a4a8443`/`279c1b86`/`91a3f64a`). Chain walker live; replaces v2.2 Plan 22-05b Decision 4 `<unknown>` sentinel with `WTHelperProvDataFromStateData` → `WTHelperGetProvSignerFromChain` → `CertGetNameStringW(CERT_X500_NAME_STR)` + `CertGetCertificateContextProperty(CERT_HASH_PROP_ID)`. Fail-closed `?` propagation on chain-walk failure when `WinVerifyTrust=Valid` (REQ-AUDC-03 acceptance #2). Deferred test moved inline (PATH-4 per CONTEXT override; closes REQ-AUDC-02 fully). 4 new unit tests pass against `C:\Windows\explorer.exe` fixture (`notepad.exe` is catalog-signed on Win11 — D-AUDC-03 fixture switch). Reuses `NonoError::SandboxInit` (D-AUDC-02: `AuditIntegrity` variant doesn't exist on fork). 11 SAFETY blocks; D-19/D-21 invariants hold.
 - [x] **Phase 29: WR-01 Reject-Stage Unification** (1/1 plan, 2026-04-30) — REQ-WRU-01..02 closed. 3 commits (`a3734bb3`/`9fcdf123` + SUMMARY). Locked as permanent design property (Option c): mask-gate vs broker-failure-flip is O(1) profile lookup vs O(syscall) post-approval; asymmetry is structural, not unifiable without security or UX regression. No behavior change, no wire-shape change, no test-assertion change — chosen verdict matrix is the existing matrix. All 5 `wr01_*` regression tests preserved as guards on the locked matrix.
-- [ ] **Phase 30: Windows nono shell Interactive Enforcement Architecture** (planning, 2026-05-07) — Driver: debug session `nono-shell-status-dll-init-failed.md` (`nono shell --profile claude-code` on Windows fails with `STATUS_DLL_INIT_FAILED (0xC0000142)`); SHELL-01's "validated" claim is wrong and must be reality-checked. Wave 1 = Option 3 field-test (Low-IL primary token + ConPTY, no WRITE_RESTRICTED, no session-SID). Wave 2 (conditional) = ProcMon-driven Win32 investigation if Wave 1 fails. Either ships a working `nono shell` Windows path with mandatory-label NO_WRITE_UP write-deny intact, OR documents evidence that no user-mode token shape can deliver both ConPTY + write-deny (deferred to v3.0 kernel-driver work). See `.planning/phases/30-windows-nono-shell-architecture/30-CONTEXT.md` for D-01..D-10.
+- [x] **Phase 30: Windows nono shell Interactive Enforcement Architecture** (planning, 2026-05-07) — Driver: debug session `nono-shell-status-dll-init-failed.md` (`nono shell --profile claude-code` on Windows fails with `STATUS_DLL_INIT_FAILED (0xC0000142)`); SHELL-01's "validated" claim is wrong and must be reality-checked. Wave 1 = Option 3 field-test (Low-IL primary token + ConPTY, no WRITE_RESTRICTED, no session-SID). Wave 2 (conditional) = ProcMon-driven Win32 investigation if Wave 1 fails. Either ships a working `nono shell` Windows path with mandatory-label NO_WRITE_UP write-deny intact, OR documents evidence that no user-mode token shape can deliver both ConPTY + write-deny (deferred to v3.0 kernel-driver work). See `.planning/phases/30-windows-nono-shell-architecture/30-CONTEXT.md` for D-01..D-10. (completed 2026-05-08)
 
 ## Phase Details (v2.3)
 
@@ -232,7 +232,7 @@ Plans:
 
 **Requirements:** No formal REQ-IDs at scope-lock; phase tracked via CONTEXT.md decisions D-01..D-10 (token shape, investigation gating, TUI/security envelope acceptance, POC ship gating, bookkeeping correction). Decision-coverage gate enforces D-01..D-10 through plans.
 
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans complete
 
 Plans:
 **Wave 1**
@@ -246,7 +246,7 @@ Plans:
 - [x] 30-04-PLAN.md — Field-smoke execution + outcome flip (3 human checkpoints): runs Plan 30-03 harnesses; on success-path adds cookbook security-envelope paragraph + flips SHELL-01 → ✔ validated v2.X Phase 30 + moves debug session to resolved/; on Wave 2 trigger leaves cookbook unchanged + flags Plan 30-05 (D-05 + D-06 + D-07 + D-10 second half)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 30-05-PLAN.md — Wave 2 ProcMon (CONDITIONAL — runs only on Wave 2 trigger from Plan 30-04): trace capture + analysis + sixth-option synthesis OR exhaust-without-fix; 3-5 working day timebox per D-04. Failure path triggers RESEARCH §Cookbook Rollback Path Option Rev-B (D-04 + D-07 failure path + D-10 terminal)
+- [x] 30-05-PLAN.md — Wave 2 ProcMon (CONDITIONAL — runs only on Wave 2 trigger from Plan 30-04): trace capture + analysis + sixth-option synthesis OR exhaust-without-fix; 3-5 working day timebox per D-04. Failure path triggers RESEARCH §Cookbook Rollback Path Option Rev-B (D-04 + D-07 failure path + D-10 terminal)
 
 **Success Criteria:**
 
@@ -294,7 +294,7 @@ Plans:
 | 27.1. NONO_TEST_HOME Seam (INSERTED) | v2.3 | 3/3 | Complete    | 2026-05-05 |
 | 28. Authenticode Chain-Walker Subject Extraction | v2.3 | 1/1 | Complete (REQ-AUDC-01..03 closed; D-AUDC-02 SandboxInit fallback + D-AUDC-03 explorer.exe fixture switch) | 2026-04-30 |
 | 29. WR-01 Reject-Stage Unification | v2.3 | 1/1 | Complete (REQ-WRU-01..02 closed; Option c locked as permanent design property) | 2026-04-30 |
-| 30. Windows nono shell Interactive Enforcement Architecture | v2.3 | 4/5 | In Progress|  |
+| 30. Windows nono shell Interactive Enforcement Architecture | v2.3 | 5/5 | Complete   | 2026-05-08 |
 
 ## Backlog (v2.4 carry-forward)
 
