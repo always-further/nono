@@ -109,3 +109,23 @@ created: 2026-05-09
 **Status:** `nyquist_compliant: partial` retained — the executed surface (Plan 25-02 ADR) is fully automated; the deferred surface (Plan 25-01) is structurally Manual-Only until v2.4 lands the cgroup v2 / setrlimit backends. No fillable gaps in v2.3 scope.
 
 **Verifier:** Claude (gsd-validate-phase, State A audit).
+
+---
+
+## Validation Audit 2026-05-09T20:59Z (re-confirmation)
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+| Tests re-run | 6 (`cargo test -p nono-cli --test adr_aipc_unix_futures`) |
+| Result | `6 passed; 0 failed; 0 ignored` |
+
+**Findings:**
+- REQ-AIPC-NIX-01: COVERED. Re-ran the 6 ADR-shape tests at HEAD (run completed in <1s); all green. ADR file at `docs/architecture/aipc-unix-futures.md` (251 lines); PROJECT.md cross-link at line 194 confirmed.
+- REQ-RESL-NIX-01..03: Manual-Only retained. Plan 25-01 plan + CONTEXT committed (`3ed80d38`); execution remains deferred to v2.4 pending Linux/macOS host coverage. No code change in v2.3 scope to audit.
+
+**Status:** `nyquist_compliant: partial` retained — same disposition as the 20:33Z audit. The executed surface (Plan 25-02 ADR) has full automated coverage; the deferred surface (Plan 25-01 RESL Unix backends) is structurally Manual-Only until v2.4 lands the cgroup v2 / setrlimit backends.
+
+**Verifier:** Claude (gsd-validate-phase, State A re-audit).
