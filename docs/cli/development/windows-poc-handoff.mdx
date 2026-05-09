@@ -8,7 +8,7 @@ Use this cookbook to validate a Windows nono build with Claude Code on your own 
 Scope: the **current** Windows supported command surface (`run`, `shell`, `wrap` via ConPTY, file/network grants enforced by Job Objects + per-path mandatory integrity labels). For the broader contract and what is intentionally unsupported, see [Windows Filesystem Parity Contract](/cli/development/windows-filesystem-parity-contract) and [Windows Feature Gap Matrix](/cli/development/windows-feature-gap-matrix).
 
 <Note>
-`nono run -- <command>` is the supported invocation for the POC on Windows. Long-form interactive shells (`nono shell`) are deferred to v3.0 — see [`nono shell` on Windows is deferred to v3.0](#nono-shell-on-windows-is-deferred-to-v30) and the "Known limitation" section below for the structural reason.
+`nono run -- <command>` is the supported invocation for non-interactive POC commands on Windows. As of Phase 31 (validated 2026-05-09), `nono shell --profile claude-code --allow-cwd` is also supported as the recommended Windows TUI host for `claude` and similar interactive agents — see [Windows `nono shell` — security envelope](#windows-nono-shell--security-envelope-phase-31-validated-2026-05-09) for the broker-process architecture and OS-level enforcement story.
 </Note>
 
 ## Prerequisites
@@ -147,7 +147,7 @@ nono v0.37.x
 
 The `Updating claude-code hook` line indicates that `~/.claude/hooks/nono-hook.sh` and the upfront sandbox section in `~/.claude/CLAUDE.md` were written. The install is idempotent and is skipped on subsequent runs unless the hook version changed.
 
-For the POC, use `nono run -- <command>` for non-TUI commands. TUI agents (claude, codex, etc.) cannot host inside the sandbox on the current Windows binary — see [`nono shell` on Windows is deferred to v3.0](#nono-shell-on-windows-is-deferred-to-v30) below.
+For the POC, use `nono run -- <command>` for non-TUI commands. TUI agents (claude, codex, etc.) host inside `nono shell --profile claude-code --allow-cwd` via the broker-process architecture — see [Windows `nono shell` — security envelope](#windows-nono-shell--security-envelope-phase-31-validated-2026-05-09) below.
 
 ## Step 5 — Smoke checklist
 
@@ -178,7 +178,7 @@ nono run --read-file $tmp.FullName -- cmd /c type $tmp.FullName
 
 # Block-net works on Windows without WFP service (Job Object + token-level).
 # Use a non-interactive child so the smoke is a one-liner. (Interactive `nono shell` is
-# deferred to v3.0; see "nono shell on Windows is deferred to v3.0" below.)
+# also supported as of Phase 31 — see the security-envelope section for the broker path.)
 nono run --profile claude-code --block-net -- cmd /c "echo block-net ok && curl -m 3 https://example.com"
 # The curl call should fail/timeout since outbound is blocked. Verify exit and no body returned.
 
@@ -203,26 +203,61 @@ If either of those silently runs, **stop the POC**. That is a fail-closed regres
 
 ## Known limitation: `nono run` cannot host TUI agents on Windows
 
-`nono run` on Windows always opens anonymous pipes for the child process — never a ConPTY. Non-interactive children (`cmd /c echo`, `cargo build`, `python -c '...'`, `claude --version`) work fine through pipes. Full-screen TUI agents (`claude`, `codex`, anything that needs cursor positioning, alternate screen buffer, or interactive stdin) cannot render and will appear to hang.
+`nono run` on Windows always opens anonymous pipes for the child process — never a ConPTY. Non-interactive children (`cmd /c echo`, `cargo build`, `python -c '...'`, `claude --version`) work fine through pipes. Full-screen TUI agents (`claude`, `codex`, anything that needs cursor positioning, alternate screen buffer, or interactive stdin) cannot render through `nono run` and will appear to hang.
 
 The constraint is documented in `crates/nono-cli/src/supervised_runtime.rs:101-111`: combining `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` with `DETACHED_PROCESS` historically crashed grandchildren with `STATUS_DLL_INIT_FAILED (0xC0000142)` (see `.planning/debug/resolved/windows-supervised-exec-cascade.md`). The conservative fix at the time disabled PTY allocation entirely on the Windows supervised path. Restoring PTY allocation for non-detached `nono run` is feasible but needs a regression-proof debug session — out of scope for the POC cookbook.
 
-**For the POC: use `nono run -- <non-TUI command>` for any non-interactive child on Windows.** TUI agents (claude, codex, etc.) are not supported on Windows in the current build — see [`nono shell` on Windows is deferred to v3.0](#nono-shell-on-windows-is-deferred-to-v30) below.
+**For the POC: use `nono run -- <non-TUI command>` for any non-interactive child on Windows. For TUI agents (claude, codex, etc.), use `nono shell --profile claude-code --allow-cwd`** — see [Windows `nono shell` — security envelope](#windows-nono-shell--security-envelope-phase-31-validated-2026-05-09) below for the broker-process architecture that delivers full TUI rendering with OS-level mandatory-label write enforcement intact.
 
-## `nono shell` on Windows is deferred to v3.0
+## Windows `nono shell` — security envelope (Phase 31, validated 2026-05-09)
 
-Phase 30 (May 2026) attempted to land OS-enforced filesystem write protection AND interactive TUI rendering for `nono shell --profile <name>` on Windows 10/11. The investigation surfaced that no user-mode token shape can deliver both simultaneously:
+`nono shell --profile claude-code --allow-cwd` on Windows 10/11 is the recommended interactive TUI host for `claude` and similar agents. The supported token shape ships via the broker-process architecture (Phase 31, validated on the user's Windows test box on 2026-05-09 after a same-day PoC validation 2026-05-08). It addresses the Phase 30 final-state finding that no **direct** Low-IL primary-token spawn from `nono.exe` can host a ConPTY child without tripping `STATUS_DLL_INIT_FAILED (0xC0000142)` at the CSRSS console-subsystem ALPC handshake during `KernelBase.dll` DllMain.
 
-- **WRITE_RESTRICTED + ConPTY** → `STATUS_DLL_INIT_FAILED (0xC0000142)` at child launch (the original 2026-05-07 debug-session signature).
-- **Low-IL primary token + ConPTY** → `STATUS_DLL_INIT_FAILED (0xC0000142)` at the CSRSS console-subsystem ALPC handshake during `KernelBase.dll` DllMain. PowerShell loads its image + `ntdll` + `kernel32` + `KernelBase`, then KernelBase's `BasepInitializeBaseDll` invokes the console-attach sequence; the CSRSS ALPC port DACL excludes Low-IL clients, the connect call fails synchronously, KernelBase's DllMain returns FALSE, and the loader sets `STATUS_DLL_INIT_FAILED`. This is RESEARCH Pitfall 2 (Microsoft-documented integrity-mismatch failure) confirmed in the field on the supervised+ConPTY path.
-- **Null token** → no OS-level write enforcement (defeats the security envelope).
-- **Anonymous-pipe stdio** → no TUI rendering (no alt-screen / cursor positioning / raw-mode input — claude appears to hang).
+### Token shape
 
-The path forward is a v3.0 kernel mini-filter driver (long-deferred Phase 6b territory) OR a broker-process pattern where a small Medium-IL intermediary attaches to CSRSS first and then spawns PowerShell as a Low-IL child inheriting the already-attached console. Both require new architectural work that exceeded Phase 30's 3-5 working day Wave 2 timebox.
+- **`nono.exe`** runs at the user's identity (Medium IL or higher). It is the supervisor and policy enforcement entry point.
+- **`nono-shell-broker.exe`** is a sibling binary of `nono.exe`, Authenticode-signed with the same key (Phase 31 release pipeline). `nono.exe` spawns the broker at the user's identity (Medium IL) via `CreateProcessW(EXTENDED_STARTUPINFO_PRESENT)` with a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` that scopes inherited handles to the broker. The broker exists *because* directly spawning a Low-IL child from `nono.exe` triggers `STATUS_DLL_INIT_FAILED (0xC0000142)` at CSRSS attach time — the Low-IL ALPC client cannot reach the CSRSS console handler port, KernelBase's `ConClntInitialize` fails, the DllMain returns FALSE, and the loader exits the process before reaching `main()`.
+- **Token degradation inside the broker.** `nono-shell-broker.exe` calls `DuplicateTokenEx(SecurityAnonymous, TokenPrimary)` against its own token, then `SetTokenInformation(TokenIntegrityLevel, WinLowLabelSid)` to lower the duplicate token to the **Low Mandatory Integrity Level**. The original Medium-IL token is preserved; only the duplicate is dropped.
+- **The actual shell child** (PowerShell 5.1 or `cmd.exe`) is launched by the broker via `CreateProcessAsUserW(low_il_token, ..., dwCreationFlags=EXTENDED_STARTUPINFO_PRESENT)`. **NO `CREATE_NEW_CONSOLE`. NO `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`.** The Low-IL child INHERITS the broker's already-attached console; KernelBase short-circuits the CSRSS attach because a console handle is already inherited (RESEARCH Assumption A1, validated end-to-end on the production binary chain).
+- **The Low-IL shell child is the user-facing shell**. Mandatory-label `NO_WRITE_UP` enforces write-deny via the MIC kernel pre-DACL check: a Low-IL subject (the shell process) cannot write to a Medium-IL object (paths outside the grant set, e.g., the user's Desktop, `AppData\Roaming` outside the granted subtree), regardless of the file's DACL.
 
-For the POC: use `nono run -- claude --version` and similar non-interactive invocations on Windows. TUI use of claude on Windows is not supported until the v3.0 work lands.
+### What's enforced at OS level
 
-See [`30-WAVE-2-PROCMON.md`](https://github.com/anthropics/nono/blob/main/.planning/phases/30-windows-nono-shell-architecture/30-WAVE-2-PROCMON.md) for the technical evidence (ProcMon trace analysis, exit-code chain, sixth-option proposal space, and the timebox rationale that drove the v3.0 deferral).
+- **Filesystem write-deny outside the grant set.** Mandatory-label `NO_WRITE_UP` at the MIC kernel pre-DACL check. This is kernel-level enforcement — NOT a hook check, NOT a userland policy. A `Set-Content -Path 'C:\Users\<u>\Desktop\evil.txt' -Value 'x'` attempt from inside the sandboxed shell raises `UnauthorizedAccessException` and the file does not exist on disk.
+- **Reads of granted paths still succeed.** Per-path Low-IL labels with read-pass mode masks via `try_set_mandatory_label` (Phase 21 carry-forward). `Get-Content $env:USERPROFILE\.claude\claude.json` works inside the sandboxed shell when the profile grants read access to that path.
+- **Job Object containment.** The broker's process tree is capped by a Job Object created by `nono.exe`. The Low-IL grandchild inherits Job Object membership automatically because `JOB_OBJECT_LIMIT_*BREAKAWAY*` flags are unset (D-04 acceptance — `cargo test broker_dispatch_tests` 2/2 PASS includes an `IsProcessInJob` runtime assertion). RESL caps (`--memory`, `--cpu-percent`, `--max-processes`, `--timeout`) cascade from the Job Object.
+
+### What's defense-in-depth (NOT the primary boundary)
+
+- **Claude Code `PreToolUse` hook.** The hook intercepts attempted writes to disallowed paths from inside the agent and surfaces a prompt. If the hook fails (or is misconfigured, or is bypassed by an attacker controlling the agent's actions), the OS-level mandatory-label check still denies the write. The OS check is the security boundary; the hook is UX + audit. Treat the hook as belt; the mandatory label is suspenders.
+- **Network differentiation per-session via WFP `FWPM_CONDITION_ALE_USER_ID` is waived on this path** (broker→Low-IL child); falls back to AppID-based filtering (same as Phase 15 detached-path waiver). For full per-session network filtering (granular `--allow-domain` differentiation across concurrent sessions of the same binary), use `nono run` (non-PTY supervised path retains `WRITE_RESTRICTED` + per-session SID).
+
+### What's NOT enforced
+
+- **Read-deny across the IL boundary is not enforced by default.** Low-IL does not block reads of Medium-IL files (NO_READ_UP is NOT set on the kernel default mandatory label). For read-deny on specific paths, use single-path grants with explicit Low-IL labels via `nono shell --read-only-grants` (Phase 21 design, carry-forward).
+- **Network deny-within-allow.** The Windows WFP allow-list is positive-only (no Landlock-style deny-within-allow). Use a profile-scoped `--allow-domain` allowlist for the supported invocation, not exclusion lists.
+
+### Audit trail
+
+The Authenticode chain-walker (`AUDC-01..03`, Phase 28) records `signer_subject` + SHA-1 thumbprint for both `nono.exe` AND the broker process — both signed with the same key, so the audit trail records a consistent identity for the supervisor stack across the launch chain.
+
+### Recommended invocation
+
+```powershell
+.\nono.exe shell --profile claude-code --allow-cwd
+# Inside the sandboxed shell:
+claude  # full TUI rendering — alternate screen buffer, cursor positioning, raw-mode input
+```
+
+For non-TUI commands, `nono run --profile claude-code -- <command>` remains the supported invocation (anonymous-pipe stdio; `WRITE_RESTRICTED` + per-session SID; full WFP per-session differentiation).
+
+### References
+
+- Phase 31 plans: `.planning/phases/31-broker-process-architecture-shell-01/31-{01..06}-PLAN.md`
+- PoC validation (2026-05-08): `.planning/quick/260508-m99-broker-process-poc-minimal-rust-binary-t/SUMMARY.md`
+- Production validation (2026-05-09): `.planning/phases/31-broker-process-architecture-shell-01/31-05-SUMMARY.md`
+- Phase 30 final-state finding (the Low-IL direct-spawn dead-end the broker bypasses): [`30-WAVE-2-PROCMON.md`](https://github.com/anthropics/nono/blob/main/.planning/phases/30-windows-nono-shell-architecture/30-WAVE-2-PROCMON.md)
+- Debug session resolution: `.planning/debug/resolved/nono-shell-status-dll-init-failed.md` § Postscript 2 (Phase 31 closure)
 
 ## Step 6 — POC user handoff content
 
@@ -234,9 +269,9 @@ Drop the table below into the README you ship alongside the MSI. These are the i
 | First-time symlink warning | Enable Developer Mode (`Settings → System → For developers`); benign if skipped, but token refresh writes leak outside `~/.claude\` |
 | Non-TUI commands (cargo, npm, scripts) | `nono run --profile claude-code -- <command>` is the supported invocation for non-interactive children |
 | Quick verification | `nono run --profile claude-code -- claude --version` exercises the full sandbox + profile path without needing a TUI |
-| TUI agents (claude, codex, etc.) | **Not supported on Windows in this build.** `nono shell` is deferred to v3.0 — see [`nono shell` on Windows is deferred to v3.0](#nono-shell-on-windows-is-deferred-to-v30). Run TUI agents directly outside the sandbox on Windows for now, or use a Linux/macOS host. |
+| TUI agents (claude, codex, etc.) | `nono shell --profile claude-code --allow-cwd`, then run `claude` (or other TUI) inside. The broker-process architecture (Phase 31, validated 2026-05-09) delivers full TUI rendering with OS-level mandatory-label `NO_WRITE_UP` write-deny intact. See [Windows `nono shell` — security envelope](#windows-nono-shell--security-envelope-phase-31-validated-2026-05-09) for the security model and what's enforced vs. defense-in-depth. |
 | Triage payload on a bug | Exact command line, full stdout, full stderr, `nono --version` output, `nono setup --check-only` output, whether WFP was reported missing |
-| Not yet supported on this build | Domain-level network filtering (`--network-profile`, `--allow-domain`) — needs WFP service, which the per-user MSI does not ship today. Use `--block-net` for offline or unrestricted network for online. Long-form `nono shell` interactive sessions are deferred to v3.0. |
+| Not yet supported on this build | Domain-level network filtering (`--network-profile`, `--allow-domain`) — needs WFP service, which the per-user MSI does not ship today. Use `--block-net` for offline or unrestricted network for online. (`nono shell` per-session WFP differentiation is waived on the broker path; falls back to AppID-based filtering — see security envelope above.) |
 | Uninstall | Apps & Features → "nono" → Uninstall (MSI). For zip: delete the extracted directory and remove from PATH. |
 
 ## Step 7 — Loop yourself before shipping
