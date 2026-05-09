@@ -325,6 +325,299 @@ mod broker {
         // OwnedHandle Drop closes child_process, child_thread, and low_il_token automatically.
         Ok(exit_code as i32)
     }
+
+    /// Phase 31 Plan 31-02 Task 2 — Nyquist gap-fill: pin the broker argv
+    /// parser's behavior at the unit-test layer. Plan 31-05's field-test
+    /// validates the end-to-end shape; these tests pin the contract so future
+    /// regressions surface at unit-test time, not field-test time.
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    mod parse_args_tests {
+        use super::*;
+        use nono::NonoError;
+
+        fn os(s: &str) -> OsString {
+            OsString::from(s)
+        }
+
+        /// Helper: argv0 ("broker.exe") followed by the actual flags. The parser
+        /// skips argv[0], so the first OsString must always be a placeholder.
+        fn argv(rest: &[&str]) -> Vec<OsString> {
+            let mut v = vec![os("broker.exe")];
+            v.extend(rest.iter().map(|s| os(s)));
+            v
+        }
+
+        /// D-08: `--shell` is required; absence is fatal with a structured
+        /// `SandboxInit` error mentioning the missing flag. Guards against
+        /// regressions that would let the broker spawn an arbitrary or
+        /// defaulted shell when nono.exe forgets to pass `--shell`.
+        #[test]
+        fn parse_args_missing_shell_returns_error() {
+            let raw = argv(&["--cwd", r"C:\foo"]);
+            let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
+                panic!("expected SandboxInit error when --shell is omitted");
+            };
+            assert!(
+                msg.contains("missing required --shell"),
+                "error message must explicitly call out missing --shell; got: {msg}"
+            );
+        }
+
+        /// D-08: `--cwd` is required; absence is fatal. Guards against
+        /// regressions that would let the broker default the cwd (e.g. to
+        /// the broker's own working dir, which is the supervisor's cwd —
+        /// a capability leak).
+        #[test]
+        fn parse_args_missing_cwd_returns_error() {
+            let raw = argv(&["--shell", r"C:\Windows\System32\notepad.exe"]);
+            let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
+                panic!("expected SandboxInit error when --cwd is omitted");
+            };
+            assert!(
+                msg.contains("missing required --cwd"),
+                "error message must explicitly call out missing --cwd; got: {msg}"
+            );
+        }
+
+        /// T-31-20 mitigation: unknown flags MUST hard-fail. The broker is a
+        /// minimal-attack-surface binary; silently accepting unknown flags
+        /// would let a future bug in nono.exe pass attacker-controlled data
+        /// through.
+        #[test]
+        fn parse_args_unknown_flag_returns_error() {
+            let raw = argv(&[
+                "--unknown-flag",
+                "value",
+                "--shell",
+                r"C:\foo.exe",
+                "--cwd",
+                r"C:\",
+            ]);
+            let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
+                panic!("expected SandboxInit error on unknown flag");
+            };
+            assert!(
+                msg.contains("unknown broker arg"),
+                "error message must call out 'unknown broker arg'; got: {msg}"
+            );
+        }
+
+        /// D-08: `--inherit-handle` values are hex-encoded HANDLE values.
+        /// Non-hex inputs MUST fail-fast — silently coercing them to 0 would
+        /// either break inheritance or worse, accidentally reference a
+        /// real handle in the broker's table.
+        #[test]
+        fn parse_args_invalid_hex_inherit_handle_returns_error() {
+            let raw = argv(&[
+                "--inherit-handle",
+                "xyz",
+                "--shell",
+                r"C:\foo.exe",
+                "--cwd",
+                r"C:\",
+            ]);
+            let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
+                panic!("expected SandboxInit error on non-hex --inherit-handle");
+            };
+            assert!(
+                msg.contains("--inherit-handle parse error"),
+                "error message must mention --inherit-handle parse error; got: {msg}"
+            );
+        }
+
+        /// D-08: `--shell-arg` is repeatable and order-preserving. Argv order
+        /// determines argv order in the spawned shell — re-ordering would
+        /// silently change the meaning of the spawn (e.g. moving `-Command`
+        /// past its payload).
+        #[test]
+        fn parse_args_shell_arg_preserves_order() {
+            let raw = argv(&[
+                "--shell",
+                "foo.exe",
+                "--shell-arg",
+                "-A",
+                "--shell-arg",
+                "-B",
+                "--shell-arg",
+                "--foo",
+                "--cwd",
+                r"C:\",
+            ]);
+            let parsed = parse_args(&raw).expect("parse must succeed");
+            assert_eq!(
+                parsed.shell_args,
+                vec!["-A".to_string(), "-B".to_string(), "--foo".to_string()],
+                "shell_args order must match argv order; reordering would silently \
+                 change the spawned command's meaning"
+            );
+        }
+
+        /// D-08: `--inherit-handle` accepts both `0x` and `0X` prefixes (and
+        /// strips them before hex parsing). Both are accumulated in argv
+        /// order. Guards against the prefix-matching bug where only one case
+        /// was stripped → the other case would parse as a different value
+        /// (or fail entirely).
+        #[test]
+        fn parse_args_multiple_inherit_handles_accumulate() {
+            let raw = argv(&[
+                "--inherit-handle",
+                "0xa",
+                "--inherit-handle",
+                "0X10",
+                "--shell",
+                "foo",
+                "--cwd",
+                r"C:\",
+            ]);
+            let parsed = parse_args(&raw).expect("parse must succeed");
+            assert_eq!(
+                parsed.inherit_handles.len(),
+                2,
+                "both --inherit-handle flags must accumulate"
+            );
+            assert_eq!(
+                parsed.inherit_handles[0] as usize, 0xa,
+                "first handle must parse from lowercase 0x prefix"
+            );
+            assert_eq!(
+                parsed.inherit_handles[1] as usize, 0x10,
+                "second handle must parse from uppercase 0X prefix"
+            );
+        }
+
+        /// D-02: an empty inherit-handle list is the most-restrictive (and
+        /// expected) shape — it means the spawned child inherits NO handles.
+        /// Construction MUST succeed with `inherit_handles.is_empty()`.
+        #[test]
+        fn parse_args_empty_inherit_handle_list_is_ok() {
+            let raw = argv(&["--shell", "foo", "--cwd", r"C:\"]);
+            let parsed = parse_args(&raw).expect("parse must succeed with no --inherit-handle");
+            assert!(
+                parsed.inherit_handles.is_empty(),
+                "no --inherit-handle flags → empty list (most-restrictive shape)"
+            );
+            assert_eq!(parsed.shell_path, std::path::PathBuf::from("foo"));
+            assert_eq!(parsed.cwd, std::path::PathBuf::from(r"C:\"));
+        }
+
+        /// Defensive parse: a flag at the end of argv with no following value
+        /// MUST fail — silently treating it as an empty string would let a
+        /// truncated argv slip through (e.g., from a corrupted IPC channel).
+        #[test]
+        fn parse_args_dangling_flag_value_returns_error() {
+            // `--shell` is the last token; no value follows.
+            let raw = argv(&["--cwd", r"C:\", "--shell"]);
+            let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
+                panic!("expected SandboxInit error when --shell has no value");
+            };
+            assert!(
+                msg.contains("--shell requires a value"),
+                "dangling --shell must report 'requires a value'; got: {msg}"
+            );
+        }
+    }
+
+    /// Phase 31 Plan 31-02 Task 2 — Nyquist gap-fill: pin the broker
+    /// command-line builder's quoting behavior. The Win32 CommandLine grammar
+    /// is fragile; quoting bugs here would silently mis-tokenize the spawned
+    /// shell's argv on the other side of `CreateProcessAsUserW`.
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    mod build_command_line_tests {
+        use super::*;
+        use std::path::PathBuf;
+
+        fn args(shell_path: &str, shell_args: Vec<String>) -> BrokerArgs {
+            BrokerArgs {
+                shell_path: PathBuf::from(shell_path),
+                shell_args,
+                inherit_handles: vec![],
+                cwd: PathBuf::from(r"C:\"),
+            }
+        }
+
+        /// Decode the trailing-null UTF-16 buffer back to a `String` for
+        /// human-readable assertions. Drops the trailing 0 terminator.
+        fn decode(wide: &[u16]) -> String {
+            assert!(
+                !wide.is_empty(),
+                "command line must have at least the null terminator"
+            );
+            String::from_utf16_lossy(&wide[..wide.len() - 1])
+        }
+
+        /// D-08 contract: shell_path is ALWAYS quoted, even if it contains no
+        /// whitespace, so the path-with-spaces case (e.g. `C:\Program Files\...`)
+        /// can never be silently mis-tokenized.
+        #[test]
+        fn build_command_line_quotes_shell_path() {
+            let a = args(r"C:\Windows\System32\powershell.exe", vec![]);
+            let wide = build_command_line(&a);
+            let s = decode(&wide);
+            assert_eq!(
+                s, "\"C:\\Windows\\System32\\powershell.exe\"",
+                "shell_path must always be enclosed in literal double-quotes"
+            );
+        }
+
+        /// Simple args (no whitespace, no quotes) round-trip without quoting.
+        /// Order matches argv order.
+        #[test]
+        fn build_command_line_appends_simple_args() {
+            let a = args(
+                r"C:\foo.exe",
+                vec!["-NoLogo".to_string(), "-NoProfile".to_string()],
+            );
+            let wide = build_command_line(&a);
+            let s = decode(&wide);
+            assert_eq!(
+                s, "\"C:\\foo.exe\" -NoLogo -NoProfile",
+                "simple args must be appended unquoted in argv order"
+            );
+        }
+
+        /// Args containing whitespace MUST be enclosed in double-quotes so the
+        /// child's CRT command-line parser tokenizes them as a single argv
+        /// entry. Without this, "hello world" would arrive as two separate args.
+        #[test]
+        fn build_command_line_quotes_args_with_whitespace() {
+            let a = args(r"C:\foo.exe", vec!["hello world".to_string()]);
+            let wide = build_command_line(&a);
+            let s = decode(&wide);
+            assert!(
+                s.contains("\"hello world\""),
+                "whitespace-bearing args must be quoted; got: {s}"
+            );
+        }
+
+        /// Embedded literal quotes in args must be doubled (PowerShell
+        /// convention). Failure here would either truncate the arg at the
+        /// embedded quote or leave the command line unbalanced.
+        #[test]
+        fn build_command_line_doubles_embedded_quotes() {
+            let a = args(r"C:\foo.exe", vec!["a\"b".to_string()]);
+            let wide = build_command_line(&a);
+            let s = decode(&wide);
+            assert!(
+                s.contains("\"a\"\"b\""),
+                "embedded quotes must be doubled (PowerShell convention); got: {s}"
+            );
+        }
+
+        /// Win32 CommandLine MUST be null-terminated UTF-16. Without the
+        /// trailing null, `CreateProcessAsUserW` reads past the buffer end.
+        #[test]
+        fn build_command_line_terminates_with_null() {
+            let a = args(r"C:\foo.exe", vec!["a".to_string()]);
+            let wide = build_command_line(&a);
+            assert_eq!(
+                wide.last(),
+                Some(&0),
+                "command line buffer must be null-terminated UTF-16"
+            );
+        }
+    }
 }
 
 #[cfg(windows)]
