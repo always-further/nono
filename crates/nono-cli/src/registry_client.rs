@@ -3,8 +3,20 @@
 use crate::package::{PackageRef, PackageSearchResponse, PackageSearchResult, PullResponse};
 use nono::{NonoError, Result};
 use serde::de::DeserializeOwned;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::Path;
+use std::time::Duration;
 
 pub const DEFAULT_REGISTRY_URL: &str = "https://registry.nono.sh";
+
+const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REGISTRY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const REGISTRY_BODY_TIMEOUT: Duration = Duration::from_secs(300);
+const REGISTRY_CALL_TIMEOUT: Duration = Duration::from_secs(300);
+const REGISTRY_JSON_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
+const REGISTRY_BUNDLE_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+const REGISTRY_ARTIFACT_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct RegistryClient {
     base_url: String,
@@ -16,7 +28,14 @@ impl RegistryClient {
     pub fn new(base_url: String) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: ureq::Agent::new_with_defaults(),
+            http: ureq::Agent::config_builder()
+                .timeout_global(Some(REGISTRY_CALL_TIMEOUT))
+                .timeout_resolve(Some(REGISTRY_CONNECT_TIMEOUT))
+                .timeout_connect(Some(REGISTRY_CONNECT_TIMEOUT))
+                .timeout_recv_response(Some(REGISTRY_RESPONSE_TIMEOUT))
+                .timeout_recv_body(Some(REGISTRY_BODY_TIMEOUT))
+                .build()
+                .new_agent(),
         }
     }
 
@@ -37,38 +56,108 @@ impl RegistryClient {
         Ok(response.packages)
     }
 
-    pub fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
+    /// Download a trust bundle JSON document, capped to
+    /// `REGISTRY_BUNDLE_LIMIT_BYTES` and returned as a string.
+    pub fn download_bundle(&self, url: &str) -> Result<String> {
         let resolved_url = self.resolve_url(url);
         let mut response = self
             .http
             .get(&resolved_url)
             .call()
             .map_err(map_ureq_error)?;
+        enforce_content_length(
+            response.body().content_length(),
+            REGISTRY_BUNDLE_LIMIT_BYTES,
+            &resolved_url,
+        )?;
         response
             .body_mut()
-            .read_to_vec()
-            .map_err(|e| NonoError::RegistryError(format!("failed to read registry response: {e}")))
+            .with_config()
+            .limit(REGISTRY_BUNDLE_LIMIT_BYTES)
+            .read_to_string()
+            .map_err(|e| {
+                NonoError::RegistryError(format!(
+                    "failed to read registry response from {}: {}",
+                    resolved_url, e
+                ))
+            })
     }
 
-    pub fn download_text(&self, url: &str) -> Result<String> {
+    /// Stream an artifact response body to `dest`, computing its SHA-256
+    /// digest incrementally. Memory profile is bounded to the 8 KiB I/O
+    /// buffer regardless of artifact size; the body is capped at
+    /// `REGISTRY_ARTIFACT_LIMIT_BYTES` and any partial file is removed
+    /// on stream-read failure.
+    ///
+    /// Returns the lowercase hex SHA-256 digest of the streamed bytes.
+    pub fn download_artifact_to_path(&self, url: &str, dest: &Path) -> Result<String> {
         let resolved_url = self.resolve_url(url);
         let mut response = self
             .http
             .get(&resolved_url)
             .call()
             .map_err(map_ureq_error)?;
-        response
+        enforce_content_length(
+            response.body().content_length(),
+            REGISTRY_ARTIFACT_LIMIT_BYTES,
+            &resolved_url,
+        )?;
+
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(NonoError::Io)?;
+        }
+
+        let mut reader = response
             .body_mut()
-            .read_to_string()
-            .map_err(|e| NonoError::RegistryError(format!("failed to read registry response: {e}")))
+            .with_config()
+            .limit(REGISTRY_ARTIFACT_LIMIT_BYTES)
+            .reader();
+        let mut file = fs::File::create(dest).map_err(NonoError::Io)?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buffer = [0_u8; 8192];
+
+        loop {
+            let bytes_read = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(bytes_read) => bytes_read,
+                Err(error) => {
+                    let _ = fs::remove_file(dest);
+                    return Err(NonoError::RegistryError(format!(
+                        "failed to read registry response from {}: {}",
+                        resolved_url, error
+                    )));
+                }
+            };
+            file.write_all(&buffer[..bytes_read])
+                .map_err(NonoError::Io)?;
+            use sha2::Digest as _;
+            hasher.update(&buffer[..bytes_read]);
+        }
+
+        use sha2::Digest as _;
+        let digest = hasher.finalize();
+        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
     }
 
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let mut response = self.http.get(&url).call().map_err(map_ureq_error)?;
-        let body = response.body_mut().read_to_string().map_err(|e| {
-            NonoError::RegistryError(format!("failed to read registry response: {e}"))
-        })?;
+        enforce_content_length(
+            response.body().content_length(),
+            REGISTRY_JSON_LIMIT_BYTES,
+            &url,
+        )?;
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(REGISTRY_JSON_LIMIT_BYTES)
+            .read_to_string()
+            .map_err(|e| {
+                NonoError::RegistryError(format!(
+                    "failed to read registry response from {}: {}",
+                    url, e
+                ))
+            })?;
         serde_json::from_str(&body).map_err(|e| {
             NonoError::RegistryError(format!("failed to decode registry response: {e}"))
         })
@@ -96,4 +185,20 @@ pub fn resolve_registry_url(override_url: Option<&str>) -> String {
 
 fn map_ureq_error(error: ureq::Error) -> NonoError {
     NonoError::RegistryError(error.to_string())
+}
+
+/// Reject responses whose advertised Content-Length exceeds `limit`.
+/// Returns Ok(()) when the header is absent (not all servers send it);
+/// downstream readers also enforce the limit via `with_config().limit(...)`.
+fn enforce_content_length(content_length: Option<u64>, limit: u64, url: &str) -> Result<()> {
+    if let Some(content_length) = content_length {
+        if content_length > limit {
+            return Err(NonoError::RegistryError(format!(
+                "registry response from {} exceeds {} bytes",
+                url, limit
+            )));
+        }
+    }
+
+    Ok(())
 }
