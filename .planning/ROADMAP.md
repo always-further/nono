@@ -172,7 +172,7 @@ Plans:
 
 **Requirements:** REQ-AAHX-01 (audit-loader correctness for audit-only sessions), REQ-AAHX-02 (bundle-target architecture decision + ADR), REQ-AAHX-03 (audit-attestation test re-enablement closes REQ-AAH-01 + REQ-NTH-03 transitively). To be locked at `/gsd-plan-phase 27.2` per the planning-time requirements convention. See `.planning/REQUIREMENTS.md` § AAHX for full acceptance criteria.
 
-**Plans:** 4/4 plans complete (STRUCTURALLY and FUNCTIONALLY). Plan 27.2-04 surfaced a tracing-stdout pollution bug at human-verify time; resolved inline as scope-deviation commit `2b7425e7` (route `tracing_subscriber::fmt()` writer in `cli_bootstrap.rs::init_tracing()` to stderr — 2 lines added, matches existing documented intent of `--log-file`). Both audit-attestation tests now pass: `cargo test -p nono-cli --test audit_attestation` reports `2 passed; 0 failed; 0 ignored`.
+**Plans:** 4/4 plans complete
 
 Plans:
 - [x] 27.2-01-PLAN.md — `cmd_verify` audit-loader swap + one-shot legacy-bundle warning helper (REQ-AAHX-01; FU-1; Wave 1)

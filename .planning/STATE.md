@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
-status: executing
+status: ready_to_plan
 last_updated: "2026-05-09T17:16:11.030Z"
 last_activity: 2026-05-09
 progress:
   total_phases: 8
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 19
   completed_plans: 17
-  percent: 89
+  percent: 88
 ---
 
 # Project State: nono — v2.3 Linux POC Unblock + Deferreds Closure
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 
 ## Current Position
 
-Phase: 27.2 (audit-attestation-test-re-enablement) — STRUCTURALLY AND FUNCTIONALLY COMPLETE
-Plan: 4 of 4
-Status: All 4 plans landed (Plans 27.2-01..04 all have SUMMARY.md). The tracing-stdout pollution bug surfaced by Plan 27.2-04's human-verify (Phase 27.1's `warn_once_test_home` WARN line contaminating `audit verify --json` stdout) was resolved inline as scope-deviation commit `2b7425e7` — added `.with_writer(std::io::stderr)` to both default and stderr-fallback paths in `crates/nono-cli/src/cli_bootstrap.rs::init_tracing()`. The fix matches the existing documented intent of `--log-file <PATH>  Write logs to a file instead of stderr`. After fix: `cargo test -p nono-cli --test audit_attestation` reports `2 passed; 0 failed; 0 ignored`. REQ-AAHX-03 fully closed.
+Phase: 28
+Plan: Not started
+Status: Ready to plan
 Milestone: v2.2 — 3/3 phases complete (Phase 22 ✓ 2026-04-28, Phase 23 ✓ 2026-04-29, Phase 24 ✓ 2026-04-27), 9/9 plans complete. v2.2 ready to ship.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
