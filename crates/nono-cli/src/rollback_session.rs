@@ -282,6 +282,8 @@ pub fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "windows"))]
+    use crate::test_env::{lock_env, EnvVarGuard};
 
     #[test]
     fn validate_session_id_rejects_traversal() {
@@ -364,5 +366,23 @@ mod tests {
     fn dead_process_not_alive() {
         // PID 99999999 is very unlikely to exist
         assert!(!is_process_alive(99_999_999));
+    }
+
+    // Phase 27.1 Nyquist gap fill: pin the rollback_root() Unix-arm
+    // migration contract. Plan 02 Edit 1.4 routed the Unix arm through
+    // nono_home_dir(), but no behavioral test asserts the override reaches
+    // it. The Windows arm uses user_state_dir() and is covered by
+    // rollback_root_uses_windows_state_dir +
+    // config::tests::user_state_dir_honors_nono_test_home.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn rollback_root_unix_honors_nono_test_home() {
+        let _env_lock = lock_env();
+        let abs = "/tmp/nono-test-rollback-root-nyquist";
+        let _env = EnvVarGuard::set_all(&[("NONO_TEST_HOME", abs)]);
+
+        let root = rollback_root().expect("rollback_root with override");
+        let expected = PathBuf::from(abs).join(".nono").join("rollbacks");
+        assert_eq!(root, expected);
     }
 }

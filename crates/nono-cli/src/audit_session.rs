@@ -459,4 +459,24 @@ mod tests {
         assert!(ids.contains(&"20260421-111111-10002"));
         assert!(!ids.contains(&"20260421-111111-10003"));
     }
+
+    // Phase 27.1 Nyquist gap fill: pin the audit_root() callsite migration
+    // contract. Plan 02 Edit 1.1 routed audit_root() through nono_home_dir(),
+    // but the only behavioral coverage was an OPTIONAL Plan 03 test that was
+    // ultimately deferred (the audit-attestation integration test is
+    // #[ignore]'d per D-27.1-14). This test asserts the seam reaches
+    // audit_root() correctly: NONO_TEST_HOME=<abs> => <abs>/.nono/audit.
+    #[test]
+    fn audit_root_honors_nono_test_home() {
+        let _env_lock = lock_env();
+        #[cfg(target_os = "windows")]
+        let abs = r"C:\nono-test-audit-root-nyquist";
+        #[cfg(not(target_os = "windows"))]
+        let abs = "/tmp/nono-test-audit-root-nyquist";
+        let _env = EnvVarGuard::set_all(&[("NONO_TEST_HOME", abs)]);
+
+        let root = audit_root().expect("audit_root with override");
+        let expected = PathBuf::from(abs).join(".nono").join("audit");
+        assert_eq!(root, expected);
+    }
 }

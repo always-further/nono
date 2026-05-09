@@ -1390,6 +1390,57 @@ mod tests {
         };
         assert!(!is_prunable(&record, now, 30 * 86_400));
     }
+
+    // Phase 27.1 Nyquist gap fill: pin the sessions_dir() callsite migration
+    // contract — Plan 02 Edit 1.8 deviation. sessions_dir() is unique among
+    // the 15 callsites because it intentionally maps the helper's error
+    // (EnvVarValidation/HomeNotFound) to NonoError::ConfigParse with the
+    // legacy "Cannot determine home directory for session registry" message
+    // for backwards compatibility with callers/tests that grep that string.
+    // Both tests below pin BOTH the positive contract (override reaches the
+    // callsite) AND the negative contract (the .map_err deviation preserves
+    // the legacy ConfigParse message and does NOT leak EnvVarValidation).
+
+    #[test]
+    fn sessions_dir_returns_path_under_nono_test_home() {
+        let _env_lock = crate::test_env::lock_env();
+        #[cfg(target_os = "windows")]
+        let abs = r"C:\nono-test-sessions-dir-nyquist";
+        #[cfg(not(target_os = "windows"))]
+        let abs = "/tmp/nono-test-sessions-dir-nyquist";
+        let _env = crate::test_env::EnvVarGuard::set_all(&[("NONO_TEST_HOME", abs)]);
+
+        let dir = super::sessions_dir().expect("sessions_dir with override");
+        let expected = PathBuf::from(abs).join(".nono").join("sessions");
+        assert_eq!(dir, expected);
+    }
+
+    #[test]
+    fn sessions_dir_maps_envvar_validation_to_config_parse() {
+        let _env_lock = crate::test_env::lock_env();
+        // Relative path triggers EnvVarValidation in nono_home_dir(); the
+        // sessions_dir() .map_err deviation must rewrite that into a
+        // ConfigParse with the exact legacy message string.
+        let _env = crate::test_env::EnvVarGuard::set_all(&[("NONO_TEST_HOME", "relative/path")]);
+
+        let err =
+            super::sessions_dir().expect_err("relative override must fail closed via ConfigParse");
+        match err {
+            NonoError::ConfigParse(msg) => {
+                assert_eq!(
+                    msg, "Cannot determine home directory for session registry",
+                    "deviation must preserve the legacy ConfigParse message verbatim"
+                );
+            }
+            NonoError::EnvVarValidation { .. } => {
+                panic!(
+                    "sessions_dir() must map EnvVarValidation to ConfigParse \
+                     (Plan 02 Edit 1.8 deviation contract); got EnvVarValidation directly"
+                );
+            }
+            other => panic!("expected ConfigParse with legacy message, got: {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
