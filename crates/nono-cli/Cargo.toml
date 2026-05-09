@@ -60,6 +60,7 @@ sigstore-sign = "0.6.5"
 tokio = { version = "1", features = ["rt", "net", "io-util"] }
 
 ureq = "3"
+semver = "1"
 
 zeroize.workspace = true
 sha2.workspace = true
