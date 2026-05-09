@@ -1773,6 +1773,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nono-shell-broker"
+version = "0.37.1"
+dependencies = [
+ "nono",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

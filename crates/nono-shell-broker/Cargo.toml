@@ -1,0 +1,31 @@
+[package]
+name = "nono-shell-broker"
+version = "0.37.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Medium-IL broker for spawning Low-IL nono shell children on Windows"
+keywords = ["sandbox", "security", "windows", "broker"]
+categories = ["os::windows-apis"]
+
+[[bin]]
+name = "nono-shell-broker"
+path = "src/main.rs"
+
+[dependencies]
+nono = { version = "0.37.1", path = "../nono" }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_SystemServices",
+] }
