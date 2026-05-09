@@ -10,6 +10,8 @@ use colored::Colorize;
 use nono::{NonoError, Result};
 
 pub(crate) fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
+    print_learn_deprecation(&args, silent);
+
     #[cfg(target_os = "macos")]
     if !args.trace {
         return print_macos_run_guidance(&args, silent);
@@ -69,6 +71,49 @@ pub(crate) fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_learn_deprecation(args: &LearnArgs, silent: bool) {
+    if silent {
+        return;
+    }
+
+    eprintln!(
+        "{}",
+        "DEPRECATED: nono learn is deprecated in v0.50.1; use `nono run` instead. Removal target: v1.0.0 (#445).".yellow()
+    );
+    if let Some(profile) = args.profile.as_deref() {
+        eprintln!(
+            "{}",
+            format!(
+                "Use: nono run --profile {} -- {}",
+                profile,
+                crate::command_display::format_command_line(&args.command)
+            )
+            .yellow()
+        );
+    } else {
+        eprintln!(
+            "{}",
+            format!(
+                "Use: nono run --profile <profile> -- {}",
+                crate::command_display::format_command_line(&args.command)
+            )
+            .yellow()
+        );
+    }
+    eprintln!(
+        "{}",
+        "`nono run` keeps the command sandboxed, reports denials, and offers to save profile updates."
+            .yellow()
+    );
+    if args.trace {
+        eprintln!(
+            "{}",
+            "Continuing with legacy unsandboxed trace mode for compatibility.".yellow()
+        );
+    }
+    eprintln!();
 }
 
 #[cfg(target_os = "macos")]

@@ -32,7 +32,7 @@ const STYLES: Styles = Styles::plain().header(Style::new().bold());
   wrap       Apply sandbox and exec into command (nono disappears)
 
 \x1b[1mEXPLORATION & DEBUGGING\x1b[0m
-  learn      Discover required filesystem paths
+  learn      [deprecated] Use `nono run` to learn from sandbox denials
   why        Check why a path or network operation would be allowed or denied
 
 \x1b[1mSESSION MANAGEMENT\x1b[0m
@@ -175,7 +175,8 @@ pub enum Commands {
     Wrap(Box<WrapArgs>),
 
     // ── Exploration & debugging ─────────────────────────────────────────
-    /// Discover required filesystem paths
+    /// [deprecated] Use `nono run` to learn from sandbox denials
+    /// DEPRECATED(canonical="nono run", introduced="v0.50.1", remove_by="v1.0.0", issue="#445")
     #[command(trailing_var_arg = true)]
     #[command(help_template = "\
 {about}
@@ -185,9 +186,13 @@ pub enum Commands {
 
 {all-args}
 {after-help}")]
-    #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
-  nono learn -- my-app                         # Discover paths needed by a command
-  nono learn --profile my-profile -- my-app    # Compare against an existing profile
+    #[command(after_help = "\x1b[1mDEPRECATED\x1b[0m
+  Use `nono run --profile <name> -- <command>` instead. `nono run` keeps the
+  command sandboxed, reports denials, and offers to save profile updates.
+
+\x1b[1mEXAMPLES\x1b[0m
+  nono run --profile my-profile -- my-app      # Preferred learning workflow
+  nono learn --profile my-profile -- my-app    # Deprecated compatibility path
   nono learn --json -- node server.js          # Output as JSON for profile
   nono learn --timeout 30 -- my-app            # Limit trace duration
 

@@ -1639,6 +1639,7 @@ struct SystemServiceDiagnostic {
 
 #[derive(Debug, Clone, Copy)]
 enum SystemServiceTarget {
+    Any,
     Exact(&'static str),
     Prefix(&'static str),
 }
@@ -1646,6 +1647,7 @@ enum SystemServiceTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SystemServiceGuidance {
     Keychain,
+    SetuidExec,
     UserPreferences,
 }
 
@@ -1741,9 +1743,27 @@ const SYSTEM_SERVICE_DIAGNOSTICS: &[SystemServiceDiagnostic] = &[
         "Preferences (CFPreferences / NSUserDefaults)",
         Some(SystemServiceGuidance::UserPreferences),
     ),
+    SystemServiceDiagnostic::any(
+        "forbidden-exec-sugid",
+        "Setuid/setgid executable blocked",
+        Some(SystemServiceGuidance::SetuidExec),
+    ),
 ];
 
 impl SystemServiceDiagnostic {
+    const fn any(
+        operation: &'static str,
+        description: &'static str,
+        guidance: Option<SystemServiceGuidance>,
+    ) -> Self {
+        Self {
+            operation,
+            target: SystemServiceTarget::Any,
+            description,
+            guidance,
+        }
+    }
+
     const fn exact(
         operation: &'static str,
         target: &'static str,
@@ -1773,17 +1793,23 @@ impl SystemServiceDiagnostic {
     }
 
     fn matches(&self, violation: &SandboxViolation) -> bool {
-        violation.operation == self.operation
-            && violation
+        if violation.operation != self.operation {
+            return false;
+        }
+        match self.target {
+            SystemServiceTarget::Any => true,
+            _ => violation
                 .target
                 .as_deref()
-                .is_some_and(|target| self.target.matches(target))
+                .is_some_and(|target| self.target.matches(target)),
+        }
     }
 }
 
 impl SystemServiceTarget {
     fn matches(self, target: &str) -> bool {
         match self {
+            Self::Any => true,
             Self::Exact(expected) => target.eq_ignore_ascii_case(expected),
             Self::Prefix(prefix) => target
                 .get(..prefix.len())
@@ -1814,7 +1840,10 @@ fn format_non_fs_violations(lines: &mut Vec<String>, violations: &[&SandboxViola
             (Some(target), None) => {
                 lines.push(format!("[nono]   {} ({})", v.operation, target));
             }
-            (None, _) => {
+            (None, Some(description)) => {
+                lines.push(format!("[nono]   {} — {}", v.operation, description));
+            }
+            (None, None) => {
                 lines.push(format!("[nono]   {}", v.operation));
             }
         }
@@ -1846,6 +1875,18 @@ fn format_non_fs_guidance(lines: &mut Vec<String>, violations: &[&SandboxViolati
         lines.push(
             "[nono]   \"unsafe_macos_seatbelt_rules\": [\"(allow user-preference-read)\"]"
                 .to_string(),
+        );
+    }
+
+    if has_guidance(SystemServiceGuidance::SetuidExec) {
+        lines.push(
+            "[nono] A sandboxed process tried to execute a setuid/setgid binary.".to_string(),
+        );
+        lines.push(
+            "[nono] macOS blocks privilege-changing execs inside this sandbox; this is not a path grant.".to_string(),
+        );
+        lines.push(
+            "[nono] nono does not save this automatically. Prefer a non-setuid helper, or run the privileged helper outside nono after review.".to_string(),
         );
     }
 }
@@ -2983,6 +3024,25 @@ mod tests {
         assert!(output.contains("CFPreferences / NSUserDefaults"));
         assert!(output.contains("unsafe_macos_seatbelt_rules"));
         assert!(output.contains("(allow user-preference-read)"));
+    }
+
+    #[test]
+    fn test_forbidden_exec_sugid_guidance_is_not_saveable() {
+        let caps = make_test_caps();
+        let violations = vec![SandboxViolation {
+            operation: "forbidden-exec-sugid".to_string(),
+            target: None,
+        }];
+        let formatter = DiagnosticFormatter::new(&caps)
+            .with_mode(DiagnosticMode::Supervised)
+            .with_sandbox_violations(&violations);
+        let output = formatter.format_footer(0);
+
+        assert!(output.contains("forbidden-exec-sugid"));
+        assert!(output.contains("Setuid/setgid executable blocked"));
+        assert!(output.contains("not a path grant"));
+        assert!(output.contains("does not save this automatically"));
+        assert!(!output.contains("unsafe_macos_seatbelt_rules"));
     }
 
     #[test]
