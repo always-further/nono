@@ -5,6 +5,13 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$BinaryPath,
 
+    # Phase 31 Plan 04: nono-shell-broker.exe is required for v2.3 SHELL-01 enforcement.
+    # The broker installs as a sibling of nono.exe in INSTALLFOLDER so the runtime
+    # cascade arm in spawn_windows_child resolves it via current_exe().parent() (D-07).
+    # Mandatory so release.yml's invocation cannot accidentally omit it (fail-closed).
+    [Parameter(Mandatory = $true)]
+    [string]$BrokerPath,
+
     [ValidateSet("machine", "user")]
     [string]$Scope = "machine",
 
@@ -118,6 +125,16 @@ function Write-Utf8NoBomCompat {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $binaryFullPath = (Resolve-Path -LiteralPath $BinaryPath).Path
+
+# Phase 31 Plan 04: validate the broker binary path before generating the WiX
+# manifest. Fail-closed (throw) on missing path, mirroring the $ServiceBinaryPath
+# validation pattern below. The broker is mandatory at the parameter level, so
+# this guard catches "path resolves but file missing" cases (e.g. typoed path or
+# missed cargo build step in the caller's workflow).
+if (-not (Test-Path -LiteralPath $BrokerPath)) {
+    throw "BrokerPath does not exist: '$BrokerPath'."
+}
+$brokerFullPath = (Resolve-Path -LiteralPath $BrokerPath).Path
 
 $serviceBinaryFullPath = ""
 if ($ServiceBinaryPath -ne "") {
@@ -241,6 +258,15 @@ $($scopeInfo.DirectoryXml)
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <Component Id="cmpNonoExe" Guid="*">
         <File Id="filNonoExe" Source="$binaryFullPath" KeyPath="yes" />
+      </Component>
+      <Component Id="cmpNonoShellBrokerExe" Guid="*">
+        <!-- Phase 31 Plan 04: nono-shell-broker.exe lives under INSTALLFOLDER
+             (the ComponentGroup's Directory attribute) so both binaries install
+             to the same dir at runtime. Satisfies D-07 sibling resolution
+             (current_exe().parent() finds the broker) for both machine scope
+             (Program Files\nono\) and user scope (LocalAppData\Programs\nono\).
+             No scope guard needed — broker is required for both MSIs. -->
+        <File Id="filNonoShellBrokerExe" Source="$brokerFullPath" KeyPath="yes" />
       </Component>
       <Component Id="cmpReadme" Guid="*">
         <File Id="filReadme" Source="$readmePath" Name="README.md" KeyPath="yes" />

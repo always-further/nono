@@ -74,6 +74,10 @@ jobs:
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --target ${{ matrix.target }} -p nono-cli
 
+      - name: Build broker (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release --target ${{ matrix.target }} -p nono-shell-broker
+
       - name: Build (cross aarch64-unknown-linux-gnu)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cross build --release --target aarch64-unknown-linux-gnu -p nono-cli
@@ -135,53 +139,70 @@ jobs:
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
 
       # D-11: build both machine and user MSIs before signing
+      # Phase 31 Plan 04: include nono-shell-broker.exe as a sibling component in
+      # both MSIs so install-time deployment lands the broker next to nono.exe at
+      # the install dir current_exe().parent() resolves to at runtime (D-07).
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $broker = Join-Path $PWD "target\\${{ matrix.target }}\\release\\nono-shell-broker.exe"
           if (-not (Test-Path $binary)) {
             Write-Error "Missing release binary: $binary"
+            exit 1
+          }
+          if (-not (Test-Path $broker)) {
+            Write-Error "Missing broker binary: $broker"
             exit 1
           }
           .\scripts\build-windows-msi.ps1 `
             -VersionTag "${{ env.RELEASE_TAG }}" `
             -BinaryPath $binary `
+            -BrokerPath $broker `
             -Scope machine `
             -OutputDir artifact_staging
           .\scripts\build-windows-msi.ps1 `
             -VersionTag "${{ env.RELEASE_TAG }}" `
             -BinaryPath $binary `
+            -BrokerPath $broker `
             -Scope user `
             -OutputDir artifact_staging
 
       # D-13: fail closed if signing or verification fails; never upload unsigned artifacts.
-      # Signs the raw .exe and both MSIs before any upload step.
+      # Signs the raw .exe, the broker .exe (Phase 31 Plan 04), and both MSIs before
+      # any upload step. The broker is signed with the SAME Authenticode key as nono.exe
+      # so the Phase 28 chain-walker (parse_signer_subject) records a consistent signer
+      # for any audit-ledger trace involving the broker process.
       - name: Sign Windows artifacts
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $broker = Join-Path $PWD "target\\${{ matrix.target }}\\release\\nono-shell-broker.exe"
           $machineMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-machine.msi"
           $userMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-user.msi"
           .\scripts\sign-windows-artifacts.ps1 `
             -CertBase64 $env:WINDOWS_SIGNING_CERT `
             -CertPassword $env:WINDOWS_SIGNING_CERT_PASSWORD `
-            -ArtifactPaths @($binary, $machineMsi, $userMsi)
+            -ArtifactPaths @($binary, $broker, $machineMsi, $userMsi)
         env:
           WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
 
       # Secondary Authenticode verification via PowerShell after signtool verify.
       # Both checks must pass before artifact upload (D-13).
+      # Phase 31 Plan 04: extends the verify loop to include the broker.exe so any
+      # signing failure on the broker fails the release before upload.
       - name: Verify Authenticode signatures (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $broker = Join-Path $PWD "target\\${{ matrix.target }}\\release\\nono-shell-broker.exe"
           $machineMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-machine.msi"
           $userMsi = Join-Path $PWD "artifact_staging\\nono-${{ env.RELEASE_TAG }}-x86_64-pc-windows-msvc-user.msi"
-          foreach ($artifact in @($binary, $machineMsi, $userMsi)) {
+          foreach ($artifact in @($binary, $broker, $machineMsi, $userMsi)) {
             $sig = Get-AuthenticodeSignature -FilePath $artifact
             if ($sig.Status -ne "Valid") {
               Write-Error "Authenticode verification failed for $artifact with status $($sig.Status)."
@@ -190,19 +211,22 @@ jobs:
             Write-Host "Authenticode OK: $artifact"
           }
 
+      # Phase 31 Plan 04: zip bundle now contains BOTH nono.exe and nono-shell-broker.exe
+      # so users who download the zip get the broker as a sibling of nono.exe per D-07.
       - name: Create zip from signed binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $broker = Join-Path $PWD "target\\${{ matrix.target }}\\release\\nono-shell-broker.exe"
           $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
           $zipPath = Join-Path $PWD $zipName
           if (Test-Path $zipPath) {
             Remove-Item -LiteralPath $zipPath -Force
           }
-          Compress-Archive -LiteralPath $binary -DestinationPath $zipPath
+          Compress-Archive -LiteralPath @($binary, $broker) -DestinationPath $zipPath
 
-      - name: Verify signed binary inside zip (Windows)
+      - name: Verify signed binaries inside zip (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -212,31 +236,35 @@ jobs:
             Remove-Item -LiteralPath $extractRoot -Recurse -Force
           }
           Expand-Archive -LiteralPath $zipName -DestinationPath $extractRoot -Force
-          $binaryName = "${{ matrix.artifact }}"
-          $extractedBinary = Join-Path $extractRoot $binaryName
-          $sig = Get-AuthenticodeSignature -FilePath $extractedBinary
-          if ($sig.Status -ne "Valid") {
-            Write-Error "Zip payload signature verification failed for $extractedBinary with status $($sig.Status)."
-            exit 1
+          foreach ($name in @("${{ matrix.artifact }}", "nono-shell-broker.exe")) {
+            $extractedBinary = Join-Path $extractRoot $name
+            $sig = Get-AuthenticodeSignature -FilePath $extractedBinary
+            if ($sig.Status -ne "Valid") {
+              Write-Error "Zip payload signature verification failed for $extractedBinary with status $($sig.Status)."
+              exit 1
+            }
+            Write-Host "Zip payload Authenticode OK: $extractedBinary"
           }
-          Write-Host "Zip payload Authenticode OK: $extractedBinary"
 
       # Artifact upload is downstream of all signing and verification steps (D-13).
+      # Phase 31 Plan 04: stages the broker .exe alongside nono.exe so the broker
+      # ships as a standalone signed artifact in addition to being inside the zip
+      # and both MSIs.
       - name: Prepare upload (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $binary = Join-Path $PWD "target\\${{ matrix.target }}\\release\\${{ matrix.artifact }}"
+          $broker = Join-Path $PWD "target\\${{ matrix.target }}\\release\\nono-shell-broker.exe"
           $zipName = "nono-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip"
-          if (-not (Test-Path $binary)) {
-            Write-Error "Missing signed binary artifact: $binary"
-            exit 1
-          }
-          if (-not (Test-Path $zipName)) {
-            Write-Error "Missing zip artifact: $zipName"
-            exit 1
+          foreach ($f in @($binary, $broker, $zipName)) {
+            if (-not (Test-Path $f)) {
+              Write-Error "Missing artifact: $f"
+              exit 1
+            }
           }
           Copy-Item $binary artifact_staging\
+          Copy-Item $broker artifact_staging\
           Copy-Item $zipName artifact_staging\
 
       - name: Prepare upload
