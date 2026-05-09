@@ -31,5 +31,6 @@ pub mod server;
 pub mod token;
 
 pub use config::ProxyConfig;
+pub use connect::ApprovalChannelRequest;
 pub use error::{ProxyError, Result};
-pub use server::{start, ProxyHandle};
+pub use server::{start, start_with_approval, ProxyHandle};

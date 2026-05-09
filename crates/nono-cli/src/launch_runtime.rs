@@ -74,7 +74,9 @@ pub(crate) struct TrustLaunchOptions {
 pub(crate) struct ProxyLaunchOptions {
     pub(crate) active: bool,
     pub(crate) network_profile: Option<String>,
+    pub(crate) profile_name: Option<String>,
     pub(crate) allow_domain: Vec<String>,
+    pub(crate) reject_domain: Vec<String>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
     pub(crate) upstream_proxy: Option<String>,
@@ -84,6 +86,8 @@ pub(crate) struct ProxyLaunchOptions {
     pub(crate) open_url_origins: Vec<String>,
     pub(crate) open_url_allow_localhost: bool,
     pub(crate) allow_launch_services_active: bool,
+    pub(crate) network_approval_mode: crate::network_approval::NetworkApprovalMode,
+    pub(crate) network_approval_timeout_secs: u64,
 }
 
 #[derive(Clone)]
