@@ -487,3 +487,17 @@ After this session was resolved as failure-mode finding, quick-task `260508-m99`
 - `.planning/quick/260508-lqh-scope-phase-31-broker-process-implementa/RESEARCH.md` §6 + §Assumptions Log A1 (the assumption now validated)
 
 **Phase 31 effort estimate** (from RESEARCH.md, revised post-PoC): ~7 days for the production lift (was 7-9; the 1.5-day PoC step is complete). Lift broker mechanism into `crates/nono-shell-broker/`, dispatch from `launch.rs`, fix harness `Out-File` false-PASS bug, re-run field smoke for Acceptance #1-#4, ship cookbook update flipping SHELL-01 ✘→✔.
+
+***
+
+## Postscript 2: Phase 31 closure (2026-05-09)
+
+Phase 31 (Broker-Process Architecture, SHELL-01) shipped with all Acceptance #1-#4 + #7 PASS on the user's Windows test box. The broker pattern (Medium-IL intermediary spawning Low-IL child via CreateProcessAsUserW with dwCreationFlags=EXTENDED_STARTUPINFO_PRESENT) bypasses the CSRSS console-subsystem ALPC denial that blocked the direct Low-IL spawn from `nono.exe`. RESEARCH Assumption A1 ("KernelBase ConClntInitialize skips the CSRSS ALPC connect when the child inherits the parent's console") is now both PoC-validated (2026-05-08) and production-validated (2026-05-09).
+
+This debug session is fully resolved. SHELL-01 → ✔ validated v2.3 Phase 31. Cookbook updated. Closing line of bug → PoC → Phase 31 closure.
+
+References:
+- PoC: `.planning/quick/260508-m99-broker-process-poc-minimal-rust-binary-t/SUMMARY.md`
+- Phase 31 plans: `.planning/phases/31-broker-process-architecture-shell-01/31-{01..06}-PLAN.md`
+- Phase 31 field-smoke: `.planning/phases/31-broker-process-architecture-shell-01/31-FIELD-SMOKE.md`
+- Phase 31 final summary: `.planning/phases/31-broker-process-architecture-shell-01/31-06-SUMMARY.md`

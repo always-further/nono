@@ -295,7 +295,7 @@ Plans:
 | 28. Authenticode Chain-Walker Subject Extraction | v2.3 | 1/1 | Complete (REQ-AUDC-01..03 closed; D-AUDC-02 SandboxInit fallback + D-AUDC-03 explorer.exe fixture switch) | 2026-04-30 |
 | 29. WR-01 Reject-Stage Unification | v2.3 | 1/1 | Complete (REQ-WRU-01..02 closed; Option c locked as permanent design property) | 2026-04-30 |
 | 30. Windows nono shell Interactive Enforcement Architecture | v2.3 | 5/5 | Complete    | 2026-05-08 |
-| 31. Broker-Process Architecture (SHELL-01) | v2.3 | 5/6 | In Progress|  |
+| 31. Broker-Process Architecture (SHELL-01) | v2.3 | 6/6 | Complete | 2026-05-09 |
 
 ## Backlog (v2.4 carry-forward)
 
@@ -319,37 +319,26 @@ The four major v2.2-deferred items (PKG streaming, audit-attestation hardening, 
 
 ### Phase 31: Broker-Process Architecture (SHELL-01)
 
-**Goal:** Productionize the validated broker-pattern PoC (`.planning/quick/260508-m99-broker-process-poc-minimal-rust-binary-t/`, PASS on Windows test box 2026-05-08) into a `nono-shell-broker.exe` Win32 binary that `nono.exe` spawns instead of directly creating a Low-IL child via `WindowsTokenArm::LowIlPrimary`. The broker is a Medium-IL intermediary that holds the inherited console, lowers a duplicate token to Low-IL via `nono::create_low_integrity_primary_token` (D-06 lifted to library), and `CreateProcessAsUserW`s the actual shell with `dwCreationFlags=EXTENDED_STARTUPINFO_PRESENT` so the Low-IL child inherits the broker's console (KernelBase short-circuits CSRSS attach when console is inherited). Phase delivers a working `nono shell --profile <name>` Windows path with mandatory-label NO_WRITE_UP write-deny intact AND ConPTY TUI rendering — OR closes as a failure-mode finding analogous to Phase 30 with SHELL-01 reverting to v3.0 deferral.
+- [x] **Phase 31: Broker-Process Architecture (SHELL-01)** (6/6 plans, 2026-05-09) — Productionized the broker-pattern PoC validated on the Windows test box (commit 98d38ed9, 2026-05-08). Replaces direct Low-IL primary token spawn (Phase 30 D-01) with a Medium-IL broker (`crates/nono-shell-broker/`) that self-degrades and spawns the Low-IL shell child via `CreateProcessAsUserW(dwCreationFlags=EXTENDED_STARTUPINFO_PRESENT)` — child inherits broker's already-attached console; KernelBase skips CSRSS attach (RESEARCH Assumption A1 validated end-to-end). Acceptance #1–#4 + #7 PASS on user's test box (2026-05-09). `broker_dispatch_tests` 2/2 PASS including D-04 `IsProcessInJob` Job Object containment runtime assertion. Authenticode chain-walker (Phase 28) records consistent signer for nono.exe + broker. SHELL-01 → ✔ validated v2.3 Phase 31. Plans:
+  - [x] 31-01-PLAN.md — Foundation: D-06 lift (`create_low_integrity_primary_token` + `OwnedHandle` to `crates/nono/src/sandbox/windows.rs`) + D-07 `NonoError::BrokerNotFound` variant + Wave-0 harness `Out-File`→`Set-Content` fix
+  - [x] 31-02-PLAN.md — `crates/nono-shell-broker/` workspace member + production `main.rs` (D-05, D-08, D-01: 8-step PoC sequence + argv-only IPC + HANDLE_LIST broker→child)
+  - [x] 31-03-PLAN.md — `WindowsTokenArm::BrokerLaunch` cascade arm in `launch.rs` + PROC_THREAD_ATTRIBUTE_HANDLE_LIST nono.exe→broker discipline + Job Object containment (D-04) + sibling broker resolution via `current_exe()` (D-07) + rewrite `pty_token_gate_tests` for new dispatch (D-15)
+  - [x] 31-04-PLAN.md — Cross-compile + signed-binary release pipeline updates: `release.yml` builds/signs/verifies/uploads `nono-shell-broker.exe` alongside `nono.exe`; `build-windows-msi.ps1` packages broker as sibling MSI component
+  - [x] 31-05-PLAN.md — Field-test reproduction of Acceptance #1-#4 + #7 on user's Windows test box (`autonomous: false` per CONTEXT D-14 single-box validation) + Job Object containment test lift (D-04 runtime acceptance via `IsProcessInJob`)
+  - [x] 31-06-PLAN.md — Branched close-out: SUCCESS path executed — cookbook security-envelope paragraph added + PROJECT.md/STATE.md/ROADMAP.md SHELL-01 → ✔ validated v2.3 Phase 31; debug session postscript appended
 
-**Requirements:** No formal REQ-IDs at scope-lock; phase tracked via CONTEXT.md decisions D-01..D-16 (token shape, broker placement + token-helper lift, scope boundary, failure-mode response). Decision-coverage gate enforces D-01..D-16 through plans.
-**Depends on:** Phase 30 (precedent + harness reuse + invalidates SHELL-01 "validated" claim).
-**Plans:** 5/6 plans executed
+  **Goal:** Land a working `nono shell --profile claude-code` Windows path with mandatory-label NO_WRITE_UP write-deny intact AND ConPTY TUI rendering, OR close as a failure-mode finding analogous to Phase 30. (Outcome: shipped on success path.)
 
-Plans:
-**Wave 1**
-- [x] 31-01-PLAN.md — Foundation: D-06 lift (`create_low_integrity_primary_token` + `OwnedHandle` to `crates/nono/src/sandbox/windows.rs`) + D-07 `NonoError::BrokerNotFound` variant + Wave-0 harness `Out-File`→`Set-Content` fix (Wave 1)
+  **Requirements:** No formal REQ-IDs at scope-lock; phase tracked via CONTEXT.md decisions D-01..D-16. Decision-coverage gate enforced D-01..D-16 through plans.
 
-**Wave 2** *(blocked on Wave 1 completion)*
-- [x] 31-02-PLAN.md — `crates/nono-shell-broker/` workspace member + production `main.rs` (D-05, D-08, D-01: 8-step PoC sequence + argv-only IPC + HANDLE_LIST broker→child) (Wave 2; depends on 31-01)
-- [x] 31-03-PLAN.md — `WindowsTokenArm::BrokerLaunch` cascade arm in `launch.rs` + PROC_THREAD_ATTRIBUTE_HANDLE_LIST nono.exe→broker discipline + Job Object containment (D-04) + sibling broker resolution via `current_exe()` (D-07) + rewrite `pty_token_gate_tests` for new dispatch (D-15) (Wave 2; depends on 31-01)
+  **Depends on:** Phase 30 (precedent + harness reuse + invalidates SHELL-01 "validated" claim).
 
-**Wave 3** *(blocked on Wave 2 completion)*
-- [x] 31-04-PLAN.md — Cross-compile + signed-binary release pipeline updates: `release.yml` builds/signs/verifies/uploads `nono-shell-broker.exe` alongside `nono.exe`; `build-windows-msi.ps1` packages broker as sibling MSI component (Wave 3; depends on 31-02 + 31-03)
+  **Success Criteria** (all PASSED):
 
-**Wave 4** *(blocked on Wave 3 completion)*
-- [x] 31-05-PLAN.md — Field-test reproduction of Acceptance #1-#4 + #7 on user's Windows test box (`autonomous: false` per CONTEXT D-14 single-box validation) + Job Object containment test lift (D-04 runtime acceptance via `IsProcessInJob`) (Wave 4; depends on 31-04)
-
-**Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 31-06-PLAN.md — Branched close-out (`autonomous: false`): SUCCESS path = cookbook security-envelope paragraph + PROJECT.md/STATE.md/ROADMAP.md SHELL-01 → ✔ validated v2.3 Phase 31; FAILURE path (D-16) = cookbook reverts + SHELL-01 → ✘ deferred to v3.0 (Wave 5; depends on 31-05)
-
-**Success Criteria** (what must be TRUE when Phase 31 completes on the SUCCESS path):
-
-1. `.\nono.exe shell --profile claude-code --allow-cwd` on Windows 10/11 launches a sandboxed shell (no `0xC0000142`, no silent exit) via the broker dispatch arm. Verified on the user's test box.
-2. `claude` runs inside the sandboxed shell with full TUI rendering (alternate screen buffer, cursor positioning, raw-mode input) — Phase 30 D-05 carried forward.
-3. From inside the sandboxed shell, `Set-Content -Path -Value` to a path outside the grant set fails with "Access is denied" at OS level (mandatory-label NO_WRITE_UP enforcement, NOT just hook-level interception) — Phase 30 D-06 carried forward.
-4. From inside the sandboxed shell, reads of granted paths (e.g. `~/.claude\claude.json`) still succeed.
-5. PROJECT.md SHELL-01 entry updated from `⚠ Phase 31 candidate` to `✔ validated v2.3 Phase 31`.
-6. Cookbook (`docs/cli/development/windows-poc-handoff.mdx`) describes the security envelope honestly: which token shape (broker→Low-IL-child), what's enforced at OS level (mandatory-label NO_WRITE_UP via MIC kernel pre-DACL check), what relies on the Claude Code hook (defense-in-depth).
-7. Harness `Out-File` → `Set-Content` fix verified by passing the corrected write-deny test in the live broker shell — new for Phase 31.
-
-**Failure mode (D-13/D-16):** if integration field-test fails on TUI rendering (Acceptance #2) or write-deny (Acceptance #3) with Low-IL child surviving DllMain, allocate ≤2 days of ProcMon localization. If unresolved by day 5 of phase work, halt phase, write a Phase 31 paused finding, replan: either (a) split into 31a [broker mechanism] + 31b [ConPTY-with-broker resolution], (b) descope to pipe-stdio fallback (D-05 unlock required — user re-decides), or (c) terminal failure (D-16): SHELL-01 reverts to ✘ v3.0 deferral; cookbook reverts to Phase 30 final-state language; v2.3 closes WITHOUT SHELL-01.
+  1. `.\nono.exe shell --profile claude-code --allow-cwd` on Windows 10/11 launches a sandboxed shell (no `0xC0000142`, no silent exit) via the broker dispatch arm.
+  2. `claude` runs inside the sandboxed shell with full TUI rendering (alternate screen buffer, cursor positioning, raw-mode input).
+  3. `Set-Content -Path -Value` to a path outside the grant set fails with "Access is denied" at OS level (mandatory-label NO_WRITE_UP enforcement on the Low-IL grandchild, NOT just hook-level interception).
+  4. Reads of granted paths (e.g., `~/.claude\claude.json`) still succeed.
+  5. PROJECT.md SHELL-01 entry reflects ✔ validated v2.3 Phase 31.
+  6. Cookbook describes the security envelope honestly (broker→Low-IL-child token shape; OS-level mandatory-label NO_WRITE_UP enforcement; Claude Code `PreToolUse` hook as defense-in-depth UX + audit, NOT primary boundary).
+  7. Harness `Out-File` → `Set-Content` fix verified by passing the corrected write-deny test in the live broker shell.
