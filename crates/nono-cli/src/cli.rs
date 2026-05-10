@@ -2015,6 +2015,10 @@ pub struct SetupArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub start_wfp_driver: bool,
 
+    /// Refresh the cached Sigstore trusted root from https://tuf-repo-cdn.sigstore.dev (per-user, no admin required)
+    #[arg(long, help_heading = "OPTIONS")]
+    pub refresh_trust_root: bool,
+
     /// Generate example user profiles in ~/.config/nono/profiles/
     #[arg(long, help_heading = "OPTIONS")]
     pub profiles: bool,

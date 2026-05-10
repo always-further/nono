@@ -16,6 +16,7 @@ pub struct SetupRunner {
     install_wfp_driver: bool,
     start_wfp_service: bool,
     start_wfp_driver: bool,
+    refresh_trust_root: bool,
     generate_profiles: bool,
     show_shell_integration: bool,
     #[allow(dead_code)]
@@ -31,6 +32,7 @@ impl SetupRunner {
             install_wfp_driver: args.install_wfp_driver,
             start_wfp_service: args.start_wfp_service,
             start_wfp_driver: args.start_wfp_driver,
+            refresh_trust_root: args.refresh_trust_root,
             generate_profiles: args.profiles,
             show_shell_integration: args.shell_integration,
             verbose: args.verbose,
@@ -77,6 +79,10 @@ impl SetupRunner {
         #[cfg(target_os = "windows")]
         if !self.check_only && self.any_windows_wfp_action_requested() {
             self.report_windows_wfp_post_action_status()?;
+        }
+
+        if !self.check_only && self.refresh_trust_root {
+            self.refresh_trust_root_step()?;
         }
 
         // Show what nono protects
@@ -660,6 +666,10 @@ impl SetupRunner {
             count += 1;
         }
 
+        if !self.check_only && self.refresh_trust_root {
+            count += 1;
+        }
+
         if !self.check_only {
             if self.generate_profiles {
                 count += 1;
@@ -686,10 +696,11 @@ impl SetupRunner {
                 index += 1;
             }
 
+            index += usize::from(self.refresh_trust_root);
             return index;
         }
 
-        3
+        3 + usize::from(!self.check_only && self.refresh_trust_root)
     }
 
     fn profiles_phase_index(&self) -> usize {
@@ -706,10 +717,11 @@ impl SetupRunner {
                 index += 1;
             }
 
+            index += usize::from(self.refresh_trust_root);
             return index;
         }
 
-        4
+        4 + usize::from(!self.check_only && self.refresh_trust_root)
     }
 
     fn register_phase_index(&self) -> usize {
@@ -754,12 +766,71 @@ impl SetupRunner {
             + usize::from(self.start_wfp_service)
     }
 
+    fn refresh_trust_root_phase_index(&self) -> usize {
+        #[cfg(target_os = "windows")]
+        if !self.check_only {
+            let mut index = 3
+                + usize::from(self.register_wfp_service)
+                + usize::from(self.install_wfp_service)
+                + usize::from(self.install_wfp_driver)
+                + usize::from(self.start_wfp_driver)
+                + usize::from(self.start_wfp_service);
+            if self.any_windows_wfp_action_requested() {
+                index += 1;
+            }
+            return index;
+        }
+        3
+    }
+
     fn setup_profiles_phase_index(&self) -> usize {
         self.profiles_phase_index() + 1
     }
 
     fn shell_integration_phase_index(&self) -> usize {
         self.profiles_phase_index() + 1 + usize::from(self.generate_profiles)
+    }
+
+    fn refresh_trust_root_step(&self) -> Result<()> {
+        let cache_dir = crate::config::nono_home_dir()?
+            .join(".nono")
+            .join("trust-root");
+        std::fs::create_dir_all(&cache_dir).map_err(NonoError::Io)?;
+
+        println!(
+            "[{}/{}] Refreshing Sigstore trusted root...",
+            self.refresh_trust_root_phase_index(),
+            self.total_phases()
+        );
+
+        // ONE-SHOT tokio runtime — the rest of `nono setup` is sync.
+        // TrustedRoot::production() runs full TUF verification (signature
+        // threshold 3, root-of-trust pinned in sigstore-rs) before returning.
+        // The bytes we persist are post-verification per T-32-02-01.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| NonoError::Setup(format!("tokio runtime: {e}")))?;
+        let trusted_root = rt
+            .block_on(nono::trust::TrustedRoot::production())
+            .map_err(|e| {
+                NonoError::Setup(format!(
+                    "Failed to fetch Sigstore trusted root from \
+                     https://tuf-repo-cdn.sigstore.dev: {e}"
+                ))
+            })?;
+
+        let json = serde_json::to_string_pretty(&trusted_root)
+            .map_err(|e| NonoError::Setup(format!("serialize trusted root: {e}")))?;
+        let cache_path = cache_dir.join("trusted_root.json");
+        std::fs::write(&cache_path, &json).map_err(NonoError::Io)?;
+
+        println!(
+            "  * Sigstore trusted root cached at {}",
+            cache_path.display()
+        );
+        println!();
+        Ok(())
     }
 }
 
@@ -828,6 +899,7 @@ fn print_check_only_summary() {
     }
     print_windows_foundation_report("");
     print_windows_wfp_readiness_report("", &wfp);
+    print_trust_root_status("");
     let wfp_ready = wfp.status_label == "ready";
     print!("{}", trailing_usage_guidance(wfp_ready));
 }
@@ -949,7 +1021,34 @@ fn windows_storage_layout() -> Result<WindowsStorageLayout> {
 
 #[cfg(not(target_os = "windows"))]
 fn print_check_only_summary() {
+    print_trust_root_status("");
     println!("Your system is ready to use nono. Run 'nono run --help' to get started.");
+}
+
+/// Print the current status of the Sigstore trusted-root cache.
+///
+/// Used by both Windows and non-Windows `print_check_only_summary` paths.
+/// Per P32-CHK-012: the STALE branch propagates the library's error message
+/// verbatim, which already contains `"nono setup --refresh-trust-root"` per
+/// D-32-03 / D-32-05 wording requirements.
+fn print_trust_root_status(prefix: &str) {
+    let path = match crate::config::nono_home_dir() {
+        Ok(h) => h.join(".nono").join("trust-root").join("trusted_root.json"),
+        Err(_) => {
+            println!("{prefix}Trust root cache: <home not resolvable>");
+            return;
+        }
+    };
+    if !path.exists() {
+        println!(
+            "{prefix}Trust root cache: NOT INITIALIZED (run `nono setup --refresh-trust-root`)"
+        );
+        return;
+    }
+    match nono::trust::load_production_trusted_root() {
+        Ok(_) => println!("{prefix}Trust root cache: OK ({})", path.display()),
+        Err(e) => println!("{prefix}Trust root cache: STALE — {e}"),
+    }
 }
 
 // ABI probing is now handled by the library's detect_abi().
@@ -1076,6 +1175,7 @@ mod tests {
             install_wfp_driver: false,
             start_wfp_service: false,
             start_wfp_driver: false,
+            refresh_trust_root: false,
             generate_profiles: true,
             show_shell_integration: false,
             verbose: 0,
