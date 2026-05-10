@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
-status: executing
+status: milestone_complete
 last_updated: "2026-05-10T10:58:38.038Z"
 last_activity: 2026-05-10
 progress:
   total_phases: 8
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 19
   completed_plans: 18
-  percent: 95
+  percent: 100
 ---
 
 # Project State: nono — v2.3 Linux POC Unblock + Deferreds Closure
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 
 ## Current Position
 
-Phase: 32 (sigstore-integration) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 32
+Phase: 32
+Plan: Not started
+Status: Milestone complete
 Milestone: v2.2 — 3/3 phases complete (Phase 22 ✓ 2026-04-28, Phase 23 ✓ 2026-04-29, Phase 24 ✓ 2026-04-27), 9/9 plans complete. v2.2 ready to ship.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
