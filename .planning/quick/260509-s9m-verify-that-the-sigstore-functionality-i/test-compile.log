@@ -1,0 +1,37 @@
+   Compiling nono-cli v0.37.1 (C:\Users\OMack\Nono\crates\nono-cli)
+   Compiling nono-shell-broker v0.37.1 (C:\Users\OMack\Nono\crates\nono-shell-broker)
+warning: unused imports: `RollbackStatus` and `SessionMetadata`
+   --> crates\nono-cli\src\audit_session.rs:357:22
+    |
+357 |     use nono::undo::{RollbackStatus, SessionMetadata};
+    |                      ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `nono-cli` (bin "nono" test) generated 1 warning (run `cargo fix --bin "nono" -p nono-cli --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 47.37s
+  Executable unittests src\lib.rs (target\debug\deps\nono-72ea3f0eafe3a594.exe)
+  Executable tests\capability_manifest_schema.rs (target\debug\deps\capability_manifest_schema-5f5835090e6a1c8b.exe)
+  Executable tests\manifest_types.rs (target\debug\deps\manifest_types-647d09e6b0d6f962.exe)
+  Executable unittests src\main.rs (target\debug\deps\nono-cdf56361fefd7b1d.exe)
+  Executable unittests src\bin\nono-wfp-service.rs (target\debug\deps\nono_wfp_service-90028676fe4f08ad.exe)
+  Executable unittests src\bin\test-connector.rs (target\debug\deps\test_connector-5d172f6002d046cb.exe)
+  Executable unittests src\bin\windows-net-probe.rs (target\debug\deps\windows_net_probe-7bc377cb1c7e055b.exe)
+  Executable tests\adr_aipc_unix_futures.rs (target\debug\deps\adr_aipc_unix_futures-f80272905b99d3ff.exe)
+  Executable tests\aipc_handle_brokering_integration.rs (target\debug\deps\aipc_handle_brokering_integration-9776e963212b6d57.exe)
+  Executable tests\attach_streaming_integration.rs (target\debug\deps\attach_streaming_integration-53fbd9c755983a08.exe)
+  Executable tests\audit_attestation.rs (target\debug\deps\audit_attestation-06caadd97ab83832.exe)
+  Executable tests\config_flag.rs (target\debug\deps\config_flag-4c49e825a77a28f4.exe)
+  Executable tests\env_vars.rs (target\debug\deps\env_vars-0db00b46d3ebe5cb.exe)
+  Executable tests\exec_identity_windows.rs (target\debug\deps\exec_identity_windows-c6393e1bc0566173.exe)
+  Executable tests\learn_windows_integration.rs (target\debug\deps\learn_windows_integration-ec418e044c8d8e72.exe)
+  Executable tests\manifest_roundtrip.rs (target\debug\deps\manifest_roundtrip-3ecc6c526fad9be1.exe)
+  Executable tests\policy_cmd.rs (target\debug\deps\policy_cmd-aee5cb04d6b85697.exe)
+  Executable tests\profile_cmd.rs (target\debug\deps\profile_cmd-9011ba6b89193bd1.exe)
+  Executable tests\prune_alias_deprecation.rs (target\debug\deps\prune_alias_deprecation-2be22c820346c4ba.exe)
+  Executable tests\rollback_audit_conflict.rs (target\debug\deps\rollback_audit_conflict-9bb64b8126faad6c.exe)
+  Executable tests\wfp_port_integration.rs (target\debug\deps\wfp_port_integration-46c677f241453363.exe)
+  Executable unittests src\lib.rs (target\debug\deps\nono_ffi-8fb142c118bde0d4.exe)
+  Executable unittests src\lib.rs (target\debug\deps\nono_proxy-e61daddc8087d659.exe)
+  Executable unittests src\main.rs (target\debug\deps\nono_shell_broker-704f9dd825938ee6.exe)
+EXIT_CODE=0

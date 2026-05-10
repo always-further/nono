@@ -1,0 +1,13 @@
+   Compiling nono-cli v0.37.1 (C:\Users\OMack\Nono\crates\nono-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.65s
+     Running tests\audit_attestation.rs (target\debug\deps\audit_attestation-c19582b4393a83b2.exe)
+
+running 4 tests
+test audit_verify_reports_signed_attestation_with_pinned_public_key ... ok
+test rollback_signed_session_verifies_from_audit_dir_bundle ... ok
+test combo_rollback_audit_session_findable_by_audit_verify ... ok
+test combo_rollback_audit_session_findable_by_rollback_list ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.39s
+
+EXIT_CODE=0

@@ -1,0 +1,1 @@
+(no #[ignore] attributes found in crates/nono/src/trust or crates/nono-cli/tests/audit_attestation.rs)

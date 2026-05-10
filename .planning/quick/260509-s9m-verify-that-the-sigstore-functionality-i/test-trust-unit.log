@@ -1,0 +1,211 @@
+   Compiling nono v0.37.1 (C:\Users\OMack\Nono\crates\nono)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.23s
+     Running unittests src\lib.rs (target\debug\deps\nono-f4e54377e1c7a744.exe)
+
+running 183 tests
+test trust::base64::tests::base64url_decode_invalid_char ... ok
+test trust::base64::tests::base64_decode_without_padding ... ok
+test trust::base64::tests::base64url_decode_skips_whitespace ... ok
+test trust::base64::tests::base64_known_value ... ok
+test trust::base64::tests::base64_has_padding ... ok
+test trust::base64::tests::base64_roundtrip ... ok
+test trust::base64::tests::base64_decode_skips_whitespace ... ok
+test trust::base64::tests::base64url_decode_standard_alphabet ... ok
+test trust::base64::tests::base64_empty ... ok
+test trust::base64::tests::base64url_decode_with_padding ... ok
+test trust::base64::tests::base64url_empty ... ok
+test trust::base64::tests::base64url_known_value ... ok
+test trust::base64::tests::base64url_no_padding ... ok
+test trust::base64::tests::base64url_roundtrip ... ok
+test trust::base64::tests::base64url_url_safe_chars ... ok
+test trust::base64::tests::cross_alphabet_interop ... ok
+test trust::bundle::tests::decode_utf8_extension_invalid_utf8 ... ok
+test trust::bundle::tests::decode_utf8_extension_raw_bytes ... ok
+test trust::bundle::tests::bundle_path_for_appends_extension ... ok
+test trust::bundle::tests::bundle_path_for_absolute_path ... ok
+test trust::bundle::tests::bundle_path_for_nested_path ... ok
+test trust::bundle::tests::extract_identity_empty_cert_chain ... ok
+test trust::bundle::tests::load_bundle_nonexistent_file ... ok
+test trust::bundle::tests::load_bundle_invalid_json ... ok
+test trust::bundle::tests::load_bundle_missing_fields ... ok
+test trust::bundle::tests::extract_identity_public_key_bundle ... ok
+test trust::bundle::tests::load_trusted_root_invalid_json ... ok
+test trust::bundle::tests::extract_identity_from_real_fulcio_cert ... ok
+test trust::bundle::tests::multi_subject_bundle_path_in_cwd ... ok
+test trust::bundle::tests::load_trusted_root_nonexistent_file ... ok
+test trust::bundle::tests::multi_subject_bundle_path_in_dir ... ok
+test trust::bundle::tests::normalize_github_uri_passthrough_v1 ... ok
+test trust::bundle::tests::normalize_github_uri_non_github ... ok
+test trust::bundle::tests::normalize_github_uri_strips_prefix ... ok
+test trust::bundle::tests::normalize_workflow_uri_full_v2 ... ok
+test trust::bundle::tests::normalize_workflow_uri_no_ref_suffix ... ok
+test trust::bundle::tests::normalize_workflow_uri_relative_passthrough ... ok
+test trust::digest::tests::bytes_digest_empty ... ok
+test trust::digest::tests::bytes_digest_different_inputs ... ok
+test trust::bundle::tests::real_fulcio_cert_matches_trust_policy ... ok
+test trust::digest::tests::bytes_digest_deterministic ... ok
+test trust::digest::tests::bytes_digest_hello_world ... ok
+test trust::digest::tests::bytes_digest_length ... ok
+test trust::digest::tests::file_digest_nonexistent ... ok
+test trust::digest::tests::hex_encode_correctness ... ok
+test trust::digest::tests::file_digest_empty_file ... ok
+test trust::digest::tests::file_digest_matches_bytes_digest ... ok
+test trust::dsse::tests::envelope_decode_payload ... ok
+test trust::dsse::tests::envelope_extract_statement ... ok
+test trust::dsse::tests::envelope_extract_statement_wrong_type ... ok
+test trust::dsse::tests::envelope_pae_bytes ... ok
+test trust::dsse::tests::envelope_parse_empty_payload ... ok
+test trust::dsse::tests::envelope_parse_invalid_json ... ok
+test trust::dsse::tests::envelope_parse_no_signatures ... ok
+test trust::dsse::tests::envelope_parse_valid ... ok
+test trust::dsse::tests::envelope_to_json_roundtrip ... ok
+test trust::dsse::tests::extract_ref_fallback ... ok
+test trust::dsse::tests::extract_ref_heads ... ok
+test trust::dsse::tests::extract_ref_standard_format ... ok
+test trust::dsse::tests::instruction_and_policy_predicate_types_differ ... ok
+test trust::digest::tests::file_digest_large_file ... ok
+test trust::dsse::tests::multi_subject_predicate_type_is_unique ... ok
+test trust::dsse::tests::multi_subject_statement_preserves_signer_predicate ... ok
+test trust::dsse::tests::multi_subject_statement_roundtrips_through_envelope ... ok
+test trust::dsse::tests::multi_subject_statement_structure ... ok
+test trust::dsse::tests::multi_subject_statement_single_subject ... ok
+test trust::dsse::tests::new_envelope_creates_valid_structure ... ok
+test trust::dsse::tests::new_instruction_statement_structure ... ok
+test trust::dsse::tests::new_policy_statement_uses_policy_predicate_type ... ok
+test trust::dsse::tests::new_statement_accepts_custom_predicate_type ... ok
+test trust::dsse::tests::pae_binary_payload ... ok
+test trust::dsse::tests::pae_empty_payload ... ok
+test trust::dsse::tests::pae_in_toto_type ... ok
+test trust::dsse::tests::pae_spec_test_vector ... ok
+test trust::dsse::tests::signature_decode ... ok
+test trust::dsse::tests::statement_empty_subjects ... ok
+test trust::dsse::tests::statement_extract_keyed_signer ... ok
+test trust::dsse::tests::statement_extract_keyless_signer ... ok
+test trust::dsse::tests::statement_extract_signer_missing ... ok
+test trust::dsse::tests::statement_extract_signer_unknown_kind ... ok
+test trust::dsse::tests::statement_first_subject_accessors ... ok
+test trust::dsse::tests::statement_parse_valid ... ok
+test trust::dsse::tests::statement_subject_missing_digest ... ok
+test trust::dsse::tests::statement_wrong_type ... ok
+test trust::policy::tests::evaluate_blocked_publisher ... ok
+test trust::policy::tests::evaluate_blocked_publisher_by_repository ... ok
+test trust::policy::tests::evaluate_blocked_file ... ok
+test trust::policy::tests::evaluate_blocklist_checked_before_signer ... ok
+test trust::policy::tests::evaluate_result_contains_path_and_digest ... ok
+test trust::policy::tests::evaluate_trusted_keyed ... ok
+test trust::policy::tests::evaluate_trusted_keyless ... ok
+test trust::policy::tests::evaluate_unsigned_file ... ok
+test trust::policy::tests::evaluate_untrusted_publisher ... ok
+test trust::policy::tests::find_included_files_empty_dir ... ok
+test trust::bundle::tests::load_production_trusted_root_succeeds ... FAILED
+test trust::bundle::tests::verify_bundle_with_invalid_digest ... FAILED
+test trust::policy::tests::find_included_files_in_non_special_hidden_dir ... ok
+test trust::policy::tests::find_included_files_in_directory ... ok
+test trust::policy::tests::find_included_files_in_claude_subdir ... ok
+test trust::policy::tests::find_included_files_skips_git_dir ... ok
+test trust::policy::tests::load_policy_from_file_not_found ... ok
+test trust::policy::tests::find_included_files_respects_extra_skip_dirs ... ok
+test trust::bundle::tests::extract_all_subjects_multi ... ok
+test trust::bundle::tests::extract_all_subjects_single ... ok
+test trust::policy::tests::load_policy_invalid_json ... ok
+test trust::policy::tests::load_policy_missing_field ... ok
+test trust::policy::tests::find_included_files_skips_well_known_heavy_dirs ... ok
+test trust::policy::tests::load_valid_policy ... ok
+test trust::policy::tests::load_policy_with_publishers ... ok
+test trust::policy::tests::merge_deduplicates_blocklist_by_digest ... ok
+test trust::policy::tests::merge_deduplicates_publishers_by_name ... ok
+test trust::policy::tests::merge_deduplicates_patterns ... ok
+test trust::policy::tests::merge_empty_errors ... ok
+test trust::policy::tests::merge_project_cannot_weaken ... ok
+test trust::policy::tests::merge_rejects_unsupported_version ... ok
+test trust::policy::tests::merge_single_policy_unchanged ... ok
+test trust::policy::tests::merge_strictest_enforcement_wins ... ok
+test trust::policy::tests::merge_unions_blocklist_digests ... ok
+test trust::policy::tests::merge_unions_includes ... ok
+test trust::policy::tests::merge_unions_publishers ... ok
+test trust::policy::tests::find_included_files_skips_bundle_sidecars ... ok
+test trust::signing::tests::export_public_key_produces_valid_spki ... ok
+test trust::signing::tests::export_public_key_to_pem ... ok
+test trust::signing::tests::generate_signing_key_produces_valid_keypair ... ok
+test trust::signing::tests::key_id_hex_differs_between_keys ... ok
+test trust::signing::tests::key_id_hex_is_deterministic ... ok
+test trust::signing::tests::sign_bytes_bundle_roundtrips_through_sigstore_bundle ... ok
+test trust::signing::tests::sign_bytes_produces_valid_bundle_json ... ok
+test trust::signing::tests::sign_bytes_bundle_contains_correct_digest ... ok
+test trust::signing::tests::sign_bytes_signature_verifies ... ok
+test trust::signing::tests::sign_files_produces_valid_multi_subject_bundle ... ok
+test trust::policy::tests::load_policy_from_file_success ... ok
+test trust::signing::tests::sign_files_roundtrips_through_sigstore_bundle ... ok
+test trust::signing::tests::sign_instruction_file_nonexistent_returns_error ... ok
+test trust::signing::tests::sign_files_signature_verifies ... ok
+test trust::signing::tests::sign_files_accepts_max_files ... ok
+test trust::signing::tests::sign_policy_bytes_differs_from_instruction_bytes ... ok
+test trust::signing::tests::sign_policy_bytes_signature_verifies ... ok
+test trust::signing::tests::sign_policy_file_nonexistent_returns_error ... ok
+test trust::signing::tests::sign_policy_bytes_uses_policy_predicate_type ... ok
+test trust::signing::tests::test_github_id_token_happy_path ... ok
+test trust::signing::tests::test_github_id_token_rejects_prefix_attack ... ok
+test trust::signing::tests::test_gitlab_id_token_happy_path ... ok
+test trust::signing::tests::test_gitlab_id_token_rejects_malformed_token ... ok
+test trust::signing::tests::test_gitlab_id_token_rejects_port_mismatch ... ok
+test trust::signing::tests::test_gitlab_id_token_rejects_prefix_matched_issuer ... ok
+test trust::signing::tests::test_gitlab_id_token_rejects_scheme_mismatch ... ok
+test trust::signing::tests::test_gitlab_id_token_rejects_wrong_issuer ... ok
+test trust::signing::tests::test_gitlab_id_token_self_managed_happy_path ... ok
+test trust::signing::tests::sign_files_rejects_too_many_files ... ok
+test trust::signing::tests::sign_policy_file_works ... ok
+test trust::types::tests::blocklist_check_hit ... ok
+test trust::types::tests::enforcement_is_blocking ... ok
+test trust::types::tests::enforcement_ordering ... ok
+test trust::types::tests::blocklist_check_miss ... ok
+test trust::types::tests::includes_invalid_glob ... ok
+test trust::types::tests::publisher_is_keyed_and_keyless ... ok
+test trust::types::tests::publisher_keyed_vs_keyless_no_cross_match ... ok
+test trust::signing::tests::sign_instruction_file_works ... ok
+test trust::types::tests::publisher_matches_keyed ... ok
+test trust::types::tests::publisher_matches_keyless ... ok
+test trust::types::tests::publisher_no_match_wrong_ref ... ok
+test trust::types::tests::includes_match ... ok
+test trust::types::tests::publisher_no_match_wrong_repo ... ok
+test trust::types::tests::publisher_rejects_empty_identity_fields ... ok
+test trust::types::tests::includes_returns_originals ... ok
+test trust::types::tests::trust_policy_serde_roundtrip ... ok
+test trust::signing::tests::write_bundle_creates_file ... ok
+test trust::types::tests::validate_version_accepts_current ... ok
+test trust::types::tests::validate_version_rejects_unsupported ... ok
+test trust::types::tests::verification_outcome_digest_mismatch ... ok
+test trust::types::tests::verification_outcome_unsigned_respects_enforcement ... ok
+test trust::types::tests::verification_outcome_untrusted_respects_enforcement ... ok
+test trust::types::tests::verification_outcome_verified ... ok
+test trust::types::tests::verification_outcome_blocked_always_blocks ... ok
+test trust::types::tests::wildcard_match_all ... ok
+test trust::types::tests::verification_result_serde_roundtrip ... ok
+test trust::types::tests::wildcard_match_exact ... ok
+test trust::types::tests::wildcard_match_interior ... ok
+test trust::types::tests::wildcard_match_multiple ... ok
+test trust::types::tests::wildcard_match_prefix ... ok
+test trust::types::tests::wildcard_match_suffix ... ok
+test trust::types::tests::wildcard_publisher_matching ... ok
+
+failures:
+
+---- trust::bundle::tests::load_production_trusted_root_succeeds stdout ----
+
+thread 'trust::bundle::tests::load_production_trusted_root_succeeds' (45652) panicked at crates\nono\src\trust\bundle.rs:879:9:
+assertion failed: root.is_ok()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- trust::bundle::tests::verify_bundle_with_invalid_digest stdout ----
+
+thread 'trust::bundle::tests::verify_bundle_with_invalid_digest' (41212) panicked at crates\nono\src\trust\bundle.rs:917:57:
+called `Result::unwrap()` on an `Err` value: TrustPolicy("failed to load production trusted root: TUF error: TUF repository load failed: Failed to verify trusted root metadata: Signature threshold of 3 not met for role root (0 valid signatures)")
+
+
+failures:
+    trust::bundle::tests::load_production_trusted_root_succeeds
+    trust::bundle::tests::verify_bundle_with_invalid_digest
+
+test result: FAILED. 181 passed; 2 failed; 0 ignored; 0 measured; 477 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p nono --lib`
+EXIT_CODE=101
