@@ -798,7 +798,6 @@ pub fn execute_supervised(
     // The guard must live until after the child is reaped (RAII cleanup on Linux).
     #[cfg(target_os = "linux")]
     let (unix_resource_guard, linux_cgroup_procs_path_nul) = {
-        use std::sync::{atomic::AtomicBool, Arc};
         if resource_limits.is_empty() {
             (None::<supervisor_linux::cgroup::CgroupSession>, Vec::new())
         } else {
