@@ -215,8 +215,22 @@ No hard FAILED truths are identified from static verification. The 2 uncertain t
 
 **Open items (not goal blockers, but should be tracked):**
 - `memory_kill` / `timeout_kill` fields not wired into `nono inspect` output (PLAN scoped as optional; accept existing exit-code reporting)
-- CR-01 (format! in post-fork child) and CR-02 (Direct timeout no-warn) from code review
-- WR-03 (cgroup path security: missing Path::starts_with guard) — security hardening gap per CLAUDE.md
+
+### Gaps to Close (user-selected 2026-05-10 from 25-REVIEW.md)
+
+User reviewed VERIFICATION.md `human_needed` status and selected 4 code-review findings to address before phase completion. The host-gated runtime acceptance items (HUMAN-UAT.md tests 1–6) are kept separate, to be closed via `/gsd-verify-work 25` on Linux/macOS host.
+
+| # | ID | Severity | File | Description | Acceptance |
+|---|----|----------|------|-------------|------------|
+| 1 | CR-01 | blocker | crates/nono-cli/src/exec_strategy.rs:862-863, 899, 933, 951, 994, 1011, 1054, 1071, 1093 | `format!()` calls in post-fork child branch of `execute_supervised` — heap allocation in async-signal-unsafe context risks allocator-mutex deadlock when parent holds it at `fork()` time. | Replace each `format!()` in child branch with `const MSG: &[u8]` static byte strings, or write via `write_all` with pre-formatted parent-side messages. Child branch must contain zero `format!`/`println!`/`eprintln!`/`String` calls between `fork()` and `exec()`. |
+| 2 | CR-02 | blocker | crates/nono-cli/src/exec_strategy.rs:1280-1291 | `--timeout` is silently not enforced in Direct strategy mode; user gets no warning. | Emit a `warn!()` log line (and visible stderr line on `-v` or always) when `--timeout` is set AND strategy resolves to Direct. Message names the limitation and suggests `--strategy supervised`. |
+| 3 | WR-03 | warning | crates/nono-cli/src/exec_strategy/supervisor_linux.rs:905-906 (around `CgroupSession::detect_from_str`) | Cgroup path constructed via `.join(cgroup_rel.trim_start_matches('/'))` without `Path::starts_with("/sys/fs/cgroup")` post-check. Per CLAUDE.md §Path Handling, this is a flagged security footgun if `/proc/self/cgroup` content is ever attacker-controlled. | Canonicalize the joined path, assert `canon.starts_with("/sys/fs/cgroup")` after construction, return `NonoError` on mismatch. Add a regression test that feeds a malicious cgroup-relative path with `..` components. |
+| 4 | WR-02/04/05 | warning (group) | crates/nono-cli/src/exec_strategy/supervisor_macos.rs | (a) WR-02: `let _ = setrlimit(...)` silently discards errors in supervised-child branch — sandbox may run without requested `--max-processes` enforcement if hard limit is below request. (b) WR-04: `getpgid(Some(child)).unwrap_or(child)` falls back to child PID as pgrp if `getpgid` fails; under PID reuse, `kill(-pgrp, SIGKILL)` could target the wrong process group. (c) WR-05: `e as i32` cast on `nix::errno::Errno` relies on internal repr. | (a) WR-02: surface setrlimit failure as `NonoError::ResourceLimitApply { feature, errno }` and fail closed instead of swallowing. (b) WR-04: match on `Result` from `getpgid`; on `Err`, log and skip the kill — do NOT fall back. (c) WR-05: use `std::io::Error::from(e)` to extract the raw errno via the public API. |
+
+### Out of Scope for This Gap Closure
+
+- HUMAN-UAT.md tests 1–6 (host-gated runtime acceptance) — remain pending in `25-HUMAN-UAT.md`, closed via `/gsd-verify-work 25` on Linux/macOS host.
+- WR-01 (cgroup detection duplication in test), WR-06 (`select_exec_strategy` always returns Supervised), WR-07 (Direct mode timeout no-warn — subsumed by CR-02), and 3 info items — deferred until production-hardening pass.
 
 ---
 
