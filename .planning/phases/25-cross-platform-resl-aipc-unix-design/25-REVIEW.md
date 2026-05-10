@@ -9,10 +9,14 @@ files_reviewed_list:
   - crates/nono-cli/src/exec_strategy/supervisor_macos.rs
   - crates/nono-cli/tests/resl_nix_async_signal_safety.rs
 findings:
-  critical: 1
+  critical: 0
   warning: 1
   info: 3
-  total: 5
+  total: 4
+  resolved:
+    - id: CR-A
+      resolved_in: ebbd6257
+      summary: "Removed orphan `use std::sync::{atomic::AtomicBool, Arc};` at exec_strategy.rs:801 left behind by WR-C cleanup. Linux CI now passes -D warnings."
 status: issues_found
 ---
 
