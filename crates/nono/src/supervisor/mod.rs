@@ -31,15 +31,17 @@ pub mod types;
 
 pub use socket::SupervisorSocket;
 pub use types::{
-    ApprovalDecision, AuditEntry, CapabilityRequest, SupervisorMessage, SupervisorResponse,
-    UrlOpenRequest,
+    ApprovalDecision, ApprovalRequest, AuditEntry, CapabilityRequest, SupervisorMessage,
+    SupervisorResponse, UrlOpenRequest,
 };
 
 use crate::error::Result;
 
 /// Trait for pluggable approval backends.
 ///
-/// Implementors decide whether to grant or deny a [`CapabilityRequest`].
+/// Implementors decide whether to grant or deny an [`ApprovalRequest`], which
+/// covers filesystem capability expansion, network access, and ETI command
+/// launch (the `Approve` intercept action).
 ///
 /// # Built-in implementations (in nono-cli)
 ///
@@ -56,15 +58,15 @@ use crate::error::Result;
 /// # Example
 ///
 /// ```rust
-/// use nono::supervisor::{ApprovalBackend, ApprovalDecision, CapabilityRequest};
+/// use nono::supervisor::{ApprovalBackend, ApprovalDecision, ApprovalRequest};
 /// use nono::Result;
 ///
 /// struct AutoDeny;
 ///
 /// impl ApprovalBackend for AutoDeny {
-///     fn request_capability(
+///     fn request_approval(
 ///         &self,
-///         _request: &CapabilityRequest,
+///         _request: &ApprovalRequest,
 ///     ) -> Result<ApprovalDecision> {
 ///         Ok(ApprovalDecision::Denied {
 ///             reason: "auto-deny policy".to_string(),
@@ -77,17 +79,18 @@ use crate::error::Result;
 /// }
 /// ```
 pub trait ApprovalBackend: Send + Sync {
-    /// Decide whether to grant or deny a capability request.
+    /// Decide whether to grant or deny an approval request.
     ///
-    /// This may block (e.g., waiting for user input or a webhook response).
-    /// The supervisor should set a read timeout on the socket to prevent
-    /// indefinite blocking.
+    /// The request may be a filesystem capability expansion, a network access
+    /// request, or an ETI command-launch request. This may block (e.g.,
+    /// waiting for user input or a webhook response). The supervisor should
+    /// apply a timeout and treat expiry as a denial.
     ///
     /// # Errors
     ///
     /// Returns an error if the backend encounters a communication failure
-    /// or internal error. The supervisor should treat errors as denials.
-    fn request_capability(&self, request: &CapabilityRequest) -> Result<ApprovalDecision>;
+    /// or internal error. The supervisor treats errors as denials.
+    fn request_approval(&self, request: &ApprovalRequest) -> Result<ApprovalDecision>;
 
     /// Human-readable name for this backend (used in audit logs).
     fn backend_name(&self) -> &str;
@@ -101,7 +104,7 @@ mod tests {
     struct TestDenyBackend;
 
     impl ApprovalBackend for TestDenyBackend {
-        fn request_capability(&self, _request: &CapabilityRequest) -> Result<ApprovalDecision> {
+        fn request_approval(&self, _request: &ApprovalRequest) -> Result<ApprovalDecision> {
             Ok(ApprovalDecision::Denied {
                 reason: "test deny".to_string(),
             })
@@ -115,7 +118,7 @@ mod tests {
     struct TestGrantBackend;
 
     impl ApprovalBackend for TestGrantBackend {
-        fn request_capability(&self, _request: &CapabilityRequest) -> Result<ApprovalDecision> {
+        fn request_approval(&self, _request: &ApprovalRequest) -> Result<ApprovalDecision> {
             Ok(ApprovalDecision::Granted)
         }
 
@@ -124,8 +127,8 @@ mod tests {
         }
     }
 
-    fn make_request() -> CapabilityRequest {
-        CapabilityRequest {
+    fn make_capability_request() -> ApprovalRequest {
+        ApprovalRequest::Capability {
             request_id: "test-001".to_string(),
             path: "/tmp/test".into(),
             access: AccessMode::Read,
@@ -138,8 +141,8 @@ mod tests {
     #[test]
     fn test_deny_backend() {
         let backend = TestDenyBackend;
-        let request = make_request();
-        let decision = backend.request_capability(&request).expect("decision");
+        let request = make_capability_request();
+        let decision = backend.request_approval(&request).expect("decision");
         assert!(decision.is_denied());
         assert_eq!(backend.backend_name(), "test-deny");
     }
@@ -147,8 +150,8 @@ mod tests {
     #[test]
     fn test_grant_backend() {
         let backend = TestGrantBackend;
-        let request = make_request();
-        let decision = backend.request_capability(&request).expect("decision");
+        let request = make_capability_request();
+        let decision = backend.request_approval(&request).expect("decision");
         assert!(decision.is_granted());
         assert_eq!(backend.backend_name(), "test-grant");
     }
@@ -168,5 +171,54 @@ mod tests {
         let timeout = ApprovalDecision::Timeout;
         assert!(!timeout.is_granted());
         assert!(!timeout.is_denied());
+    }
+
+    #[test]
+    fn test_approval_request_accessors() {
+        let cap = make_capability_request();
+        assert_eq!(cap.request_id(), "test-001");
+        assert_eq!(cap.session_id(), "sess-001");
+
+        let net = ApprovalRequest::Network {
+            request_id: "net-001".to_string(),
+            host: "example.com".to_string(),
+            port: 443,
+            protocol: "tcp".to_string(),
+            resolved_ips: vec![],
+            reason: None,
+            child_pid: 42,
+            session_id: "sess-002".to_string(),
+        };
+        assert_eq!(net.request_id(), "net-001");
+        assert_eq!(net.session_id(), "sess-002");
+
+        let cmd = ApprovalRequest::Command {
+            request_id: "cmd-001".to_string(),
+            command: "git".to_string(),
+            args: vec!["git".to_string(), "push".to_string()],
+            caller: "session".to_string(),
+            intercept_rule: "push".to_string(),
+            reason: None,
+            child_pid: 99,
+            session_id: "sess-003".to_string(),
+        };
+        assert_eq!(cmd.request_id(), "cmd-001");
+        assert_eq!(cmd.session_id(), "sess-003");
+    }
+
+    #[test]
+    fn test_capability_request_into_approval_request() {
+        let cap_req = CapabilityRequest {
+            request_id: "r1".to_string(),
+            path: "/tmp/foo".into(),
+            access: AccessMode::ReadWrite,
+            reason: Some("test".to_string()),
+            child_pid: 7,
+            session_id: "s1".to_string(),
+        };
+        let approval: ApprovalRequest = cap_req.into();
+        assert_eq!(approval.request_id(), "r1");
+        assert_eq!(approval.session_id(), "s1");
+        assert!(matches!(approval, ApprovalRequest::Capability { .. }));
     }
 }

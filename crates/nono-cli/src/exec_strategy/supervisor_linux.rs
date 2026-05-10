@@ -447,7 +447,7 @@ pub(super) fn handle_seccomp_notification(
     };
 
     // 8. Delegate to approval backend (for both instruction and non-instruction files)
-    let request = nono::supervisor::CapabilityRequest {
+    let request = nono::supervisor::ApprovalRequest::Capability {
         request_id: format!("seccomp-{}", unique_request_id()),
         path: path.clone(),
         access,
@@ -456,7 +456,7 @@ pub(super) fn handle_seccomp_notification(
         session_id: config.session_id.to_string(),
     };
 
-    let decision = match config.approval_backend.request_capability(&request) {
+    let decision = match config.approval_backend.request_approval(&request) {
         Ok(d) => {
             if d.is_denied() {
                 record_denial(
@@ -1321,16 +1321,16 @@ mod tests {
         };
         use nix::libc;
         use nono::sandbox::{SYS_BIND, SYS_CONNECT, SockaddrInfo, UnixSocketKind};
-        use nono::supervisor::{ApprovalDecision, CapabilityRequest};
+        use nono::supervisor::{ApprovalDecision, ApprovalRequest};
         use nono::{ApprovalBackend, UnixSocketCapability, UnixSocketMode};
         use std::os::unix::net::UnixListener;
         use std::path::{Path, PathBuf};
 
         struct DenyAllBackend;
         impl ApprovalBackend for DenyAllBackend {
-            fn request_capability(
+            fn request_approval(
                 &self,
-                _req: &CapabilityRequest,
+                _req: &ApprovalRequest,
             ) -> nono::Result<ApprovalDecision> {
                 Ok(ApprovalDecision::Denied {
                     reason: "test".to_string(),

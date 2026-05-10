@@ -442,7 +442,7 @@ pub(crate) fn verify_audit_log(
 mod tests {
     use super::*;
     use nono::AccessMode;
-    use nono::supervisor::{ApprovalDecision, AuditEntry, CapabilityRequest, UrlOpenRequest};
+    use nono::supervisor::{ApprovalDecision, ApprovalRequest, AuditEntry, UrlOpenRequest};
     use nono::undo::{NetworkAuditDecision, NetworkAuditEvent, NetworkAuditMode};
     use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
@@ -542,7 +542,7 @@ mod tests {
         recorder
             .record_capability_decision(AuditEntry {
                 timestamp: UNIX_EPOCH + Duration::from_secs(5),
-                request: CapabilityRequest {
+                request: ApprovalRequest::Capability {
                     request_id: "req-1".to_string(),
                     path: PathBuf::from("/tmp/example"),
                     access: AccessMode::ReadWrite,

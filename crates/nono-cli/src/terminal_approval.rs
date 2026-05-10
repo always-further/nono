@@ -4,7 +4,7 @@
 //! additional filesystem access. This is the default approval backend
 //! for `nono run`.
 
-use nono::{AccessMode, ApprovalBackend, ApprovalDecision, CapabilityRequest, NonoError, Result};
+use nono::{AccessMode, ApprovalBackend, ApprovalDecision, ApprovalRequest, NonoError, Result};
 use std::io::{BufRead, IsTerminal, Write};
 
 /// Interactive terminal approval backend.
@@ -16,7 +16,7 @@ use std::io::{BufRead, IsTerminal, Write};
 pub struct TerminalApproval;
 
 impl ApprovalBackend for TerminalApproval {
-    fn request_capability(&self, request: &CapabilityRequest) -> Result<ApprovalDecision> {
+    fn request_approval(&self, request: &ApprovalRequest) -> Result<ApprovalDecision> {
         let stderr = std::io::stderr();
         if !stderr.is_terminal() {
             return Ok(ApprovalDecision::Denied {
@@ -24,16 +24,69 @@ impl ApprovalBackend for TerminalApproval {
             });
         }
 
-        // Display the request (sanitize untrusted fields from the sandboxed child)
         eprintln!();
-        eprintln!("[nono] The sandboxed process is requesting additional access:");
-        eprintln!(
-            "[nono]   Path:   {}",
-            sanitize_for_terminal(&request.path.display().to_string())
-        );
-        eprintln!("[nono]   Access: {}", format_access_mode(&request.access));
-        if let Some(ref reason) = request.reason {
-            eprintln!("[nono]   Reason: {}", sanitize_for_terminal(reason));
+        match request {
+            ApprovalRequest::Capability {
+                path,
+                access,
+                reason,
+                ..
+            } => {
+                eprintln!("[nono] The sandboxed process is requesting additional access:");
+                eprintln!(
+                    "[nono]   Path:   {}",
+                    sanitize_for_terminal(&path.display().to_string())
+                );
+                eprintln!("[nono]   Access: {}", format_access_mode(access));
+                if let Some(ref r) = reason {
+                    eprintln!("[nono]   Reason: {}", sanitize_for_terminal(r));
+                }
+            }
+            ApprovalRequest::Network {
+                host,
+                port,
+                protocol,
+                reason,
+                ..
+            } => {
+                eprintln!("[nono] The sandboxed process is requesting network access:");
+                eprintln!(
+                    "[nono]   Host:     {}",
+                    sanitize_for_terminal(host)
+                );
+                eprintln!("[nono]   Port:     {port}");
+                eprintln!("[nono]   Protocol: {protocol}");
+                if let Some(ref r) = reason {
+                    eprintln!("[nono]   Reason: {}", sanitize_for_terminal(r));
+                }
+            }
+            ApprovalRequest::Command {
+                command,
+                args,
+                caller,
+                intercept_rule,
+                reason,
+                ..
+            } => {
+                eprintln!("[nono] ETI command launch requires approval:");
+                eprintln!(
+                    "[nono]   Command: {}",
+                    sanitize_for_terminal(command)
+                );
+                let display_args: Vec<String> = args
+                    .iter()
+                    .skip(1)
+                    .map(|a| sanitize_for_terminal(a))
+                    .collect();
+                if !display_args.is_empty() {
+                    eprintln!("[nono]   Args:    {}", display_args.join(" "));
+                }
+                eprintln!("[nono]   Caller:  {}", sanitize_for_terminal(caller));
+                eprintln!("[nono]   Rule:    {}", sanitize_for_terminal(intercept_rule));
+                if let Some(ref r) = reason {
+                    eprintln!("[nono]   Reason: {}", sanitize_for_terminal(r));
+                }
+            }
         }
         eprintln!("[nono]");
         eprint!("[nono] Grant access? [y/N] ");
@@ -129,6 +182,7 @@ fn format_access_mode(access: &AccessMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nono::AccessMode;
 
     #[test]
     fn test_terminal_approval_backend_name() {

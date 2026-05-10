@@ -2607,7 +2607,7 @@ fn handle_supervisor_message(
                 sock.send_response(&response)?;
                 record_capability_audit(
                     config,
-                    request,
+                    nono::supervisor::ApprovalRequest::from(request),
                     decision_started,
                     response_decision(&response),
                 )?;
@@ -2660,7 +2660,7 @@ fn handle_supervisor_message(
                         // Stash the verified digest for TOCTOU re-check at open time
                         verified_digest = Some(verified.digest);
                         // Instruction file verified — proceed to approval backend
-                        match config.approval_backend.request_capability(&request) {
+                        match config.approval_backend.request_approval(&nono::supervisor::ApprovalRequest::from(request.clone())) {
                             Ok(d) => {
                                 if d.is_denied() {
                                     record_denial(
@@ -2712,7 +2712,7 @@ fn handle_supervisor_message(
                 }
             } else {
                 // 3. Delegate to approval backend (non-instruction files)
-                match config.approval_backend.request_capability(&request) {
+                match config.approval_backend.request_approval(&nono::supervisor::ApprovalRequest::from(request.clone())) {
                     Ok(d) => {
                         if d.is_denied() {
                             record_denial(
@@ -2764,7 +2764,7 @@ fn handle_supervisor_message(
                             sock.send_response(&response)?;
                             record_capability_audit(
                                 config,
-                                request,
+                                nono::supervisor::ApprovalRequest::from(request),
                                 decision_started,
                                 response_decision(&response),
                             )?;
@@ -2782,7 +2782,7 @@ fn handle_supervisor_message(
                         sock.send_response(&response)?;
                         record_capability_audit(
                             config,
-                            request,
+                            nono::supervisor::ApprovalRequest::from(request),
                             decision_started,
                             response_decision(&response),
                         )?;
@@ -2799,7 +2799,7 @@ fn handle_supervisor_message(
             sock.send_response(&response)?;
             record_capability_audit(
                 config,
-                request,
+                nono::supervisor::ApprovalRequest::from(request),
                 decision_started,
                 response_decision(&response),
             )?;
@@ -2849,7 +2849,7 @@ fn response_decision(response: &SupervisorResponse) -> ApprovalDecision {
 
 fn record_capability_audit(
     config: &SupervisorConfig<'_>,
-    request: nono::supervisor::CapabilityRequest,
+    request: nono::supervisor::ApprovalRequest,
     decision_started: Instant,
     decision: ApprovalDecision,
 ) -> Result<()> {
@@ -3960,9 +3960,9 @@ mod tests {
 
         struct DenyAll;
         impl ApprovalBackend for DenyAll {
-            fn request_capability(
+            fn request_approval(
                 &self,
-                _req: &nono::supervisor::CapabilityRequest,
+                _req: &nono::supervisor::ApprovalRequest,
             ) -> nono::Result<ApprovalDecision> {
                 Ok(ApprovalDecision::Denied {
                     reason: "test".to_string(),
@@ -4073,9 +4073,9 @@ mod tests {
 
         struct DenyAll;
         impl ApprovalBackend for DenyAll {
-            fn request_capability(
+            fn request_approval(
                 &self,
-                _req: &nono::supervisor::CapabilityRequest,
+                _req: &nono::supervisor::ApprovalRequest,
             ) -> nono::Result<ApprovalDecision> {
                 Ok(ApprovalDecision::Denied {
                     reason: "test".to_string(),
@@ -4159,9 +4159,9 @@ mod tests {
 
     struct TestDenyBackend;
     impl ApprovalBackend for TestDenyBackend {
-        fn request_capability(
+        fn request_approval(
             &self,
-            _req: &nono::supervisor::CapabilityRequest,
+            _req: &nono::supervisor::ApprovalRequest,
         ) -> nono::Result<ApprovalDecision> {
             Ok(ApprovalDecision::Denied {
                 reason: "test".to_string(),
@@ -4459,9 +4459,9 @@ mod tests {
     fn test_should_install_macos_open_shim_respects_launch_services_flag() {
         struct TestBackend;
         impl ApprovalBackend for TestBackend {
-            fn request_capability(
+            fn request_approval(
                 &self,
-                _req: &nono::supervisor::CapabilityRequest,
+                _req: &nono::supervisor::ApprovalRequest,
             ) -> nono::Result<ApprovalDecision> {
                 Ok(ApprovalDecision::Denied {
                     reason: "test".to_string(),
