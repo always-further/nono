@@ -40,18 +40,80 @@ fn read_exec_strategy() -> String {
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
-/// Find the byte range of the `Ok(ForkResult::Child) => {` arm by counting braces.
+/// Find the line range of the post-fork child arm by searching for the sentinel
+/// comments `// CR-01-CHILD-ARM-START` and `// CR-01-CHILD-ARM-END`.
 ///
-/// Returns `(start_line, end_line)` (1-indexed, inclusive). Panics if the marker is
-/// not found — that would indicate a refactor we want to know about.
+/// Returns `(start_line, end_line)` (1-indexed, inclusive) — the lines BETWEEN
+/// the sentinels (not including the sentinel comments themselves).
+///
+/// Panics if either sentinel is missing — that indicates the production code
+/// was refactored and the sentinels need to be re-placed.
+///
+/// This replaces the previous brace-counting + first-match-find approach
+/// (WR-A + WR-B in 25-REVIEW-GAPS.md): brace counting ignored string literals
+/// and block comments; first-match-find could be silently misaimed by a
+/// future test-helper child arm added before line 844.
 fn find_child_branch_lines(src: &str) -> (usize, usize) {
-    let marker = "Ok(ForkResult::Child) => {";
-    let start_byte = src
-        .find(marker)
-        .expect("expected `Ok(ForkResult::Child) => {` marker in exec_strategy.rs");
+    const START_SENTINEL: &str = "CR-01-CHILD-ARM-START";
+    const END_SENTINEL: &str = "CR-01-CHILD-ARM-END";
 
-    // Count braces from the opening `{` of the arm body.
-    let body_start = start_byte + marker.len() - 1; // index of the `{`
+    let start_byte = src.find(START_SENTINEL).unwrap_or_else(|| {
+        panic!(
+            "expected `{START_SENTINEL}` sentinel in exec_strategy.rs — \
+             production child arm is missing its scoping sentinel; \
+             see 25-VERIFICATION.md CR-01-RESIDUAL fix"
+        )
+    });
+    let end_byte = src.find(END_SENTINEL).unwrap_or_else(|| {
+        panic!(
+            "expected `{END_SENTINEL}` sentinel in exec_strategy.rs — \
+             production child arm is missing its closing sentinel; \
+             see 25-VERIFICATION.md CR-01-RESIDUAL fix"
+        )
+    });
+    assert!(
+        end_byte > start_byte,
+        "CR-01-CHILD-ARM-END must appear after CR-01-CHILD-ARM-START in source order \
+         (got start={start_byte}, end={end_byte})"
+    );
+
+    // Convert byte offsets to 1-indexed line numbers. The returned range covers
+    // the lines BETWEEN the two sentinels (exclusive of the sentinel lines
+    // themselves), so line-comment stripping in the caller does not eat the
+    // sentinels' own contents.
+    let start_line = src[..start_byte].matches('\n').count() + 1;
+    let end_line = src[..end_byte].matches('\n').count() + 1;
+    (start_line + 1, end_line - 1)
+}
+
+/// Return the body (everything between the opening `{` and matching closing `}`)
+/// of a function whose signature begins with `fn_signature_prefix`. Used for
+/// per-helper assertions (e.g. clear_close_on_exec) so the regression test can
+/// reach beyond the lexical child arm region.
+///
+/// `fn_signature_prefix` should be a stable, unique substring of the function
+/// signature line — e.g. `"fn clear_close_on_exec(fd: i32) -> std::io::Result<()>"`.
+///
+/// Panics if the signature is not found.
+fn slice_function_body(src: &str, fn_signature_prefix: &str) -> String {
+    let sig_byte = src.find(fn_signature_prefix).unwrap_or_else(|| {
+        panic!(
+            "expected function signature `{fn_signature_prefix}` in exec_strategy.rs — \
+             if this helper was renamed or its signature changed, update the \
+             strengthened CR-01-RESIDUAL test in resl_nix_async_signal_safety.rs"
+        )
+    });
+    // Locate the opening `{` after the signature.
+    let body_start = src[sig_byte..]
+        .find('{')
+        .map(|off| sig_byte + off)
+        .expect("function signature without an opening brace");
+
+    // Brace counting is safe here because we are scanning a *small, named function*
+    // body, not an arbitrary match arm. The function signature is a stable anchor;
+    // string-literal/comment fragility (WR-B's concern about the broader child arm)
+    // is unlikely to materialize inside this single helper. If a future commit
+    // introduces a `{` inside a string literal here, the test failure will be loud.
     let bytes = src.as_bytes();
     let mut depth = 0i32;
     let mut end_byte = body_start;
@@ -70,12 +132,9 @@ fn find_child_branch_lines(src: &str) -> (usize, usize) {
     }
     assert!(
         end_byte > body_start,
-        "could not find matching `}}` for child branch arm body"
+        "could not find matching `}}` for `{fn_signature_prefix}`"
     );
-
-    let start_line = src[..start_byte].matches('\n').count() + 1;
-    let end_line = src[..end_byte].matches('\n').count() + 1;
-    (start_line, end_line)
+    src[body_start..=end_byte].to_string()
 }
 
 /// Extract the substring of `src` covering the lexical region `[start_line..=end_line]`
@@ -124,6 +183,42 @@ fn cr_01_no_format_macro_in_post_fork_child_branch() {
          \n\
          See the already-correct chdir handler near the bottom of the child arm for \
          the reference pattern."
+    );
+
+    // CR-01-RESIDUAL: clear_close_on_exec is reachable from the post-fork child
+    // arm (line 950 call site). Its body must not allocate. This per-helper
+    // scan closes the call-graph gap that the lexical region scan above misses.
+    // See 25-VERIFICATION.md CR-01-RESIDUAL gaps.missing block, option (b).
+    let helper_body = slice_function_body(
+        &src,
+        "fn clear_close_on_exec(fd: i32) -> std::io::Result<()>",
+    );
+    // Strip line comments so SAFETY/doc remarks that mention `format!(...)`
+    // do not false-positive.
+    let helper_stripped: String = helper_body
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(idx) => &line[..idx],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let helper_format_count = helper_stripped.matches("format!(").count();
+    assert_eq!(
+        helper_format_count, 0,
+        "CR-01-RESIDUAL regression: found {helper_format_count} `format!(` \
+         invocation(s) inside `clear_close_on_exec` body. This helper is called \
+         from the post-fork child arm of execute_supervised (line 950 call site), \
+         so any heap allocation here re-opens the allocator-mutex-deadlock \
+         primitive that CR-01 was supposed to eliminate.\n\
+         \n\
+         Replace `format!(...)` with `std::io::Error::last_os_error()` \
+         (which captures errno into a stack-resident io::Error::Repr without \
+         allocating). The function signature must remain `fn clear_close_on_exec(fd: i32) \
+         -> std::io::Result<()>` so the call site discards the io::Error via \
+         `if let Err(_e) = ...`.\n\
+         \n\
+         See 25-VERIFICATION.md gaps.missing block for the canonical fix."
     );
 }
 
