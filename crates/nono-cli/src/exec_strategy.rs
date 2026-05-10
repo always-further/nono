@@ -2765,14 +2765,18 @@ fn open_url_in_browser(url: &str) -> std::result::Result<(), String> {
 }
 
 /// Clear `FD_CLOEXEC` on a file descriptor so it survives `execve()`.
-fn clear_close_on_exec(fd: i32) -> Result<()> {
+///
+/// Returns `std::io::Result<()>` so callers in async-signal-unsafe contexts
+/// (post-fork child) can react to failure without triggering heap allocation.
+/// `std::io::Error::last_os_error()` captures the errno into a stack-resident
+/// `io::Error::Repr` for raw OS errors and does NOT allocate — this is the
+/// CR-01-RESIDUAL fix per 25-VERIFICATION.md gaps.missing block.
+fn clear_close_on_exec(fd: i32) -> std::io::Result<()> {
     // SAFETY: `fcntl` is called with a valid fd owned by this process.
+    // `fcntl` itself is async-signal-safe (POSIX).
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
-        return Err(NonoError::SandboxInit(format!(
-            "fcntl(F_GETFD) failed: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(std::io::Error::last_os_error());
     }
 
     let new_flags = flags & !libc::FD_CLOEXEC;
@@ -2780,10 +2784,7 @@ fn clear_close_on_exec(fd: i32) -> Result<()> {
         // SAFETY: `fcntl` is called with a valid fd and descriptor flags.
         let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, new_flags) };
         if rc < 0 {
-            return Err(NonoError::SandboxInit(format!(
-                "fcntl(F_SETFD) failed: {}",
-                std::io::Error::last_os_error()
-            )));
+            return Err(std::io::Error::last_os_error());
         }
     }
 
