@@ -408,7 +408,30 @@ fn run_sign_keyless(args: TrustSignArgs) -> Result<()> {
     // Discover OIDC token from ambient environment (GitHub Actions, etc.)
     let token = discover_oidc_token(&rt)?;
 
+    // Test-only: allow overriding Fulcio + Rekor URLs via env vars so
+    // hermetic integration tests can inject httpmock servers without
+    // modifying the production binary. Only compiled in test builds
+    // (feature = "test-trust-overrides").
+    #[cfg(feature = "test-trust-overrides")]
+    let context = {
+        let fulcio_url = std::env::var("NONO_TEST_FULCIO_URL")
+            .unwrap_or_else(|_| "https://fulcio.sigstore.dev".to_string());
+        let rekor_url = std::env::var("NONO_TEST_REKOR_URL")
+            .unwrap_or_else(|_| "https://rekor.sigstore.dev".to_string());
+        // SigningScheme is from sigstore-crypto (re-exported via sigstore-verify).
+        // Use EcdsaP256Sha256 — the default for Fulcio-issued certificates.
+        let config = sigstore_sign::SigningConfig {
+            fulcio_url,
+            rekor_url,
+            tsa_url: None,
+            signing_scheme: trust::SigningScheme::EcdsaP256Sha256,
+            rekor_api_version: sigstore_sign::rekor::RekorApiVersion::default(),
+        };
+        sigstore_sign::SigningContext::with_config(config)
+    };
+    #[cfg(not(feature = "test-trust-overrides"))]
     let context = sigstore_sign::SigningContext::production();
+
     let signer = context.signer(token);
 
     if multi_subject {

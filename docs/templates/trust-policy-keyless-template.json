@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "includes": [
+    "SKILLS*.md",
+    "CLAUDE.md",
+    "instruction*.md"
+  ],
+  "publishers": [
+    {
+      "name": "nono-release-gha",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "repository": "always-further/nono",
+      "workflow": ".github/workflows/release.yml",
+      "ref_pattern": "refs/tags/v*"
+    },
+    {
+      "name": "nono-release-gitlab",
+      "issuer": "https://gitlab.com",
+      "repository": "always-further/nono",
+      "workflow": ".gitlab-ci.yml",
+      "ref_pattern": "refs/tags/v*"
+    }
+  ],
+  "blocklist": {
+    "digests": []
+  },
+  "enforcement": "deny"
+}
