@@ -1,0 +1,35 @@
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-gh-capture",
+    "version": "1.0.0",
+    "description": "ETI test: intercept gh auth token via capture. The supervisor (outside sandbox) runs the real gh auth token and proxies the output, so the sandboxed agent receives the token without direct config access."
+  },
+  "command_policies": {
+    "session_can_use": ["gh"],
+    "commands": {
+      "gh": {
+        "executable": "/opt/homebrew/bin/gh",
+        "sandbox": {
+          "environment": {
+            "allow_vars": [
+              "PATH",
+              "HOME",
+              "USER",
+              "LOGNAME",
+              "GH_TOKEN",
+              "GITHUB_TOKEN",
+              "GH_HOST"
+            ]
+          }
+        },
+        "intercept": [
+          {
+            "args": ["auth", "token"],
+            "action": { "type": "capture" }
+          }
+        ]
+      }
+    }
+  }
+}

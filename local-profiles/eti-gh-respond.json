@@ -1,0 +1,23 @@
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-gh-respond",
+    "version": "1.0.0",
+    "description": "ETI test: intercept gh auth token with a static fake response. No real credentials accessed."
+  },
+  "command_policies": {
+    "session_can_use": ["gh"],
+    "commands": {
+      "gh": {
+        "executable": "/opt/homebrew/bin/gh",
+        "sandbox": {},
+        "intercept": [
+          {
+            "args": ["auth", "token"],
+            "action": { "type": "respond", "stdout": "ghp_intercepted_fake_token_0000\n" }
+          }
+        ]
+      }
+    }
+  }
+}

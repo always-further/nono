@@ -4137,9 +4137,9 @@ mod macos {
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::ffi::{CString, OsStr, OsString};
-    use std::fs::{self, File};
+    use std::fs;
     use std::io::{Read, Write};
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
@@ -4684,6 +4684,7 @@ mod macos {
         }
 
         let caller = resolve_caller(auth.peer_pid, session_root_pid, state)?;
+        let policy = select_effective_policy(&state.plan.config, &request.command, &caller)?;
         let command_config = state
             .plan
             .config
@@ -4692,7 +4693,6 @@ mod macos {
             .ok_or_else(|| {
                 NonoError::SandboxInit(format!("missing command config for {}", request.command))
             })?;
-        let policy = select_effective_policy(&caller, &request.command, command_config)?;
 
         let intercept_action = resolve_intercept_action(command_config, &request.argv);
 
@@ -5235,29 +5235,26 @@ mod macos {
             cmd.arg(OsString::from_vec(arg.clone()));
         }
 
-        let mut pipe_fds = [-1i32; 2];
-        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
-            return Err(NonoError::SandboxInit(format!(
-                "ETI Capture: pipe() failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        // SAFETY: pipe() returned fresh fds.
-        let pipe_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
-        let pipe_write = unsafe { File::from_raw_fd(pipe_fds[1]) };
-
+        // Use Stdio::piped() so Rust manages the pipe internally.
+        // Rust closes the parent's write end after spawn(), allowing read_to_end
+        // to return once the child closes its stdout — unlike Stdio::from(file)
+        // which keeps the write fd alive inside Command (&mut self) indefinitely.
         cmd.stdin(Stdio::null())
-            .stdout(Stdio::from(pipe_write))
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
         let mut child = cmd.spawn().map_err(NonoError::CommandExecution)?;
         track_child(state, child.id(), &request.command)?;
 
+        let child_stdout = child.stdout.take().ok_or_else(|| {
+            NonoError::SandboxInit("ETI Capture: missing child stdout pipe".to_string())
+        })?;
+
         let mut captured = Vec::new();
         {
             use std::io::Read;
-            let mut reader = std::io::BufReader::new(File::from(pipe_read))
-                .take((MAX_CAPTURE_STDOUT as u64) + 1);
+            let mut reader =
+                std::io::BufReader::new(child_stdout).take((MAX_CAPTURE_STDOUT as u64) + 1);
             reader
                 .read_to_end(&mut captured)
                 .map_err(|e| NonoError::SandboxInit(format!("ETI Capture pipe read: {e}")))?;
@@ -5366,48 +5363,62 @@ mod macos {
     // ── Policy selection ──────────────────────────────────────────────────────
 
     fn select_effective_policy<'a>(
-        caller: &Caller,
+        plan: &'a CommandPoliciesConfig,
         command_name: &str,
-        config: &'a crate::command_policy::CommandPolicyConfig,
+        caller: &Caller,
     ) -> Result<&'a CommandSandboxConfig> {
+        let command = plan.commands.get(command_name).ok_or_else(|| {
+            NonoError::SandboxInit(format!("unknown ETI command '{command_name}'"))
+        })?;
         match caller {
             Caller::Session => {
-                // Top-level sandbox shorthand: if `sandbox` is set, use it.
-                if let Some(ref s) = config.sandbox {
-                    return Ok(s);
+                if !plan.session_can_use.iter().any(|n| n == command_name) {
+                    return Err(NonoError::BlockedCommand {
+                        command: command_name.to_string(),
+                        reason: "session_can_use missing".to_string(),
+                    });
                 }
-                if let Some(policy) = config.from.get("session") {
-                    match policy {
-                        crate::command_policy::CommandFromConfig::Policy(p) => return Ok(p),
-                        crate::command_policy::CommandFromConfig::Deny(_) => {
-                            return Err(NonoError::BlockedCommand {
-                                command: command_name.to_string(),
-                                reason: "session caller denied".to_string(),
-                            });
-                        }
-                    }
-                }
-                Err(NonoError::BlockedCommand {
-                    command: command_name.to_string(),
-                    reason: "missing_from".to_string(),
-                })
-            }
-            Caller::Command { name } => {
-                if let Some(policy) = config.from.get(name.as_str()) {
-                    match policy {
+                if let Some(from) = command.from.get("session") {
+                    return match from {
                         crate::command_policy::CommandFromConfig::Policy(p) => Ok(p),
                         crate::command_policy::CommandFromConfig::Deny(_) => {
                             Err(NonoError::BlockedCommand {
                                 command: command_name.to_string(),
-                                reason: format!("{name} caller denied"),
+                                reason: "from.session explicit deny".to_string(),
                             })
                         }
-                    }
-                } else {
-                    Err(NonoError::BlockedCommand {
+                    };
+                }
+                command
+                    .sandbox
+                    .as_ref()
+                    .ok_or_else(|| NonoError::BlockedCommand {
                         command: command_name.to_string(),
-                        reason: "missing_from".to_string(),
+                        reason: "missing session sandbox".to_string(),
                     })
+            }
+            Caller::Command { name } => {
+                let caller_command = plan.commands.get(name.as_str()).ok_or_else(|| {
+                    NonoError::SandboxInit(format!("unknown ETI caller '{name}'"))
+                })?;
+                if !caller_command.can_use.iter().any(|n| n == command_name) {
+                    return Err(NonoError::BlockedCommand {
+                        command: command_name.to_string(),
+                        reason: format!("{name}.can_use missing"),
+                    });
+                }
+                match command.from.get(name.as_str()) {
+                    Some(crate::command_policy::CommandFromConfig::Policy(p)) => Ok(p),
+                    Some(crate::command_policy::CommandFromConfig::Deny(_)) => {
+                        Err(NonoError::BlockedCommand {
+                            command: command_name.to_string(),
+                            reason: format!("from.{name} explicit deny"),
+                        })
+                    }
+                    None => Err(NonoError::BlockedCommand {
+                        command: command_name.to_string(),
+                        reason: format!("missing from.{name}"),
+                    }),
                 }
             }
         }
