@@ -8,6 +8,7 @@ use landlock::{
     Ruleset, RulesetAttr, RulesetCreatedAttr, Scope, ABI,
 };
 use std::path::Path;
+use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 
 /// Detected Landlock ABI version with feature query methods.
@@ -111,10 +112,26 @@ const ABI_PROBE_ORDER: [ABI; 6] = [ABI::V6, ABI::V5, ABI::V4, ABI::V3, ABI::V2, 
 /// Probes from V6 down to V1 using `HardRequirement` compatibility mode.
 /// Returns the highest ABI for which a full ruleset can be created.
 ///
+/// The result is cached after the first call since the kernel ABI does not
+/// change at runtime.
+///
 /// # Errors
 ///
 /// Returns an error if no ABI version is supported (Landlock not available).
 pub fn detect_abi() -> Result<DetectedAbi> {
+    static CACHED: OnceLock<Option<DetectedAbi>> = OnceLock::new();
+
+    let cached = CACHED.get_or_init(|| detect_abi_uncached().ok());
+
+    match cached {
+        Some(abi) => Ok(*abi),
+        None => Err(NonoError::SandboxInit(
+            "No supported Landlock ABI detected".to_string(),
+        )),
+    }
+}
+
+fn detect_abi_uncached() -> Result<DetectedAbi> {
     let mut last_error = None;
 
     for &abi in &ABI_PROBE_ORDER {
