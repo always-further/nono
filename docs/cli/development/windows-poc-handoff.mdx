@@ -149,6 +149,120 @@ The `Updating claude-code hook` line indicates that `~/.claude/hooks/nono-hook.s
 
 For the POC, use `nono run -- <command>` for non-TUI commands. TUI agents (claude, codex, etc.) host inside `nono shell --profile claude-code --allow-cwd` via the broker-process architecture — see [Windows `nono shell` — security envelope](#windows-nono-shell--security-envelope-phase-31-validated-2026-05-09) below.
 
+## Sigstore Trust Root Setup (one-time per user)
+
+`nono trust verify --keyless` requires a refreshed Sigstore trusted root cached
+at `~/.nono/trust-root/trusted_root.json`. The cache is per-user (no admin)
+and refreshes only when you explicitly run setup — verify NEVER attempts
+inline network refresh. Mirror of the WFP service prereq pattern from Step 5
+(below): explicit operator action up front, fail-closed-with-recovery-hint at
+runtime, no implicit network on the verify path.
+
+Run once after install:
+
+```powershell
+nono setup --refresh-trust-root
+```
+
+The command fetches TUF metadata from `https://tuf-repo-cdn.sigstore.dev` and
+writes the verified trusted root to your per-user cache. Subsequent
+`nono trust verify --keyless` invocations run offline against that cache.
+
+**Fail-closed contract:** if the cache is absent or expired,
+`nono trust verify --keyless` fails with a recovery message naming the exact
+command (`nono setup --refresh-trust-root`) — see [Sigstore TUF Cache ADR](../../architecture/sigstore-tuf-cache.md)
+for the design rationale (Phase 32 D-32-01). Verify-is-offline is structural
+and dynamic — there is no inline network call on the verify path at all.
+
+**Check status:**
+
+```powershell
+nono setup --check-only
+```
+
+Look for the `Trust root cache:` line — `OK` (with cache path), `STALE` (with
+diagnostic), or `NOT INITIALIZED` (run `--refresh-trust-root` to fix). The same
+output also includes `self-authenticode-subject:` and `self-authenticode-thumbprint:`
+lines that report `nono.exe`'s own signature — what the broker self-trust-anchor
+gate compares against (see Broker.exe Verification subsection below).
+
+### Verifying Keyless-Signed Artifacts
+
+`nono trust verify --keyless` requires explicit `--issuer` (OIDC issuer URL,
+exact match) and `--identity` (regex against the bundle SAN). Both flags are
+fail-closed-mandatory — verify rejects bundles when either is missing.
+
+**GitHub Actions release** (canonical pattern):
+
+```powershell
+nono trust verify --keyless `
+  --issuer https://token.actions.githubusercontent.com `
+  --identity '^https://github\.com/<org>/<repo>/\.github/workflows/release\.yml@refs/tags/v.*$' `
+  <bundle-file>
+```
+
+Example for the `nono` project itself:
+
+```powershell
+nono trust verify --keyless `
+  --issuer https://token.actions.githubusercontent.com `
+  --identity '^https://github\.com/always-further/nono/\.github/workflows/release\.yml@refs/tags/v.*$' `
+  instruction.md
+```
+
+**GitLab CI release**:
+
+```powershell
+nono trust verify --keyless `
+  --issuer <gitlab-issuer-url> `
+  --identity '<gitlab-identity-pattern>' `
+  <bundle-file>
+```
+
+A baked-in policy template lives at
+[`docs/templates/trust-policy-keyless-template.json`](../../templates/trust-policy-keyless-template.json)
+— copy to `~/.nono/trust-policy.json` to make `--policy` invocations match the
+project's release pipeline by default.
+
+**Local development:** keyless signing is CI-only (no interactive browser OAuth).
+For local dev, use:
+
+```powershell
+nono trust sign --keyref <key-path> <file>
+nono trust verify <file>  # keyed verify; no --issuer/--identity needed
+```
+
+### Broker.exe Verification at Launch
+
+`nono shell --profile <name>` on Windows spawns `nono-shell-broker.exe` (a sibling
+of `nono.exe` in the install directory). Phase 32 adds an Authenticode
+self-trust-anchor verification before the spawn: `nono.exe` extracts ITS OWN
+signature, then requires `broker.exe`'s signature to match (subject + thumbprint).
+
+On a properly-installed release MSI, both binaries are signed by the same
+pipeline identity — verification passes silently. The `nono setup --check-only`
+diagnostic surfaces the exact subject + thumbprint nono.exe is comparing against.
+
+**Fail mode:** if a malicious sibling broker is dropped in, or if either
+binary's signature is unverifiable, `nono shell` fails with text containing:
+
+```
+Trust verification failed: broker.exe Authenticode signature does not match nono.exe
+```
+
+— the message names both expected and observed `(subject, thumbprint)` pairs.
+No escape-hatch flag exists by design. Recovery: reinstall from the official MSI.
+See [Broker Trust Anchor ADR](../../architecture/broker-trust-anchor.md) for the
+threat model and self-bootstrapping rationale (Phase 32 D-32-13/14).
+
+**Dev-build note:** `cargo build`-built `nono.exe` runs out of `target/(debug|release)/`
+— the install-layout substring detector activates and SKIPS verification (logged at
+info-level under `tracing` target `broker_authenticode`). Production installs
+(`Program Files\nono\` or `LocalAppData\Programs\nono\`) do not match this pattern
+and always enforce verification. The detector is a runtime check on `current_exe()`'s
+path, NOT `#[cfg(debug_assertions)]` — `cargo test --release` therefore exercises
+the production-mode strict path correctly (Phase 32 Pitfall 6).
+
 ## Step 5 — Smoke checklist
 
 Run these from a fresh PowerShell. Capture stdout, stderr, and `nono --version` for each — that is the minimum triage payload from [Windows Preview Pilot § Debugging Inputs](/cli/development/windows-preview-pilot#debugging-inputs).
@@ -316,3 +430,6 @@ A reasonable validation order on your build box:
 - [Windows Feature Gap Matrix](/cli/development/windows-feature-gap-matrix) — current parity vs Linux/macOS
 - [Windows Installer Strategy](/cli/development/windows-installer-strategy) — MSI scope contracts
 - [Claude Code client guide](/cli/clients/claude-code) — profile shape, hook semantics, custom profile patterns
+- [Sigstore TUF Cache ADR](../../architecture/sigstore-tuf-cache.md) — Phase 32 D-32-01 cached-root + verify-is-offline invariant
+- [Broker Trust Anchor ADR](../../architecture/broker-trust-anchor.md) — Phase 32 D-32-13 self-trust-anchor for broker.exe
+- Phase 32 CONTEXT — `.planning/phases/32-sigstore-integration/32-CONTEXT.md`
