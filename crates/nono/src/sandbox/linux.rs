@@ -119,16 +119,15 @@ const ABI_PROBE_ORDER: [ABI; 6] = [ABI::V6, ABI::V5, ABI::V4, ABI::V3, ABI::V2, 
 ///
 /// Returns an error if no ABI version is supported (Landlock not available).
 pub fn detect_abi() -> Result<DetectedAbi> {
-    static CACHED: OnceLock<Option<DetectedAbi>> = OnceLock::new();
+    static CACHED: OnceLock<DetectedAbi> = OnceLock::new();
 
-    let cached = CACHED.get_or_init(|| detect_abi_uncached().ok());
-
-    match cached {
-        Some(abi) => Ok(*abi),
-        None => Err(NonoError::SandboxInit(
-            "No supported Landlock ABI detected".to_string(),
-        )),
+    if let Some(abi) = CACHED.get() {
+        return Ok(*abi);
     }
+
+    let abi = detect_abi_uncached()?;
+    let _ = CACHED.set(abi);
+    Ok(abi)
 }
 
 fn detect_abi_uncached() -> Result<DetectedAbi> {
