@@ -1,0 +1,5 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling nono-shell-broker v0.37.1 (C:\Users\OMack\Nono\crates\nono-shell-broker)
+   Compiling nono-ffi v0.37.1 (C:\Users\OMack\Nono\bindings\c)
+    Finished `release` profile [optimized] target(s) in 1m 35s
+EXIT_CODE=0
