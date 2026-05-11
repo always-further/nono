@@ -6,7 +6,7 @@ slug: completion
 cluster_id: C8
 type: execute
 wave: 2
-depends_on: ["34-04", "34-01"]
+depends_on: ["34-04", "34-01", "34-02"]
 blocks: []
 files_modified:
   - crates/nono-cli/src/cli.rs

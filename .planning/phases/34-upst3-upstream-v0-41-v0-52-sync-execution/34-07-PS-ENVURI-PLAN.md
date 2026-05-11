@@ -13,6 +13,7 @@ files_modified:
   - crates/nono-cli/src/session_commands.rs
   - crates/nono-cli/src/profile/mod.rs
   - crates/nono/src/keystore.rs
+  - crates/nono-cli/src/exec_strategy/linux.rs
 upstream_tag_range: v0.50.0..v0.50.1
 upstream_commit_count: 7
 autonomous: true

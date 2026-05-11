@@ -431,4 +431,8 @@ Plans:
 Plans:
 - [ ] TBD (run `/gsd-spec-phase 34` then `/gsd-plan-phase 34`)
 
+**Cross-cutting constraints:**
+- D-34-E1 invariant: zero edits to `*_windows.rs` for every commit
+- All 8 D-34-D2 close-gates pass
+
 **Reference:** `.planning/phases/33-windows-parity-upstream-0-52-divergence/DIVERGENCE-LEDGER.md`, `docs/architecture/upstream-parity-strategy.md`, `.planning/templates/upstream-sync-quick.md`
