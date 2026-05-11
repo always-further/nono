@@ -33,6 +33,9 @@ host.nono_binary.commit
 # Plan-execution scratch directory (per-plan staging of upstream files for manual port)
 .tmp/
 
+# Local CI / drift-audit scratch (Phase 33 D-33-A2 — raw drift JSON is regenerable, not committed)
+ci-logs-local/
+
 # Sysinternals ProcMon traces (Phase 30 Plan 30-05) — large binaries, evidence is in CSV/MD
 *.pml
 
