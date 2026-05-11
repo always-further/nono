@@ -151,7 +151,7 @@ For the POC, use `nono run -- <command>` for non-TUI commands. TUI agents (claud
 
 ## Sigstore Trust Root Setup (one-time per user)
 
-`nono trust verify --keyless` requires a refreshed Sigstore trusted root cached
+Keyless `nono trust verify` requires a refreshed Sigstore trusted root cached
 at `~/.nono/trust-root/trusted_root.json`. The cache is per-user (no admin)
 and refreshes only when you explicitly run setup — verify NEVER attempts
 inline network refresh. Mirror of the WFP service prereq pattern from Step 5
@@ -165,12 +165,12 @@ nono setup --refresh-trust-root
 ```
 
 The command fetches TUF metadata from `https://tuf-repo-cdn.sigstore.dev` and
-writes the verified trusted root to your per-user cache. Subsequent
-`nono trust verify --keyless` invocations run offline against that cache.
+writes the verified trusted root to your per-user cache. Subsequent keyless
+`nono trust verify` invocations run offline against that cache.
 
-**Fail-closed contract:** if the cache is absent or expired,
-`nono trust verify --keyless` fails with a recovery message naming the exact
-command (`nono setup --refresh-trust-root`) — see [Sigstore TUF Cache ADR](../../architecture/sigstore-tuf-cache.md)
+**Fail-closed contract:** if the cache is absent or expired, keyless
+`nono trust verify` fails with a recovery message naming the exact command
+(`nono setup --refresh-trust-root`) — see [Sigstore TUF Cache ADR](../../architecture/sigstore-tuf-cache.md)
 for the design rationale (Phase 32 D-32-01). Verify-is-offline is structural
 and dynamic — there is no inline network call on the verify path at all.
 
@@ -188,14 +188,16 @@ gate compares against (see Broker.exe Verification subsection below).
 
 ### Verifying Keyless-Signed Artifacts
 
-`nono trust verify --keyless` requires explicit `--issuer` (OIDC issuer URL,
+Keyless `nono trust verify` requires explicit `--issuer` (OIDC issuer URL,
 exact match) and `--identity` (regex against the bundle SAN). Both flags are
 fail-closed-mandatory — verify rejects bundles when either is missing.
+Providing both is what selects keyless mode; there is no separate `--keyless`
+boolean on verify.
 
 **GitHub Actions release** (canonical pattern):
 
 ```powershell
-nono trust verify --keyless `
+nono trust verify `
   --issuer https://token.actions.githubusercontent.com `
   --identity '^https://github\.com/<org>/<repo>/\.github/workflows/release\.yml@refs/tags/v.*$' `
   <bundle-file>
@@ -204,7 +206,7 @@ nono trust verify --keyless `
 Example for the `nono` project itself:
 
 ```powershell
-nono trust verify --keyless `
+nono trust verify `
   --issuer https://token.actions.githubusercontent.com `
   --identity '^https://github\.com/always-further/nono/\.github/workflows/release\.yml@refs/tags/v.*$' `
   instruction.md
@@ -213,7 +215,7 @@ nono trust verify --keyless `
 **GitLab CI release**:
 
 ```powershell
-nono trust verify --keyless `
+nono trust verify `
   --issuer <gitlab-issuer-url> `
   --identity '<gitlab-identity-pattern>' `
   <bundle-file>
