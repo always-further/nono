@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
 status: executing
-last_updated: "2026-05-11T03:16:10.320Z"
+last_updated: "2026-05-11T04:10:00.000Z"
 last_activity: 2026-05-11
 progress:
   total_phases: 8
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 ## Current Position
 
 Phase: 33 (windows-parity-upstream-0-52-divergence) — EXECUTING
-Plan: 1 of 4
+Plan: 2 of 4 (33-00 ✓ + 33-01 ✓; 33-02 ADR + 33-03 downstream-updates remain)
 Status: Executing Phase 33
 Milestone: v2.2 — 3/3 phases complete (Phase 22 ✓ 2026-04-28, Phase 23 ✓ 2026-04-29, Phase 24 ✓ 2026-04-27), 9/9 plans complete. v2.2 ready to ship.
 
@@ -47,7 +47,7 @@ Next actions:
   - After Phase 23 closes, `/gsd-complete-milestone v2.2` to archive the milestone.
   - Pre-merge `windows-squash` → `main` quick task remains a candidate for milestone-close timing.
 
-Last activity: 2026-05-11 -- Phase 33 execution started
+Last activity: 2026-05-11 -- Phase 33 Plan 33-01 closed; DIVERGENCE-LEDGER.md (12 clusters / 97 commits) committed (5fa0dca4); SUMMARY committed (63a37d17); CRITICAL audit finding contradicts G-25-DRIFT-01 (zero RESL flag rename commits in v0.40.1..v0.52.0)
 
 Prior activity: 2026-04-28 — Phase 22 closed end-to-end (UAT 10/10 + 1 spec-error skipped, commit e60ab093). Quick task 260428-rsu created as deferred runbook for upstream-stack rebase (awaiting trigger).
 
@@ -86,6 +86,10 @@ Progress: [██████████] 100%
 - **Phase 09 unreachable!() scoped to Unix:** On Windows, execute_direct returns Ok(i32); unreachable!() moved inside cfg(not(windows)) block; Windows Direct branch captures exit code and calls std::process::exit(exit_code) (2026-04-10).
 - **Phase 09 stale test replaced:** apply_rejects_unsupported_proxy_with_ports removed; apply_accepts_port_level_wfp_caps asserts Ok(()) for port-level caps post-Phase-09 semantics (2026-04-10).
 - **Phase 12-03 STOP on pre-existing CI failure:** `make ci` fallback surfaced 48 `disallowed_methods` clippy errors in `profile/mod.rs`, `config/mod.rs`, `sandbox_state.rs`. Root-caused to revert `cf5a60a` (2026-04-10), predates Phase 12. Phase 12's own files (`crates/nono/src/sandbox/windows.rs`, `crates/nono-cli/tests/wfp_port_integration.rs`) produce zero clippy diagnostics. Did NOT auto-fix per plan STOP directive (2026-04-11).
+
+### Key Decisions (v2.4)
+
+- **Phase 33 Plan 33-01 (REQ-1) — DIVERGENCE-LEDGER.md curated for v0.40.1..v0.52.0:** Wave 1 ledger curation completed 2026-05-11. Drift-tool re-run (D-33-A1 locked invocation `make check-upstream-drift ARGS="--from v0.40.1 --to v0.52.0 --format json"`, dispatched on Windows host via `bash scripts/check-upstream-drift.sh`) produces 97 unique commits across 12 minor releases (v0.41.0..v0.52.0) with `by_category` distribution `profile=15, policy=5, package=5, proxy=6, audit=4, other=91`. Curated 12 themed clusters (vs the v0.37-v0.40 precedent's 5; justified by the 97-commit / 12-tag spread): largest is v0.46-v0.47.1 path-canonicalization + JSON-schema-restructure (23 commits); smallest are v0.42 unix-socket-capability and v0.42 proxy-hardening (4 each). Per-cluster dispositions: **8 will-sync** (CLI consolidation v0.41, proxy/network hardening v0.42-v0.45, headless-keyring + display fixes v0.43-v0.43.1, schema-restructure v0.46-v0.47.1, shell completion v0.48, trust hardening v0.49, ps display + env:// credentials v0.50-v0.50.1, env-deny_vars + nono learn deprecation v0.52); **3 fork-preserve** (PTY attach v0.41 — fork's ConPTY path is structurally different per D-11; pack migration v0.44 — would delete v2.1 Phase 18.1-03 widening per D-20; proxy TLS interception v0.51 — would delete fork's Windows credential-injection rewrite per D-20); **1 won't-sync** (Unix-socket capability v0.42 — Unix-only enum variant would expose a no-op on Windows backend, violating D-19 if pulled in this audit cycle). Manual fork-only surface enumeration (D-33-A3) covers `crates/nono-shell-broker/` (Phase 31), `NONO_TEST_HOME` (Phase 27.1), Authenticode chain-walker (Phase 28), `WindowsTokenArm::BrokerLaunch` (Phase 31), Sigstore TUF cached-root (Phase 32), broker self-trust-anchor (Phase 32), plus 8 `*_windows.rs` files matching `git ls-files | grep -E '_windows\.rs$'` byte-for-byte; explicit "NOT in workspace" correction for `crates/nono-wfp-service/` (verified against `Cargo.toml` `[workspace] members`). **CRITICAL audit finding (contradicts G-25-DRIFT-01 hypothesis):** ZERO commits matching the 4 RESL flag rename keywords (`--memory`, `--cpu-percent`, `--max-processes`, `--timeout`) anywhere in v0.40.1..v0.52.0. The G-25-DRIFT-01 entry recorded 2026-05-10 cited "deprecated/renamed in upstream nono v0.52" as the originating concern; this audit shows that claim is empirically false against `upstream/main` HEAD `54f7c32a` at audit date `2026-05-11`. Upstream at v0.52.0 still ships the 4 flags under their original Phase 25 names. Wave 2 ADR Context section + Wave 3 REQ-4 G-25-DRIFT-01 update will re-classify the gap (the divergence does not exist). **Validation (all 6 self-audit checks pass):** coverage diff (97 == 97 unique shas — zero gap); disposition enum (12 clusters / 12 valid disposition lines); header reproducibility (`upstream_head_at_audit` + `drift_tool_sh_sha` + locked invocation each grep-discoverable on a single line); fork-only surface section (6 grep markers each return ≥1 line); drift-tool re-run idempotence (exit 0); D-19 invariant (`git diff --name-only -- crates/nono/` = 0 files). **2 deviations auto-fixed:** Rule 3 — drift JSON output redirected from `/tmp/` to `ci-logs-local/drift/` (Windows-host Python interpreters can't access MSYS `/tmp/` paths); `ci-logs-local/` added to `.gitignore` per D-33-A2 ("raw JSON not committed"). Rule 2 — `*_windows.rs` enumeration corrected: plan listed `crates/nono/src/sandbox/windows.rs` which does NOT exist at audit time (likely renamed in Phase 04-era sandbox modularization); actual ls-files surface adds `crates/nono/src/supervisor/socket_windows.rs` + `crates/nono-cli/tests/exec_identity_windows.rs`. Documented in SUMMARY. Commits: `5fa0dca4` (DIVERGENCE-LEDGER.md, .gitkeep, .gitignore — single atomic commit per plan's Task 3 commit-message template; ledger 30,972 bytes, 12 cluster sections, 97 commit rows) + `63a37d17` (33-01-SUMMARY.md). DCO sign-offs in both. Wave 2 (Plan 33-02 ADR) reads the cluster summary table for Decision Table scoring and the fork-only surface area for security-posture column rationale; Wave 3 (Plan 33-03) reads the audit finding for REQ-4 G-25-DRIFT-01 update item 4 (audit-walk note).
 
 ### Key Decisions (v2.3)
 

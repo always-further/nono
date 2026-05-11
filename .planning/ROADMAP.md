@@ -401,12 +401,12 @@ Plans:
 
 **Depends on:** Phase 25 (RESL Unix backends + G-25-DRIFT-01), Phase 32 (Sigstore Integration; closes Windows-only trust-anchor surface).
 
-**Plans:** 1/4 plans executed
+**Plans:** 2/4 plans executed
 
 Plans:
 **Wave 1**
 - [x] 33-00-PLAN.md — Wave 0 prep: fetch upstream tags, capture drift-tool + upstream HEAD shas for ledger provenance, lock RESEARCH Open Questions 1 + 2 (project-md-target + adr-commit-pattern)
-- [ ] 33-01-PLAN.md — REQ-1 drift audit: run `make check-upstream-drift ARGS="--from v0.40.1 --to v0.52.0 --format json"` and curate DIVERGENCE-LEDGER.md (two-tier cluster + nested row table) with manual fork-only surface enumeration (D-33-A3)
+- [x] 33-01-PLAN.md — REQ-1 drift audit: ran `make check-upstream-drift ARGS="--from v0.40.1 --to v0.52.0 --format json"` and curated DIVERGENCE-LEDGER.md (12 themed clusters / 97 commits — 8 will-sync, 3 fork-preserve, 1 won't-sync) with manual fork-only surface enumeration (D-33-A3); CRITICAL audit finding contradicts G-25-DRIFT-01 hypothesis (zero RESL-flag-rename commits in range); commits `5fa0dca4` (ledger) + `63a37d17` (SUMMARY)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 33-02-PLAN.md — REQ-2 strategic ADR: write docs/architecture/upstream-parity-strategy.md (plain-text `**Status:** Accepted` header per D-33-C4; 3 options × 5 criteria L/M/H scoring per D-33-C1/C2/C3)
