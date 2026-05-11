@@ -5,6 +5,37 @@
 ### Changed
 - Bump fork workspace version 0.37.1 → 0.53.0. Reflects milestone v2.1/v2.2/v2.3 progress and signals fork has reached upstream v0.52 parity (v0.52.0 CHANGELOG absorbed in Phase 34-08b; v0.53.0 divergence ledger written in Phase 39-01). Fork continues to track its own version separately from upstream per Phase 34 convention.
 
+## [0.52.1] - 2026-05-11
+
+### Bug Fixes
+
+- Match backend validation logic
+
+- *(schema)* Add missing 'environment' property to profile JSON schema
+
+- *(proxy)* Set NODE_USE_ENV_PROXY for Node 26
+
+- *(policy)* Expand browser deny groups with missing Chromium-based browsers
+
+- Preserve two keyboard-mode resets
+
+- Documented concat! blocks instead of opaque byte blobs
+
+- *(pty)* Stop clearing terminal scrollback on exit for normal-mode sessions
+
+- Provide more accurate warning message + doc comment update
+
+- *(cli)* Validate --allow paths and persist domain allowlist in sandbox state
+
+- *(cli)* Make 'nono why --host' aware of proxy domain filtering
+
+- Prevent feature unification from linking libdbus in no-keyring builds
+
+
+### Documentation
+
+- *(agents)* Relax agent disclosure and expand campaign ban
+
 ## [0.52.0] - 2026-05-10
 
 ### Bug Fixes
