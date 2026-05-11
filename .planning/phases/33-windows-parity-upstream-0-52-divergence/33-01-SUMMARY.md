@@ -14,7 +14,7 @@ requires:
 provides:
   - DIVERGENCE-LEDGER.md — phase-local audit artifact at `.planning/phases/33-windows-parity-upstream-0-52-divergence/DIVERGENCE-LEDGER.md`
   - 12 themed clusters covering all 97 unique commits in v0.40.1..v0.52.0
-  - Per-cluster dispositions: 8 will-sync, 3 fork-preserve, 1 won't-sync
+  - Per-cluster dispositions: 8 will-sync, 2 fork-preserve, 2 won't-sync
   - Manual fork-only surface enumeration (D-33-A3) covering Phase 31 broker, NONO_TEST_HOME seam, Authenticode chain-walker, BrokerLaunch dispatch arm, TUF cached-root, broker self-trust-anchor, and 8 *_windows.rs files
   - CRITICAL audit finding: zero RESL-flag-rename commits found in v0.40.1..v0.52.0 (contradicts G-25-DRIFT-01 hypothesis); the gap as recorded does not actually exist in upstream
 affects: [33-02 (Wave 2 ADR), 33-03 (Wave 3 PROJECT.md + ROADMAP), 25 (G-25-DRIFT-01 re-classification per audit finding), 34 (UPST3-sync — will consume 8 will-sync clusters as cherry-pick/manual-replay queue)]
