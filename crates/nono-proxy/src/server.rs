@@ -604,7 +604,7 @@ mod tests {
         let node_proxy_flag = vars.iter().find(|(k, _)| k == "NODE_USE_ENV_PROXY");
         assert!(
             node_proxy_flag.is_some(),
-            "proxy env must set NODE_USE_ENV_PROXY for Node 26+ (undici 8.x) built-in fetch()"
+            "proxy env must set NODE_USE_ENV_PROXY for Node 20.6+ (undici 5.22+) built-in fetch()"
         );
         assert_eq!(
             node_proxy_flag.unwrap().1,
