@@ -1013,9 +1013,14 @@ pub fn resolve_deny_paths_for_groups(
 ///
 /// On macOS this is a no-op (Seatbelt handles deny-within-allow natively).
 ///
+/// On Windows this is also a no-op: the mandatory-label backend (Phase 21 WSFG-01)
+/// applies `SECURITY_MANDATORY_LOW_RID` ACEs per deny path via `SetNamedSecurityInfoW`
+/// independently of allow grants on the parent, so deny-within-allow is structurally
+/// enforceable.
+///
 /// **Must be called after all paths are finalized** (groups + profile + CLI overrides + CWD).
 pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> Result<()> {
-    if cfg!(target_os = "macos") {
+    if !cfg!(target_os = "linux") {
         return Ok(());
     }
 
@@ -2094,7 +2099,8 @@ mod tests {
             );
         }
 
-        // macOS: no-op, Linux: hard error
+        // Linux: hard error (Landlock can't enforce deny-within-allow).
+        // macOS/Windows: no-op (Seatbelt + mandatory-label backends handle it natively).
         if cfg!(target_os = "linux") {
             let err = validate_deny_overlaps(&deny_paths, &caps)
                 .expect_err("Expected overlap to fail on Linux");
@@ -2103,7 +2109,7 @@ mod tests {
                 "Expected deny-overlap error message, got: {err}"
             );
         } else {
-            validate_deny_overlaps(&deny_paths, &caps).expect("no-op on macOS");
+            validate_deny_overlaps(&deny_paths, &caps).expect("no-op on macOS/Windows");
         }
     }
 
