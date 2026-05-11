@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.52.2] - 2026-05-11
+
+### Bug Fixes
+
+- *(profile-save)* Address suppression review feedback
+
+
+### Features
+
+- *(profile-save)* Suppress save-profile prompts for denied paths
+
+
+### Miscellaneous
+
+- Release v0.52.1
+
+## [0.52.1] - 2026-05-11
+
+### Bug Fixes
+
+- *(profile-save)* Address suppression review feedback
+
+
+### Features
+
+- *(profile-save)* Suppress save-profile prompts for denied paths
+
 ## [0.52.1] - 2026-05-11
 
 ### Bug Fixes

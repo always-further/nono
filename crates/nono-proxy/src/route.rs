@@ -142,6 +142,8 @@ impl RouteStore {
     pub fn load(routes: &[RouteConfig]) -> Result<Self> {
         let mut loaded = HashMap::new();
 
+        let base_root_store = build_base_root_store();
+
         for route in routes {
             let normalized_prefix = route.prefix.trim_matches('/').to_string();
 
@@ -164,6 +166,7 @@ impl RouteStore {
                     route.tls_client_cert.is_some(),
                 );
                 Some(build_tls_connector(
+                    &base_root_store,
                     route.tls_ca.as_deref(),
                     route.tls_client_cert.as_deref(),
                     route.tls_client_key.as_deref(),
@@ -245,12 +248,10 @@ impl RouteStore {
         })
     }
 
-    /// Look up the route prefix and loaded entry for a CONNECT-style
-    /// `host:port`. Returns `Some((prefix, route))` on a match.
+    /// Return the first route matching `host:port`, or `None`.
     ///
-    /// Used by the TLS-intercept CONNECT branch to map the agent's
-    /// `CONNECT api.openai.com:443` target back to a route prefix
-    /// (`"openai"`) so the credential store can be consulted.
+    /// Prefer [`lookup_all_by_upstream`](Self::lookup_all_by_upstream)
+    /// when multiple routes may share the same upstream.
     #[must_use]
     pub fn lookup_by_upstream(&self, host_port: &str) -> Option<(&str, &LoadedRoute)> {
         let normalised = host_port.to_lowercase();
@@ -263,20 +264,40 @@ impl RouteStore {
         })
     }
 
-    /// Returns `true` if the `host:port` matches a route that requires
-    /// TLS interception (has `credential_key`, `oauth2`, or non-empty
-    /// `endpoint_rules`).
-    ///
-    /// Used in the CONNECT dispatch path to choose between transparent
-    /// tunnelling, the existing 403, and the new intercept handler.
+    /// Return all routes whose upstream matches `host:port`, sorted by
+    /// prefix for deterministic iteration.
     #[must_use]
-    pub fn has_intercept_route(&self, host_port: &str) -> bool {
-        self.lookup_by_upstream(host_port)
-            .is_some_and(|(_, route)| route.requires_intercept)
+    pub fn lookup_all_by_upstream(&self, host_port: &str) -> Vec<(&str, &LoadedRoute)> {
+        let normalised = host_port.to_lowercase();
+        let mut matches: Vec<_> = self
+            .routes
+            .iter()
+            .filter(|(_, route)| {
+                route
+                    .upstream_host_port
+                    .as_ref()
+                    .is_some_and(|hp| *hp == normalised)
+            })
+            .map(|(prefix, route)| (prefix.as_str(), route))
+            .collect();
+        matches.sort_by_key(|(prefix, _)| *prefix);
+        matches
     }
 
-    /// Return the set of normalised `host:port` strings for all route
-    /// upstreams. Uses pre-normalised values computed at load time.
+    /// Whether any route for `host:port` requires TLS interception.
+    #[must_use]
+    pub fn has_intercept_route(&self, host_port: &str) -> bool {
+        let normalised = host_port.to_lowercase();
+        self.routes.values().any(|route| {
+            route
+                .upstream_host_port
+                .as_ref()
+                .is_some_and(|hp| *hp == normalised)
+                && route.requires_intercept
+        })
+    }
+
+    /// All unique upstream `host:port` strings across loaded routes.
     #[must_use]
     pub fn route_upstream_hosts(&self) -> std::collections::HashSet<String> {
         self.routes
@@ -342,23 +363,30 @@ fn read_pem_file(path: &std::path::Path, label: &str) -> Result<Zeroizing<Vec<u8
         })
 }
 
-/// Build a `TlsConnector` with optional custom CA and optional client certificate.
+/// Root cert store combining webpki roots with the OS trust store.
 ///
-/// - `ca_path`: PEM-encoded CA certificate file to trust in addition to system roots.
-///   Required for upstreams with self-signed or private CA certificates.
-/// - `client_cert_path`: PEM-encoded client certificate for mTLS. Must be paired with `client_key_path`.
-/// - `client_key_path`: PEM-encoded private key matching `client_cert_path`.
-///
-/// At least one of the three parameters must be `Some`. Returns an error if any
-/// file cannot be read, contains invalid PEM, or the TLS configuration fails.
+/// Loaded once at startup and cloned into each per-route connector.
+fn build_base_root_store() -> rustls::RootCertStore {
+    let mut store = rustls::RootCertStore::empty();
+    store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let native = rustls_native_certs::load_native_certs();
+    for cert in native.certs {
+        if let Err(e) = store.add(cert) {
+            debug!("skipping unparseable native cert: {e}");
+        }
+    }
+    store
+}
+
+/// Build a per-route `TlsConnector`, optionally adding a custom CA
+/// and/or mTLS client certificate on top of `base_root_store`.
 fn build_tls_connector(
+    base_root_store: &rustls::RootCertStore,
     ca_path: Option<&str>,
     client_cert_path: Option<&str>,
     client_key_path: Option<&str>,
 ) -> Result<tokio_rustls::TlsConnector> {
-    let mut root_store = rustls::RootCertStore::empty();
-    // Always include system roots
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut root_store = base_root_store.clone();
 
     // Add custom CA if provided
     if let Some(ca_path) = ca_path {
@@ -483,7 +511,8 @@ fn build_tls_connector(
 /// Compatibility shim: build a connector with only a custom CA (no client cert).
 #[cfg(test)]
 fn build_tls_connector_with_ca(ca_path: &str) -> Result<tokio_rustls::TlsConnector> {
-    build_tls_connector(Some(ca_path), None, None)
+    let base = build_base_root_store();
+    build_tls_connector(&base, Some(ca_path), None, None)
 }
 
 #[cfg(test)]
@@ -850,6 +879,194 @@ mod tests {
         assert!(store.lookup_by_upstream("api.example.com:443").is_none());
     }
 
+    #[test]
+    fn test_lookup_all_by_upstream_returns_multiple_routes() {
+        let routes = vec![
+            RouteConfig {
+                prefix: "github_org_a".to_string(),
+                upstream: "https://github.com".to_string(),
+                credential_key: Some("env://GH_TOKEN_A".to_string()),
+                inject_mode: Default::default(),
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy: None,
+                env_var: Some("GH_TOKEN_A".to_string()),
+                endpoint_rules: vec![crate::config::EndpointRule {
+                    method: "*".to_string(),
+                    path: "/org-a/**".to_string(),
+                }],
+                tls_ca: None,
+                tls_client_cert: None,
+                tls_client_key: None,
+                oauth2: None,
+            },
+            RouteConfig {
+                prefix: "github_org_b".to_string(),
+                upstream: "https://github.com".to_string(),
+                credential_key: Some("env://GH_TOKEN_B".to_string()),
+                inject_mode: Default::default(),
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy: None,
+                env_var: Some("GH_TOKEN_B".to_string()),
+                endpoint_rules: vec![crate::config::EndpointRule {
+                    method: "*".to_string(),
+                    path: "/org-b/**".to_string(),
+                }],
+                tls_ca: None,
+                tls_client_cert: None,
+                tls_client_key: None,
+                oauth2: None,
+            },
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+
+        let all = store.lookup_all_by_upstream("github.com:443");
+        assert_eq!(all.len(), 2, "both routes share the same upstream");
+
+        let prefixes: Vec<&str> = all.iter().map(|(p, _)| *p).collect();
+        assert!(prefixes.contains(&"github_org_a"));
+        assert!(prefixes.contains(&"github_org_b"));
+
+        let (_, route_a) = all.iter().find(|(p, _)| *p == "github_org_a").unwrap();
+        assert!(route_a.endpoint_rules.is_allowed("GET", "/org-a/repo"));
+        assert!(!route_a.endpoint_rules.is_allowed("GET", "/org-b/repo"));
+
+        let (_, route_b) = all.iter().find(|(p, _)| *p == "github_org_b").unwrap();
+        assert!(route_b.endpoint_rules.is_allowed("GET", "/org-b/repo"));
+        assert!(!route_b.endpoint_rules.is_allowed("GET", "/org-a/repo"));
+
+        assert!(store.has_intercept_route("github.com:443"));
+        assert!(store.is_route_upstream("github.com:443"));
+        assert!(store.lookup_all_by_upstream("other.com:443").is_empty());
+    }
+
+    /// Models a real multi-org GitHub profile. Mirrors the selection
+    /// loop in `tls_intercept::handle`:
+    ///   1 match  → inject that route's credential
+    ///   0 matches → passthrough (no credential injected)
+    ///   2+ matches → ambiguous (hard-deny 403)
+    #[test]
+    fn test_route_selection_multi_org_profile() {
+        // Helper to build a route with the given prefix and endpoint path.
+        fn gh_route(prefix: &str, env: &str, path: &str) -> RouteConfig {
+            RouteConfig {
+                prefix: prefix.to_string(),
+                upstream: "https://github.com".to_string(),
+                credential_key: Some(format!("env://{env}")),
+                inject_mode: Default::default(),
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy: None,
+                env_var: Some(env.to_string()),
+                endpoint_rules: vec![crate::config::EndpointRule {
+                    method: "*".to_string(),
+                    path: path.to_string(),
+                }],
+                tls_ca: None,
+                tls_client_cert: None,
+                tls_client_key: None,
+                oauth2: None,
+            }
+        }
+
+        #[derive(Debug, PartialEq)]
+        enum Selection<'a> {
+            Route(&'a str),
+            Passthrough,
+            Ambiguous(Vec<&'a str>),
+        }
+
+        fn select<'a>(
+            candidates: &'a [(&'a str, &'a LoadedRoute)],
+            method: &str,
+            path: &str,
+        ) -> Selection<'a> {
+            let mut matches: Vec<&str> = Vec::new();
+            let mut catch_all: Option<&str> = None;
+            for (prefix, route) in candidates {
+                if route.endpoint_rules.is_empty() {
+                    if catch_all.is_none() {
+                        catch_all = Some(*prefix);
+                    }
+                } else if route.endpoint_rules.is_allowed(method, path) {
+                    matches.push(prefix);
+                }
+            }
+            if matches.len() > 1 {
+                Selection::Ambiguous(matches)
+            } else if let Some(svc) = matches.into_iter().next().or(catch_all) {
+                Selection::Route(svc)
+            } else {
+                Selection::Passthrough
+            }
+        }
+
+        // --- Profile: two org-scoped routes, no catch-all ---
+        let routes = vec![
+            gh_route("github_https_org_a", "GH_TOKEN_A", "/org-a/**"),
+            gh_route("github_https_org_b", "GH_TOKEN_B", "/org-b/**"),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+        let candidates = store.lookup_all_by_upstream("github.com:443");
+        assert_eq!(candidates.len(), 2);
+
+        // Private org-a repo → org-a credential
+        assert_eq!(
+            select(&candidates, "GET", "/org-a/repo.git/info/refs"),
+            Selection::Route("github_https_org_a")
+        );
+        // Private org-b repo → org-b credential
+        assert_eq!(
+            select(&candidates, "GET", "/org-b/repo.git/info/refs"),
+            Selection::Route("github_https_org_b")
+        );
+        // Public repo (e.g. always-further/nono) → passthrough, no cred
+        assert_eq!(
+            select(&candidates, "GET", "/always-further/nono.git/info/refs"),
+            Selection::Passthrough
+        );
+        // POST to public repo → also passthrough
+        assert_eq!(
+            select(
+                &candidates,
+                "POST",
+                "/always-further/nono.git/git-upload-pack"
+            ),
+            Selection::Passthrough
+        );
+
+        // --- Adding a /** catch-all would cause ambiguity ---
+        let routes_with_catchall = vec![
+            gh_route("github_https_org_a", "GH_TOKEN_A", "/org-a/**"),
+            gh_route("github_https_org_b", "GH_TOKEN_B", "/org-b/**"),
+            gh_route("github_https_all", "GH_TOKEN_A", "/**"),
+        ];
+        let store2 = RouteStore::load(&routes_with_catchall).unwrap();
+        let candidates2 = store2.lookup_all_by_upstream("github.com:443");
+        assert_eq!(candidates2.len(), 3);
+
+        // org-a request now matches BOTH org_a AND the /** catch-all → ambiguous
+        assert_eq!(
+            select(&candidates2, "GET", "/org-a/repo.git/info/refs"),
+            Selection::Ambiguous(vec!["github_https_all", "github_https_org_a"])
+        );
+        // Public repo matches only the /** catch-all → 1 match, ok
+        assert_eq!(
+            select(&candidates2, "GET", "/always-further/nono.git/info/refs"),
+            Selection::Route("github_https_all")
+        );
+    }
+
     /// Self-signed CA for testing. Generated with:
     /// openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     ///   -keyout /dev/null -nodes -days 36500 -subj '/CN=nono-test-ca' -out -
@@ -950,7 +1167,8 @@ h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
         let cert_path = dir.path().join("client.crt");
         std::fs::write(&cert_path, TEST_CLIENT_CERT_PEM).unwrap();
 
-        let result = build_tls_connector(None, Some(cert_path.to_str().unwrap()), None);
+        let base = build_base_root_store();
+        let result = build_tls_connector(&base, None, Some(cert_path.to_str().unwrap()), None);
         let err = result
             .err()
             .expect("should fail with half-pair")
@@ -968,7 +1186,8 @@ h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
         let key_path = dir.path().join("client.key");
         std::fs::write(&key_path, TEST_CLIENT_KEY_PEM).unwrap();
 
-        let result = build_tls_connector(None, None, Some(key_path.to_str().unwrap()));
+        let base = build_base_root_store();
+        let result = build_tls_connector(&base, None, None, Some(key_path.to_str().unwrap()));
         let err = result
             .err()
             .expect("should fail with half-pair")
@@ -986,7 +1205,9 @@ h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
         let key_path = dir.path().join("client.key");
         std::fs::write(&key_path, TEST_CLIENT_KEY_PEM).unwrap();
 
+        let base = build_base_root_store();
         let result = build_tls_connector(
+            &base,
             None,
             Some("/nonexistent/client.crt"),
             Some(key_path.to_str().unwrap()),
@@ -1005,7 +1226,9 @@ h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
         let cert_path = dir.path().join("client.crt");
         std::fs::write(&cert_path, TEST_CLIENT_CERT_PEM).unwrap();
 
+        let base = build_base_root_store();
         let result = build_tls_connector(
+            &base,
             None,
             Some(cert_path.to_str().unwrap()),
             Some("/nonexistent/client.key"),
@@ -1033,7 +1256,9 @@ h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
             return;
         }
 
+        let base = build_base_root_store();
         let result = build_tls_connector(
+            &base,
             None,
             Some(cert_path.to_str().unwrap()),
             Some("/nonexistent/key"),
@@ -1054,7 +1279,9 @@ h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
         std::fs::write(&cert_path, "not a certificate\n").unwrap();
         std::fs::write(&key_path, TEST_CLIENT_KEY_PEM).unwrap();
 
+        let base = build_base_root_store();
         let result = build_tls_connector(
+            &base,
             None,
             Some(cert_path.to_str().unwrap()),
             Some(key_path.to_str().unwrap()),
@@ -1076,7 +1303,9 @@ h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
         std::fs::write(&cert_path, TEST_CLIENT_CERT_PEM).unwrap();
         std::fs::write(&key_path, "not a key\n").unwrap();
 
+        let base = build_base_root_store();
         let result = build_tls_connector(
+            &base,
             None,
             Some(cert_path.to_str().unwrap()),
             Some(key_path.to_str().unwrap()),

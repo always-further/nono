@@ -73,34 +73,41 @@ const MAX_TRACKED_REQUEST_IDS: usize = 4096;
 /// diagnostics/prompts take over the terminal.
 const POST_EXIT_PTY_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
+struct ProfileSaveOffer<'a> {
+    policy_explanations: &'a [nono::diagnostic::PolicyExplanation],
+    error_observation: &'a nono::diagnostic::ErrorObservation,
+    caps: &'a CapabilitySet,
+    command: &'a [String],
+    compared_profile: Option<&'a str>,
+    sandbox_violations: &'a [nono::SandboxViolation],
+    ignored_denial_paths: &'a [std::path::PathBuf],
+}
+
 fn offer_profile_save_for_child(
     pty: Option<&mut crate::pty_proxy::PtyProxy>,
-    policy_explanations: &[nono::diagnostic::PolicyExplanation],
-    error_observation: &nono::diagnostic::ErrorObservation,
-    caps: &CapabilitySet,
-    command: &[String],
-    compared_profile: Option<&str>,
-    sandbox_violations: &[nono::SandboxViolation],
+    offer: ProfileSaveOffer<'_>,
 ) -> Result<()> {
     if let Some(proxy) = pty {
         let _released_terminal = proxy.release_terminal_for_prompt();
         return crate::profile_save_runtime::offer_save_run_profile(
-            policy_explanations,
-            error_observation,
-            caps,
-            command,
-            compared_profile,
-            sandbox_violations,
+            offer.policy_explanations,
+            offer.error_observation,
+            offer.caps,
+            offer.command,
+            offer.compared_profile,
+            offer.sandbox_violations,
+            offer.ignored_denial_paths,
         );
     }
 
     crate::profile_save_runtime::offer_save_run_profile(
-        policy_explanations,
-        error_observation,
-        caps,
-        command,
-        compared_profile,
-        sandbox_violations,
+        offer.policy_explanations,
+        offer.error_observation,
+        offer.caps,
+        offer.command,
+        offer.compared_profile,
+        offer.sandbox_violations,
+        offer.ignored_denial_paths,
     )
 }
 
@@ -208,6 +215,8 @@ pub struct ExecConfig<'a> {
     pub protected_paths: &'a [std::path::PathBuf],
     /// Base profile name to derive a saved user patch from after run-time denials.
     pub profile_save_base: Option<&'a str>,
+    /// Denied paths that should not be offered in the save-profile prompt.
+    pub ignored_denial_paths: &'a [std::path::PathBuf],
     /// Optional startup timeout for known interactive CLIs that were launched
     /// without their recommended built-in profile.
     pub startup_timeout: Option<StartupTimeoutConfig<'a>>,
@@ -1246,12 +1255,15 @@ pub fn execute_supervised(
                 clear_signal_forwarding_target();
                 offer_profile_save_for_child(
                     pty_proxy.as_mut(),
-                    &prompt_policy_explanations,
-                    &prompt_error_observation,
-                    config.caps,
-                    config.command,
-                    config.profile_save_base,
-                    &sandbox_violations,
+                    ProfileSaveOffer {
+                        policy_explanations: &prompt_policy_explanations,
+                        error_observation: &prompt_error_observation,
+                        caps: config.caps,
+                        command: config.command,
+                        compared_profile: config.profile_save_base,
+                        sandbox_violations: &sandbox_violations,
+                        ignored_denial_paths: config.ignored_denial_paths,
+                    },
                 )?;
             }
 

@@ -368,6 +368,22 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     // exchange needs TLS.
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let native = rustls_native_certs::load_native_certs();
+    if !native.errors.is_empty() {
+        debug!(
+            "failed to load {} native cert(s); continuing with webpki roots + any that succeeded",
+            native.errors.len()
+        );
+    }
+    let native_count = native.certs.len();
+    for cert in native.certs {
+        if let Err(e) = root_store.add(cert) {
+            debug!("skipping unparseable native cert: {e}");
+        }
+    }
+    if native_count > 0 {
+        debug!("added {native_count} native system CA(s) to upstream trust store");
+    }
     let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))

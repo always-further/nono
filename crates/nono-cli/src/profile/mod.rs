@@ -89,6 +89,13 @@ pub struct FilesystemConfig {
     /// the new name makes the "does not grant access" semantics explicit.
     #[serde(default)]
     pub bypass_protection: Vec<String>,
+    /// Paths whose runtime denials should not be offered in the save-profile
+    /// prompt. This does not grant access, remove deny rules, or hide the
+    /// diagnostic footer; it only suppresses repeated save suggestions for
+    /// paths the user has decided not to grant.
+    /// ALIAS(canonical="suppress_save_prompt", introduced="v0.52.0", remove_by="indefinite", issue="#875")
+    #[serde(default, alias = "ignore")]
+    pub suppress_save_prompt: Vec<String>,
 }
 
 /// Group composition — include/exclude pair for policy groups.
@@ -2208,6 +2215,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &base.filesystem.bypass_protection,
                 &child.filesystem.bypass_protection,
             ),
+            suppress_save_prompt: dedup_append(
+                &base.filesystem.suppress_save_prompt,
+                &child.filesystem.suppress_save_prompt,
+            ),
         },
         network: NetworkConfig {
             block: base.network.block || child.network.block,
@@ -2682,12 +2693,32 @@ mod tests {
             "meta": {"name": "t"},
             "filesystem": {
                 "deny": ["/blocked"],
-                "bypass_protection": ["$HOME/.docker"]
+                "bypass_protection": ["$HOME/.docker"],
+                "suppress_save_prompt": ["$HOME/.copilot/settings.json"]
             }
         }"#;
         let profile: Profile = serde_json::from_str(json).expect("parse");
         assert_eq!(profile.filesystem.deny, vec!["/blocked"]);
         assert_eq!(profile.filesystem.bypass_protection, vec!["$HOME/.docker"]);
+        assert_eq!(
+            profile.filesystem.suppress_save_prompt,
+            vec!["$HOME/.copilot/settings.json"]
+        );
+    }
+
+    #[test]
+    fn test_filesystem_config_ignore_alias_drains_to_suppress_save_prompt() {
+        let json = r#"{
+            "meta": {"name": "t"},
+            "filesystem": {
+                "ignore": ["$HOME/.copilot/settings.json"]
+            }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            profile.filesystem.suppress_save_prompt,
+            vec!["$HOME/.copilot/settings.json"]
+        );
     }
 
     #[test]
@@ -4059,6 +4090,7 @@ mod tests {
                 unix_socket_dir_bind: vec![],
                 deny: vec!["/base/policy-deny".to_string()],
                 bypass_protection: vec!["/base/override-deny".to_string()],
+                suppress_save_prompt: vec!["/base/no-prompt".to_string()],
             },
             network: NetworkConfig {
                 block: false,
@@ -4133,6 +4165,7 @@ mod tests {
                 unix_socket_dir_bind: vec![],
                 deny: vec!["/child/policy-deny".to_string()],
                 bypass_protection: vec!["/child/override-deny".to_string()],
+                suppress_save_prompt: vec!["/child/no-prompt".to_string()],
             },
             network: NetworkConfig {
                 block: false,
@@ -4886,6 +4919,14 @@ mod tests {
             .filesystem
             .bypass_protection
             .contains(&"/child/override-deny".to_string()));
+        assert!(merged
+            .filesystem
+            .suppress_save_prompt
+            .contains(&"/base/no-prompt".to_string()));
+        assert!(merged
+            .filesystem
+            .suppress_save_prompt
+            .contains(&"/child/no-prompt".to_string()));
     }
 
     #[test]
@@ -5640,7 +5681,8 @@ mod tests {
                 "allow": ["/tmp/project"],
                 "read": ["/etc", "/opt/data"],
                 "allow_file": ["/tmp/config.json"],
-                "bypass_protection": ["/etc/hosts"]
+                "bypass_protection": ["/etc/hosts"],
+                "suppress_save_prompt": ["/tmp/project/.cache/noisy.json"]
             },
             "network": {
                 "block": false,

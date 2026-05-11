@@ -101,6 +101,7 @@ All filesystem grants, denials, and deny-rule exemptions live under this single 
 | `write_file`        | array of string | Single files with write-only access. |
 | `deny`              | array of string | Paths denied filesystem access. |
 | `bypass_protection` | array of string | Paths exempted from deny groups. **This flag does not implicitly grant access** — `bypass_protection` only removes the deny rule; each path must also appear in `filesystem.allow`, `filesystem.read`, or `filesystem.write` (or the matching `*_file` variant) to become accessible. |
+| `ignore`            | array of string | Paths whose runtime denials should not be offered in save-profile prompts. Does not grant access or hide diagnostics. |
 
 All path fields support variable expansion (see Section 6).
 
@@ -337,6 +338,29 @@ When a deny group blocks a path you need access to, use `filesystem.bypass_prote
 }
 ```
 
+### Suppress repeated save suggestions
+
+Use `filesystem.suppress_save_prompt` for paths you intentionally do not want
+to grant, but also do not want offered in the save-profile prompt every run:
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "copilot-local",
+    "description": "Local prompt-suppression choices"
+  },
+  "filesystem": {
+    "suppress_save_prompt": ["$HOME/.copilot/settings.json"]
+  }
+}
+```
+
+The sandbox still denies these paths. `filesystem.suppress_save_prompt` only
+filters the save-profile suggestion. `filesystem.ignore` is accepted as an
+alias, but new profiles should use the explicit suppress name so it is not
+mistaken for an access grant.
+
 ### Denying specific project files
 
 Block access to a file in the working directory while keeping the rest accessible. Use `$WORKDIR` to reference the current working directory — relative paths like `./` are not expanded:
@@ -475,7 +499,7 @@ nono profile diff <a> <b>         # Compare two profiles
 
 ## 6. Variable Expansion
 
-The following variables are expanded in all path fields (`filesystem.*`, including `filesystem.allow`, `filesystem.read`, `filesystem.write`, `filesystem.deny`, and `filesystem.bypass_protection`).
+The following variables are expanded in all path fields (`filesystem.*`, including `filesystem.allow`, `filesystem.read`, `filesystem.write`, `filesystem.deny`, `filesystem.bypass_protection`, and `filesystem.suppress_save_prompt`).
 
 | Variable           | Expands to |
 |--------------------|------------|
@@ -495,6 +519,7 @@ Always use these variables instead of hardcoded absolute paths to keep profiles 
 
 - A profile with no `groups.include` has no deny rules. Always include appropriate deny groups for untrusted workloads.
 - `filesystem.bypass_protection` only removes the deny rule. It does not grant access. You must also add the path via `filesystem.allow`, `filesystem.read`, or `filesystem.write` (or the matching `*_file` variant).
+- `filesystem.suppress_save_prompt` only suppresses save-profile suggestions. It does not grant access, remove deny rules, or hide diagnostics.
 - `groups.exclude` removes groups from the resolved set. This weakens the sandbox. Use it only when you understand which protections you are removing.
 - `extends` chains resolve recursively up to depth 10. Circular inheritance is an error.
 - Platform-specific groups (suffix `_macos` or `_linux`) are filtered at resolution time. Include both variants for cross-platform profiles.

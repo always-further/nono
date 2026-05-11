@@ -222,6 +222,10 @@ fn build_skeleton(args: &ProfileInitArgs) -> serde_json::Value {
             "bypass_protection".to_string(),
             serde_json::Value::Array(vec![]),
         );
+        filesystem.insert(
+            "suppress_save_prompt".to_string(),
+            serde_json::Value::Array(vec![]),
+        );
     }
     root.insert(
         "filesystem".to_string(),
@@ -929,7 +933,8 @@ pub(crate) fn cmd_show(args: ProfileShowArgs) -> Result<()> {
         || !fs.read_file.is_empty()
         || !fs.write_file.is_empty()
         || !fs.deny.is_empty()
-        || !fs.bypass_protection.is_empty();
+        || !fs.bypass_protection.is_empty()
+        || !fs.suppress_save_prompt.is_empty();
 
     if has_fs {
         println!();
@@ -941,6 +946,12 @@ pub(crate) fn cmd_show(args: ProfileShowArgs) -> Result<()> {
         print_fs_paths("read_file", &fs.read_file, t, args.raw);
         print_fs_paths("write_file", &fs.write_file, t, args.raw);
         print_fs_paths("deny", &fs.deny, t, args.raw);
+        print_fs_paths(
+            "suppress_save_prompt",
+            &fs.suppress_save_prompt,
+            t,
+            args.raw,
+        );
         if !fs.bypass_protection.is_empty() {
             println!(
                 "    {}: {}",
@@ -1161,6 +1172,7 @@ fn profile_to_json(
         "write_file": profile.filesystem.write_file,
         "deny": profile.filesystem.deny,
         "bypass_protection": profile.filesystem.bypass_protection,
+        "suppress_save_prompt": profile.filesystem.suppress_save_prompt,
     });
 
     // Groups and commands are emitted only when populated, so default-empty
@@ -1340,6 +1352,11 @@ pub(crate) fn cmd_diff(args: ProfileDiffArgs) -> Result<()> {
             "filesystem.bypass_protection",
             &p1.filesystem.bypass_protection,
             &p2.filesystem.bypass_protection,
+        ),
+        (
+            "filesystem.suppress_save_prompt",
+            &p1.filesystem.suppress_save_prompt,
+            &p2.filesystem.suppress_save_prompt,
         ),
         ("commands.deny", &p1.commands.deny, &p2.commands.deny),
     ]);
@@ -1979,6 +1996,10 @@ fn diff_fs_json(
         "allow_file": diff_vec(&fs1.allow_file, &fs2.allow_file),
         "read_file": diff_vec(&fs1.read_file, &fs2.read_file),
         "write_file": diff_vec(&fs1.write_file, &fs2.write_file),
+        "suppress_save_prompt": diff_vec(
+            &fs1.suppress_save_prompt,
+            &fs2.suppress_save_prompt
+        ),
     })
 }
 
@@ -2244,6 +2265,11 @@ pub(crate) fn cmd_validate(args: ProfileValidateArgs) -> Result<()> {
         check_paths(&profile.filesystem.allow, "filesystem.allow", &mut warnings);
         check_paths(&profile.filesystem.read, "filesystem.read", &mut warnings);
         check_paths(&profile.filesystem.write, "filesystem.write", &mut warnings);
+        check_paths(
+            &profile.filesystem.suppress_save_prompt,
+            "filesystem.suppress_save_prompt",
+            &mut warnings,
+        );
     }
 
     if args.json {
@@ -3329,6 +3355,7 @@ mod tests {
         assert!(full_fs.contains_key("write_file"));
         assert!(full_fs.contains_key("deny"));
         assert!(full_fs.contains_key("bypass_protection"));
+        assert!(full_fs.contains_key("suppress_save_prompt"));
 
         // Minimal filesystem has only allow + read; the canonical deny /
         // bypass_protection appear only with --full.
@@ -3337,6 +3364,7 @@ mod tests {
         assert!(!min_fs.contains_key("allow_file"));
         assert!(!min_fs.contains_key("deny"));
         assert!(!min_fs.contains_key("bypass_protection"));
+        assert!(!min_fs.contains_key("suppress_save_prompt"));
 
         // Full groups has both include and exclude; minimal has only include.
         let full_groups = full_obj["groups"].as_object().expect("groups object");

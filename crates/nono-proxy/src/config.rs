@@ -294,8 +294,13 @@ impl CompiledEndpointRules {
         Ok(Self { rules: compiled })
     }
 
-    /// Check if the given method+path is allowed.
-    /// Returns `true` if no rules were compiled (allow-all, backward compatible).
+    /// `true` if no endpoint rules are defined (allow-all).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    /// `true` if method+path matches a rule, or if no rules are defined.
     #[must_use]
     pub fn is_allowed(&self, method: &str, path: &str) -> bool {
         if self.rules.is_empty() {

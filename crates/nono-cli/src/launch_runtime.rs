@@ -96,6 +96,7 @@ pub(crate) struct ExecutionFlags {
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,
     pub(crate) bypass_protection_paths: Vec<PathBuf>,
+    pub(crate) ignored_denial_paths: Vec<PathBuf>,
     pub(crate) session: SessionLaunchOptions,
     pub(crate) rollback: RollbackLaunchOptions,
     pub(crate) trust: TrustLaunchOptions,
@@ -116,6 +117,7 @@ impl ExecutionFlags {
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
             bypass_protection_paths: Vec::new(),
+            ignored_denial_paths: Vec::new(),
             session: SessionLaunchOptions::default(),
             rollback: RollbackLaunchOptions::default(),
             trust: TrustLaunchOptions {
@@ -233,6 +235,7 @@ pub(crate) fn prepare_run_launch_plan(
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: prepared.wsl2_proxy_policy,
             bypass_protection_paths: prepared.bypass_protection_paths,
+            ignored_denial_paths: prepared.ignored_denial_paths,
             session: SessionLaunchOptions {
                 detached_start: run_args.detached,
                 session_name: run_args.name,

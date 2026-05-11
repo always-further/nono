@@ -318,6 +318,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
             .profile_name
             .as_deref()
             .or(recommended_profile),
+        ignored_denial_paths: &flags.ignored_denial_paths,
         startup_timeout: if should_apply_startup_timeout(startup_timeout_profile, &cmd_args) {
             startup_timeout_profile.map(|profile| exec_strategy::StartupTimeoutConfig {
                 timeout: PROFILE_HINT_STARTUP_TIMEOUT,

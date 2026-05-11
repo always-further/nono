@@ -86,7 +86,8 @@ With `--full`, additional sections are included as empty stubs for all additive 
     "read_file": [],
     "write_file": [],
     "deny": [],
-    "bypass_protection": []
+    "bypass_protection": [],
+    "suppress_save_prompt": []
   },
   "security": {},
   "network": {
@@ -293,6 +294,28 @@ Groups are referenced by name in the `groups.include` field. See [Profiles & Gro
 <Note>
   `filesystem.bypass_protection` only removes the deny rule. You must also grant access via `filesystem.allow`, `filesystem.read`, or `filesystem.write` (or the matching `*_file` variant) for the path to be accessible.
 </Note>
+
+### Suppressing Repeated Save Suggestions
+
+Use `filesystem.suppress_save_prompt` for paths you intentionally do not want
+to grant, but also do not want to see in the save-profile prompt on every run:
+
+```json
+{
+  "filesystem": {
+    "suppress_save_prompt": ["$HOME/.copilot/settings.json"]
+  }
+}
+```
+
+This does not grant access and does not hide diagnostics. It only suppresses
+matching save-profile suggestions. `filesystem.ignore` is accepted as an alias,
+but the canonical name is deliberately explicit so it is not mistaken for
+allowing the denied path.
+
+The post-run save prompt offers the same behavior interactively: choose
+`suppress` to save all listed denied-path suggestions here instead of adding
+them as `read`, `read_file`, `allow`, or `allow_file` grants.
 
 ### Exclude Inherited Groups
 

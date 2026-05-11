@@ -994,6 +994,16 @@ pub struct SandboxArgs {
     )]
     pub bypass_protection: Vec<PathBuf>,
 
+    /// Suppress save-profile prompts for denials under this path. Does not grant access
+    /// ALIAS(canonical="--suppress-save-prompt", introduced="v0.52.0", remove_by="indefinite", issue="#875")
+    #[arg(
+        long = "suppress-save-prompt",
+        alias = "ignore-denied",
+        value_name = "PATH",
+        help_heading = "FILESYSTEM"
+    )]
+    pub suppress_save_prompt: Vec<PathBuf>,
+
     /// Allow CWD access without prompting (level set by profile, defaults to read-only)
     #[arg(long, help_heading = "FILESYSTEM")]
     pub allow_cwd: bool,
@@ -1194,7 +1204,7 @@ pub struct SandboxArgs {
             "allow", "read", "write", "allow_file", "read_file", "write_file",
             "allow_unix_socket", "allow_unix_socket_bind",
             "allow_unix_socket_dir", "allow_unix_socket_dir_bind",
-            "profile", "bypass_protection", "allow_cwd",
+            "profile", "bypass_protection", "suppress_save_prompt", "allow_cwd",
             "block_net", "allow_net", "network_profile", "allow_proxy",
             "allow_bind", "allow_port", "allow_connect_port", "external_proxy", "proxy_port",
             "proxy_credential", "allow_endpoint", "env_credential", "env_credential_map",
@@ -1290,6 +1300,16 @@ pub struct WrapSandboxArgs {
         help_heading = "FILESYSTEM"
     )]
     pub bypass_protection: Vec<PathBuf>,
+
+    /// Suppress save-profile prompts for denials under this path. Does not grant access
+    /// ALIAS(canonical="--suppress-save-prompt", introduced="v0.52.0", remove_by="indefinite", issue="#875")
+    #[arg(
+        long = "suppress-save-prompt",
+        alias = "ignore-denied",
+        value_name = "PATH",
+        help_heading = "FILESYSTEM"
+    )]
+    pub suppress_save_prompt: Vec<PathBuf>,
 
     /// Allow CWD access without prompting (level set by profile, defaults to read-only)
     #[arg(long, help_heading = "FILESYSTEM")]
@@ -1398,7 +1418,7 @@ pub struct WrapSandboxArgs {
             "allow", "read", "write", "allow_file", "read_file", "write_file",
             "allow_unix_socket", "allow_unix_socket_bind",
             "allow_unix_socket_dir", "allow_unix_socket_dir_bind",
-            "profile", "bypass_protection", "allow_cwd",
+            "profile", "bypass_protection", "suppress_save_prompt", "allow_cwd",
             "block_net", "allow_bind", "allow_port", "allow_connect_port",
             "env_credential", "env_credential_map",
             "allow_command", "block_command", "allow_launch_services", "allow_gpu",
@@ -1430,6 +1450,7 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             allow_unix_socket_dir: args.allow_unix_socket_dir,
             allow_unix_socket_dir_bind: args.allow_unix_socket_dir_bind,
             bypass_protection: args.bypass_protection,
+            suppress_save_prompt: args.suppress_save_prompt,
             allow_cwd: args.allow_cwd,
             workdir: args.workdir,
             block_net: args.block_net,
@@ -3182,6 +3203,57 @@ mod tests {
                 assert_eq!(
                     args.sandbox.bypass_protection[0],
                     PathBuf::from("/tmp/test")
+                );
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_suppress_save_prompt_multiple() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--suppress-save-prompt",
+            "/tmp/a",
+            "--suppress-save-prompt",
+            "/tmp/b",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.sandbox.suppress_save_prompt.len(), 2);
+                assert_eq!(
+                    args.sandbox.suppress_save_prompt[0],
+                    PathBuf::from("/tmp/a")
+                );
+                assert_eq!(
+                    args.sandbox.suppress_save_prompt[1],
+                    PathBuf::from("/tmp/b")
+                );
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_ignore_denied_alias_maps_to_suppress_save_prompt() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--ignore-denied",
+            "/tmp/a",
+            "--allow",
+            ".",
+            "echo",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(
+                    args.sandbox.suppress_save_prompt,
+                    vec![PathBuf::from("/tmp/a")]
                 );
             }
             _ => panic!("Expected Run command"),

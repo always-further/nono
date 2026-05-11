@@ -70,6 +70,7 @@ Profiles use JSON format:
     "write_file": [],
     "deny": [],
     "bypass_protection": [],
+    "suppress_save_prompt": [],
     "unix_socket": [],
     "unix_socket_bind": [],
     "unix_socket_dir": [],
@@ -137,6 +138,7 @@ This is the primary mechanism for surgically customizing inherited profiles with
 | `deny` | `filesystem` | Additional deny rules to apply (block read and write content). On macOS, Unix socket paths also emit a `network-outbound` deny so that `connect(2)` to the socket is blocked. |
 | `deny` | `commands` | Deprecated in v0.33.0. Startup-only command denylist extension. Not enforced for child processes; prefer `filesystem.deny` and narrower grants. |
 | `bypass_protection` | `filesystem` | Paths exempted from deny groups. **Does not grant access** — each path must also appear in `filesystem.allow`, `filesystem.read`, or `filesystem.write`. |
+| `suppress_save_prompt` | `filesystem` | Paths whose runtime denials should not be offered in save-profile prompts. **Does not grant access** and does not hide diagnostics. |
 
 <Note>
   **Renamed in issue #594.** The old top-level `policy` section was dissolved into `filesystem`, `groups`, and `commands` in the canonical schema. Legacy names still deserialize with a deprecation warning; see the migration table in `nono profile guide` for the full mapping. The legacy keys will be removed in v1.0.0.
@@ -248,6 +250,28 @@ This is equivalent to the CLI flag `--bypass-protection`:
 ```bash
 nono run --profile opencode --allow ~/.docker --bypass-protection ~/.docker -- opencode
 ```
+
+#### Suppressing Save Suggestions Without Granting Access
+
+Use `filesystem.suppress_save_prompt` when a path is expected to be denied and
+you do not want nono to keep offering it as a profile addition:
+
+```json
+{
+  "extends": "claude-code",
+  "meta": { "name": "claude-local", "version": "1.0.0" },
+  "filesystem": {
+    "suppress_save_prompt": ["$HOME/.copilot/settings.json"]
+  }
+}
+```
+
+`filesystem.suppress_save_prompt` only suppresses the save-profile suggestion
+for matching denials. The sandbox still denies the path, and the diagnostic
+footer can still show the denial if the run fails.
+
+The interactive save prompt applies this to every listed path suggestion when
+you choose `suppress`; it does not create any allow/read/write grants.
 
 <Note>
   `filesystem`, `groups`, and `commands` fields are additive across inheritance. A child profile's `filesystem.deny` is merged with the base profile's `filesystem.deny`, and `groups.exclude` from both levels are combined.
@@ -447,6 +471,12 @@ Every profile's effective capability set is built through composition:
 4. **profile.filesystem.allow/read/write**, **profile.filesystem.deny**, and **profile.commands.allow/deny** apply additive overrides
 5. **profile.filesystem.bypass_protection** punches targeted holes through deny groups (requires a matching grant in `filesystem.allow`/`read`/`write`)
 6. **CLI overrides** (`--allow`, `--read`, `--bypass-protection`, etc.) are applied last
+
+`profile.filesystem.suppress_save_prompt` and `--suppress-save-prompt` are
+prompt filters only; they do not participate in capability enforcement. The
+older `filesystem.ignore` and `--ignore-denied` forms are accepted as aliases,
+but new examples use the explicit suppress wording to avoid suggesting an
+access grant.
 
 Exclusions are applied after group addition. If the same group appears in both
 `groups.include` and `groups.exclude`, the exclusion wins.

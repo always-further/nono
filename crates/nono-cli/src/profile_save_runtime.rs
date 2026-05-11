@@ -28,6 +28,13 @@ struct PatchGrant {
     bypass_protection: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileSaveChoice {
+    Grant,
+    Suppress,
+    Skip,
+}
+
 /// Env var that suppresses the "save denied paths as user profile?"
 /// prompt entirely. Set by integration tests and CI runs that have an
 /// openable `/dev/tty` (so `terminal_prompts_available` would otherwise
@@ -55,6 +62,7 @@ pub(crate) fn offer_save_run_profile(
     command: &[String],
     compared_profile: Option<&str>,
     sandbox_violations: &[SandboxViolation],
+    ignored_denial_paths: &[PathBuf],
 ) -> Result<()> {
     if !terminal_prompts_available() {
         return Ok(());
@@ -65,6 +73,7 @@ pub(crate) fn offer_save_run_profile(
         error_observation,
         caps,
         sandbox_violations,
+        ignored_denial_paths,
     )?
     else {
         return Ok(());
@@ -72,6 +81,7 @@ pub(crate) fn offer_save_run_profile(
 
     let cmd_name = command_name(command)?;
     let has_overrides = patch_has_policy_overrides(&patch);
+    let suppress_patch = build_suppress_save_prompt_patch(&patch);
     let _prompt_terminal = prepare_prompt_terminal();
 
     prompt_println("");
@@ -80,78 +90,96 @@ pub(crate) fn offer_save_run_profile(
     if let Some(existing_profile) = compared_profile
         .filter(|name| profile::is_valid_profile_name(name) && profile::is_user_override(name))
     {
-        let confirmed = if has_overrides {
-            confirm_typed_word(
-                &format!(
-                    "Update existing user profile '{}' with these entries, including unsafe policy overrides? Type 'override' to confirm: ",
-                    existing_profile
-                ),
-                "override",
-            )?
-        } else {
-            confirm(
-                &format!(
-                    "Update existing user profile '{}' with denied paths/rules? [Y/n] ",
-                    existing_profile
-                ),
-                true,
-            )?
+        let choice = prompt_profile_save_choice(Some(existing_profile), suppress_patch.is_some())?;
+        let Some(selected_patch) =
+            selected_profile_save_patch(choice, &patch, suppress_patch.as_ref(), has_overrides)?
+        else {
+            return Ok(());
         };
 
-        if confirmed {
-            let prepared = prepare_profile_save_from_patch(
-                &patch,
-                &cmd_name,
-                existing_profile,
-                compared_profile,
-            )?;
-            write_profile(&prepared)?;
-            print_profile_save(&prepared, command);
+        let prepared = prepare_profile_save_from_patch(
+            selected_patch,
+            &cmd_name,
+            existing_profile,
+            compared_profile,
+        )?;
+        write_profile(&prepared)?;
+        print_profile_save(&prepared, command);
+        if choice == ProfileSaveChoice::Suppress {
+            print_suppression_save_note(selected_patch);
         }
         return Ok(());
     }
+
+    let choice = prompt_profile_save_choice(None, suppress_patch.is_some())?;
+    let Some(selected_patch) =
+        selected_profile_save_patch(choice, &patch, suppress_patch.as_ref(), has_overrides)?
+    else {
+        return Ok(());
+    };
 
     let suggested = suggested_run_profile_name(compared_profile, &cmd_name);
     let Some(profile_name) = prompt_profile_name(suggested.as_deref())? else {
         return Ok(());
     };
 
-    if has_overrides
-        && !confirm_typed_word(
-            "Save profile with the policy overrides shown above? Type 'override' to confirm: ",
-            "override",
-        )?
-    {
-        return Ok(());
-    }
-
-    let prepared =
-        prepare_profile_save_from_patch(&patch, &cmd_name, &profile_name, compared_profile)?;
+    let prepared = prepare_profile_save_from_patch(
+        selected_patch,
+        &cmd_name,
+        &profile_name,
+        compared_profile,
+    )?;
     write_profile(&prepared)?;
     print_profile_save(&prepared, command);
+    if choice == ProfileSaveChoice::Suppress {
+        print_suppression_save_note(selected_patch);
+    }
 
     Ok(())
 }
 
+fn selected_profile_save_patch<'a>(
+    choice: ProfileSaveChoice,
+    grant_patch: &'a profile::Profile,
+    suppress_patch: Option<&'a profile::Profile>,
+    has_overrides: bool,
+) -> Result<Option<&'a profile::Profile>> {
+    match choice {
+        ProfileSaveChoice::Grant => {
+            if has_overrides
+                && !confirm_typed_word(
+                    "Granting the shown entries includes policy overrides. Type 'override' to confirm: ",
+                    "override",
+                )?
+            {
+                return Ok(None);
+            }
+            Ok(Some(grant_patch))
+        }
+        ProfileSaveChoice::Suppress => Ok(suppress_patch),
+        ProfileSaveChoice::Skip => Ok(None),
+    }
+}
+
 /// Prompt for a new profile name, re-prompting on invalid or shadowed names
-/// until the user enters a valid name or presses Enter to skip.
+/// until the user enters a valid name. When a suggestion exists, Enter accepts
+/// it; otherwise a typed name is required.
 ///
-/// Returns `Ok(None)` when the user skips.
+/// Returns `Ok(None)` only when the user explicitly types `skip`.
 fn prompt_profile_name(suggested: Option<&str>) -> Result<Option<String>> {
     let mut first = true;
     loop {
         let prompt = if first {
             if let Some(suggested_name) = suggested {
-                format!(
-                    "Save denied paths as user profile? Enter a name (suggested: {}, or press Enter to skip): ",
-                    suggested_name
-                )
+                format!("User profile name [{}]: ", suggested_name)
             } else {
-                "Save denied paths as user profile? Enter a name (or press Enter to skip): "
-                    .to_string()
+                "User profile name: ".to_string()
             }
         } else {
-            "Enter a name (or press Enter to skip): ".to_string()
+            match suggested {
+                Some(suggested_name) => format!("Enter a name [{}]: ", suggested_name),
+                None => "Enter a name: ".to_string(),
+            }
         };
         prompt_print(&prompt, &[]);
 
@@ -163,6 +191,17 @@ fn prompt_profile_name(suggested: Option<&str>) -> Result<Option<String>> {
         let candidate = input.trim();
 
         if candidate.is_empty() {
+            if let Some(suggested_name) = suggested {
+                return Ok(Some(suggested_name.to_string()));
+            }
+            prompt_println(&format!(
+                "{}",
+                "Profile name required. Type a name, or type 'skip' to cancel.".red()
+            ));
+            continue;
+        }
+
+        if candidate.eq_ignore_ascii_case("skip") {
             return Ok(None);
         }
 
@@ -187,6 +226,59 @@ fn prompt_profile_name(suggested: Option<&str>) -> Result<Option<String>> {
         }
 
         return Ok(Some(candidate.to_string()));
+    }
+}
+
+fn prompt_profile_save_choice(
+    existing_profile: Option<&str>,
+    can_suppress: bool,
+) -> Result<ProfileSaveChoice> {
+    loop {
+        let prompt = match (existing_profile, can_suppress) {
+            (Some(name), true) => format!(
+                "Update user profile '{}' with suggestions? [g] grant / [s] suppress / [Enter] skip: ",
+                name
+            ),
+            (Some(name), false) => format!(
+                "Update existing user profile '{}' with the shown rules? [g] save / [Enter] skip: ",
+                name
+            ),
+            (None, true) => {
+                "Save suggestions to a user profile? [g] grant / [s] suppress / [Enter] skip: "
+                    .to_string()
+            }
+            (None, false) => {
+                "Save the shown rules in a user profile? [g] save / [Enter] skip: ".to_string()
+            }
+        };
+
+        prompt_print(&prompt, &[]);
+
+        let input = read_input_line()?;
+        if let Some(choice) = parse_profile_save_choice(&input, can_suppress) {
+            return Ok(choice);
+        }
+
+        let help = if can_suppress {
+            "Enter g to grant, s to suppress, or press Enter to skip."
+        } else {
+            "Enter g to save, or press Enter to skip."
+        };
+        prompt_println(&format!("{}", help.red()));
+    }
+}
+
+fn parse_profile_save_choice(input: &str, can_suppress: bool) -> Option<ProfileSaveChoice> {
+    let normalized = input.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "n" | "no" | "skip" => Some(ProfileSaveChoice::Skip),
+        "g" | "grant" | "y" | "yes" | "save" => Some(ProfileSaveChoice::Grant),
+        "s" | "suppress" | "suppress-save-prompt" | "no-nag" | "no_nag" | "nonag"
+            if can_suppress =>
+        {
+            Some(ProfileSaveChoice::Suppress)
+        }
+        _ => None,
     }
 }
 
@@ -413,6 +505,19 @@ pub(crate) fn print_profile_save(prepared: &PreparedProfileSave, command: &[Stri
     ));
 }
 
+fn print_suppression_save_note(patch: &profile::Profile) {
+    let count = patch.filesystem.suppress_save_prompt.len();
+    if count == 0 {
+        return;
+    }
+
+    prompt_println(&format!(
+        "  ({} path suggestion{} suppressed; access is still denied)",
+        count,
+        if count == 1 { "" } else { "s" }
+    ));
+}
+
 /// Print a preview of what paths will be written to the profile.
 ///
 /// Highlights `bypass_protection` entries with a visible warning since those
@@ -434,7 +539,7 @@ pub(crate) fn print_patch_preview(patch: &profile::Profile) {
     }
 
     if has_entries {
-        prompt_println("[nono] Paths to be saved:");
+        prompt_println("[nono] Paths to be saved as grants:");
         for (label, paths) in sections {
             for path in *paths {
                 let is_override = patch.filesystem.bypass_protection.contains(path);
@@ -445,6 +550,11 @@ pub(crate) fn print_patch_preview(patch: &profile::Profile) {
                 }
             }
         }
+        prompt_println("");
+        prompt_println(
+            "[nono] Choose suppress to keep denying all listed paths and stop future save suggestions.",
+        );
+        prompt_println("[nono] CLI equivalent for one path: --suppress-save-prompt PATH");
     }
 
     if has_unsafe_rules {
@@ -687,11 +797,17 @@ pub(crate) fn prepare_profile_save_from_patch(
         .filter(|name| profile::is_valid_profile_name(name) && *name != profile_name)
         .map(|name| vec![name.to_string()]);
     let has_base = extends.is_some();
+    let suppression_only = patch_is_suppression_only(patch);
     new_profile.extends = extends;
     new_profile.meta = profile::ProfileMeta {
         name: profile_name.to_string(),
         version: "1.0.0".to_string(),
-        description: Some(if has_base {
+        description: Some(if suppression_only {
+            format!(
+                "Runtime-discovered save-prompt suppressions for {}",
+                cmd_name
+            )
+        } else if has_base {
             format!("Runtime-discovered path additions for {}", cmd_name)
         } else {
             format!("Runtime-discovered path profile for {}", cmd_name)
@@ -716,6 +832,7 @@ fn build_run_profile_patch(
     error_observation: &ErrorObservation,
     caps: &CapabilitySet,
     sandbox_violations: &[SandboxViolation],
+    ignored_denial_paths: &[PathBuf],
 ) -> Result<Option<profile::Profile>> {
     let mut grants: BTreeMap<PathBuf, PatchGrant> = BTreeMap::new();
 
@@ -725,6 +842,7 @@ fn build_run_profile_patch(
             &explanation.path,
             explanation.access,
             &explanation.reason,
+            ignored_denial_paths,
         );
     }
 
@@ -736,7 +854,13 @@ fn build_run_profile_patch(
                     "sensitive_path" | "insufficient_access" | "path_not_granted"
                 ) =>
             {
-                add_patch_grant(&mut grants, &hint.path, hint.access, &reason);
+                add_patch_grant(
+                    &mut grants,
+                    &hint.path,
+                    hint.access,
+                    &reason,
+                    ignored_denial_paths,
+                );
             }
             _ => {}
         }
@@ -802,6 +926,45 @@ fn build_run_profile_patch(
     Ok(Some(patch))
 }
 
+fn patch_is_suppression_only(patch: &profile::Profile) -> bool {
+    !patch.filesystem.suppress_save_prompt.is_empty()
+        && patch.filesystem.allow.is_empty()
+        && patch.filesystem.read.is_empty()
+        && patch.filesystem.write.is_empty()
+        && patch.filesystem.allow_file.is_empty()
+        && patch.filesystem.read_file.is_empty()
+        && patch.filesystem.write_file.is_empty()
+        && patch.filesystem.bypass_protection.is_empty()
+        && patch.unsafe_macos_seatbelt_rules.is_empty()
+}
+
+fn build_suppress_save_prompt_patch(grant_patch: &profile::Profile) -> Option<profile::Profile> {
+    let paths = grant_patch_path_suggestions(grant_patch);
+    if paths.is_empty() {
+        return None;
+    }
+
+    let mut patch = profile::Profile::default();
+    patch.filesystem.suppress_save_prompt = paths.into_iter().collect();
+    Some(patch)
+}
+
+fn grant_patch_path_suggestions(patch: &profile::Profile) -> BTreeSet<String> {
+    let sections = [
+        &patch.filesystem.allow,
+        &patch.filesystem.read,
+        &patch.filesystem.write,
+        &patch.filesystem.allow_file,
+        &patch.filesystem.read_file,
+        &patch.filesystem.write_file,
+    ];
+
+    sections
+        .into_iter()
+        .flat_map(|paths| paths.iter().cloned())
+        .collect()
+}
+
 pub(crate) fn has_saveable_system_service_rules(violations: &[SandboxViolation]) -> bool {
     violations
         .iter()
@@ -831,8 +994,16 @@ fn add_patch_grant(
     path: &Path,
     access: AccessMode,
     reason: &str,
+    ignored_denial_paths: &[PathBuf],
 ) {
     let (flag, target) = query_ext::suggested_flag_parts(path, access);
+    if !ignored_denial_paths.is_empty()
+        && (matches_ignored_denial(path, ignored_denial_paths)
+            || (target.as_path() != path && matches_ignored_denial(&target, ignored_denial_paths)))
+    {
+        return;
+    }
+
     let is_file = matches!(flag, "--read-file" | "--write-file" | "--allow-file");
 
     match grants.get_mut(&target) {
@@ -852,6 +1023,17 @@ fn add_patch_grant(
             );
         }
     }
+}
+
+fn matches_ignored_denial(path: &Path, ignored_denial_paths: &[PathBuf]) -> bool {
+    if ignored_denial_paths.is_empty() {
+        return false;
+    }
+
+    let canonical = nono::try_canonicalize(path);
+    ignored_denial_paths
+        .iter()
+        .any(|ignored| canonical == *ignored || canonical.starts_with(ignored))
 }
 
 fn merge_access(existing: AccessMode, requested: AccessMode) -> AccessMode {
@@ -878,6 +1060,10 @@ pub(crate) fn merge_profile_patch(profile: &mut profile::Profile, patch: &profil
     profile.filesystem.bypass_protection = profile::dedup_append(
         &profile.filesystem.bypass_protection,
         &patch.filesystem.bypass_protection,
+    );
+    profile.filesystem.suppress_save_prompt = profile::dedup_append(
+        &profile.filesystem.suppress_save_prompt,
+        &patch.filesystem.suppress_save_prompt,
     );
     profile.unsafe_macos_seatbelt_rules = profile::dedup_append(
         &profile.unsafe_macos_seatbelt_rules,
@@ -926,6 +1112,7 @@ mod tests {
             &ErrorObservation::default(),
             &CapabilitySet::new(),
             &[],
+            &[],
         )
         .expect("build patch")
         .expect("patch");
@@ -968,6 +1155,7 @@ mod tests {
             &ErrorObservation::default(),
             &CapabilitySet::new(),
             &[],
+            &[],
         )
         .expect("build patch")
         .expect("patch");
@@ -975,6 +1163,147 @@ mod tests {
         assert_eq!(patch.filesystem.allow_file, vec!["~/config.json"]);
         assert!(patch.filesystem.read_file.is_empty());
         assert!(patch.filesystem.write_file.is_empty());
+    }
+
+    #[test]
+    fn build_run_profile_patch_omits_ignored_denials() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp_home = TempDir::new().expect("temp home");
+        let _env = EnvVarGuard::set_all(&[("HOME", temp_home.path().to_str().expect("home path"))]);
+
+        let ignored = temp_home.path().join(".copilot").join("settings.json");
+        let saved = temp_home.path().join(".copilot").join("config.json");
+        std::fs::create_dir_all(saved.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&ignored, b"{}").expect("write ignored");
+        std::fs::write(&saved, b"{}").expect("write saved");
+
+        let ignored_explanation = PolicyExplanation {
+            path: ignored.clone(),
+            access: AccessMode::Read,
+            reason: "path_not_granted".to_string(),
+            details: None,
+            policy_source: None,
+            suggested_flag: None,
+        };
+        let saved_explanation = PolicyExplanation {
+            path: saved,
+            access: AccessMode::Read,
+            reason: "path_not_granted".to_string(),
+            details: None,
+            policy_source: None,
+            suggested_flag: None,
+        };
+
+        let patch = build_run_profile_patch(
+            &[ignored_explanation, saved_explanation],
+            &ErrorObservation::default(),
+            &CapabilitySet::new(),
+            &[],
+            &[nono::try_canonicalize(&ignored)],
+        )
+        .expect("build patch")
+        .expect("patch");
+
+        assert_eq!(patch.filesystem.read_file, vec!["~/.copilot/config.json"]);
+    }
+
+    #[test]
+    fn build_run_profile_patch_returns_none_when_all_denials_are_ignored() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp_home = TempDir::new().expect("temp home");
+        let _env = EnvVarGuard::set_all(&[("HOME", temp_home.path().to_str().expect("home path"))]);
+
+        let target = temp_home.path().join(".copilot").join("settings.json");
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&target, b"{}").expect("write");
+
+        let explanation = PolicyExplanation {
+            path: target.clone(),
+            access: AccessMode::Read,
+            reason: "path_not_granted".to_string(),
+            details: None,
+            policy_source: None,
+            suggested_flag: None,
+        };
+
+        let patch = build_run_profile_patch(
+            &[explanation],
+            &ErrorObservation::default(),
+            &CapabilitySet::new(),
+            &[],
+            &[nono::try_canonicalize(&target)],
+        )
+        .expect("build patch");
+
+        assert!(patch.is_none());
+    }
+
+    #[test]
+    fn build_suppress_save_prompt_patch_collects_all_grant_paths() {
+        let grant_patch = profile::Profile {
+            filesystem: profile::FilesystemConfig {
+                read: vec!["~/workspace".to_string()],
+                read_file: vec!["~/.copilot/settings.json".to_string()],
+                allow_file: vec!["~/.copilot/config.json".to_string()],
+                bypass_protection: vec!["~/.copilot/settings.json".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let suppress_patch =
+            build_suppress_save_prompt_patch(&grant_patch).expect("suppression patch");
+
+        assert_eq!(
+            suppress_patch.filesystem.suppress_save_prompt,
+            vec![
+                "~/.copilot/config.json".to_string(),
+                "~/.copilot/settings.json".to_string(),
+                "~/workspace".to_string(),
+            ]
+        );
+        assert!(suppress_patch.filesystem.read.is_empty());
+        assert!(suppress_patch.filesystem.read_file.is_empty());
+        assert!(suppress_patch.filesystem.bypass_protection.is_empty());
+    }
+
+    #[test]
+    fn build_suppress_save_prompt_patch_ignores_unsafe_only_patch() {
+        let grant_patch = profile::Profile {
+            unsafe_macos_seatbelt_rules: vec![USER_PREFERENCES_SEATBELT_RULE.to_string()],
+            ..Default::default()
+        };
+
+        assert!(build_suppress_save_prompt_patch(&grant_patch).is_none());
+    }
+
+    #[test]
+    fn parse_profile_save_choice_supports_grant_suppress_and_skip() {
+        assert_eq!(
+            parse_profile_save_choice("g", true),
+            Some(ProfileSaveChoice::Grant)
+        );
+        assert_eq!(
+            parse_profile_save_choice("yes", true),
+            Some(ProfileSaveChoice::Grant)
+        );
+        assert_eq!(
+            parse_profile_save_choice("s", true),
+            Some(ProfileSaveChoice::Suppress)
+        );
+        assert_eq!(
+            parse_profile_save_choice("no-nag", true),
+            Some(ProfileSaveChoice::Suppress)
+        );
+        assert_eq!(
+            parse_profile_save_choice("", true),
+            Some(ProfileSaveChoice::Skip)
+        );
+        assert_eq!(
+            parse_profile_save_choice("no", true),
+            Some(ProfileSaveChoice::Skip)
+        );
+        assert_eq!(parse_profile_save_choice("s", false), None);
     }
 
     #[test]
@@ -989,6 +1318,7 @@ mod tests {
             &ErrorObservation::default(),
             &CapabilitySet::new(),
             &violations,
+            &[],
         )
         .expect("build patch")
         .expect("patch");
@@ -1073,8 +1403,8 @@ mod tests {
     #[test]
     fn prompt_line_uses_crlf_for_terminal_layout() {
         assert_eq!(
-            prompt_line("[nono] Paths to be saved:"),
-            "[nono] Paths to be saved:\r\n"
+            prompt_line("[nono] Paths to be saved as grants:"),
+            "[nono] Paths to be saved as grants:\r\n"
         );
         assert_eq!(prompt_line(""), "\r\n");
     }
@@ -1082,8 +1412,8 @@ mod tests {
     #[test]
     fn prompt_tty_rendering_clears_line_tails() {
         assert_eq!(
-            prompt_line_for_tty("[nono] Paths to be saved:"),
-            "\r[nono] Paths to be saved:\u{1b}[K\r\n"
+            prompt_line_for_tty("[nono] Paths to be saved as grants:"),
+            "\r[nono] Paths to be saved as grants:\u{1b}[K\r\n"
         );
         assert_eq!(
             prompt_inline_for_tty("Update profile? [Y/n] "),
@@ -1145,6 +1475,47 @@ mod tests {
             prepared.profile.unsafe_macos_seatbelt_rules,
             vec![USER_PREFERENCES_SEATBELT_RULE.to_string()]
         );
+    }
+
+    #[test]
+    fn prepare_profile_save_from_suppression_patch_uses_suppression_description() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp_home = TempDir::new().expect("temp home");
+        let temp_config = TempDir::new().expect("temp config");
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", temp_home.path().to_str().expect("home path")),
+            (
+                "XDG_CONFIG_HOME",
+                temp_config.path().to_str().expect("config path"),
+            ),
+        ]);
+
+        let patch = profile::Profile {
+            filesystem: profile::FilesystemConfig {
+                suppress_save_prompt: vec!["~/.copilot/settings.json".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let prepared =
+            prepare_profile_save_from_patch(&patch, "claude", "claude-local", Some("claude-code"))
+                .expect("prepare");
+
+        assert!(matches!(prepared.action, SaveAction::Created));
+        assert_eq!(
+            prepared.profile.extends,
+            Some(vec!["claude-code".to_string()])
+        );
+        assert_eq!(
+            prepared.profile.meta.description.as_deref(),
+            Some("Runtime-discovered save-prompt suppressions for claude")
+        );
+        assert_eq!(
+            prepared.profile.filesystem.suppress_save_prompt,
+            vec!["~/.copilot/settings.json"]
+        );
+        assert!(prepared.profile.filesystem.read_file.is_empty());
     }
 
     #[test]

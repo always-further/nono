@@ -76,6 +76,10 @@ fn test_schema_filesystem_has_deny_and_bypass_protection() {
         props.contains_key("bypass_protection"),
         "FilesystemConfig.bypass_protection missing from canonical schema"
     );
+    assert!(
+        props.contains_key("suppress_save_prompt"),
+        "FilesystemConfig.suppress_save_prompt missing from canonical schema"
+    );
 }
 
 #[test]

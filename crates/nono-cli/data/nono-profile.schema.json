@@ -254,6 +254,16 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Paths exempted from group-level deny rules. Each path must also appear in an allow/read/write section to actually grant access; bypass_protection only removes the deny."
+        },
+        "suppress_save_prompt": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Paths whose runtime denials should not be offered in the save-profile prompt. Does not grant access, remove deny rules, or hide diagnostic output."
+        },
+        "ignore": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Alias for suppress_save_prompt. Prefer filesystem.suppress_save_prompt in new profiles."
         }
       }
     },

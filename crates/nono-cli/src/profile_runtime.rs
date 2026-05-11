@@ -25,6 +25,7 @@ pub(crate) struct PreparedProfile {
     pub(crate) allow_gpu: bool,
     pub(crate) allow_parent_of_protected: bool,
     pub(crate) bypass_protection_paths: Vec<PathBuf>,
+    pub(crate) ignored_denial_paths: Vec<PathBuf>,
     pub(crate) allowed_env_vars: Option<Vec<String>>,
     pub(crate) denied_env_vars: Option<Vec<String>>,
 }
@@ -262,6 +263,42 @@ fn collect_bypass_protection_paths(
     paths
 }
 
+fn expand_ignored_denial_path(path: &Path, workdir: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    let expanded = profile::expand_vars(&path_str, workdir).unwrap_or_else(|_| path.to_path_buf());
+    nono::try_canonicalize(&expanded)
+}
+
+fn collect_ignored_denial_paths(
+    loaded_profile: Option<&profile::Profile>,
+    cli_ignored_denials: &[PathBuf],
+    workdir: &Path,
+) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = loaded_profile
+        .map(|profile| {
+            profile
+                .filesystem
+                .suppress_save_prompt
+                .iter()
+                .filter_map(|template| {
+                    profile::expand_vars(template, workdir)
+                        .ok()
+                        .map(|expanded| nono::try_canonicalize(&expanded))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for path in cli_ignored_denials {
+        let canonical = expand_ignored_denial_path(path, workdir);
+        if !paths.contains(&canonical) {
+            paths.push(canonical);
+        }
+    }
+
+    paths
+}
+
 fn prepare_profile_with_options(
     args: &SandboxArgs,
     workdir: &Path,
@@ -382,6 +419,11 @@ fn prepare_profile_with_options(
             &args.bypass_protection,
             workdir,
         ),
+        ignored_denial_paths: collect_ignored_denial_paths(
+            loaded_profile.as_ref(),
+            &args.suppress_save_prompt,
+            workdir,
+        ),
         allowed_env_vars: loaded_profile.as_ref().and_then(|profile| {
             profile.environment.as_ref().map(|env_config| {
                 if let Some(err) = crate::exec_strategy::validate_env_var_patterns(
@@ -456,6 +498,10 @@ mod tests {
         if let Err(err) = fs::create_dir_all(&cli_override) {
             panic!("failed to create CLI override path: {err}");
         }
+        let cli_ignore = workdir.path().join("cli-ignore");
+        if let Err(err) = fs::create_dir_all(&cli_ignore) {
+            panic!("failed to create CLI ignore path: {err}");
+        }
 
         let profile_path = workdir.path().join("preflight-profile.json");
         if let Err(err) = fs::write(
@@ -471,7 +517,8 @@ mod tests {
                     "listen_port": [8080]
                 },
                 "filesystem": {
-                    "bypass_protection": ["$WORKDIR/.git"]
+                    "bypass_protection": ["$WORKDIR/.git"],
+                    "suppress_save_prompt": ["$WORKDIR/.copilot/settings.json"]
                 }
             }"#,
         ) {
@@ -481,6 +528,7 @@ mod tests {
         let args = SandboxArgs {
             profile: Some(profile_path.to_string_lossy().into_owned()),
             bypass_protection: vec![cli_override],
+            suppress_save_prompt: vec![cli_ignore],
             ..SandboxArgs::default()
         };
 
@@ -526,6 +574,15 @@ mod tests {
             runtime.bypass_protection_paths,
             preflight.bypass_protection_paths
         );
+        assert_eq!(runtime.ignored_denial_paths, preflight.ignored_denial_paths);
+        assert!(runtime
+            .ignored_denial_paths
+            .contains(&nono::try_canonicalize(
+                &workdir.path().join(".copilot/settings.json")
+            )));
+        assert!(runtime
+            .ignored_denial_paths
+            .contains(&nono::try_canonicalize(&workdir.path().join("cli-ignore"))));
         assert_eq!(runtime.allowed_env_vars, preflight.allowed_env_vars);
         assert_eq!(runtime.denied_env_vars, preflight.denied_env_vars);
         assert_eq!(
