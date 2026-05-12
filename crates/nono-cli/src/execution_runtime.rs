@@ -305,7 +305,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let exec_resolved_program = resolved_program.clone();
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(runtime) = eti_runtime.as_ref() {
         if let Some(err) = runtime.validate_initial_exec(&command[0], &resolved_program)? {
             return Err(err);

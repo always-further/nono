@@ -3,7 +3,7 @@
   "meta": {
     "name": "shell-git-ssh-demo",
     "version": "1.0.0",
-    "description": "Demo tool sandboxing: sh may invoke git, git may invoke ssh with ssh-agent; direct git/ssh are denied.",
+    "description": "Demo tool sandboxing: sh may invoke git or ssh, git may invoke ssh with ssh-agent; direct git/ssh are denied.",
     "author": "nono-project"
   },
   "security": {
@@ -29,9 +29,10 @@
     },
     "commands": {
       "sh": {
-        "executable": "/usr/bin/sh",
+        "executable": "/bin/sh",
         "can_use": [
-          "git"
+          "git",
+          "ssh"
         ],
         "sandbox": {
           "fs_read": [
@@ -65,12 +66,18 @@
               "."
             ],
             "fs_write": [
-              "."
+              ".",
+              "$TMPDIR"
+            ],
+            "fs_read_file": [
+              "$HOME/.gitconfig",
+              "$HOME/.config/git/config"
             ],
             "environment": {
               "allow_vars": [
                 "PATH",
                 "HOME",
+                "TMPDIR",
                 "USER",
                 "LOGNAME",
                 "TERM",
@@ -99,6 +106,36 @@
       "ssh": {
         "executable": "/usr/bin/ssh",
         "from": {
+          "sh": {
+            "use_credentials": [
+              "ssh-agent"
+            ],
+            "argv_prepend": [
+              "-o",
+              "IdentityFile=none"
+            ],
+            "fs_read_file": [
+              "$HOME/.ssh/known_hosts",
+              "$HOME/.ssh/known_hosts2",
+              "/etc/ssh/ssh_known_hosts",
+              "/etc/ssh/ssh_known_hosts2"
+            ],
+            "network": {
+              "allow_all": true
+            },
+            "environment": {
+              "allow_vars": [
+                "PATH",
+                "HOME",
+                "USER",
+                "LOGNAME",
+                "TERM",
+                "LANG",
+                "LC_*",
+                "GIT_PROTOCOL"
+              ]
+            }
+          },
           "git": {
             "use_credentials": [
               "ssh-agent"
@@ -114,9 +151,7 @@
               "/etc/ssh/ssh_known_hosts2"
             ],
             "network": {
-              "tcp_connect_ports": [
-                22
-              ]
+              "allow_all": true
             },
             "environment": {
               "allow_vars": [

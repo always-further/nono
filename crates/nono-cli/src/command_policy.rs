@@ -386,6 +386,8 @@ impl CommandSandboxConfig {
 #[serde(deny_unknown_fields)]
 pub struct CommandNetworkConfig {
     #[serde(default)]
+    pub allow_all: bool,
+    #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
     pub tcp_connect_ports: Vec<u16>,
@@ -398,6 +400,7 @@ pub struct CommandNetworkConfig {
 impl CommandNetworkConfig {
     fn merge_child(&self, child: &Self) -> Self {
         Self {
+            allow_all: self.allow_all || child.allow_all,
             allowed_hosts: dedup_append(&self.allowed_hosts, &child.allowed_hosts),
             tcp_connect_ports: dedup_append(&self.tcp_connect_ports, &child.tcp_connect_ports),
             tcp_bind_ports: dedup_append(&self.tcp_bind_ports, &child.tcp_bind_ports),
@@ -886,6 +889,27 @@ fn validate_network(
     network: &CommandNetworkConfig,
     report: &mut CommandPolicyValidationReport,
 ) {
+    if network.allow_all
+        && (!network.allowed_hosts.is_empty()
+            || !network.tcp_connect_ports.is_empty()
+            || !network.tcp_bind_ports.is_empty()
+            || network.proxy_helper.is_some())
+    {
+        report.error(
+            "conflicting_network_policy",
+            format!(
+                "command '{command_name}' from.{caller} uses allow_all with narrower network rules"
+            ),
+        );
+    }
+
+    if network.allow_all {
+        report.warning(
+            "allow_all_network",
+            format!("command '{command_name}' from.{caller} allows unrestricted child network"),
+        );
+    }
+
     let proxy_helper = network.proxy_helper.as_deref().unwrap_or_default();
     if !network.allowed_hosts.is_empty() && proxy_helper.is_empty() {
         report.error(
@@ -1507,6 +1531,56 @@ mod tests {
                 .errors
                 .iter()
                 .any(|finding| finding.code == "unenforceable_allowed_hosts")
+        );
+    }
+
+    #[test]
+    fn allow_all_network_is_explicit_warning() {
+        let mut config = active_git_config();
+        if let Some(git) = config.commands.get_mut("git") {
+            git.sandbox = Some(CommandSandboxConfig {
+                network: Some(CommandNetworkConfig {
+                    allow_all: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|finding| finding.code == "allow_all_network")
+        );
+    }
+
+    #[test]
+    fn allow_all_network_rejects_narrower_rules() {
+        let mut config = active_git_config();
+        if let Some(git) = config.commands.get_mut("git") {
+            git.sandbox = Some(CommandSandboxConfig {
+                network: Some(CommandNetworkConfig {
+                    allow_all: true,
+                    tcp_connect_ports: vec![22],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.code == "conflicting_network_policy")
         );
     }
 

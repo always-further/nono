@@ -1,0 +1,174 @@
+{
+  "extends": "default",
+  "meta": {
+    "name": "kubectl-helm-bash-demo",
+    "version": "1.0.0",
+    "description": "Kubernetes deployment pipeline with progressive privilege reduction",
+    "author": "k8s-automation"
+  },
+  "security": {
+    "signal_mode": "isolated"
+  },
+  "filesystem": {},
+  "network": {
+    "block": false
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "interactive": false,
+  "command_policies": {
+    "session_can_use": [
+      "sh"
+    ],
+    "credentials": {
+      "kubeconfig": {
+        "type": "raw-file",
+        "path": "/Users/lukehinds/.kube/config"
+      }
+    },
+    "commands": {
+      "sh": {
+        "executable": "/bin/sh",
+        "can_use": [
+          "kubectl",
+          "helm"
+        ],
+        "from": {
+          "kubectl": {
+            "fs_read": [
+              "."
+            ],
+            "fs_write": [
+              ".",
+              "$TMPDIR"
+            ],
+            "environment": {
+              "allow_vars": [
+                "PATH",
+                "HOME",
+                "TMPDIR",
+                "KUBECONFIG",
+                "KUBE_NAMESPACE",
+                "KUBE_CONTEXT",
+                "HELM_*"
+              ]
+            }
+          },
+          "helm": {
+            "fs_read": [
+              "."
+            ],
+            "fs_write": [
+              ".",
+              "$TMPDIR"
+            ],
+            "environment": {
+              "allow_vars": [
+                "PATH",
+                "HOME",
+                "TMPDIR",
+                "KUBECONFIG",
+                "KUBE_NAMESPACE",
+                "KUBE_CONTEXT",
+                "HELM_*"
+              ]
+            }
+          }
+        },
+        "sandbox": {
+          "fs_read": [
+            "."
+          ],
+          "fs_write": [
+            "."
+          ],
+          "environment": {
+            "allow_vars": [
+              "PATH",
+              "HOME",
+              "USER",
+              "KUBECONFIG",
+              "KUBE_*"
+            ]
+          }
+        }
+      },
+      "kubectl": {
+        "can_use": [
+          "sh"
+        ],
+        "from": {
+          "sh": {
+            "allow_raw_file_credentials_in_chained_policy": true,
+            "use_credentials": [
+              "kubeconfig"
+            ],
+            "fs_read": [
+              ".",
+              "$HOME/.kube"
+            ],
+            "fs_write": [
+              ".",
+              "$TMPDIR"
+            ],
+            "fs_read_file": [
+              "$HOME/.kube/config"
+            ],
+            "environment": {
+              "allow_vars": [
+                "PATH",
+                "HOME",
+                "KUBECONFIG",
+                "KUBE_NAMESPACE",
+                "KUBE_CONTEXT"
+              ]
+            },
+            "network": {
+              "allow_all": true
+            }
+          },
+          "session": "deny"
+        }
+      },
+      "helm": {
+        "can_use": [
+          "sh"
+        ],
+        "from": {
+          "sh": {
+            "allow_raw_file_credentials_in_chained_policy": true,
+            "use_credentials": [
+              "kubeconfig"
+            ],
+            "fs_read": [
+              "."
+            ],
+            "fs_write": [
+              ".",
+              "$TMPDIR"
+            ],
+            "fs_read_file": [
+              "$HOME/.config/helm/repositories.yaml",
+              "$HOME/.kube/config"
+            ],
+            "environment": {
+              "allow_vars": [
+                "PATH",
+                "HOME",
+                "HELM_*",
+                "KUBECONFIG",
+                "KUBE_NAMESPACE",
+                "TMPDIR"
+              ]
+            },
+            "network": {
+              "allow_all": true
+            }
+          },
+          "session": "deny"
+        }
+      }
+    }
+  }
+}

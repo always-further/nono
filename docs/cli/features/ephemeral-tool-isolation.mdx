@@ -6,7 +6,11 @@ description: Run selected commands in narrow per-tool sandboxes with brokered ch
 Ephemeral Tool Isolation (ETI) lets a profile turn specific command names into brokered tools. The outer session gets shims on `PATH`; when a shim is invoked, the supervisor launches the real command in a fresh child sandbox built only from the selected command policy.
 
 <Note>
-  ETI v1 is Linux-only. Profiles with active `command_policies` validate on other platforms, but runtime enforcement requires Linux Landlock support.
+  ETI runtime enforcement is available on Linux and macOS. Linux uses
+  Landlock, including a second execute-only layer for child commands. macOS
+  uses Seatbelt in supervisor-spawned child processes. Raw per-port TCP rules
+  remain Linux-only; macOS ETI rejects policies that require them because
+  Seatbelt cannot enforce those filters.
 </Note>
 
 ## Mental Model
@@ -113,7 +117,7 @@ nono run --profile eti-jq-readonly -- jq '.name' package.json
 
 ## Direct Network Tool
 
-This profile lets the session invoke `curl` and allows raw TCP connect on port 443. Hostname filtering is not implied by port rules.
+On Linux, this profile lets the session invoke `curl` and allows raw TCP connect on port 443. Hostname filtering is not implied by port rules. macOS ETI rejects raw TCP port rules because Seatbelt cannot enforce per-port filters for these child sandboxes.
 
 ```json
 {
@@ -156,6 +160,11 @@ nono run --profile eti-curl-https -- curl -I https://example.com
 
 If you need hostname enforcement, use an enforceable nono proxy/helper policy. `allowed_hosts` without such a helper is rejected.
 
+For tools that must use raw network directly on macOS, make the broader grant
+explicit with `network.allow_all: true`. This allows unrestricted child network
+for that selected command and cannot be combined with narrower host or port
+rules.
+
 ## Chained Tools
 
 This profile lets the session run `sh`, and lets that shell-shaped caller invoke `git`. Direct session `git` remains denied.
@@ -174,7 +183,7 @@ This profile lets the session run `sh`, and lets that shell-shaped caller invoke
     "session_can_use": ["sh"],
     "commands": {
       "sh": {
-        "executable": "/usr/bin/sh",
+        "executable": "/bin/sh",
         "can_use": ["git"],
         "sandbox": {
           "fs_read": ["."],
@@ -324,14 +333,16 @@ This is useful for mode selection. It is not a substitute for sandbox grants; fi
 
 ## Credentials
 
-ETI v1 supports two credential types:
+ETI supports two credential types:
 
 | Type | Typical use |
 |---|---|
 | `ssh-agent` | Grant one selected child access to the session ssh-agent socket |
 | `raw-file` | Grant direct-session tools exact read access to a file credential |
 
-The built-in Git profile uses ssh-agent:
+The built-in Git profile uses ssh-agent. Its raw TCP/22 rule currently requires
+Linux Landlock; use a proxy-backed policy for hostname/network enforcement on
+macOS:
 
 ```json
 {
@@ -408,4 +419,5 @@ nono run --profile my-eti-profile -- "$REAL" --version
 | `Host key verification failed` | SSH could not verify the host from the known-hosts files the policy grants. |
 | `ETI exec failed for script ... using interpreter ...` | The command resolved to a shebang script. Grant the required interpreter, package, and runtime data paths explicitly. |
 | `ETI direct exec bypass denied` | A policy-controlled command was invoked by absolute path instead of through its shim. |
+| `Seatbelt cannot enforce raw per-port TCP rules for ETI children` | The selected ETI policy uses raw TCP port filters on macOS. Use a Linux host or a proxy-backed policy instead. |
 | `legacy_blocked_command` | A deprecated blocked-command entry was folded into ETI as deny-only command control. |

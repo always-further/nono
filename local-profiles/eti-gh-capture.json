@@ -5,6 +5,21 @@
     "version": "1.0.0",
     "description": "ETI test: intercept gh auth token via capture. The supervisor (outside sandbox) runs the real gh auth token and proxies the output, so the sandboxed agent receives the token without direct config access."
   },
+   "filesystem": {
+     "allow": [
+      "~/.config/gh"
+    ],
+    "read": [
+      "~/.nvm/",
+      "~/.agents/skills"
+    ],
+    "write": [],
+    "allow_file": [],
+    "read_file": [],
+    "write_file": [],
+    "deny": [],
+    "bypass_protection": []
+  },
   "command_policies": {
     "session_can_use": ["gh"],
     "commands": {

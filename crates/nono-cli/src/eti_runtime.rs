@@ -1,8 +1,8 @@
 //! Ephemeral Tool Isolation runtime support.
 //!
 //! The profile resolver lives in `command_policy`; this module owns the
-//! Linux-only runtime pieces: private shim materialisation, the outer exec
-//! Landlock gate, shim IPC, caller resolution, and brokered command launch.
+//! Linux/macOS runtime pieces: private shim materialisation, outer exec gating,
+//! shim IPC, caller resolution, and brokered command launch.
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) struct PreparedEtiRuntime;
@@ -228,10 +228,6 @@ mod linux {
         /// Empty for `Passthrough` and `Respond` actions.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         captured_stdout: Vec<u8>,
-        /// macOS Seatbelt extension tokens issued by the supervisor.
-        /// Empty on Linux; populated on macOS for per-command capability grants.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        extension_tokens: Vec<String>,
     }
 
     impl EtiShimResponse {
@@ -240,7 +236,6 @@ mod linux {
                 exit_code,
                 error: None,
                 captured_stdout: Vec::new(),
-                extension_tokens: Vec::new(),
             }
         }
 
@@ -249,7 +244,6 @@ mod linux {
                 exit_code,
                 error: Some(error),
                 captured_stdout: Vec::new(),
-                extension_tokens: Vec::new(),
             }
         }
     }
@@ -1960,6 +1954,10 @@ mod linux {
         let Some(network) = &policy.network else {
             return;
         };
+        if network.allow_all {
+            caps.set_network_mode_mut(NetworkMode::AllowAll);
+            return;
+        }
         for port in &network.tcp_connect_ports {
             caps.add_tcp_connect_port(*port);
         }
@@ -3529,7 +3527,7 @@ mod linux {
                 .map(|cap| UnixSocketGrantSpec {
                     path: cap.original.as_os_str().as_bytes().to_vec(),
                     mode: cap.mode.to_string(),
-                    is_directory: cap.is_directory,
+                    is_directory: cap.is_directory(),
                 })
                 .collect(),
             network_blocked: caps.is_network_blocked(),
@@ -4146,24 +4144,36 @@ pub(crate) use linux::{
 #[cfg(target_os = "macos")]
 mod macos {
     use crate::command_policy::{
-        CommandCredentialType, CommandPoliciesConfig, CommandSandboxConfig, InterceptActionConfig,
+        CommandCredentialConfig, CommandCredentialType, CommandPoliciesConfig,
+        CommandSandboxConfig, InterceptActionConfig, ResolvedCommandBinaries,
+        ResolvedCommandBinary,
     };
     use crate::terminal_approval::TerminalApproval;
     use nix::libc;
     use nono::supervisor::ApprovalRequest;
-    use nono::{AccessMode, CapabilitySet, NonoError, Result};
+    use nono::supervisor::socket::{recv_fd_via_socket, send_fd_via_socket};
+    use nono::{
+        AccessMode, CapabilitySet, FsCapability, NetworkMode, NonoError, Result, Sandbox,
+        UnixSocketCapability, UnixSocketMode,
+    };
     use serde::{Deserialize, Serialize};
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use sha2::{Digest, Sha256};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::ffi::{CString, OsStr, OsString};
-    use std::fs;
+    use std::fs::{self, File, OpenOptions};
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::{
+        DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+    };
     use std::os::unix::net::{UnixListener, UnixStream};
+    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tracing::debug;
 
     // ── Constants ────────────────────────────────────────────────────────────
@@ -4182,7 +4192,8 @@ mod macos {
     const PROC_PIDTBSDINFO: i32 = 3;
 
     const ETI_SOCKET_ENV: &str = "NONO_ETI_SOCKET";
-    const ETI_SHIM_MARKER_ENV: &str = "NONO_ETI_SHIM";
+    const ETI_SHIM_DIR_ENV: &str = "NONO_ETI_SHIM_DIR";
+    const ETI_LAUNCH_SPEC_ENV: &str = "NONO_ETI_LAUNCH_SPEC";
 
     const DEFAULT_ENV_ALLOW: &[&str] = &[
         "PATH",
@@ -4247,15 +4258,6 @@ mod macos {
         stdio_tty: [bool; 3],
     }
 
-    /// macOS exec spec returned to the shim for Passthrough/Approve actions.
-    /// The shim consumes extension tokens, then execve()s real_binary directly.
-    #[derive(Debug, Serialize, Deserialize)]
-    struct MacosExecSpec {
-        real_binary: Vec<u8>,
-        argv: Vec<Vec<u8>>,
-        env: Vec<Vec<u8>>,
-    }
-
     #[derive(Debug, Serialize, Deserialize)]
     struct EtiShimResponse {
         exit_code: i32,
@@ -4263,51 +4265,86 @@ mod macos {
         error: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         captured_stdout: Vec<u8>,
-        /// Sandbox extension tokens for the shim to consume before execve.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        extension_tokens: Vec<String>,
-        /// Populated for Passthrough/Approve actions; absent for Capture/Respond/error.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        exec_spec: Option<MacosExecSpec>,
     }
 
     impl EtiShimResponse {
-        fn exec(exec_spec: MacosExecSpec, extension_tokens: Vec<String>) -> Self {
-            Self {
-                exit_code: 0,
-                error: None,
-                captured_stdout: Vec::new(),
-                extension_tokens,
-                exec_spec: Some(exec_spec),
-            }
-        }
-        fn capture(exit_code: i32, captured_stdout: Vec<u8>) -> Self {
+        fn ok(exit_code: i32) -> Self {
             Self {
                 exit_code,
                 error: None,
-                captured_stdout,
-                extension_tokens: Vec::new(),
-                exec_spec: None,
+                captured_stdout: Vec::new(),
             }
         }
+
         fn err(exit_code: i32, error: String) -> Self {
             Self {
                 exit_code,
                 error: Some(error),
                 captured_stdout: Vec::new(),
-                extension_tokens: Vec::new(),
-                exec_spec: None,
             }
         }
     }
 
+    #[derive(Debug, Serialize, Deserialize)]
+    struct EtiChildLaunchSpec {
+        real_binary: Vec<u8>,
+        executable_kind: String,
+        interpreter: Option<Vec<u8>>,
+        interpreter_args: Vec<String>,
+        argv: Vec<Vec<u8>>,
+        env: Vec<Vec<u8>>,
+        cwd: Vec<u8>,
+        stdio_mode: String,
+        caps: ChildCapsSpec,
+        expected_dev: u64,
+        expected_ino: u64,
+        expected_size: u64,
+        expected_mtime_nanos: i128,
+        expected_sha256: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct ChildCapsSpec {
+        fs: Vec<FsGrantSpec>,
+        unix_sockets: Vec<UnixSocketGrantSpec>,
+        platform_rules: Vec<String>,
+        network_blocked: bool,
+        tcp_connect_ports: Vec<u16>,
+        tcp_bind_ports: Vec<u16>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct FsGrantSpec {
+        path: Vec<u8>,
+        access: String,
+        is_file: bool,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct UnixSocketGrantSpec {
+        path: Vec<u8>,
+        mode: String,
+        is_directory: bool,
+    }
+
+    struct StdioFds {
+        stdin: OwnedFd,
+        stdout: OwnedFd,
+        stderr: OwnedFd,
+    }
+
     // ── State ────────────────────────────────────────────────────────────────
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct FileId {
+        dev: u64,
+        ino: u64,
+    }
 
     struct ShimIdentity {
         path: PathBuf,
         /// (st_dev, st_ino) captured at materialisation.
-        dev: u64,
-        ino: u64,
+        id: FileId,
     }
 
     struct ActiveChild {
@@ -4321,7 +4358,8 @@ mod macos {
         runtime_dir: PathBuf,
         socket_path: PathBuf,
         shim_dir: PathBuf,
-        workdir: PathBuf,
+        session_path: String,
+        policy_root: PathBuf,
         plan: ResolvedEtiPlan,
         shims_by_command: BTreeMap<String, ShimIdentity>,
         shims_by_path: BTreeMap<PathBuf, String>,
@@ -4336,12 +4374,25 @@ mod macos {
 
     struct ResolvedEtiPlan {
         config: CommandPoliciesConfig,
-        deny_only_commands: BTreeSet<String>,
+        resolved: ResolvedCommandBinaries,
+        deny_only: BTreeMap<String, ResolvedDenyOnlyCommand>,
+        allowed_direct_bypass_ids: HashSet<FileId>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ResolvedDenyOnlyCommand {
+        id: FileId,
     }
 
     #[derive(Debug, Clone)]
     enum ResolvedCredential {
-        SshAgent { socket_path: PathBuf },
+        SshAgent {
+            socket: Option<PathBuf>,
+            unavailable_reason: Option<String>,
+        },
+        RawFile {
+            path: PathBuf,
+        },
     }
 
     // ── PreparedEtiRuntime ───────────────────────────────────────────────────
@@ -4351,36 +4402,61 @@ mod macos {
         listener: Arc<UnixListener>,
     }
 
+    impl ResolvedEtiPlan {
+        fn build(
+            config: &CommandPoliciesConfig,
+            allowed_commands: &[String],
+            blocked_commands: &[String],
+            outer_caps: &CapabilitySet,
+        ) -> Result<Self> {
+            let resolved = crate::command_policy::resolve_policy_command_binaries(
+                config,
+                std::env::var_os("PATH"),
+            )?;
+            let deny_only = resolve_deny_only_commands(config, blocked_commands, allowed_commands)?;
+            validate_controlled_binary_immutability(&resolved, &deny_only, outer_caps)?;
+            let governance_denies = resolve_governance_denies(config)?;
+            let allowed_direct_bypass_ids = resolve_allowed_direct_bypass_ids(
+                config,
+                &resolved,
+                &deny_only,
+                &governance_denies,
+            )?;
+            Ok(Self {
+                config: config.clone(),
+                resolved,
+                deny_only,
+                allowed_direct_bypass_ids,
+            })
+        }
+    }
+
     impl PreparedEtiRuntime {
         pub(crate) fn prepare(
             config: &CommandPoliciesConfig,
-            _allowed_commands: &[String],
-            _blocked_commands: &[String],
-            _outer_caps: &CapabilitySet,
-            workdir: &Path,
+            allowed_commands: &[String],
+            blocked_commands: &[String],
+            outer_caps: &CapabilitySet,
+            policy_root: &Path,
         ) -> Result<Self> {
             validate_platform_requirements(config)?;
 
-            let deny_only_commands: BTreeSet<String> = _blocked_commands.iter().cloned().collect();
-            let plan = ResolvedEtiPlan {
-                config: config.clone(),
-                deny_only_commands,
-            };
+            let plan =
+                ResolvedEtiPlan::build(config, allowed_commands, blocked_commands, outer_caps)?;
 
             let runtime_dir = create_runtime_dir()?;
             let mut cleanup = RuntimeDirCleanup::new(runtime_dir.clone());
             let socket_path = runtime_dir.join("supervisor.sock");
             let listener = bind_runtime_socket(&socket_path)?;
             let shim_dir = runtime_dir.clone();
+            let session_path = build_session_path(&shim_dir);
 
             let credential_handles = resolve_credentials(&plan.config.credentials)?;
 
             let mut shims_by_command = BTreeMap::new();
             let mut shims_by_path = BTreeMap::new();
-            let mut shim_names: BTreeSet<String> = plan.config.commands.keys().cloned().collect();
-            for name in &plan.deny_only_commands {
-                shim_names.insert(name.clone());
-            }
+            let mut shim_names: BTreeSet<String> = plan.resolved.commands.keys().cloned().collect();
+            shim_names.extend(plan.deny_only.keys().cloned());
             let shim_source = materialize_shim_source(&runtime_dir)?;
             for name in shim_names {
                 let identity = materialize_shim(&shim_source, &runtime_dir, &name)?;
@@ -4393,7 +4469,8 @@ mod macos {
                     runtime_dir,
                     socket_path,
                     shim_dir,
-                    workdir: workdir.to_path_buf(),
+                    session_path,
+                    policy_root: policy_root.to_path_buf(),
                     plan,
                     shims_by_command,
                     shims_by_path,
@@ -4422,17 +4499,18 @@ mod macos {
         }
 
         /// Returns environment overrides to inject into the child process.
-        /// Prepends the shim directory to PATH and sets ETI socket/marker vars.
+        /// Prepends the shim directory to PATH and sets ETI socket vars.
         pub(crate) fn env_overrides(&self) -> Vec<(String, String)> {
-            let current_path = std::env::var("PATH").unwrap_or_default();
-            let new_path = format!("{}:{current_path}", self.inner.shim_dir.display());
             vec![
-                ("PATH".to_string(), new_path),
+                ("PATH".to_string(), self.inner.session_path.clone()),
                 (
                     ETI_SOCKET_ENV.to_string(),
                     self.inner.socket_path.display().to_string(),
                 ),
-                (ETI_SHIM_MARKER_ENV.to_string(), "1".to_string()),
+                (
+                    ETI_SHIM_DIR_ENV.to_string(),
+                    self.inner.shim_dir.display().to_string(),
+                ),
             ]
         }
 
@@ -4457,27 +4535,32 @@ mod macos {
         /// Grants Seatbelt capabilities for shim dir execution, socket access,
         /// and workdir read (so getcwd() works inside the sandbox).
         pub(crate) fn grant_outer_caps(&self, caps: &mut CapabilitySet) -> Result<()> {
-            caps.add_fs(nono::FsCapability::new_dir(
+            caps.add_fs(FsCapability::new_dir(
                 &self.inner.shim_dir,
                 AccessMode::Read,
             )?);
             for shim in self.inner.shims_by_command.values() {
-                caps.add_fs(nono::FsCapability::new_file(&shim.path, AccessMode::Read)?);
+                caps.add_fs(FsCapability::new_file(&shim.path, AccessMode::Read)?);
             }
-            caps.add_unix_socket(nono::UnixSocketCapability::new_file(
+            caps.add_unix_socket(UnixSocketCapability::new_file(
                 &self.inner.socket_path,
-                nono::UnixSocketMode::Connect,
+                UnixSocketMode::Connect,
+            )?);
+            caps.add_fs(FsCapability::new_file(
+                &self.inner.socket_path,
+                AccessMode::Read,
             )?);
             // Seatbelt's (deny default) blocks getcwd() if the shim's cwd is not
             // reachable via file-read-metadata. Adding the workdir here ensures its
             // ancestor chain gets file-read-metadata via collect_parent_dirs, so the
             // shim can call getcwd() when the child process is in this directory.
-            if self.inner.workdir != Path::new("/") {
-                caps.add_fs(nono::FsCapability::new_dir(
-                    &self.inner.workdir,
+            if self.inner.policy_root != Path::new("/") {
+                caps.add_fs(FsCapability::new_dir(
+                    &self.inner.policy_root,
                     AccessMode::Read,
                 )?);
             }
+            add_outer_process_exec_gate(caps, &self.inner)?;
             caps.deduplicate();
             Ok(())
         }
@@ -4492,6 +4575,39 @@ mod macos {
                 .shims_by_command
                 .get(program)
                 .map(|identity| identity.path.as_path())
+        }
+
+        /// Default-deny gate for the initial command when macOS ETI is active.
+        pub(crate) fn validate_initial_exec(
+            &self,
+            original_program: &str,
+            resolved_program: &Path,
+        ) -> Result<Option<NonoError>> {
+            if !original_program.contains('/')
+                && self.inner.shims_by_command.contains_key(original_program)
+            {
+                return Ok(None);
+            }
+
+            let resolved_canonical = resolved_program.canonicalize().map_err(|source| {
+                NonoError::PathCanonicalization {
+                    path: resolved_program.to_path_buf(),
+                    source,
+                }
+            })?;
+            let metadata =
+                fs::metadata(&resolved_canonical).map_err(|source| NonoError::ConfigRead {
+                    path: resolved_canonical.clone(),
+                    source,
+                })?;
+            Ok(check_exec_gate(
+                &self.inner.plan.allowed_direct_bypass_ids,
+                &self.inner.plan.resolved.commands,
+                &self.inner.plan.deny_only,
+                original_program,
+                resolved_program,
+                file_id(&metadata),
+            ))
         }
 
         /// Starts the IPC accept loop in a background thread. Returns immediately;
@@ -4543,12 +4659,20 @@ mod macos {
     // ── Shim / child launcher entrypoints ────────────────────────────────────
 
     pub(crate) fn maybe_run_internal_eti_entrypoint() -> bool {
-        if std::env::var_os(ETI_SHIM_MARKER_ENV).is_some() {
-            exit_from_result(run_shim());
-            true
-        } else {
-            false
+        if std::env::var_os(ETI_LAUNCH_SPEC_ENV).is_some() {
+            exit_from_result(run_child_launcher());
+            return true;
         }
+
+        if std::env::var_os(ETI_SOCKET_ENV).is_some()
+            && std::env::var_os(ETI_SHIM_DIR_ENV).is_some()
+            && current_exe_is_eti_shim()
+        {
+            exit_from_result(run_shim());
+            return true;
+        }
+
+        false
     }
 
     pub(crate) fn record_main_start() {}
@@ -4556,12 +4680,22 @@ mod macos {
 
     fn exit_from_result(result: Result<()>) {
         match result {
-            Ok(()) => {}
+            Ok(()) => std::process::exit(0),
             Err(e) => {
-                eprintln!("nono: ETI shim error: {e}");
+                eprintln!("nono: {e}");
                 std::process::exit(126);
             }
         }
+    }
+
+    fn current_exe_is_eti_shim() -> bool {
+        let Some(shim_dir) = std::env::var_os(ETI_SHIM_DIR_ENV).map(PathBuf::from) else {
+            return false;
+        };
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        exe.starts_with(shim_dir)
     }
 
     fn run_shim() -> Result<()> {
@@ -4610,68 +4744,94 @@ mod macos {
             ))
         })?;
         write_frame(&mut stream, &request)?;
-
+        send_stdio_fds(&stream)?;
         let response: EtiShimResponse = read_frame(&mut stream)?;
-        drop(stream);
 
         if let Some(error) = response.error {
             eprintln!("nono: ETI denied {}: {error}", request.command);
             std::process::exit(response.exit_code);
         }
 
-        // Consume extension tokens before execve so the sandboxed process
-        // inherits the expanded access.
-        for token in &response.extension_tokens {
-            nono::sandbox::extension_consume(token).map_err(|e| {
-                NonoError::SandboxInit(format!("ETI extension_consume failed: {e}"))
-            })?;
-        }
-
-        // Passthrough/Approve: exec the real binary in place.
-        if let Some(exec) = response.exec_spec {
-            let binary = CString::new(exec.real_binary).map_err(|_| {
-                NonoError::SandboxInit("ETI exec spec binary contains NUL".to_string())
-            })?;
-            let argv_c = exec
-                .argv
-                .iter()
-                .map(|a| CString::new(a.clone()))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|_| {
-                    NonoError::SandboxInit("ETI exec spec argv contains NUL".to_string())
-                })?;
-            let env_c = exec
-                .env
-                .iter()
-                .map(|e| CString::new(e.clone()))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|_| {
-                    NonoError::SandboxInit("ETI exec spec env contains NUL".to_string())
-                })?;
-
-            let mut argv_ptrs: Vec<*const libc::c_char> =
-                argv_c.iter().map(|a| a.as_ptr()).collect();
-            argv_ptrs.push(std::ptr::null());
-            let mut env_ptrs: Vec<*const libc::c_char> = env_c.iter().map(|e| e.as_ptr()).collect();
-            env_ptrs.push(std::ptr::null());
-
-            // SAFETY: binary, argv_ptrs, env_ptrs are valid null-terminated C strings.
-            // execve does not return on success.
-            unsafe {
-                libc::execve(binary.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
-            }
-            return Err(NonoError::SandboxInit(format!(
-                "ETI execve failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        // Capture/Respond: write buffered output and exit.
         if !response.captured_stdout.is_empty() {
             use std::io::Write;
             let _ = std::io::stdout().write_all(&response.captured_stdout);
         }
         std::process::exit(response.exit_code);
+    }
+
+    fn run_child_launcher() -> Result<()> {
+        let spec_path = std::env::var_os(ETI_LAUNCH_SPEC_ENV)
+            .map(PathBuf::from)
+            .ok_or_else(|| NonoError::SandboxInit("ETI launch spec env missing".to_string()))?;
+        let bytes = fs::read(&spec_path).map_err(|source| NonoError::ConfigRead {
+            path: spec_path.clone(),
+            source,
+        })?;
+        let spec: EtiChildLaunchSpec = serde_json::from_slice(&bytes).map_err(|err| {
+            NonoError::ConfigParse(format!("failed to parse ETI launch spec: {err}"))
+        })?;
+        if spec.stdio_mode != "direct_fds" {
+            return Err(NonoError::ConfigParse(format!(
+                "invalid ETI stdio mode '{}'",
+                spec.stdio_mode
+            )));
+        }
+
+        let real_binary = OsString::from_vec(spec.real_binary.clone());
+        let cwd = OsString::from_vec(spec.cwd.clone());
+        std::env::set_current_dir(&cwd).map_err(|err| {
+            NonoError::SandboxInit(format!("ETI child chdir failed before sandbox: {err}"))
+        })?;
+
+        verify_launch_binary(&spec)?;
+        let caps = caps_from_spec(&spec.caps)?;
+        Sandbox::apply(&caps)?;
+
+        let binary = CString::new(real_binary.as_bytes())
+            .map_err(|_| NonoError::SandboxInit("ETI real binary path contains NUL".to_string()))?;
+        let mut argv_c = Vec::with_capacity(spec.argv.len());
+        for arg in &spec.argv {
+            argv_c.push(
+                CString::new(arg.as_slice())
+                    .map_err(|_| NonoError::SandboxInit("ETI argv contains NUL".to_string()))?,
+            );
+        }
+        let argv_ptrs: Vec<*const libc::c_char> = argv_c
+            .iter()
+            .map(|arg| arg.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+
+        let mut env_c = Vec::with_capacity(spec.env.len());
+        for entry in &spec.env {
+            env_c.push(
+                CString::new(entry.as_slice())
+                    .map_err(|_| NonoError::SandboxInit("ETI env contains NUL".to_string()))?,
+            );
+        }
+        let env_ptrs: Vec<*const libc::c_char> = env_c
+            .iter()
+            .map(|entry| entry.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+
+        unsafe {
+            libc::execve(binary.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
+        }
+        let err = std::io::Error::last_os_error();
+        if spec.executable_kind == "ShebangScript" {
+            let interpreter = spec
+                .interpreter
+                .map(OsString::from_vec)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            return Err(NonoError::SandboxInit(format!(
+                "ETI execve failed for script {} using interpreter {}: {err}. The selected child policy must grant the script, interpreter, and any required language runtime/package directories.",
+                PathBuf::from(real_binary).display(),
+                interpreter
+            )));
+        }
+        Err(NonoError::CommandExecution(err))
     }
 
     // ── IPC handler ──────────────────────────────────────────────────────────
@@ -4691,14 +4851,15 @@ mod macos {
             audit_recorder,
         );
         state.queued_requests.fetch_sub(1, Ordering::SeqCst);
-        let resp = match outcome {
-            Ok(r) => r,
+        match outcome {
+            Ok((exit_code, captured_stdout)) => {
+                let _ = write_response(&mut stream, exit_code, None, captured_stdout);
+            }
             Err(err) => {
                 state.emitted_error_response.store(true, Ordering::SeqCst);
-                EtiShimResponse::err(126, err.to_string())
+                let _ = write_response(&mut stream, 126, Some(err.to_string()), Vec::new());
             }
-        };
-        let _ = write_frame(&mut stream, &resp);
+        }
     }
 
     fn handle_shim_stream_inner(
@@ -4707,14 +4868,19 @@ mod macos {
         session_root_pid: u32,
         session_id: &str,
         audit_recorder: Option<Arc<Mutex<crate::audit_integrity::AuditRecorder>>>,
-    ) -> Result<EtiShimResponse> {
+    ) -> Result<(i32, Vec<u8>)> {
+        let auth = authenticate_shim(stream, state)?;
         let request: EtiShimRequest = read_frame(stream)?;
         validate_ipc_request(&request)?;
+        if request.command != auth.command {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI shim command mismatch: requested {}, authenticated {}",
+                request.command, auth.command
+            )));
+        }
+        let stdio = recv_stdio_fds(stream)?;
 
-        let auth = authenticate_shim(stream, state)?;
-
-        // Deny-only blocked commands.
-        if !state.plan.config.commands.contains_key(&request.command) {
+        if state.plan.deny_only.contains_key(&request.command) {
             record_command_policy_audit(
                 audit_recorder.as_ref(),
                 &request,
@@ -4723,17 +4889,49 @@ mod macos {
                 session_root_pid,
                 None,
                 "denied",
-                Some("blocked_command".to_string()),
+                Some("legacy_blocked_command".to_string()),
                 None,
             )?;
             return Err(NonoError::BlockedCommand {
                 command: request.command,
-                reason: "blocked_command".to_string(),
+                reason: "legacy_blocked_command".to_string(),
             });
         }
 
-        let caller = resolve_caller(auth.peer_pid, session_root_pid, state)?;
-        let policy = select_effective_policy(&state.plan.config, &request.command, &caller)?;
+        let caller = match resolve_caller(auth.peer_pid, session_root_pid, state) {
+            Ok(caller) => caller,
+            Err(err) => {
+                record_command_policy_audit(
+                    audit_recorder.as_ref(),
+                    &request,
+                    session_id,
+                    auth.peer_pid,
+                    session_root_pid,
+                    None,
+                    "denied",
+                    Some(err.to_string()),
+                    None,
+                )?;
+                return Err(err);
+            }
+        };
+        let policy = match select_effective_policy(&state.plan.config, &request.command, &caller) {
+            Ok(policy) => policy,
+            Err(err) => {
+                record_command_policy_audit(
+                    audit_recorder.as_ref(),
+                    &request,
+                    session_id,
+                    auth.peer_pid,
+                    session_root_pid,
+                    Some(&caller),
+                    "denied",
+                    Some(err.to_string()),
+                    None,
+                )?;
+                return Err(err);
+            }
+        };
         let command_config = state
             .plan
             .config
@@ -4758,13 +4956,7 @@ mod macos {
                 None,
                 Some(0),
             )?;
-            return Ok(EtiShimResponse {
-                exit_code: 0,
-                error: None,
-                captured_stdout: stdout.as_bytes().to_vec(),
-                extension_tokens: Vec::new(),
-                exec_spec: None,
-            });
+            return Ok((0, stdout.as_bytes().to_vec()));
         }
 
         // ── Approve ──────────────────────────────────────────────────────────
@@ -4839,7 +5031,10 @@ mod macos {
                     "ETI active child limit exceeded".to_string(),
                 ));
             }
-            let result = capture_child(state, &request, policy);
+            let result = (|| {
+                let launch = build_child_launch_spec(state, &request, policy)?;
+                launch_child_with_capture(state, &request.command, launch, stdio)
+            })();
             state.active_count.fetch_sub(1, Ordering::SeqCst);
             return match result {
                 Ok((exit_code, raw_output)) => {
@@ -4865,7 +5060,7 @@ mod macos {
                         None,
                         Some(exit_code),
                     )?;
-                    Ok(EtiShimResponse::capture(exit_code, captured))
+                    Ok((exit_code, captured))
                 }
                 Err(err) => {
                     record_command_policy_audit(
@@ -4903,10 +5098,13 @@ mod macos {
                 "ETI active child limit exceeded".to_string(),
             ));
         }
-        let result = build_exec_response(state, &request, policy);
+        let result = (|| {
+            let launch = build_child_launch_spec(state, &request, policy)?;
+            launch_child(state, &request.command, launch, stdio)
+        })();
         state.active_count.fetch_sub(1, Ordering::SeqCst);
         match &result {
-            Ok(_) => record_command_policy_audit(
+            Ok(exit_code) => record_command_policy_audit(
                 audit_recorder.as_ref(),
                 &request,
                 session_id,
@@ -4915,7 +5113,7 @@ mod macos {
                 Some(&caller),
                 "allowed",
                 None,
-                None,
+                Some(*exit_code),
             )?,
             Err(err) => record_command_policy_audit(
                 audit_recorder.as_ref(),
@@ -4929,13 +5127,14 @@ mod macos {
                 None,
             )?,
         }
-        result
+        result.map(|exit_code| (exit_code, Vec::new()))
     }
 
     // ── Shim authentication ───────────────────────────────────────────────────
 
     struct ShimAuth {
         peer_pid: u32,
+        command: String,
     }
 
     fn authenticate_shim(stream: &UnixStream, state: &EtiState) -> Result<ShimAuth> {
@@ -4954,16 +5153,13 @@ mod macos {
             path: exe_path.clone(),
             source: e,
         })?;
-        use std::os::unix::fs::MetadataExt;
-        let (dev, ino) = (meta.dev(), meta.ino());
-        if identity.dev != dev || identity.ino != ino {
+        if identity.id != file_id(&meta) {
             return Err(NonoError::SandboxInit(format!(
                 "ETI shim auth: inode mismatch for {}",
                 exe_path.display()
             )));
         }
-        let _ = command; // verified above via shims_by_command lookup
-        Ok(ShimAuth { peer_pid })
+        Ok(ShimAuth { peer_pid, command })
     }
 
     fn peer_pid_from_stream(stream: &UnixStream) -> Result<u32> {
@@ -5017,6 +5213,10 @@ mod macos {
     }
 
     fn resolve_caller(peer_pid: u32, session_root_pid: u32, state: &EtiState) -> Result<Caller> {
+        if let Some(cmd) = live_active_child_command(peer_pid, state)? {
+            return Ok(Caller::Command { name: cmd });
+        }
+
         // Fast path: the shim IS the session root (simple exec, no intermediate shell).
         if peer_pid == session_root_pid {
             return Ok(Caller::Session);
@@ -5032,11 +5232,11 @@ mod macos {
             if pid == 0 || pid == 1 {
                 break;
             }
-            if pid == session_root_pid {
-                return Ok(Caller::Session);
-            }
             if let Some(cmd) = live_active_child_command(pid, state)? {
                 return Ok(Caller::Command { name: cmd });
+            }
+            if pid == session_root_pid {
+                return Ok(Caller::Session);
             }
         }
         Err(NonoError::BlockedCommand {
@@ -5124,6 +5324,7 @@ mod macos {
             .active_children
             .lock()
             .map_err(|_| NonoError::SandboxInit("ETI pid map lock poisoned".to_string()))?;
+        map.retain(|pid, child| is_pid_alive_with_start(*pid, child.start_usec));
         map.insert(
             child_pid,
             ActiveChild {
@@ -5143,89 +5344,369 @@ mod macos {
         Ok(())
     }
 
-    // ── Exec spec builder (Passthrough/Approve) ───────────────────────────────
+    fn file_id(metadata: &fs::Metadata) -> FileId {
+        FileId {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    }
 
-    fn build_exec_response(
+    // ── Child launch spec builder ─────────────────────────────────────────────
+
+    fn build_child_launch_spec(
         state: &EtiState,
         request: &EtiShimRequest,
         policy: &CommandSandboxConfig,
-    ) -> Result<EtiShimResponse> {
-        let command_config = state
+    ) -> Result<EtiChildLaunchSpec> {
+        let binary = state
             .plan
-            .config
+            .resolved
             .commands
             .get(&request.command)
             .ok_or_else(|| {
-                NonoError::SandboxInit(format!("missing command config for {}", request.command))
+                NonoError::SandboxInit(format!("missing resolved binary for {}", request.command))
             })?;
-        let executable = command_config.executable.as_deref().ok_or_else(|| {
-            NonoError::SandboxInit(format!(
-                "command '{}' has no executable configured",
-                request.command
-            ))
-        })?;
+        verify_binary_identity(binary)?;
+        let cwd = PathBuf::from(OsString::from_vec(request.cwd.clone()));
+        let cwd = cwd
+            .canonicalize()
+            .map_err(|source| NonoError::PathCanonicalization {
+                path: cwd.clone(),
+                source,
+            })?;
+        let mut caps = build_child_caps(state, binary, policy)?;
+        caps.deduplicate();
 
-        // Build effective argv: synthesized argv[0] + policy argv_prepend + shim argv[1..]
-        let mut effective_argv: Vec<Vec<u8>> = Vec::new();
-        effective_argv.push(executable.as_bytes().to_vec());
-        for arg in &policy.argv_prepend {
-            effective_argv.push(arg.as_bytes().to_vec());
-        }
-        if request.argv.len() > 1 {
-            effective_argv.extend_from_slice(&request.argv[1..]);
-        }
-
-        // Filter environment through policy + token broker.
-        let effective_env = filter_child_env(state, request, policy)?;
-
-        // Issue extension tokens for the binary and credential paths.
-        let mut extension_tokens = Vec::new();
-        issue_token_for_path(
-            Path::new(executable),
-            AccessMode::Read,
-            &mut extension_tokens,
-        );
-        issue_credential_tokens(state, policy, &mut extension_tokens);
-
-        Ok(EtiShimResponse::exec(
-            MacosExecSpec {
-                real_binary: executable.as_bytes().to_vec(),
-                argv: effective_argv,
-                env: effective_env,
-            },
-            extension_tokens,
-        ))
+        Ok(EtiChildLaunchSpec {
+            real_binary: binary.canonical_path.as_os_str().as_bytes().to_vec(),
+            executable_kind: format!("{:?}", binary.shape.kind),
+            interpreter: binary
+                .shape
+                .interpreter
+                .as_ref()
+                .map(|path| path.as_os_str().as_bytes().to_vec()),
+            interpreter_args: binary.shape.interpreter_args.clone(),
+            argv: effective_argv(binary, request, policy)?,
+            env: filter_child_env(state, request, policy)?,
+            cwd: cwd.as_os_str().as_bytes().to_vec(),
+            stdio_mode: selected_stdio_mode(request).to_string(),
+            caps: caps_to_spec(&caps),
+            expected_dev: binary.dev,
+            expected_ino: binary.ino,
+            expected_size: binary.size,
+            expected_mtime_nanos: binary.mtime_nanos,
+            expected_sha256: binary.sha256.clone(),
+        })
     }
 
-    fn issue_token_for_path(path: &Path, access: AccessMode, tokens: &mut Vec<String>) {
-        match nono::sandbox::extension_issue_file(path, access) {
-            Ok(token) => tokens.push(token),
-            Err(e) => debug!(
-                "ETI: failed to issue extension token for {}: {e}",
-                path.display()
-            ),
-        }
-    }
-
-    fn issue_credential_tokens(
+    fn build_child_caps(
         state: &EtiState,
+        binary: &ResolvedCommandBinary,
         policy: &CommandSandboxConfig,
-        tokens: &mut Vec<String>,
-    ) {
-        for cred_name in &policy.use_credentials {
-            if let Some(cred) = state.credential_handles.get(cred_name) {
-                match cred {
-                    ResolvedCredential::SshAgent { socket_path } => {
-                        issue_token_for_path(socket_path, AccessMode::ReadWrite, tokens);
-                    }
+    ) -> Result<CapabilitySet> {
+        let mut caps = CapabilitySet::new().block_network();
+        caps.add_fs(FsCapability::new_file(
+            &binary.canonical_path,
+            AccessMode::Read,
+        )?);
+        add_macos_runtime_baseline(&mut caps)?;
+        add_executable_shape_baseline(&mut caps, binary)?;
+        add_chaining_control_caps(&mut caps, state)?;
+        add_policy_fs(&mut caps, policy, &state.policy_root)?;
+        add_policy_network(&mut caps, policy)?;
+        add_policy_credentials(&mut caps, state, policy)?;
+        add_child_process_exec_gate(&mut caps, state, binary)?;
+        Ok(caps)
+    }
+
+    fn add_executable_shape_baseline(
+        caps: &mut CapabilitySet,
+        binary: &ResolvedCommandBinary,
+    ) -> Result<()> {
+        let Some(interpreter) = binary.shape.interpreter.as_ref() else {
+            return Ok(());
+        };
+        let interpreter =
+            interpreter
+                .canonicalize()
+                .map_err(|source| NonoError::PathCanonicalization {
+                    path: interpreter.clone(),
+                    source,
+                })?;
+        caps.add_fs(FsCapability::new_file(interpreter, AccessMode::Read)?);
+        Ok(())
+    }
+
+    fn add_chaining_control_caps(caps: &mut CapabilitySet, state: &EtiState) -> Result<()> {
+        caps.add_fs(FsCapability::new_dir(&state.shim_dir, AccessMode::Read)?);
+        for shim in state.shims_by_command.values() {
+            caps.add_fs(FsCapability::new_file(&shim.path, AccessMode::Read)?);
+        }
+        caps.add_unix_socket(UnixSocketCapability::new_file(
+            &state.socket_path,
+            UnixSocketMode::Connect,
+        )?);
+        caps.add_fs(FsCapability::new_file(
+            &state.socket_path,
+            AccessMode::Read,
+        )?);
+        Ok(())
+    }
+
+    fn add_outer_process_exec_gate(caps: &mut CapabilitySet, state: &EtiState) -> Result<()> {
+        let mut allowed = Vec::new();
+        allowed.extend(
+            state
+                .shims_by_command
+                .values()
+                .map(|identity| identity.path.clone()),
+        );
+        for binary in state.plan.resolved.commands.values() {
+            let id = FileId {
+                dev: binary.dev,
+                ino: binary.ino,
+            };
+            if state.plan.allowed_direct_bypass_ids.contains(&id) {
+                allowed.push(binary.canonical_path.clone());
+            }
+        }
+        add_process_exec_gate(caps, allowed)
+    }
+
+    fn add_child_process_exec_gate(
+        caps: &mut CapabilitySet,
+        state: &EtiState,
+        binary: &ResolvedCommandBinary,
+    ) -> Result<()> {
+        let mut allowed = vec![binary.canonical_path.clone()];
+        if let Some(interpreter) = binary.shape.interpreter.as_ref() {
+            allowed.push(interpreter.canonicalize().map_err(|source| {
+                NonoError::PathCanonicalization {
+                    path: interpreter.clone(),
+                    source,
+                }
+            })?);
+        }
+        allowed.extend(
+            state
+                .shims_by_command
+                .values()
+                .map(|identity| identity.path.clone()),
+        );
+        add_process_exec_gate(caps, allowed)
+    }
+
+    fn add_process_exec_gate(
+        caps: &mut CapabilitySet,
+        allowed_paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<()> {
+        let mut allowed = BTreeSet::new();
+        for path in allowed_paths {
+            let canonical =
+                path.canonicalize()
+                    .map_err(|source| NonoError::PathCanonicalization {
+                        path: path.clone(),
+                        source,
+                    })?;
+            add_macos_exec_variants(&canonical, &mut allowed)?;
+            allowed.insert(canonical);
+        }
+
+        caps.add_platform_rule("(deny process-exec*)")?;
+        for path in allowed {
+            let escaped = crate::policy::escape_seatbelt_path(crate::policy::path_to_utf8(&path)?)?;
+            caps.add_platform_rule(format!("(allow process-exec* (literal \"{escaped}\"))"))?;
+        }
+        Ok(())
+    }
+
+    fn add_macos_exec_variants(path: &Path, allowed: &mut BTreeSet<PathBuf>) -> Result<()> {
+        if path == Path::new("/bin/sh") && Path::new("/bin/bash").exists() {
+            allowed.insert(
+                PathBuf::from("/bin/bash")
+                    .canonicalize()
+                    .map_err(|source| NonoError::PathCanonicalization {
+                        path: PathBuf::from("/bin/bash"),
+                        source,
+                    })?,
+            );
+            for selector in ["/private/var/select/sh", "/var/select/sh"] {
+                let selector = PathBuf::from(selector);
+                if selector.exists() {
+                    allowed.insert(selector);
                 }
             }
         }
-        for path_entry in &policy.fs_read_file {
-            if let Ok(path) = resolve_policy_path(path_entry, Path::new(".")) {
-                issue_token_for_path(&path, AccessMode::Read, tokens);
+        if path == Path::new("/usr/bin/git") {
+            for variant in [
+                "/Library/Developer/CommandLineTools/usr/bin/git",
+                "/Library/Developer/CommandLineTools/usr/libexec/git-core/git",
+            ] {
+                let variant = PathBuf::from(variant);
+                if variant.exists() {
+                    allowed.insert(variant);
+                }
             }
         }
+        Ok(())
+    }
+
+    fn add_macos_runtime_baseline(caps: &mut CapabilitySet) -> Result<()> {
+        for dir in [
+            "/usr/lib",
+            "/usr/share",
+            "/System/Library",
+            "/System/Cryptexes",
+            "/System/Volumes",
+            "/private/var/db/dyld",
+            "/var/db/dyld",
+            "/private/var/select",
+            "/var/select",
+            "/var/db/timezone",
+            "/usr/share/zoneinfo",
+            "/usr/share/locale",
+            "/usr/share/terminfo",
+            "/Library/Developer/CommandLineTools",
+            "/private/etc",
+            "/etc",
+        ] {
+            add_read_dir_if_exists(caps, dir)?;
+        }
+        add_xcode_selector_rules(caps)?;
+        for (file, access) in [
+            ("/dev/null", AccessMode::ReadWrite),
+            ("/dev/tty", AccessMode::ReadWrite),
+            ("/dev/zero", AccessMode::Read),
+            ("/dev/random", AccessMode::Read),
+            ("/dev/urandom", AccessMode::Read),
+        ] {
+            add_file_if_exists(caps, file, access)?;
+        }
+        Ok(())
+    }
+
+    fn add_xcode_selector_rules(caps: &mut CapabilitySet) -> Result<()> {
+        for selector in [
+            "/private/var/db/xcode_select_link",
+            "/var/db/xcode_select_link",
+        ] {
+            let selector_path = Path::new(selector);
+            if selector_path.exists() || selector_path.symlink_metadata().is_ok() {
+                let escaped = crate::policy::escape_seatbelt_path(selector)?;
+                caps.add_platform_rule(format!("(allow file-read* (literal \"{escaped}\"))"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn add_read_dir_if_exists(caps: &mut CapabilitySet, path: &str) -> Result<()> {
+        let path = Path::new(path);
+        if path.is_dir() {
+            caps.add_fs(FsCapability::new_dir(path, AccessMode::Read)?);
+        }
+        Ok(())
+    }
+
+    fn add_file_if_exists(caps: &mut CapabilitySet, path: &str, access: AccessMode) -> Result<()> {
+        let path = Path::new(path);
+        if path.exists() && !path.is_dir() {
+            caps.add_fs(FsCapability::new_file(path, access)?);
+        }
+        Ok(())
+    }
+
+    fn add_policy_fs(
+        caps: &mut CapabilitySet,
+        policy: &CommandSandboxConfig,
+        policy_root: &Path,
+    ) -> Result<()> {
+        for entry in &policy.fs_read {
+            let path = resolve_policy_path(entry, policy_root)?;
+            caps.add_fs(FsCapability::new_dir(path, AccessMode::Read)?);
+        }
+        for entry in &policy.fs_write {
+            let path = resolve_policy_path(entry, policy_root)?;
+            caps.add_fs(FsCapability::new_dir(path, AccessMode::ReadWrite)?);
+        }
+        for entry in &policy.fs_read_file {
+            let path = resolve_policy_path(entry, policy_root)?;
+            add_optional_read_file(caps, path)?;
+        }
+        for entry in &policy.fs_write_file {
+            let path = resolve_policy_path(entry, policy_root)?;
+            caps.add_fs(FsCapability::new_file(path, AccessMode::ReadWrite)?);
+        }
+        Ok(())
+    }
+
+    fn add_optional_read_file(caps: &mut CapabilitySet, path: PathBuf) -> Result<()> {
+        match FsCapability::new_file(&path, AccessMode::Read) {
+            Ok(capability) => {
+                caps.add_fs(capability);
+                Ok(())
+            }
+            Err(NonoError::PathNotFound(_)) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn add_policy_network(caps: &mut CapabilitySet, policy: &CommandSandboxConfig) -> Result<()> {
+        let Some(network) = &policy.network else {
+            return Ok(());
+        };
+        if network.allow_all {
+            caps.set_network_mode_mut(NetworkMode::AllowAll);
+            return Ok(());
+        }
+        if !network.tcp_connect_ports.is_empty() || !network.tcp_bind_ports.is_empty() {
+            return Err(NonoError::NetworkFilterUnsupported {
+                platform: "macOS".to_string(),
+                reason: "Seatbelt cannot enforce raw per-port TCP rules for ETI children"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn add_policy_credentials(
+        caps: &mut CapabilitySet,
+        state: &EtiState,
+        policy: &CommandSandboxConfig,
+    ) -> Result<()> {
+        for handle in &policy.use_credentials {
+            match state.credential_handles.get(handle) {
+                Some(ResolvedCredential::SshAgent {
+                    socket: Some(socket),
+                    ..
+                }) => {
+                    caps.add_unix_socket(UnixSocketCapability::new_file(
+                        socket,
+                        UnixSocketMode::Connect,
+                    )?);
+                    caps.add_fs(FsCapability::new_file(socket, AccessMode::Read)?);
+                }
+                Some(ResolvedCredential::SshAgent {
+                    socket: None,
+                    unavailable_reason,
+                }) => {
+                    let reason = unavailable_reason
+                        .as_deref()
+                        .unwrap_or("ssh-agent socket unavailable");
+                    return Err(NonoError::ConfigParse(format!(
+                        "ETI credential '{handle}' is unavailable: {reason}"
+                    )));
+                }
+                Some(ResolvedCredential::RawFile { path }) => {
+                    caps.add_fs(FsCapability::new_file(path, AccessMode::Read)?);
+                }
+                None => {
+                    return Err(NonoError::SandboxInit(format!(
+                        "ETI credential handle '{handle}' was not resolved"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resolve_policy_path(entry: &str, cwd: &Path) -> Result<PathBuf> {
@@ -5237,89 +5718,28 @@ mod macos {
         }
     }
 
-    // ── Capture action ────────────────────────────────────────────────────────
-
-    fn capture_child(
-        state: &EtiState,
+    fn effective_argv(
+        binary: &ResolvedCommandBinary,
         request: &EtiShimRequest,
         policy: &CommandSandboxConfig,
-    ) -> Result<(i32, Vec<u8>)> {
-        let command_config = state
-            .plan
-            .config
-            .commands
-            .get(&request.command)
-            .ok_or_else(|| {
-                NonoError::SandboxInit(format!("missing command config for {}", request.command))
-            })?;
-        let executable = command_config.executable.as_deref().ok_or_else(|| {
-            NonoError::SandboxInit(format!(
-                "command '{}' has no executable configured",
-                request.command
-            ))
-        })?;
-
-        let mut effective_argv: Vec<Vec<u8>> = Vec::new();
-        effective_argv.push(executable.as_bytes().to_vec());
-        for arg in &policy.argv_prepend {
-            effective_argv.push(arg.as_bytes().to_vec());
-        }
-        if request.argv.len() > 1 {
-            effective_argv.extend_from_slice(&request.argv[1..]);
-        }
-
-        let effective_env = filter_child_env(state, request, policy)?;
-
-        // Build std::process::Command
-        let mut cmd = Command::new(executable);
-        cmd.env_clear();
-        for entry in &effective_env {
-            if let Some(eq) = entry.iter().position(|&b| b == b'=') {
-                let key = OsString::from_vec(entry[..eq].to_vec());
-                let val = OsString::from_vec(entry[eq + 1..].to_vec());
-                cmd.env(key, val);
-            }
-        }
-        for arg in effective_argv.iter().skip(1) {
-            cmd.arg(OsString::from_vec(arg.clone()));
-        }
-
-        // Use Stdio::piped() so Rust manages the pipe internally.
-        // Rust closes the parent's write end after spawn(), allowing read_to_end
-        // to return once the child closes its stdout — unlike Stdio::from(file)
-        // which keeps the write fd alive inside Command (&mut self) indefinitely.
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-
-        let mut child = cmd.spawn().map_err(NonoError::CommandExecution)?;
-        track_child(state, child.id(), &request.command)?;
-
-        let child_stdout = child.stdout.take().ok_or_else(|| {
-            NonoError::SandboxInit("ETI Capture: missing child stdout pipe".to_string())
-        })?;
-
-        let mut captured = Vec::new();
-        {
-            use std::io::Read;
-            let mut reader =
-                std::io::BufReader::new(child_stdout).take((MAX_CAPTURE_STDOUT as u64) + 1);
-            reader
-                .read_to_end(&mut captured)
-                .map_err(|e| NonoError::SandboxInit(format!("ETI Capture pipe read: {e}")))?;
-        }
-
-        let status = child.wait().map_err(NonoError::CommandExecution)?;
-        untrack_child(state, child.id())?;
-
-        if captured.len() > MAX_CAPTURE_STDOUT {
+    ) -> Result<Vec<Vec<u8>>> {
+        if request.argv.is_empty() {
             return Err(NonoError::SandboxInit(
-                "ETI Capture: output exceeds limit".to_string(),
+                "ETI request had empty argv".to_string(),
             ));
         }
-
-        let exit_code = status.code().unwrap_or(1);
-        Ok((exit_code, captured))
+        let mut argv = Vec::with_capacity(request.argv.len() + policy.argv_prepend.len());
+        argv.push(binary.canonical_path.as_os_str().as_bytes().to_vec());
+        for arg in &policy.argv_prepend {
+            if arg.as_bytes().contains(&0) {
+                return Err(NonoError::ConfigParse(
+                    "ETI policy argv_prepend contains NUL".to_string(),
+                ));
+            }
+            argv.push(arg.as_bytes().to_vec());
+        }
+        argv.extend(request.argv.iter().skip(1).cloned());
+        Ok(argv)
     }
 
     // ── Environment filtering ─────────────────────────────────────────────────
@@ -5342,10 +5762,9 @@ mod macos {
 
         let mut result: Vec<Vec<u8>> = Vec::new();
         for entry in &request.env {
-            let Some(eq) = entry.iter().position(|&b| b == b'=') else {
+            let Some((name, _value)) = split_env_entry(entry) else {
                 continue;
             };
-            let name = &entry[..eq];
             let Ok(name_str) = std::str::from_utf8(name) else {
                 continue;
             };
@@ -5374,19 +5793,38 @@ mod macos {
         }
 
         result.retain(|entry| !entry.starts_with(b"PATH="));
-        result.push(format!("PATH={}", state.shim_dir.display()).into_bytes());
+        result.push(format!("PATH={}", state.session_path).into_bytes());
         inject_chaining_control_env(&mut result, state);
         apply_environment_set_vars(&mut result, policy)?;
 
         // Inject resolved credentials.
         for cred_name in &policy.use_credentials {
-            if let Some(cred) = state.credential_handles.get(cred_name) {
-                match cred {
-                    ResolvedCredential::SshAgent { socket_path } => {
-                        let mut entry = b"SSH_AUTH_SOCK=".to_vec();
-                        entry.extend_from_slice(socket_path.as_os_str().as_bytes());
-                        result.push(entry);
-                    }
+            match state.credential_handles.get(cred_name) {
+                Some(ResolvedCredential::SshAgent {
+                    socket: Some(socket),
+                    ..
+                }) => {
+                    result.retain(|entry| !entry.starts_with(b"SSH_AUTH_SOCK="));
+                    let mut entry = b"SSH_AUTH_SOCK=".to_vec();
+                    entry.extend_from_slice(socket.as_os_str().as_bytes());
+                    result.push(entry);
+                }
+                Some(ResolvedCredential::SshAgent {
+                    socket: None,
+                    unavailable_reason,
+                }) => {
+                    let reason = unavailable_reason
+                        .as_deref()
+                        .unwrap_or("ssh-agent socket unavailable");
+                    return Err(NonoError::ConfigParse(format!(
+                        "ETI credential '{cred_name}' is unavailable: {reason}"
+                    )));
+                }
+                Some(ResolvedCredential::RawFile { .. }) => {}
+                None => {
+                    return Err(NonoError::SandboxInit(format!(
+                        "ETI credential handle '{cred_name}' was not resolved"
+                    )));
                 }
             }
         }
@@ -5396,13 +5834,15 @@ mod macos {
 
     fn inject_chaining_control_env(env: &mut Vec<Vec<u8>>, state: &EtiState) {
         let socket_prefix = format!("{ETI_SOCKET_ENV}=");
-        let marker_prefix = format!("{ETI_SHIM_MARKER_ENV}=");
+        let shim_dir_prefix = format!("{ETI_SHIM_DIR_ENV}=");
+        let launch_spec_prefix = format!("{ETI_LAUNCH_SPEC_ENV}=");
         env.retain(|entry| {
             !entry.starts_with(socket_prefix.as_bytes())
-                && !entry.starts_with(marker_prefix.as_bytes())
+                && !entry.starts_with(shim_dir_prefix.as_bytes())
+                && !entry.starts_with(launch_spec_prefix.as_bytes())
         });
         env.push(format!("{ETI_SOCKET_ENV}={}", state.socket_path.display()).into_bytes());
-        env.push(format!("{ETI_SHIM_MARKER_ENV}=1").into_bytes());
+        env.push(format!("{ETI_SHIM_DIR_ENV}={}", state.shim_dir.display()).into_bytes());
     }
 
     fn apply_environment_set_vars(
@@ -5438,6 +5878,307 @@ mod macos {
             env.push(entry);
         }
         Ok(())
+    }
+
+    // ── Child launching ──────────────────────────────────────────────────────
+
+    fn launch_child(
+        state: &EtiState,
+        command_name: &str,
+        spec: EtiChildLaunchSpec,
+        stdio: StdioFds,
+    ) -> Result<i32> {
+        let spec_path = write_launch_spec(&state.runtime_dir, &spec)?;
+        let result = launch_child_with_direct_fds(state, command_name, &spec_path, stdio);
+        let _ = fs::remove_file(&spec_path);
+        result
+    }
+
+    fn prepare_launcher_command(spec_path: &Path) -> Result<Command> {
+        let nono_exe = std::env::current_exe().map_err(|err| {
+            NonoError::SandboxInit(format!("failed to locate nono executable: {err}"))
+        })?;
+        let mut command = Command::new(nono_exe);
+        command.env_clear().env(ETI_LAUNCH_SPEC_ENV, spec_path);
+        if let Some(value) = std::env::var_os("ETI_PROFILE_HOTPATH") {
+            command.env("ETI_PROFILE_HOTPATH", value);
+        }
+        Ok(command)
+    }
+
+    fn launch_child_with_direct_fds(
+        state: &EtiState,
+        command_name: &str,
+        spec_path: &Path,
+        stdio: StdioFds,
+    ) -> Result<i32> {
+        let mut command = prepare_launcher_command(spec_path)?;
+        command
+            .stdin(Stdio::from(File::from(stdio.stdin)))
+            .stdout(Stdio::from(File::from(stdio.stdout)))
+            .stderr(Stdio::from(File::from(stdio.stderr)));
+        let mut child = command.spawn().map_err(NonoError::CommandExecution)?;
+        wait_for_tracked_child(state, command_name, &mut child)
+    }
+
+    fn launch_child_with_capture(
+        state: &EtiState,
+        command_name: &str,
+        spec: EtiChildLaunchSpec,
+        stdio: StdioFds,
+    ) -> Result<(i32, Vec<u8>)> {
+        let mut pipe_fds = [-1i32; 2];
+        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI Capture: pipe() failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let pipe_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
+        let pipe_write = unsafe { File::from_raw_fd(pipe_fds[1]) };
+
+        let spec_path = write_launch_spec(&state.runtime_dir, &spec)?;
+        let mut command = prepare_launcher_command(&spec_path)?;
+        command
+            .stdin(Stdio::from(File::from(stdio.stdin)))
+            .stdout(Stdio::from(pipe_write))
+            .stderr(Stdio::from(File::from(stdio.stderr)));
+        drop(stdio.stdout);
+
+        let mut child = command.spawn().map_err(NonoError::CommandExecution)?;
+        track_child(state, child.id(), command_name)?;
+
+        let mut captured = Vec::new();
+        let mut pipe_reader =
+            std::io::BufReader::new(File::from(pipe_read)).take((MAX_CAPTURE_STDOUT as u64) + 1);
+        let read_result = pipe_reader.read_to_end(&mut captured);
+        drop(pipe_reader);
+
+        let status = child.wait().map_err(NonoError::CommandExecution);
+        untrack_child(state, child.id())?;
+        let _ = fs::remove_file(&spec_path);
+
+        read_result.map_err(|err| {
+            NonoError::SandboxInit(format!("ETI Capture: pipe read failed: {err}"))
+        })?;
+        if captured.len() > MAX_CAPTURE_STDOUT {
+            return Err(NonoError::SandboxInit(
+                "ETI Capture: output exceeds limit".to_string(),
+            ));
+        }
+
+        Ok((exit_status_code(status?), captured))
+    }
+
+    fn wait_for_tracked_child(
+        state: &EtiState,
+        command_name: &str,
+        child: &mut Child,
+    ) -> Result<i32> {
+        track_child(state, child.id(), command_name)?;
+        let status = child.wait().map_err(NonoError::CommandExecution);
+        untrack_child(state, child.id())?;
+        status.map(exit_status_code)
+    }
+
+    fn exit_status_code(status: std::process::ExitStatus) -> i32 {
+        status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
+            .unwrap_or(126)
+    }
+
+    fn write_launch_spec(runtime_dir: &Path, spec: &EtiChildLaunchSpec) -> Result<PathBuf> {
+        let path = unique_runtime_path(runtime_dir, "launch", "json");
+        let json = serde_json::to_vec(spec).map_err(|err| {
+            NonoError::ConfigParse(format!("failed to serialize ETI launch spec: {err}"))
+        })?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|source| NonoError::ConfigWrite {
+                path: path.clone(),
+                source,
+            })?;
+        file.write_all(&json)
+            .map_err(|source| NonoError::ConfigWrite {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(path)
+    }
+
+    fn verify_binary_identity(binary: &ResolvedCommandBinary) -> Result<()> {
+        let metadata =
+            fs::metadata(&binary.canonical_path).map_err(|source| NonoError::ConfigRead {
+                path: binary.canonical_path.clone(),
+                source,
+            })?;
+        if metadata.dev() != binary.dev || metadata.ino() != binary.ino {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI command binary changed inode before launch: {}",
+                binary.canonical_path.display()
+            )));
+        }
+        if metadata.size() != binary.size || mtime_nanos(&metadata) != binary.mtime_nanos {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI command binary changed metadata before launch: {}",
+                binary.canonical_path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn verify_launch_binary(spec: &EtiChildLaunchSpec) -> Result<()> {
+        let path = PathBuf::from(OsString::from_vec(spec.real_binary.clone()));
+        let metadata = fs::metadata(&path).map_err(|source| NonoError::ConfigRead {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.dev() != spec.expected_dev || metadata.ino() != spec.expected_ino {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI command binary changed inode before launch: {}",
+                path.display()
+            )));
+        }
+        if metadata.size() != spec.expected_size
+            || mtime_nanos(&metadata) != spec.expected_mtime_nanos
+        {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI command binary changed metadata before launch: {}",
+                path.display()
+            )));
+        }
+
+        let mut file = File::open(&path).map_err(|source| NonoError::ConfigRead {
+            path: path.clone(),
+            source,
+        })?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0_u8; 8192];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|err| NonoError::SandboxInit(format!("ETI binary read: {err}")))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let actual_sha256: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        if actual_sha256 != spec.expected_sha256 {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI binary content changed before launch: {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn mtime_nanos(metadata: &fs::Metadata) -> i128 {
+        let secs = metadata.mtime() as i128;
+        let nanos = metadata.mtime_nsec() as i128;
+        secs.saturating_mul(1_000_000_000).saturating_add(nanos)
+    }
+
+    fn selected_stdio_mode(_request: &EtiShimRequest) -> &'static str {
+        "direct_fds"
+    }
+
+    fn split_env_entry(entry: &[u8]) -> Option<(&[u8], &[u8])> {
+        let idx = entry.iter().position(|byte| *byte == b'=')?;
+        Some((&entry[..idx], &entry[idx + 1..]))
+    }
+
+    fn caps_to_spec(caps: &CapabilitySet) -> ChildCapsSpec {
+        ChildCapsSpec {
+            fs: caps
+                .fs_capabilities()
+                .iter()
+                .map(|cap| FsGrantSpec {
+                    path: cap.original.as_os_str().as_bytes().to_vec(),
+                    access: cap.access.to_string(),
+                    is_file: cap.is_file,
+                })
+                .collect(),
+            unix_sockets: caps
+                .unix_socket_capabilities()
+                .iter()
+                .map(|cap| UnixSocketGrantSpec {
+                    path: cap.original.as_os_str().as_bytes().to_vec(),
+                    mode: cap.mode.to_string(),
+                    is_directory: cap.is_directory(),
+                })
+                .collect(),
+            platform_rules: caps.platform_rules().to_vec(),
+            network_blocked: caps.is_network_blocked(),
+            tcp_connect_ports: caps.tcp_connect_ports().to_vec(),
+            tcp_bind_ports: caps.tcp_bind_ports().to_vec(),
+        }
+    }
+
+    fn caps_from_spec(spec: &ChildCapsSpec) -> Result<CapabilitySet> {
+        let mut caps = CapabilitySet::new();
+        if spec.network_blocked {
+            caps.set_network_mode_mut(NetworkMode::Blocked);
+        }
+        for fs_grant in &spec.fs {
+            let access = parse_access(&fs_grant.access)?;
+            let path = PathBuf::from(OsString::from_vec(fs_grant.path.clone()));
+            let cap = if fs_grant.is_file {
+                FsCapability::new_file(path, access)?
+            } else {
+                FsCapability::new_dir(path, access)?
+            };
+            caps.add_fs(cap);
+        }
+        for socket_grant in &spec.unix_sockets {
+            let mode = parse_socket_mode(&socket_grant.mode)?;
+            let path = PathBuf::from(OsString::from_vec(socket_grant.path.clone()));
+            let cap = if socket_grant.is_directory {
+                UnixSocketCapability::new_dir(path, mode)?
+            } else {
+                UnixSocketCapability::new_file(path, mode)?
+            };
+            caps.add_unix_socket(cap);
+        }
+        for rule in &spec.platform_rules {
+            caps.add_platform_rule(rule.clone())?;
+        }
+        for port in &spec.tcp_connect_ports {
+            caps.add_tcp_connect_port(*port);
+        }
+        for port in &spec.tcp_bind_ports {
+            caps.add_tcp_bind_port(*port);
+        }
+        Ok(caps)
+    }
+
+    fn parse_access(value: &str) -> Result<AccessMode> {
+        match value {
+            "read" => Ok(AccessMode::Read),
+            "write" => Ok(AccessMode::Write),
+            "read+write" => Ok(AccessMode::ReadWrite),
+            other => Err(NonoError::ConfigParse(format!(
+                "invalid ETI access mode '{other}'"
+            ))),
+        }
+    }
+
+    fn parse_socket_mode(value: &str) -> Result<UnixSocketMode> {
+        match value {
+            "connect" => Ok(UnixSocketMode::Connect),
+            "connect+bind" => Ok(UnixSocketMode::ConnectBind),
+            other => Err(NonoError::ConfigParse(format!(
+                "invalid ETI unix socket mode '{other}'"
+            ))),
+        }
     }
 
     // ── Policy selection ──────────────────────────────────────────────────────
@@ -5573,37 +6314,329 @@ mod macos {
         Ok(())
     }
 
+    // ── Plan resolution helpers ───────────────────────────────────────────────
+
+    fn build_session_path(shim_dir: &Path) -> String {
+        let original = std::env::var("PATH").unwrap_or_default();
+        if original.is_empty() {
+            shim_dir.display().to_string()
+        } else {
+            format!("{}:{original}", shim_dir.display())
+        }
+    }
+
+    fn command_search_dirs(
+        config: &CommandPoliciesConfig,
+        path_env: Option<OsString>,
+    ) -> Result<Vec<PathBuf>> {
+        let mut dirs = BTreeSet::new();
+        if let Some(path_env) = path_env {
+            for dir in std::env::split_paths(&path_env) {
+                if dir.as_os_str().is_empty() || !dir.exists() {
+                    continue;
+                }
+                if let Ok(canonical) = dir.canonicalize() {
+                    if canonical.is_dir() {
+                        dirs.insert(canonical);
+                    }
+                }
+            }
+        }
+        for dir in &config.executable_dirs {
+            let canonical = PathBuf::from(dir).canonicalize().map_err(|source| {
+                NonoError::PathCanonicalization {
+                    path: PathBuf::from(dir),
+                    source,
+                }
+            })?;
+            if !canonical.is_dir() {
+                return Err(NonoError::ExpectedDirectory(canonical));
+            }
+            dirs.insert(canonical);
+        }
+        Ok(dirs.into_iter().collect())
+    }
+
+    fn resolve_deny_only_commands(
+        config: &CommandPoliciesConfig,
+        blocked_commands: &[String],
+        allowed_commands: &[String],
+    ) -> Result<BTreeMap<String, ResolvedDenyOnlyCommand>> {
+        let allowed: HashSet<&String> = allowed_commands.iter().collect();
+        let dirs = command_search_dirs(config, std::env::var_os("PATH"))?;
+        let mut deny_only = BTreeMap::new();
+        for name in blocked_commands {
+            if allowed.contains(name) || config.commands.contains_key(name) {
+                continue;
+            }
+            if let Some(path) = find_first_executable(name, &dirs)? {
+                let metadata = fs::metadata(&path).map_err(|source| NonoError::ConfigRead {
+                    path: path.clone(),
+                    source,
+                })?;
+                deny_only.insert(
+                    name.clone(),
+                    ResolvedDenyOnlyCommand {
+                        id: file_id(&metadata),
+                    },
+                );
+            }
+        }
+        Ok(deny_only)
+    }
+
+    fn validate_controlled_binary_immutability(
+        resolved: &ResolvedCommandBinaries,
+        _deny_only: &BTreeMap<String, ResolvedDenyOnlyCommand>,
+        outer_caps: &CapabilitySet,
+    ) -> Result<()> {
+        for binary in resolved.commands.values() {
+            validate_controlled_file(&binary.canonical_path, outer_caps, "policy command")?;
+        }
+        Ok(())
+    }
+
+    fn validate_controlled_file(
+        path: &Path,
+        outer_caps: &CapabilitySet,
+        label: &str,
+    ) -> Result<()> {
+        let metadata = fs::metadata(path).map_err(|source| NonoError::ConfigRead {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        reject_group_or_world_writable_path(path, &metadata, label)?;
+        if outer_caps_grant_write(outer_caps, path) {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI {label} binary is writable by the outer session capability set: {}",
+                path.display()
+            )));
+        }
+        let parent = path.parent().ok_or_else(|| {
+            NonoError::SandboxInit(format!(
+                "ETI {label} binary has no parent directory: {}",
+                path.display()
+            ))
+        })?;
+        let parent_metadata = fs::metadata(parent).map_err(|source| NonoError::ConfigRead {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+        reject_group_or_world_writable_path(
+            parent,
+            &parent_metadata,
+            &format!("{label} executable parent directory for {}", path.display()),
+        )?;
+        if outer_caps_grant_write(outer_caps, parent) {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI {label} binary is replaceable through writable parent directory: {}",
+                parent.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn reject_group_or_world_writable_path(
+        path: &Path,
+        metadata: &fs::Metadata,
+        label: &str,
+    ) -> Result<()> {
+        let mode = metadata.permissions().mode();
+        if mode & 0o022 != 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI {label} is group/world writable: {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn outer_caps_grant_write(caps: &CapabilitySet, path: &Path) -> bool {
+        caps.fs_capabilities().iter().any(|cap| {
+            cap.access.contains(AccessMode::Write)
+                && if cap.is_file {
+                    cap.resolved == path
+                } else {
+                    path.starts_with(&cap.resolved)
+                }
+        })
+    }
+
+    fn resolve_governance_denies(
+        config: &CommandPoliciesConfig,
+    ) -> Result<HashMap<FileId, PathBuf>> {
+        let mut denies = HashMap::new();
+        for entry in &config.deny_direct_exec_bypass {
+            let path = PathBuf::from(entry);
+            let canonical =
+                path.canonicalize()
+                    .map_err(|source| NonoError::PathCanonicalization {
+                        path: path.clone(),
+                        source,
+                    })?;
+            let metadata = fs::metadata(&canonical).map_err(|source| NonoError::ConfigRead {
+                path: canonical.clone(),
+                source,
+            })?;
+            if !metadata.is_file() {
+                return Err(NonoError::ExpectedFile(canonical));
+            }
+            denies.insert(file_id(&metadata), canonical);
+        }
+        Ok(denies)
+    }
+
+    fn resolve_allowed_direct_bypass_ids(
+        config: &CommandPoliciesConfig,
+        resolved: &ResolvedCommandBinaries,
+        deny_only: &BTreeMap<String, ResolvedDenyOnlyCommand>,
+        governance_denies: &HashMap<FileId, PathBuf>,
+    ) -> Result<HashSet<FileId>> {
+        let blocked_ids: HashSet<FileId> = deny_only.values().map(|entry| entry.id).collect();
+        let mut ids = HashSet::new();
+        for (command_name, command) in &config.commands {
+            let Some(policy_binary) = resolved.commands.get(command_name) else {
+                return Err(NonoError::SandboxInit(format!(
+                    "missing resolved binary for command '{command_name}'"
+                )));
+            };
+            let policy_id = FileId {
+                dev: policy_binary.dev,
+                ino: policy_binary.ino,
+            };
+            for entry in &command.allow_direct_exec_bypass {
+                let path = PathBuf::from(entry);
+                let canonical =
+                    path.canonicalize()
+                        .map_err(|source| NonoError::PathCanonicalization {
+                            path: path.clone(),
+                            source,
+                        })?;
+                let metadata =
+                    fs::metadata(&canonical).map_err(|source| NonoError::ConfigRead {
+                        path: canonical.clone(),
+                        source,
+                    })?;
+                if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                    return Err(NonoError::ConfigParse(format!(
+                        "allow_direct_exec_bypass for '{command_name}' is not an executable file: {}",
+                        canonical.display()
+                    )));
+                }
+                let id = file_id(&metadata);
+                if id != policy_id {
+                    return Err(NonoError::ConfigParse(format!(
+                        "allow_direct_exec_bypass for '{command_name}' must reference the resolved policy-controlled binary {}; got {}",
+                        policy_binary.canonical_path.display(),
+                        canonical.display()
+                    )));
+                }
+                if blocked_ids.contains(&id) {
+                    return Err(NonoError::ConfigParse(format!(
+                        "allow_direct_exec_bypass for '{command_name}' intersects a deny-only blocked command: {}",
+                        canonical.display()
+                    )));
+                }
+                if let Some(denied) = governance_denies.get(&id) {
+                    return Err(NonoError::ConfigParse(format!(
+                        "allow_direct_exec_bypass for '{command_name}' intersects inherited deny_direct_exec_bypass {}",
+                        denied.display()
+                    )));
+                }
+                ids.insert(id);
+            }
+        }
+        Ok(ids)
+    }
+
+    fn find_first_executable(name: &str, dirs: &[PathBuf]) -> Result<Option<PathBuf>> {
+        for dir in dirs {
+            let candidate = dir.join(name);
+            let Ok(metadata) = fs::metadata(&candidate) else {
+                continue;
+            };
+            if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+                return candidate.canonicalize().map(Some).map_err(|source| {
+                    NonoError::PathCanonicalization {
+                        path: candidate,
+                        source,
+                    }
+                });
+            }
+        }
+        Ok(None)
+    }
+
+    fn check_exec_gate(
+        allowed_bypass_ids: &HashSet<FileId>,
+        resolved_commands: &BTreeMap<String, ResolvedCommandBinary>,
+        deny_only: &BTreeMap<String, ResolvedDenyOnlyCommand>,
+        original_program: &str,
+        resolved_program: &Path,
+        id: FileId,
+    ) -> Option<NonoError> {
+        if allowed_bypass_ids.contains(&id) {
+            return None;
+        }
+        for (name, command) in resolved_commands {
+            if command.dev == id.dev && command.ino == id.ino {
+                return Some(NonoError::BlockedCommand {
+                    command: original_program.to_string(),
+                    reason: format!(
+                        "ETI direct exec bypass denied for policy-controlled command '{name}'"
+                    ),
+                });
+            }
+        }
+        for (name, command) in deny_only {
+            if command.id == id {
+                return Some(NonoError::BlockedCommand {
+                    command: original_program.to_string(),
+                    reason: format!("ETI direct exec denied for legacy blocked command '{name}'"),
+                });
+            }
+        }
+        Some(NonoError::BlockedCommand {
+            command: original_program.to_string(),
+            reason: format!(
+                "ETI denies non-policy initial exec of '{}'; add the command name to \
+                 command_policies.session_can_use or configure allow_direct_exec_bypass",
+                resolved_program.display()
+            ),
+        })
+    }
+
     // ── Runtime dir + socket ──────────────────────────────────────────────────
 
     fn create_runtime_dir() -> Result<PathBuf> {
-        let base = std::env::temp_dir();
-        let uid = unsafe { libc::getuid() };
-        let dir = base.join(format!("nono-eti-{uid}"));
-        for i in 0..16u32 {
-            let candidate = dir.join(format!("{i:04x}"));
-            match fs::create_dir_all(&candidate) {
-                Ok(()) => {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700)).map_err(
-                        |e| NonoError::ConfigWrite {
-                            path: candidate.clone(),
-                            source: e,
-                        },
-                    )?;
-                    return Ok(candidate);
+        let base = if Path::new("/private/tmp").is_dir() {
+            PathBuf::from("/private/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        for _ in 0..32 {
+            let path = unique_runtime_path(&base, "nono-eti", "");
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(&path) {
+                Ok(()) => return Ok(path),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(source) => {
+                    return Err(NonoError::ConfigWrite { path, source });
                 }
-                Err(_) => continue,
             }
         }
         Err(NonoError::SandboxInit(
-            "ETI: failed to create runtime dir".to_string(),
+            "failed to allocate ETI runtime dir".to_string(),
         ))
     }
 
     fn bind_runtime_socket(socket_path: &Path) -> Result<UnixListener> {
-        // Remove a stale socket left by a previous crashed run before binding.
         if socket_path.exists() {
-            let _ = fs::remove_file(socket_path);
+            return Err(NonoError::SandboxInit(format!(
+                "ETI runtime socket already exists: {}",
+                socket_path.display()
+            )));
         }
         UnixListener::bind(socket_path).map_err(|e| {
             NonoError::SandboxInit(format!("ETI: bind socket {}: {e}", socket_path.display()))
@@ -5611,27 +6644,52 @@ mod macos {
     }
 
     fn guarded_remove_runtime_dir(dir: &Path) -> Result<()> {
-        let meta = match fs::metadata(dir) {
-            Ok(m) => m,
-            Err(_) => return Ok(()),
+        let meta = match fs::symlink_metadata(dir) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(NonoError::ConfigRead {
+                    path: dir.to_path_buf(),
+                    source,
+                });
+            }
         };
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let uid = unsafe { libc::getuid() };
-        if meta.uid() != uid {
-            return Err(NonoError::SandboxInit(
-                "ETI: runtime dir owner mismatch, skipping cleanup".to_string(),
-            ));
+        if !meta.is_dir()
+            || meta.file_type().is_symlink()
+            || meta.uid() != unsafe { libc::geteuid() }
+            || (meta.permissions().mode() & 0o077) != 0
+        {
+            return Err(NonoError::SandboxInit(format!(
+                "unsafe ETI runtime dir shape: {}",
+                dir.display()
+            )));
         }
-        if meta.permissions().mode() & 0o777 != 0o700 {
-            return Err(NonoError::SandboxInit(
-                "ETI: runtime dir mode unexpected, skipping cleanup".to_string(),
-            ));
+        let file_name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if !file_name.starts_with("nono-eti-") {
+            return Err(NonoError::SandboxInit(format!(
+                "refusing to clean non-ETI dir {}",
+                dir.display()
+            )));
         }
         fs::remove_dir_all(dir).map_err(|e| NonoError::ConfigWrite {
             path: dir.to_path_buf(),
             source: e,
         })?;
         Ok(())
+    }
+
+    fn unique_runtime_path(base: &Path, prefix: &str, suffix: &str) -> PathBuf {
+        let nonce = rand::random::<u64>();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let mut name = format!("{prefix}-{}-{now}-{nonce:x}", std::process::id());
+        if !suffix.is_empty() {
+            name.push('.');
+            name.push_str(suffix);
+        }
+        base.join(name)
     }
 
     struct RuntimeDirCleanup {
@@ -5682,14 +6740,18 @@ mod macos {
         name: &str,
     ) -> Result<ShimIdentity> {
         let shim_path = runtime_dir.join(name);
-        // Hard link so the shim has its own name (argv[0]) while sharing the binary.
-        if fs::hard_link(shim_source, &shim_path).is_err() {
-            // Fallback: copy (cross-device or unsupported FS).
-            fs::copy(shim_source, &shim_path).map_err(|e| NonoError::ConfigWrite {
+        // macOS proc_pidpath may report any sibling hardlink for a shared inode,
+        // so each shim must be a distinct copied file for command authentication.
+        fs::copy(shim_source, &shim_path).map_err(|e| NonoError::ConfigWrite {
+            path: shim_path.clone(),
+            source: e,
+        })?;
+        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o500)).map_err(|e| {
+            NonoError::ConfigWrite {
                 path: shim_path.clone(),
                 source: e,
-            })?;
-        }
+            }
+        })?;
         // Canonicalize so the registered path matches what proc_pidpath returns
         // on macOS (/var/folders is a symlink to /private/var/folders).
         let canonical_path = shim_path.canonicalize().unwrap_or(shim_path.clone());
@@ -5697,42 +6759,86 @@ mod macos {
             path: canonical_path.clone(),
             source: e,
         })?;
-        use std::os::unix::fs::MetadataExt;
         Ok(ShimIdentity {
             path: canonical_path,
-            dev: meta.dev(),
-            ino: meta.ino(),
+            id: file_id(&meta),
         })
     }
 
     // ── Credentials ───────────────────────────────────────────────────────────
 
     fn resolve_credentials(
-        credentials: &BTreeMap<String, crate::command_policy::CommandCredentialConfig>,
+        credentials: &BTreeMap<String, CommandCredentialConfig>,
     ) -> Result<BTreeMap<String, ResolvedCredential>> {
         let mut result = BTreeMap::new();
         for (name, cred) in credentials {
             match cred.credential_type {
                 CommandCredentialType::SshAgent => {
-                    let socket_env = cred
-                        .socket
-                        .as_deref()
-                        .unwrap_or("SSH_AUTH_SOCK")
-                        .trim_start_matches('$');
-                    let socket_str = std::env::var(socket_env).unwrap_or_default();
-                    if !socket_str.is_empty() {
-                        result.insert(
-                            name.clone(),
-                            ResolvedCredential::SshAgent {
-                                socket_path: PathBuf::from(socket_str),
-                            },
-                        );
-                    }
+                    let socket_template = cred.socket.as_ref().ok_or_else(|| {
+                        NonoError::ConfigParse(format!(
+                            "ssh-agent credential '{name}' missing socket"
+                        ))
+                    })?;
+                    let (socket, unavailable_reason) =
+                        match resolve_ssh_agent_socket(socket_template) {
+                            Ok(socket) => (Some(socket), None),
+                            Err(reason) => (None, Some(reason)),
+                        };
+                    result.insert(
+                        name.clone(),
+                        ResolvedCredential::SshAgent {
+                            socket,
+                            unavailable_reason,
+                        },
+                    );
                 }
-                CommandCredentialType::RawFile => {} // not resolved on macOS ETI
+                CommandCredentialType::RawFile => {
+                    let path = cred
+                        .path
+                        .as_ref()
+                        .ok_or_else(|| {
+                            NonoError::ConfigParse(format!(
+                                "raw-file credential '{name}' missing path"
+                            ))
+                        })
+                        .map(PathBuf::from)?;
+                    let canonical =
+                        path.canonicalize()
+                            .map_err(|source| NonoError::PathCanonicalization {
+                                path: path.clone(),
+                                source,
+                            })?;
+                    if !canonical.is_file() {
+                        return Err(NonoError::ExpectedFile(path));
+                    }
+                    result.insert(
+                        name.clone(),
+                        ResolvedCredential::RawFile { path: canonical },
+                    );
+                }
             }
         }
         Ok(result)
+    }
+
+    fn resolve_ssh_agent_socket(value: &str) -> std::result::Result<PathBuf, String> {
+        let path = if value == "$SSH_AUTH_SOCK" {
+            match std::env::var_os("SSH_AUTH_SOCK") {
+                Some(value) => PathBuf::from(value),
+                None => return Err("SSH_AUTH_SOCK is unset".to_string()),
+            }
+        } else {
+            PathBuf::from(value)
+        };
+        let canonical = path
+            .canonicalize()
+            .map_err(|source| format!("failed to resolve {}: {source}", path.display()))?;
+        let metadata = fs::metadata(&canonical)
+            .map_err(|source| format!("failed to stat {}: {source}", canonical.display()))?;
+        if !metadata.file_type().is_socket() {
+            return Err(format!("{} is not a socket", canonical.display()));
+        }
+        Ok(canonical)
     }
 
     // ── Platform requirements ─────────────────────────────────────────────────
@@ -5809,6 +6915,38 @@ mod macos {
             .map_err(|e| NonoError::SandboxInit(format!("ETI IPC deserialize: {e}")))
     }
 
+    fn write_response(
+        stream: &mut UnixStream,
+        exit_code: i32,
+        error: Option<String>,
+        captured_stdout: Vec<u8>,
+    ) -> Result<()> {
+        let mut response = match error {
+            None => EtiShimResponse::ok(exit_code),
+            Some(error) => EtiShimResponse::err(exit_code, error),
+        };
+        response.captured_stdout = captured_stdout;
+        write_frame(stream, &response)
+    }
+
+    fn send_stdio_fds(stream: &UnixStream) -> Result<()> {
+        for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            send_fd_via_socket(stream.as_raw_fd(), fd)?;
+        }
+        Ok(())
+    }
+
+    fn recv_stdio_fds(stream: &UnixStream) -> Result<StdioFds> {
+        let stdin = recv_fd_via_socket(stream.as_raw_fd())?;
+        let stdout = recv_fd_via_socket(stream.as_raw_fd())?;
+        let stderr = recv_fd_via_socket(stream.as_raw_fd())?;
+        Ok(StdioFds {
+            stdin,
+            stdout,
+            stderr,
+        })
+    }
+
     fn is_tty(fd: i32) -> bool {
         // SAFETY: isatty is async-signal-safe and always returns 0 or 1.
         unsafe { libc::isatty(fd) != 0 }
@@ -5821,14 +6959,21 @@ mod macos {
 
         fn test_state() -> EtiState {
             let runtime_dir = PathBuf::from("/tmp/nono-eti-test");
+            let shim_dir = runtime_dir.join("shims");
             EtiState {
                 runtime_dir: runtime_dir.clone(),
                 socket_path: runtime_dir.join("supervisor.sock"),
-                shim_dir: runtime_dir.join("shims"),
-                workdir: PathBuf::from("/tmp"),
+                shim_dir: shim_dir.clone(),
+                session_path: format!("{}:/usr/bin", shim_dir.display()),
+                policy_root: PathBuf::from("/tmp"),
                 plan: ResolvedEtiPlan {
                     config: CommandPoliciesConfig::default(),
-                    deny_only_commands: BTreeSet::new(),
+                    resolved: ResolvedCommandBinaries {
+                        commands: BTreeMap::new(),
+                        warnings: Vec::new(),
+                    },
+                    deny_only: BTreeMap::new(),
+                    allowed_direct_bypass_ids: HashSet::new(),
                 },
                 shims_by_command: BTreeMap::new(),
                 shims_by_path: BTreeMap::new(),
@@ -5874,6 +7019,102 @@ mod macos {
         }
 
         #[test]
+        fn process_exec_gate_denies_by_default_and_allows_exact_paths() -> Result<()> {
+            let mut caps = CapabilitySet::new();
+            add_process_exec_gate(&mut caps, vec![PathBuf::from("/bin/sh")])?;
+
+            let rules = caps.platform_rules();
+            assert!(
+                rules
+                    .iter()
+                    .any(|rule| rule.as_str() == "(deny process-exec*)")
+            );
+            assert!(
+                rules
+                    .iter()
+                    .any(|rule| rule.as_str() == "(allow process-exec* (literal \"/bin/sh\"))")
+            );
+            if Path::new("/bin/bash").exists() {
+                assert!(
+                    rules.iter().any(
+                        |rule| rule.as_str() == "(allow process-exec* (literal \"/bin/bash\"))"
+                    )
+                );
+            }
+            if Path::new("/private/var/select/sh").exists() {
+                assert!(rules.iter().any(|rule| {
+                    rule.as_str() == "(allow process-exec* (literal \"/private/var/select/sh\"))"
+                }));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn child_cap_spec_preserves_platform_exec_gate() -> Result<()> {
+            let mut caps = CapabilitySet::new();
+            add_process_exec_gate(&mut caps, vec![PathBuf::from("/bin/sh")])?;
+
+            let spec = caps_to_spec(&caps);
+            assert!(
+                spec.platform_rules
+                    .iter()
+                    .any(|rule| rule.as_str() == "(deny process-exec*)")
+            );
+
+            let restored = caps_from_spec(&spec)?;
+            assert!(
+                restored
+                    .platform_rules()
+                    .iter()
+                    .any(|rule| rule.as_str() == "(deny process-exec*)")
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn materialized_shims_have_distinct_inodes() -> Result<()> {
+            let dir = tempfile::tempdir().map_err(|source| NonoError::ConfigWrite {
+                path: PathBuf::from("/tmp"),
+                source,
+            })?;
+            let source_path = dir.path().join("shim-source");
+            fs::write(&source_path, b"shim").map_err(|source| NonoError::ConfigWrite {
+                path: source_path.clone(),
+                source,
+            })?;
+            fs::set_permissions(&source_path, fs::Permissions::from_mode(0o500)).map_err(
+                |source| NonoError::ConfigWrite {
+                    path: source_path.clone(),
+                    source,
+                },
+            )?;
+
+            let first = materialize_shim(&source_path, dir.path(), "awk")?;
+            let second = materialize_shim(&source_path, dir.path(), "xargs")?;
+
+            assert_ne!(first.id, second.id);
+            Ok(())
+        }
+
+        #[test]
+        fn selected_stdio_mode_uses_supervisor_direct_fds() {
+            let request = request_with_env(Vec::new());
+            assert_eq!(selected_stdio_mode(&request), "direct_fds");
+        }
+
+        #[test]
+        fn resolve_caller_prefers_active_command_for_peer_pid() -> Result<()> {
+            let state = test_state();
+            let pid = std::process::id();
+            track_child(&state, pid, "git")?;
+
+            let caller = resolve_caller(pid, pid, &state)?;
+
+            assert!(matches!(caller, Caller::Command { name } if name == "git"));
+            Ok(())
+        }
+
+        #[test]
         fn filter_child_env_uses_safe_default_and_chaining_env() -> Result<()> {
             let state = test_state();
             let request = request_with_env(vec![
@@ -5882,6 +7123,7 @@ mod macos {
                 b"CUSTOM=value".to_vec(),
                 b"LD_PRELOAD=/evil.dylib".to_vec(),
                 b"NONO_ETI_SOCKET=/old.sock".to_vec(),
+                b"NONO_ETI_LAUNCH_SPEC=/old.json".to_vec(),
             ]);
 
             let env = filter_child_env(&state, &request, &CommandSandboxConfig::default())?;
@@ -5889,7 +7131,7 @@ mod macos {
             assert!(contains_entry(&env, b"HOME=/Users/test"));
             assert!(contains_entry(
                 &env,
-                format!("PATH={}", state.shim_dir.display()).as_bytes()
+                format!("PATH={}", state.session_path).as_bytes()
             ));
             assert!(contains_entry(
                 &env,
@@ -5897,11 +7139,12 @@ mod macos {
             ));
             assert!(contains_entry(
                 &env,
-                format!("{ETI_SHIM_MARKER_ENV}=1").as_bytes()
+                format!("{ETI_SHIM_DIR_ENV}={}", state.shim_dir.display()).as_bytes()
             ));
             assert!(!contains_prefix(&env, b"CUSTOM="));
             assert!(!contains_prefix(&env, b"LD_PRELOAD="));
             assert!(!contains_entry(&env, b"NONO_ETI_SOCKET=/old.sock"));
+            assert!(!contains_entry(&env, b"NONO_ETI_LAUNCH_SPEC=/old.json"));
 
             Ok(())
         }
