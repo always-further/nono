@@ -710,9 +710,7 @@ pub fn print_profile_hint(program: &str, profile: &str, silent: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        normalize_terminal_line_endings, print_profile_hint, render_diagnostic_footer,
-    };
+    use super::{normalize_terminal_line_endings, print_profile_hint, render_diagnostic_footer};
 
     #[test]
     fn normalize_terminal_line_endings_uses_crlf() {
