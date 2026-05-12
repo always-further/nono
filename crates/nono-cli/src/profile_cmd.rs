@@ -743,7 +743,7 @@ pub(crate) fn cmd_show(args: ProfileShowArgs) -> Result<()> {
     }
 
     if args.json {
-        let val = profile_to_json(&args.profile, &profile, &raw_extends);
+        let val = profile_to_json(&args.profile, &profile, &raw_extends)?;
         println!("{}", to_json(&val)?);
         return Ok(());
     }
@@ -1042,23 +1042,64 @@ fn profile_to_json(
     name: &str,
     profile: &Profile,
     raw_extends: &Option<Vec<String>>,
-) -> serde_json::Value {
+) -> Result<serde_json::Value> {
     let mut val = serde_json::json!({
         "name": name,
         "description": profile.meta.description.as_deref().unwrap_or(""),
         "extends": raw_extends.as_ref().map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
     });
 
-    // Security
-    val["security"] = serde_json::json!({
-        "groups": profile.security.groups,
-        "allowed_commands": profile.security.allowed_commands,
-        "signal_mode": format!("{:?}", profile.security.signal_mode),
-        "process_info_mode": format!("{:?}", profile.security.process_info_mode),
-        "ipc_mode": format!("{:?}", profile.security.ipc_mode),
-        "capability_elevation": profile.security.capability_elevation,
-        "wsl2_proxy_policy": format!("{:?}", profile.security.wsl2_proxy_policy),
-    });
+    // Plan 35-03 (REQ-PORT-CLOSURE-07 / D-35-C2 + D-35-C3): replace
+    // format!("{:?}", …) JSON emission of Option<…> security fields with
+    // serde_json::Map insertion + omit-when-None semantics. Restores the
+    // upstream f3e7f885 (v0.47.0) shape that Plan 34-04b adopted but later
+    // Wave-3 plans regressed (P34-DEFER-10-1).
+    let mut security = serde_json::Map::new();
+    security.insert(
+        "groups".to_string(),
+        serde_json::json!(profile.security.groups),
+    );
+    security.insert(
+        "allowed_commands".to_string(),
+        serde_json::json!(profile.security.allowed_commands),
+    );
+    if let Some(ref mode) = profile.security.signal_mode {
+        security.insert(
+            "signal_mode".to_string(),
+            serde_json::to_value(mode)
+                .map_err(|e| NonoError::ProfileParse(format!("signal_mode serialize: {e}")))?,
+        );
+    }
+    if let Some(ref mode) = profile.security.process_info_mode {
+        security.insert(
+            "process_info_mode".to_string(),
+            serde_json::to_value(mode).map_err(|e| {
+                NonoError::ProfileParse(format!("process_info_mode serialize: {e}"))
+            })?,
+        );
+    }
+    if let Some(ref mode) = profile.security.ipc_mode {
+        security.insert(
+            "ipc_mode".to_string(),
+            serde_json::to_value(mode)
+                .map_err(|e| NonoError::ProfileParse(format!("ipc_mode serialize: {e}")))?,
+        );
+    }
+    security.insert(
+        "capability_elevation".to_string(),
+        serde_json::json!(profile.security.capability_elevation),
+    );
+    if let Some(ref policy) = profile.security.wsl2_proxy_policy {
+        security.insert(
+            "wsl2_proxy_policy".to_string(),
+            serde_json::to_value(policy).map_err(|e| {
+                NonoError::ProfileParse(format!("wsl2_proxy_policy serialize: {e}"))
+            })?,
+        );
+    }
+    val.as_object_mut()
+        .ok_or_else(|| NonoError::ProfileParse("profile_to_json root not an object".to_string()))?
+        .insert("security".to_string(), serde_json::Value::Object(security));
 
     // Filesystem
     val["filesystem"] = serde_json::json!({
@@ -1093,10 +1134,20 @@ fn profile_to_json(
         "upstream_bypass": profile.network.upstream_bypass,
     });
 
-    // Workdir
-    val["workdir"] = serde_json::json!({
-        "access": format!("{:?}", profile.workdir.access),
-    });
+    // Workdir — emit via serde_json::to_value so the existing
+    // #[serde(rename_all = "lowercase")] on WorkdirAccess produces "readwrite"
+    // rather than the Debug-leaked "ReadWrite" (Plan 35-03 D-35-C3).
+    let mut workdir = serde_json::Map::new();
+    workdir.insert(
+        "access".to_string(),
+        serde_json::to_value(&profile.workdir.access)
+            .map_err(|e| NonoError::ProfileParse(format!("workdir.access serialize: {e}")))?,
+    );
+    val.as_object_mut()
+        .ok_or_else(|| {
+            NonoError::ProfileParse("profile_to_json root not an object (workdir)".to_string())
+        })?
+        .insert("workdir".to_string(), serde_json::Value::Object(workdir));
 
     // Rollback
     val["rollback"] = serde_json::json!({
@@ -1149,7 +1200,7 @@ fn profile_to_json(
         val["unsafe_macos_seatbelt_rules"] = serde_json::json!(profile.unsafe_macos_seatbelt_rules);
     }
 
-    val
+    Ok(val)
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,7 +1212,7 @@ pub(crate) fn cmd_diff(args: ProfileDiffArgs) -> Result<()> {
     let p2 = profile::load_profile(&args.profile2)?;
 
     if args.json {
-        let val = diff_to_json(&args.profile1, &args.profile2, &p1, &p2);
+        let val = diff_to_json(&args.profile1, &args.profile2, &p1, &p2)?;
         println!("{}", to_json(&val)?);
         return Ok(());
     }
@@ -1774,7 +1825,7 @@ fn diff_string_vecs<'a>(
     result
 }
 
-fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_json::Value {
+fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> Result<serde_json::Value> {
     let g1: BTreeSet<&str> = p1.security.groups.iter().map(|s| s.as_str()).collect();
     let g2: BTreeSet<&str> = p2.security.groups.iter().map(|s| s.as_str()).collect();
 
@@ -1792,7 +1843,28 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
     let ou1 = p1.open_urls.as_ref();
     let ou2 = p2.open_urls.as_ref();
 
-    serde_json::json!({
+    // Plan 35-03 (REQ-PORT-CLOSURE-07 / D-35-C2 + D-35-C3): pre-compute
+    // serde_json::to_value for Option<…> and non-Optional enum fields so we
+    // can use `?` before the json!({}) macro (which doesn't support `?`).
+    // Applies omit-when-None semantics: None → JSON null here (we preserve
+    // the diff shape — profile1/profile2 keys always present — but emit
+    // serde-driven snake_case strings rather than Debug-leaked "None").
+    let wsl2_p1 = match &p1.security.wsl2_proxy_policy {
+        Some(ref v) => serde_json::to_value(v)
+            .map_err(|e| NonoError::ProfileParse(format!("wsl2_proxy_policy p1 serialize: {e}")))?,
+        None => serde_json::Value::Null,
+    };
+    let wsl2_p2 = match &p2.security.wsl2_proxy_policy {
+        Some(ref v) => serde_json::to_value(v)
+            .map_err(|e| NonoError::ProfileParse(format!("wsl2_proxy_policy p2 serialize: {e}")))?,
+        None => serde_json::Value::Null,
+    };
+    let workdir_p1 = serde_json::to_value(&p1.workdir.access)
+        .map_err(|e| NonoError::ProfileParse(format!("workdir.access p1 serialize: {e}")))?;
+    let workdir_p2 = serde_json::to_value(&p2.workdir.access)
+        .map_err(|e| NonoError::ProfileParse(format!("workdir.access p2 serialize: {e}")))?;
+
+    Ok(serde_json::json!({
         "profile1": name1,
         "profile2": name2,
         "groups": {
@@ -1809,14 +1881,14 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
             "changed": p1.security.capability_elevation != p2.security.capability_elevation,
         },
         "wsl2_proxy_policy": {
-            "profile1": format!("{:?}", p1.security.wsl2_proxy_policy),
-            "profile2": format!("{:?}", p2.security.wsl2_proxy_policy),
+            "profile1": wsl2_p1,
+            "profile2": wsl2_p2,
             "changed": p1.security.wsl2_proxy_policy != p2.security.wsl2_proxy_policy,
         },
         "filesystem": diff_fs_json(&p1.filesystem, &p2.filesystem),
         "workdir": {
-            "profile1": format!("{:?}", p1.workdir.access),
-            "profile2": format!("{:?}", p2.workdir.access),
+            "profile1": workdir_p1,
+            "profile2": workdir_p2,
             "changed": p1.workdir.access != p2.workdir.access,
         },
         "network": {
@@ -1883,7 +1955,7 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
             "changed": p1.allow_launch_services != p2.allow_launch_services,
         },
         // Plan 34-01 fork-divergence: profile.allow_gpu field does not exist in fork's Profile.
-    })
+    }))
 }
 
 fn diff_fs_json(
@@ -1986,9 +2058,17 @@ fn diff_custom_credentials_json(
             );
         }
         if old.inject_mode != new.inject_mode {
+            // Plan 35-03 (D-35-C3): InjectMode carries #[serde(rename_all = "snake_case")]
+            // so serde_json::to_value emits "header" / "url_path" etc. rather than
+            // Debug-format "Header" / "UrlPath". Fall back to Debug only on the
+            // (structurally impossible) serialization error path.
+            let im_p1 = serde_json::to_value(&old.inject_mode)
+                .unwrap_or_else(|_| serde_json::Value::String(format!("{:?}", old.inject_mode)));
+            let im_p2 = serde_json::to_value(&new.inject_mode)
+                .unwrap_or_else(|_| serde_json::Value::String(format!("{:?}", new.inject_mode)));
             detail.insert(
                 "inject_mode".into(),
-                serde_json::json!({"profile1": format!("{:?}", old.inject_mode), "profile2": format!("{:?}", new.inject_mode)}),
+                serde_json::json!({"profile1": im_p1, "profile2": im_p2}),
             );
         }
         if old.inject_header != new.inject_header {
