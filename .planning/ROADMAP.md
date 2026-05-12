@@ -426,7 +426,7 @@ Plans:
 
 **Depends on:** Phase 33 (audit ledger + parity-strategy ADR).
 
-**Plans:** 8/12 plans executed
+**Plans:** 9/13 plans executed (34-08 split into 34-08a + 34-08b after empirical discovery; phase count 12 → 13)
 
 Plans:
 
@@ -447,8 +447,10 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 34-02-PROXY-NET-PLAN.md — Plan 34-02 (C4 v0.43–v0.44 proxy net hardening; D-34-B2: no Phase 09 WFP retrofit)
 - [x] 34-05-COMPLETION-PLAN.md — Plan 34-05 (C8 v0.48 `nono completion`; D-34-B2: no MSI integration) — 8 cherry-picks + 3 fork-fixups landed; gates 1/2/5 PASS; 3/4 deferred-to-CI; P34-DEFER-01-1 carry-forward acceptable.
-- [ ] 34-07-PS-ENVURI-PLAN.md — Plan 34-07 (C10 v0.50 `nono ps` + `env://`)
-- [ ] 34-08-ENV-DENY-PLAN.md — Plan 34-08 (C12 v0.52 env deny_vars + `nono learn` deprecation; D-34-B2: no Windows-specific docstring)
+- [x] 34-07-PS-ENVURI-PLAN.md — Plan 34-07 (C10 v0.50 `nono ps` + `env://`)
+- [archived] 34-08-ENV-DENY-PLAN.archive.md — Plan 34-08 split into 34-08a + 34-08b after empirical discovery of partial Phase 20-03 env_sanitization port (cherry-pick blocked at commit 1/10 `3657c935`); precedent: 34-04 → 34-04b split.
+- [ ] 34-08a-ENV-SURFACE-PORT-PLAN.md — Plan 34-08a (C12-env-surface: D-20 manual port of v0.37.0 env-filter surface + 4 v0.52 env-touching cherry-picks; security-critical deny_vars + empty-allow fail-closed; `autonomous: false`)
+- [ ] 34-08b-LEARN-DEPRECATION-PLAN.md — Plan 34-08b (C12-non-env: 5 non-env-touching cherry-picks from v0.52 — macOS learn, interactive prompt, `nono learn` deprecation per D-34-B2, escaped quotes, release; `autonomous: true`)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 34-09-FP-PACKS-PLAN.md — Plan 34-09 (C6 v0.44 pack migration D-20 manual replay; `autonomous: false`)

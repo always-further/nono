@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
 status: executing
-last_updated: "2026-05-12T04:06:20.443Z"
-last_activity: 2026-05-11
+last_updated: "2026-05-12T13:12:09.088Z"
+last_activity: 2026-05-12
 progress:
   total_phases: 8
   completed_phases: 8
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 
 Phase: 34
 Plan: 34-06 closed (2026-05-12, with 2 deferrals: P34-DEFER-06-1 yaml_merge-wiring trio, P34-DEFER-06-2 v0.49.0 release-bump); 34-01 + 34-03 + 34-04 + 34-04b + 34-00 previously closed. **Wave 1 COMPLETE** (3/3 plans closed). Next ready: Wave 2 (34-02 PROXY-NET).
-Status: In progress — Wave 1 complete; Wave 2 ready to dispatch
+Status: Ready to execute
 Milestone: v2.3 — Phase 34 in progress (6 of 12 plans closed: 34-00 G-25-DRIFT-01, 34-04 PATH-CANON-SCHEMA, 34-04b FP-CANONICAL-SCHEMA, 34-01 CLI-CONSOLIDATION, 34-03 KEYRING, 34-06 TRUST-SCAN). Wave 1 COMPLETE.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
@@ -47,7 +47,7 @@ Next actions:
   - After Phase 23 closes, `/gsd-complete-milestone v2.2` to archive the milestone.
   - Pre-merge `windows-squash` → `main` quick task remains a candidate for milestone-close timing.
 
-Last activity: 2026-05-11 -- Phase 34 Plan 34-01 (CLI consolidation, cluster C2 v0.41.0) closed: 6/6 upstream cherry-picks + 1 fmt-fix landed on main (commits fc76c772..23ad9242); D-19 trailer smoke 6/6, D-34-E1 invariant 0 hits, fork-defense grep counts 7/7 held; D-34-D2 mandatory gates 1/2/5 PASS (gate 1 with 1 pre-existing out-of-scope Windows-path test failure logged as P34-DEFER-01-1); cross-target clippy gates 3/4 documented-deferred to CI (linker/cc not installed on dev host); admin-required gates 6/7/8 documented-skipped; `nono profile` is canonical CLI surface; `nono policy` works as deprecation shim. Final main sha 23ad92427c6a47767c6cca97d5521f96e9130c63. Push to origin/main deferred to user.
+Last activity: 2026-05-12 -- Phase 34 planning complete
 
 Last activity: 2026-05-11 -- Phase 34 planning complete
 
@@ -240,7 +240,7 @@ Known deferred items at close: 20 (6 UAT bookkeeping gaps, 4 verification human_
 ## Session Continuity
 
 **Current Milestone:** v2.3 — Linux POC Unblock + Deferreds Closure (scope-locked 2026-04-29; in progress; status=gaps_found per audit).
-**Last Activity:** 2026-05-11
+**Last Activity:** 2026-05-12
 **Resumed:** 2026-05-11 — Phase 33 (`windows-parity-upstream-0-52-divergence`) Wave 3 closed via `/gsd-execute-phase 33`. Plan 33-03 landed three downstream artifact edits in single commit `8f783c39` closing REQ-3 + REQ-4 + REQ-5 (PROJECT.md Key Decisions row for parity-strategy decision + 25-HUMAN-UAT.md G-25-DRIFT-01 Update section with empirical-disproof framing + ROADMAP Phase 33 entry flipped to complete + Phase 34 UPST3-sync stub appended per D-33-D1 base case for Option A). All 12 REQ-3/4/5 validators + 2 cross-cutting (D-19 + make-ci sub) pass. Phase 33 now 4/4 plans executed; all 5 REQs landed (REQ-1 5fa0dca4 / REQ-2 7107b88d / REQ-3+4+5 8f783c39); ready for `/gsd-verify-work` verifier pass. Next: orchestrator's verify-phase step, then `/gsd-complete-phase 33` if verifier passes.
 
 **Stopped At (prior session, retained for context):** 2026-05-08 — user chose Phase 31 broker-process commitment over v2.3 gap-fill. Next: `/gsd-phase add 31` to insert Phase 31 (broker-process implementation, SHELL-01) into ROADMAP.md, then `/gsd-discuss-phase 31` with validated PoC (`quick-260508-m99`) + 370-line RESEARCH.md (`quick-260508-lqh`) as locked scoping inputs. Effort: ~7 days execution. v2.3 audit gaps (5 missing VERIFICATION.md + Phase 27.2 disposition) deferred — to be addressed before milestone close, but not blocking Phase 31 start.
