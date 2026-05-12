@@ -95,3 +95,29 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 
 </details>
 
+
+### 🏗️ v2.4 Complete the Partial Ports + UPST4 (Phases 35–40, incl. optional 36.5 + 38) — IN PROGRESS
+
+**Goal:** Absorb the 10 Phase 34 NEEDS-FOLLOW-UP-PLAN deferrals (partial upstream ports + Windows test-hygiene), execute the v2.3 host-blocked carry-forwards (Plan 25-01 RESL Unix backends + Plan 26-02 PKGS streaming/auto-pull) on Linux/macOS host, and absorb upstream v0.52.1 / v0.52.2 / v0.53.0 via UPST4 per Phase 33 ADR's "lazily-evaluated cadence" rule.
+
+**Trigger:** Phase 34 VERIFICATION.md strategic recommendation surfaced 10 NEEDS-FOLLOW-UP-PLAN deferrals. v2.3 audit had 5 host-blocked requirements (REQ-RESL-NIX-01..03 + REQ-PKGS-01 + REQ-PKGS-04). Upstream cadence rule fires for v0.52.1+ (3 new tags landed post-Phase-33-audit cutoff).
+
+**Requirement coverage:** 14 requirements across 5 categories (PORT-CLOSURE-01..07, RESL-NIX-01..03, PKGS-01 + PKGS-04, UPST4-01..02, AAHX-HOST-01). All mapped; zero orphans.
+
+**Estimated effort:** ~14-18 weeks. Phase numbering continues from Phase 34.
+
+- [ ] **Phase 35: UPST3-closure quick wins** — REQ-PORT-CLOSURE-01 (Windows env-filter wiring; P34-DEFER-08a-1) + REQ-PORT-CLOSURE-06 (Linux Landlock profiles-dir; P34-DEFER-09-1) + REQ-PORT-CLOSURE-07 (Windows test-harness hygiene; P34-DEFER-01-1 + 10-1) + half of REQ-PORT-CLOSURE-05 (escape-quote pipeline; P34-DEFER-08b-2 depends on 08b-1 ordering). ~2 weeks. Quick wins to keep deferral count down while Phase 36 absorbs the heavy items.
+- [ ] **Phase 36: UPST3 deep closure** — REQ-PORT-CLOSURE-02 (full deprecated_schema module port; P34-DEFER-04b-1) + REQ-PORT-CLOSURE-04 (yaml_merge wiring trio + wiring.rs base; P34-DEFER-06-1 + 09-2) + remainder of REQ-PORT-CLOSURE-05 (b5f0a3ab deep ExecConfig refactor; P34-DEFER-08b-1). ~4-6 weeks.
+- [ ] **Phase 36.5 (optional): Profile drafts feature absorption** — REQ-PORT-CLOSURE-03 (upstream 829c341a `nono profile promote` + `--draft` + package_status.rs + profile-drafts directory infrastructure). ~1 week. Planner-discretion split from Phase 36 to keep the deep-closure plan from getting unwieldy.
+- [ ] **Phase 37: v2.3 carry-forward Linux/macOS execution** — REQ-RESL-NIX-01..03 (Plan 25-01 cgroup v2 + setrlimit RESL backends) + REQ-PKGS-01 + REQ-PKGS-04 (Plan 26-02 streaming refactor + auto-pull). Plan + CONTEXT artifacts already committed in v2.3 (`3ed80d38` + `86efcdeb`); execution requires Linux/macOS host. ~2 weeks once host available.
+- [ ] **Phase 38 (optional): Phase 27 reopen — REQ-AAH-01 native host re-validation** — REQ-AAHX-HOST-01. Tactical confirmation pass on Linux/macOS host that the Phase 27 transitive closure (via 27.1 + 27.2) holds without a host-native gap. Skip if field-validation surfaces no gap. ~2-3 days.
+- [ ] **Phase 39: UPST4 audit** — REQ-UPST4-01. Mirror Phase 33 shape. DIVERGENCE-LEDGER.md inventory of upstream v0.52.0..v0.53.0+ divergence (3 confirmed tags at milestone start: v0.52.1 `21bbb82e`, v0.52.2 `e8bf0148`, v0.53.0 `c4b25b82`; may grow). Per-cluster disposition + parity-strategy review against Phase 33 ADR. ~1 week.
+- [ ] **Phase 40: UPST4 sync execution** — REQ-UPST4-02. Mirror Phase 34 shape. Cherry-pick + D-20 manual replay per UPST4 audit dispositions. D-19 trailer convention + Windows-only-files invariant inherited from Phase 22+34. ~2-3 weeks.
+
+**Out of scope (explicit deferrals to v2.5 or later):**
+- **v2.5-FU-1** (audit-bundle shim removal) + **v2.5-FU-2** (cmd_verify v2 JSON schema) — Phase 27.2 deferrals tracked in `deferred-items.md`.
+- **AIPC G-04 wire-protocol compile-time tightening** — cascades into 23 pre-existing tests + child SDK demultiplexer; v3.0 or later.
+- **WR-02 EDR HUMAN-UAT** — v3.0-deferred pending EDR-instrumented runner.
+- **P32-DEFER-005** (sigstore-verify 0.6.5 → 0.6.6 upgrade) — candidate v2.4 stretch item if a phase has space; otherwise v2.5.
+
+**Reference:** `.planning/REQUIREMENTS.md`, `.planning/MILESTONE-CONTEXT.md` (scope-themes provenance), `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/deferred-items.md` (effort-estimate provenance for Theme 1 REQs).

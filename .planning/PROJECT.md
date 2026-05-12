@@ -6,23 +6,34 @@
 
 v2.3 closed the Linux POC credibility gap with the Cross-Platform RESL design (Phase 25; AIPC Unix Futures ADR shipped; cgroup v2 + setrlimit RESL backends host-blocked carry-forward), shipped v2.2's deferred items (PKG streaming validators via Phase 26 Plan 26-01 with D-20 manual replay protecting `validate_path_within`; audit-attestation REQ-AAH-01 closed transitively via Phase 27.1 `NONO_TEST_HOME` seam + Phase 27.2 audit-loader + bundle-target ADR; Authenticode chain-walker subject extraction in Phase 28 with `WTHelperGetProvSignerFromChain` → `CertGetNameStringW` populating subject + thumbprint on Valid signatures), locked the WR-01 reject-stage asymmetry as permanent design property (Phase 29 Option c), productionized the Windows broker pattern (Phase 30 surfaced CSRSS console-subsystem ALPC denial via ProcMon → Phase 31 productionized `crates/nono-shell-broker/` Medium-IL broker with `CreateProcessAsUserW(EXTENDED_STARTUPINFO_PRESENT)` Low-IL child spawn — SHELL-01 → ✔ validated, was v3.0-deferred), hardened Sigstore integration (Phase 32; TUF cached-root + keyless `--issuer`/`--identity` regex + broker self-trust-anchor via Phase 28 chain-walker self-introspection), and absorbed upstream v0.37–v0.52 cross-platform parity work (Phase 33 audit produced DIVERGENCE-LEDGER + parity-strategy ADR with Option A `continue` accepted; Phase 34 UPST3 executed 13 plans / ~75 commits across 12 cluster dispositions). 15/20 v2.3 requirements closed substantively; 5 host-blocked carry-forwards to v2.4 (REQ-RESL-NIX-01..03 + REQ-PKGS-01 + REQ-PKGS-04). `windows-squash` → `main` merged mid-milestone at commit `1ef30c63`. 422 commits since `v2.2`.
 
-## Current Milestone: v2.4 (TBD — pending `/gsd-new-milestone`)
+## Current Milestone: v2.4 Complete the Partial Ports + UPST4
 
-**Scope preview (captured in `.planning/MILESTONE-CONTEXT.md`):**
+**Goal:** Absorb the 10 Phase 34 NEEDS-FOLLOW-UP-PLAN deferrals (partial upstream ports + Windows test-hygiene), execute the v2.3 host-blocked carry-forwards (Plan 25-01 RESL Unix backends + Plan 26-02 PKGS streaming/auto-pull) on Linux/macOS host, and absorb upstream v0.52.1 / v0.52.2 / v0.53.0 via UPST4 per Phase 33 ADR's "lazily-evaluated cadence" rule.
 
-Three themes selected at v2.3 close:
-1. **Complete the partial upstream ports** — 10 P34-DEFER-* items (deprecated_schema module port, profile drafts, yaml_merge wiring, Windows env-filter wiring, ExecConfig refactor, Linux Landlock profiles-dir, wiring.rs abstraction, Windows test-harness hygiene). ~8-12 weeks if all absorbed.
-2. **Execute v2.3 host-blocked carry-forwards** — Plan 25-01 RESL Unix backends (cgroup v2 + setrlimit) + Plan 26-02 PKGS-01 streaming + PKGS-04 auto-pull + Phase 27 REQ-AAH-01 closure on host. Requires Linux/macOS host coverage.
-3. **UPST4 — upstream v0.52.1 / v0.52.2 / v0.53.0 ingestion** — Phase 33 ADR's "per upstream release, lazily-evaluated" cadence rule fires.
+**Trigger:** Phase 34 VERIFICATION.md strategic recommendation surfaced 10 NEEDS-FOLLOW-UP-PLAN deferrals that exceed any single-phase absorption budget. v2.3 audit had 5 host-blocked requirements (REQ-RESL-NIX-01..03 + REQ-PKGS-01 + REQ-PKGS-04). Upstream cadence rule fires for v0.52.1 / v0.52.2 / v0.53.0.
 
-**Trigger:** Phase 34 VERIFICATION.md strategic recommendation (NEEDS-FOLLOW-UP-PLAN deferrals exceed in-phase absorption budget); v2.3 audit's host-blocked requirements; upstream cadence rule.
+**Phases:** 6-7 (Phases 35–40, plus optional 36.5 + 38). Phase numbering continues from Phase 34.
+
+**Target features:**
+
+- **Phase 35 — UPST3-closure quick wins (Theme 1):** P34-DEFER-08a-1 (Windows `exec_strategy_windows/` env-filter wiring; ~3-5 days) + P34-DEFER-09-1 (Linux Landlock profiles-dir pre-creation from upstream `bdf183e9`; ~2-3 days) + P34-DEFER-08b-2 (escape-quote structured-property pipeline; ~3-5 days) + Windows test-harness hygiene (P34-DEFER-01-1 `query_ext::test_query_path_denied` UNC path flake + P34-DEFER-10-1 policy show/diff `--json` Rust Debug leak; ~3-5 days). Total estimate ~2 weeks.
+- **Phase 36 — UPST3 deep closure (Theme 1):** P34-DEFER-04b-1 (full Option C `deprecated_schema` module port — ~824 LOC + 210-callsite internal rename + JSON schema fixture restructure + docs migration; ~1-2 weeks) + P34-DEFER-06-1 (yaml_merge wiring trio blocked by unported `24d8b924` base port ~1761 LOC; ~2-3 weeks) + P34-DEFER-09-2 (full upstream `wiring.rs` abstraction with idempotent JSON-merge install records; ~2-3 weeks) + P34-DEFER-08b-1 (`b5f0a3ab` deep ExecConfig refactor — 11 files / 721 insertions; ~1-2 weeks). Total estimate ~4-6 weeks.
+- **Phase 36.5 — Profile drafts feature absorption (Theme 1, optional):** P34-DEFER-04b-2 (upstream `829c341a` profile drafts feature — `nono profile promote`, `--draft` flag, `package_status.rs`, `NonoError::ActionRequired`, profile-drafts directory infrastructure with atomic ops + base-hash verification). ~1 week. Planner-discretion split from Phase 36.
+- **Phase 37 — v2.3 carry-forward Linux/macOS execution (Theme 2):** Plan 25-01 (Linux cgroup v2 `memory.max`/`cpu.max`/`pids.max`/`cgroup.kill` + macOS `setrlimit` `RLIMIT_AS`/`RLIMIT_NPROC`; `--cpu-percent` fail-closed unsupported on macOS; closes REQ-RESL-NIX-01..03) + Plan 26-02 (REQ-PKGS-01 streaming refactor from upstream `9ebad89a` + REQ-PKGS-04 auto-pull from upstream `115b5cfa`). Requires Linux/macOS host coverage. ~2 weeks once host available.
+- **Phase 38 — Phase 27 reopen (Theme 2, optional):** REQ-AAH-01 native re-validation on Linux/macOS host (currently closed transitively via 27.1 + 27.2 `NONO_TEST_HOME` seam + audit-loader swap). Tactical confirmation pass; only needed if Phase 27's transitive closure leaves a host-native gap. ~2-3 days.
+- **Phase 39 — UPST4 audit (Theme 3):** Mirror Phase 33 shape. DIVERGENCE-LEDGER.md inventory of upstream `v0.52.0..v0.53.0+` divergence (3 confirmed tags at milestone start: `v0.52.1` `21bbb82e`, `v0.52.2` `e8bf0148`, `v0.53.0` `c4b25b82`; may grow). Per-cluster disposition + parity-strategy review against Phase 33 ADR. ~1 week.
+- **Phase 40 — UPST4 sync execution (Theme 3):** Mirror Phase 34 shape. Cherry-pick + D-20 manual replay per UPST4 audit dispositions. D-19 trailer convention + Windows-only-files invariant inherited from Phase 22+34. ~2-3 weeks.
+
+**Total estimate:** ~14-18 weeks. Phase numbering continues from Phase 34 (current highest; SDK does NOT reset phase numbers unless `--reset-phase-numbers` flag is passed).
 
 **Out of scope (explicit deferrals to v2.5 or later):**
-- v2.5-FU-1 (audit-bundle shim removal) + v2.5-FU-2 (cmd_verify v2 JSON schema) — Phase 27.2 deferrals tracked in `deferred-items.md`.
-- WR-02 EDR HUMAN-UAT — v3.0-deferred pending EDR-instrumented runner.
-- AIPC G-04 wire-protocol compile-time tightening — v3.0 or later.
+- **v2.5-FU-1** (audit-bundle shim removal — removes the v2.3 transitional shim once `--rollback`-aware verifiers can read both legacy `<rollback_root>/<id>/` and canonical `<audit_root>/<id>/` bundle paths) — Phase 27.2 deferral.
+- **v2.5-FU-2** (cmd_verify v2 JSON schema — structured fields for the verification output) — Phase 27.2 deferral.
+- **AIPC G-04 wire-protocol compile-time tightening** — cascades into 23 pre-existing tests + child SDK demultiplexer; deferred to v3.0 or later.
+- **WR-02 EDR HUMAN-UAT** — v3.0-deferred pending EDR-instrumented runner.
+- **P32-DEFER-005** (sigstore-verify 0.6.5 → 0.6.6 upgrade) — candidate v2.4 stretch item if a phase has space; otherwise deferred to v2.5.
 
-**Action required:** Run `/gsd-new-milestone` to formalize v2.4 with the scope preview as input.
+**Source context:** `.planning/milestones/v2.4-MILESTONE-CONTEXT.md` (captured 2026-05-12 from `/gsd-new-milestone` aborted invocation; user-selected all 3 themes + "Complete the Partial Ports + UPST4" name; archived at v2.4 milestone start).
 
 <details>
 <summary>Previously Shipped</summary>

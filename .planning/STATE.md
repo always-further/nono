@@ -1,79 +1,34 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.3
-milestone_name: Linux POC Unblock + Deferreds Closure
-status: executing
-last_updated: "2026-05-12T15:50:04.901Z"
+milestone: v2.4
+milestone_name: Complete the Partial Ports + UPST4
+status: planning
+last_updated: "2026-05-12T16:31:34.863Z"
 last_activity: 2026-05-12
 progress:
-  total_phases: 8
-  completed_phases: 8
-  total_plans: 23
-  completed_plans: 23
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
-# Project State: nono — v2.3 Linux POC Unblock + Deferreds Closure
+# Project State: nono — v2.4 Complete the Partial Ports + UPST4
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
+See: .planning/PROJECT.md (updated 2026-05-12 at v2.4 milestone start; v2.3 shipped same day)
 
 **Core Value:** Every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 33 — windows-parity-upstream-0-52-divergence
+**Current Focus:** v2.4 milestone start — defining REQ-IDs + Phase 35+ structure
 
 ## Current Position
 
-Phase: 34
-Plan: 34-06 closed (2026-05-12, with 2 deferrals: P34-DEFER-06-1 yaml_merge-wiring trio, P34-DEFER-06-2 v0.49.0 release-bump); 34-01 + 34-03 + 34-04 + 34-04b + 34-00 previously closed. **Wave 1 COMPLETE** (3/3 plans closed). Next ready: Wave 2 (34-02 PROXY-NET).
-Status: Ready to execute
-Milestone: v2.3 — Phase 34 in progress (6 of 12 plans closed: 34-00 G-25-DRIFT-01, 34-04 PATH-CANON-SCHEMA, 34-04b FP-CANONICAL-SCHEMA, 34-01 CLI-CONSOLIDATION, 34-03 KEYRING, 34-06 TRUST-SCAN). Wave 1 COMPLETE.
-
-  - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
-  - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` local; merge-to-main pending on pre-milestone quick task).
-  - v2.1 — shipped 2026-04-21 (tag `v2.1` local; merge-to-main pending on pre-milestone quick task).
-  - v2.2 — started 2026-04-24, this milestone.
-
-v2.2 finalized phase structure (locked 2026-04-24 by gsd-roadmapper):
-
-  - Phase 22: UPST2 — Upstream v0.38–v0.40 Parity Sync (5 plans). Covers PROF-01..04, POLY-01..03, PKG-01..04, OAUTH-01..03, AUD-01..04 (18 requirements). Locked plan sequence: 22-01 Profile struct → 22-02 Policy tightening (wave-parallel with 22-01) → 22-03 Package manager → 22-04 OAuth2 proxy → 22-05 Audit integrity + attestation (last — touches `rollback_runtime.rs`/`supervised_runtime.rs`/`exec_strategy.rs` which are heavily forked on windows-squash).
-  - Phase 23: Windows Audit-Event Retrofit (1 plan). Covers AUD-05 — wires ledger emissions into the 5 AIPC broker paths in `exec_strategy_windows/supervisor.rs`. Depends on Phase 22.
-  - Phase 24: Parity-Drift Prevention (2 plans). Covers DRIFT-01 (`check-upstream-drift` tooling) + DRIFT-02 (GSD quick-task template for upstream sync). Independent of Phase 22/23 sequencing.
-
-Next actions:
-
-  - `/gsd-discuss-phase 23` or `/gsd-plan-phase 23` — scope AUD-05 (Windows AIPC broker audit emissions) as the last v2.2 phase. Plan 23-01 threads ledger-append calls into each `handle_*_request` in `crates/nono-cli/src/exec_strategy_windows/supervisor.rs` (File, Socket, Pipe, JobObject, Event, Mutex), preserves WR-01 reject-stage asymmetry, and survives `AppliedLabelsGuard` Drop flush.
-  - After Phase 23 closes, `/gsd-complete-milestone v2.2` to archive the milestone.
-  - Pre-merge `windows-squash` → `main` quick task remains a candidate for milestone-close timing.
-
-Last activity: 2026-05-12 -- Phase 34 planning complete
-
-Last activity: 2026-05-11 -- Phase 34 planning complete
-
-Prior activity: 2026-05-11 -- Phase 34 planning complete
-
-Prior activity: 2026-05-11 -- Quick task 260511-gzq-keyring-windows-native completed: enabled `keyring v3.6.3` Windows-native backend in `crates/nono/Cargo.toml` + `crates/nono-cli/Cargo.toml` (added `keyring = { version = "3", features = ["windows-native"] }` to each Windows target block, matching the Linux `sync-secret-service` and macOS `apple-native` pattern); pre-fix, missing feature flag caused keyring v3 to fall back to in-memory mock backend per docs.rs/keyring/3.6.3 — keygen+sign+verify failed cross-process on Windows because keygen wrote to mock, sign found empty mock in next process; bug has been silent since v2.1 keyring v3 adoption (Phase 20 UPST-03); fix verified end-to-end via debug binary keyed sign roundtrip producing real `LegacyGeneric:target=*.nono-trust` entries in Credential Manager (vs zero pre-fix); blast radius covers all `nono trust` keyed flows + `keyring://service/account` URI scheme + AUD-02 audit-attestation key reads; new release binary sha256 `06c1156e...` (was `8742260...`); ready for POC reinstall
-
-Prior activity: 2026-05-11 -- Quick task 260511-fyl-pub-origin-push completed: pushed 326 local commits to origin/main (`33229adc..c63998ae` fast-forward, no force); range covers Phase 22 UAT close through Phase 34 CONTEXT + this session's 3 quick tasks; unblocks the raw-GitHub URL workaround from quick task 260511-fpn since the fixture commit `d9969978` is now reachable on origin; POC user's `Invoke-WebRequest` for `trust-root-frozen.json` works on retry; verified via WebFetch against `raw.githubusercontent.com/oscarmackjr-twg/nono/c63998ae/...`; push-cadence drift noted as open follow-up (Phase 22 D-07 said per-plan-close push, drifted ~13 days)
-
-Prior activity: 2026-05-11 -- Quick task 260511-fpn-sigstore-tuf-rotation completed: documented Sigstore TUF root rotation workaround for POC users (sigstore-verify 0.6.5 has stale embedded TUF anchor; `nono setup --refresh-trust-root` fails with "0 valid signatures" because Sigstore rotated keys); workaround per Phase 32 D-32-15 verify-is-offline design — `Invoke-WebRequest` fetches the maintainer-captured `trust-root-frozen.json` (committed at d9969978, 2026-05-10) directly into `%USERPROFILE%\.nono\trust-root\trusted_root.json` cache; added "Known issue" subsection to `docs/cli/development/windows-poc-handoff.mdx` § Sigstore Trust Root Setup; tracked upstream upgrade as P32-DEFER-005 (sigstore-verify 0.6.5 → 0.6.6 — bumping the full crate set spans 6 source files + 6 test files, v2.4 candidate)
-
-Prior activity: 2026-05-11 -- Quick task 260511-fg3-poc-keyless-doc-fix completed: stripped 7 nonexistent `nono trust verify --keyless` references from `docs/cli/development/windows-poc-handoff.mdx` (4 prose + 3 powershell examples); keyless verify shape is `--issuer` + `--identity` (both fail-closed-mandatory per Phase 32 D-32-07..10, commit f7a1bdf8); sign-side `--keyless` references preserved (real flag); workspace-wide `grep "trust verify --keyless" docs/` now 0 hits
-
-Even prior activity: 2026-05-11 -- Quick task 260511-eiy-landlock-windows-leak completed: fixed `validate_deny_overlaps` cfg gate in `crates/nono-cli/src/policy.rs` (changed `if cfg!(target_os = "macos")` → `if !cfg!(target_os = "linux")`); Windows host now correctly skips Linux-only Landlock deny-overlap fail-closed gate (Phase 21 WSFG-01 mandatory-label backend enforces deny-within-allow natively); 3 previously-flaky `policy::tests::test_*deny_overlaps*` + `test_resolve_read_group` now PASS on Windows (75/75 module tests green); release binary rebuilt at `target/release/nono.exe`; POC users reinstall to clear the leak
-
-Prior activity: 2026-05-11 -- Phase 34 CONTEXT gathered (commit 4d872c08); 4 areas resolved: D-34-A1 one-plan-per-cluster (10 plans), D-34-A2 C7 Wave-0 foundation gate, D-34-B1 both fork-preserve in scope, D-34-B2 surgical Win retrofit posture, D-34-C1 G-25-DRIFT-01 closes as no-divergence at phase-start (Plan 34-00), D-34-D1 direct-on-main with one PR per plan (10 PRs), D-34-D2 per-plan close gate adds cross-target clippy (Linux + macOS) on top of Phase 22 D-18 baseline; resume file `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/34-CONTEXT.md`
-
-Earlier activity: 2026-05-11 -- Phase 34 CONTEXT gathered (commit 4d872c08); 4 areas resolved: D-34-A1 one-plan-per-cluster (10 plans), D-34-A2 C7 Wave-0 foundation gate, D-34-B1 both fork-preserve in scope, D-34-B2 surgical Win retrofit posture, D-34-C1 G-25-DRIFT-01 closes as no-divergence at phase-start (Plan 34-00), D-34-D1 direct-on-main with one PR per plan (10 PRs), D-34-D2 per-plan close gate adds cross-target clippy (Linux + macOS) on top of Phase 22 D-18 baseline; resume file `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/34-CONTEXT.md`
-
-Even earlier activity: 2026-05-11 -- Phase 33 Plan 33-02 closed; docs/architecture/upstream-parity-strategy.md (Accepted ADR; 3 options x 5 criteria L/M/H) committed (7107b88d); SUMMARY committed (2f3307ed); operator selected Option A (continue bidirectional parity) with aggregate shape (3H/2M/0L) dominating Option B (1H/0M/4L) and Option C (1H/2M/2L) without invoking D-33-C3 tiebreaker
-
-Earlier activity: 2026-04-28 — Phase 22 closed end-to-end (UAT 10/10 + 1 spec-error skipped, commit e60ab093). Quick task 260428-rsu created as deferred runbook for upstream-stack rebase (awaiting trigger).
-
-```
-Progress: [██████████] 100%
-```
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-05-12 — Milestone v2.4 started
 
 ## Accumulated Context
 
