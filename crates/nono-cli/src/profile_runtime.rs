@@ -204,11 +204,11 @@ pub(crate) fn prepare_profile(
         ),
         // Plan 34-08a Task 3 (D-20 manual replay of upstream `1b412a7`):
         // surface `profile.environment.allow_vars` as a runtime allow-list.
-        // Plan 34-08a Task 4 (D-20 replay of v0.52.0 `3657c935`) adds the
-        // empty-allow short-circuit (`if env_config.allow_vars.is_empty()
-        // { return None; }`) — Task 5 (`780965d7`) will revert this as a
-        // security regression fix. Validation is best-effort — invalid
-        // patterns emit a warning to stderr but the field is still forwarded.
+        // Plan 34-08a Task 5 (D-20 replay of v0.52.0 `780965d7`): preserve
+        // fail-closed semantics for empty allow_vars. An empty `allow_vars`
+        // list returns `Some([])` (strip all inherited vars) rather than
+        // `None` (no filtering). Profiles that set env_credentials but omit
+        // allow_vars would otherwise silently inherit every parent env var.
         //
         // Validation logic is duplicated here from
         // `exec_strategy::env_sanitization::validate_env_var_patterns`
@@ -217,16 +217,13 @@ pub(crate) fn prepare_profile(
         // untouched in this plan). Kept in lock-step with the canonical
         // helper via tests in `exec_strategy/env_sanitization.rs`.
         allowed_env_vars: loaded_profile.as_ref().and_then(|profile| {
-            profile.environment.as_ref().and_then(|env_config| {
-                if env_config.allow_vars.is_empty() {
-                    return None;
-                }
+            profile.environment.as_ref().map(|env_config| {
                 if let Some(err) =
                     validate_env_var_patterns_local(&env_config.allow_vars, "allow_vars")
                 {
                     eprintln!("Warning: {}", err);
                 }
-                Some(env_config.allow_vars.clone())
+                env_config.allow_vars.clone()
             })
         }),
         denied_env_vars: loaded_profile.as_ref().and_then(|profile| {
@@ -264,4 +261,53 @@ fn validate_env_var_patterns_local(patterns: &[String], field_name: &str) -> Opt
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::profile::{EnvironmentConfig, Profile};
+
+    /// Plan 34-08a Task 5 regression test (v0.52.0 `780965d7`):
+    /// an `EnvironmentConfig` with empty `allow_vars` MUST surface as
+    /// `Some(vec![])` (strip-all / fail-closed) rather than `None`
+    /// (no filter / inherit-all). This is the security invariant that
+    /// `3657c935` regressed and `780965d7` restored.
+    ///
+    /// Direct-tests the closure shape used in `prepare_profile`:
+    /// `profile.environment.as_ref().map(|cfg| cfg.allow_vars.clone())`.
+    #[test]
+    fn empty_allow_vars_fails_closed() {
+        let profile = Profile {
+            environment: Some(EnvironmentConfig {
+                allow_vars: vec![],
+                deny_vars: vec![],
+            }),
+            ..Default::default()
+        };
+        let allowed: Option<Vec<String>> = profile
+            .environment
+            .as_ref()
+            .map(|env_config| env_config.allow_vars.clone());
+        // Must be Some(vec![]) -- strip all -- NOT None.
+        assert_eq!(allowed, Some(Vec::<String>::new()));
+        assert!(
+            allowed.as_ref().is_some_and(|v| v.is_empty()),
+            "empty allow_vars must surface as Some(vec![]), not None"
+        );
+    }
+
+    /// Companion: no `environment` block at all -> None (inherit-all).
+    /// Distinguishes "absent" (None) from "explicit empty" (Some([])).
+    #[test]
+    fn absent_environment_block_returns_none() {
+        let profile = Profile {
+            environment: None,
+            ..Default::default()
+        };
+        let allowed: Option<Vec<String>> = profile
+            .environment
+            .as_ref()
+            .map(|env_config| env_config.allow_vars.clone());
+        assert_eq!(allowed, None);
+    }
 }
