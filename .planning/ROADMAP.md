@@ -106,7 +106,7 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 
 **Estimated effort:** ~14-18 weeks. Phase numbering continues from Phase 34.
 
-- [ ] **Phase 35: UPST3-closure quick wins** — REQ-PORT-CLOSURE-01 (Windows env-filter wiring; P34-DEFER-08a-1) + REQ-PORT-CLOSURE-06 (Linux Landlock profiles-dir; P34-DEFER-09-1) + REQ-PORT-CLOSURE-07 (Windows test-harness hygiene; P34-DEFER-01-1 + 10-1) + half of REQ-PORT-CLOSURE-05 (escape-quote pipeline; P34-DEFER-08b-2 depends on 08b-1 ordering). ~2 weeks. Quick wins to keep deferral count down while Phase 36 absorbs the heavy items.
+- [x] **Phase 35: UPST3-closure quick wins** — REQ-PORT-CLOSURE-01 (Windows env-filter wiring; P34-DEFER-08a-1) + REQ-PORT-CLOSURE-06 (Linux Landlock profiles-dir; P34-DEFER-09-1) + REQ-PORT-CLOSURE-07 (Windows test-harness hygiene; P34-DEFER-01-1 + 10-1) + half of REQ-PORT-CLOSURE-05 (escape-quote pipeline; P34-DEFER-08b-2 depends on 08b-1 ordering). ~2 weeks. Quick wins to keep deferral count down while Phase 36 absorbs the heavy items. (completed 2026-05-12)
 - [ ] **Phase 36: UPST3 deep closure** — REQ-PORT-CLOSURE-02 (full deprecated_schema module port; P34-DEFER-04b-1) + REQ-PORT-CLOSURE-04 (yaml_merge wiring trio + wiring.rs base; P34-DEFER-06-1 + 09-2) + remainder of REQ-PORT-CLOSURE-05 (b5f0a3ab deep ExecConfig refactor; P34-DEFER-08b-1). ~4-6 weeks.
 - [ ] **Phase 36.5: Profile drafts feature absorption (optional)** — REQ-PORT-CLOSURE-03 (upstream 829c341a `nono profile promote` + `--draft` + package_status.rs + profile-drafts directory infrastructure). ~1 week. Planner-discretion split from Phase 36 to keep the deep-closure plan from getting unwieldy.
 - [ ] **Phase 37: v2.3 carry-forward Linux/macOS execution** — REQ-RESL-NIX-01..03 (Plan 25-01 cgroup v2 + setrlimit RESL backends) + REQ-PKGS-01 + REQ-PKGS-04 (Plan 26-02 streaming refactor + auto-pull). Plan + CONTEXT artifacts already committed in v2.3 (`3ed80d38` + `86efcdeb`); execution requires Linux/macOS host. ~2 weeks once host available.
@@ -132,11 +132,11 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 
 **Requirements:** REQ-PORT-CLOSURE-01, REQ-PORT-CLOSURE-06, REQ-PORT-CLOSURE-07. See `.planning/REQUIREMENTS.md`. **Scope note:** the v2.4 summary line mentions "half of REQ-PORT-CLOSURE-05 (escape-quote pipeline)" — that piece (P34-DEFER-08b-2) is **moved to Phase 36** because it depends on the 08b-1 ExecConfig refactor; Phase 35 ships 01 + 06 + 07 only.
 
-**Plans:** 3 plans (all Wave 1, parallelism-allowed per D-35-A3).
+**Plans:** 3/3 plans complete
 
-- [ ] 35-01-WIN-ENV-FILTER-PLAN.md — REQ-PORT-CLOSURE-01 (Windows execution-path env-filter wiring; closes P34-DEFER-08a-1)
-- [ ] 35-02-LINUX-LANDLOCK-PROFILES-PLAN.md — REQ-PORT-CLOSURE-06 (Linux Landlock profiles-dir pre-creation; cherry-picks upstream bdf183e9; closes P34-DEFER-09-1)
-- [ ] 35-03-WIN-TEST-HYGIENE-PLAN.md — REQ-PORT-CLOSURE-07 (UNC strip in suggested_flag + full format!("{:?}") JSON-emission audit + Phase 35 closure ledger append; closes P34-DEFER-01-1, 09-3, 10-1)
+- [x] 35-01-WIN-ENV-FILTER-PLAN.md — REQ-PORT-CLOSURE-01 (Windows execution-path env-filter wiring; closes P34-DEFER-08a-1)
+- [x] 35-02-LINUX-LANDLOCK-PROFILES-PLAN.md — REQ-PORT-CLOSURE-06 (Linux Landlock profiles-dir pre-creation; cherry-picks upstream bdf183e9; closes P34-DEFER-09-1)
+- [x] 35-03-WIN-TEST-HYGIENE-PLAN.md — REQ-PORT-CLOSURE-07 (UNC strip in suggested_flag + full format!("{:?}") JSON-emission audit + Phase 35 closure ledger append; closes P34-DEFER-01-1, 09-3, 10-1)
 
 **Estimated effort:** ~2 weeks.
 
