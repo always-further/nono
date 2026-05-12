@@ -270,6 +270,9 @@ const ROOT_HELP_TEMPLATE: &str = "\
   policy     Inspect policy groups, profiles, and security rules
   profile    Create and manage nono profiles
 
+\x1b[1mSHELL\x1b[0m
+  completion   Generate shell completion scripts
+
 \x1b[1mOPTIONS\x1b[0m
 {options}
 
