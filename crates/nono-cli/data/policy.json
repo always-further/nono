@@ -436,6 +436,7 @@
     "claude_code_macos": {
       "description": "Claude Code macOS-specific state and credential paths",
       "platform": "macos",
+      "deny_override": ["~/Library/Keychains"],
       "allow": {
         "read": [
           "$HOME/.local/share/claude",
@@ -451,6 +452,7 @@
     "codex_macos": {
       "description": "Codex macOS-specific state and credential paths",
       "platform": "macos",
+      "deny_override": ["~/Library/Keychains"],
       "allow": {
         "readwrite": [
           "$HOME/Library/Keychains/login.keychain-db",

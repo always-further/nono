@@ -55,6 +55,13 @@ pub struct Group {
     /// macOS symlink path pairs (symlink -> real target)
     #[serde(default)]
     pub symlink_pairs: Option<HashMap<String, String>>,
+    /// Paths whose deny entries should be removed when this group is active.
+    /// Allows a group that grants access (e.g. `claude_code_macos`) to
+    /// override a deny from another group (e.g. `deny_keychains_macos`)
+    /// without requiring the external pack profile to carry a
+    /// platform-specific `bypass_protection` entry.
+    #[serde(default)]
+    pub deny_override: Option<Vec<String>>,
 }
 
 /// Allow operations nested under `allow`
@@ -358,6 +365,7 @@ pub fn resolve_groups(
     let mut resolved_groups = Vec::new();
     let mut needs_unlink_overrides = false;
     let mut deny_paths = Vec::new();
+    let mut deny_override_entries: Vec<(String, PathBuf)> = Vec::new();
 
     for name in group_names {
         let group = policy
@@ -378,7 +386,43 @@ pub fn resolve_groups(
         if resolve_single_group(name, group, caps, &mut deny_paths)? {
             needs_unlink_overrides = true;
         }
+
+        if let Some(overrides) = &group.deny_override {
+            for path_str in overrides {
+                let path = expand_path(path_str)?;
+                if !path.exists() {
+                    debug!(
+                        "Group '{}' deny_override path '{}' (expanded to '{}') \
+                         does not exist, skipping",
+                        name,
+                        path_str,
+                        path.display()
+                    );
+                    continue;
+                }
+                deny_override_entries.push((name.clone(), path));
+            }
+        }
+
         resolved_groups.push(name.clone());
+    }
+
+    for (group_name, path) in &deny_override_entries {
+        let canonical = canonicalize_for_comparison(path);
+        let before = deny_paths.len();
+        deny_paths.retain(|dp| !dp.starts_with(&canonical));
+        if canonical != *path {
+            deny_paths.retain(|dp| !dp.starts_with(path));
+        }
+        let removed = before.saturating_sub(deny_paths.len());
+        if removed > 0 {
+            info!(
+                "Group '{}' deny_override removed {} deny entry/entries via '{}'",
+                group_name,
+                removed,
+                path.display()
+            );
+        }
     }
 
     Ok(ResolvedGroups {
@@ -1560,6 +1604,14 @@ mod tests {
             .contains(&"$HOME/Library/Keychains/login.keychain-db".to_string()));
         assert!(claude_code_macos_paths
             .contains(&"$HOME/Library/Keychains/metadata.keychain-db".to_string()));
+        let deny_overrides = claude_code_macos
+            .deny_override
+            .as_ref()
+            .expect("claude_code_macos deny_override missing");
+        assert!(
+            deny_overrides.contains(&"~/Library/Keychains".to_string()),
+            "claude_code_macos must override the keychain deny"
+        );
 
         let claude_code_linux = policy
             .groups
@@ -2412,6 +2464,93 @@ mod tests {
                 .contains("nonexistent/test/path"),
             "Expected deny path to contain 'nonexistent/test/path', got: {}",
             resolved.deny_paths[0].display()
+        );
+    }
+
+    #[test]
+    fn test_deny_override_strips_matching_deny_paths() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let deny_dir = dir.path().join("secret");
+        std::fs::create_dir(&deny_dir).expect("mkdir");
+        let deny_str = deny_dir.to_string_lossy().to_string();
+
+        let json = format!(
+            r#"{{
+                "meta": {{ "version": 2, "schema_version": "2.0" }},
+                "groups": {{
+                    "g_deny": {{
+                        "description": "deny group",
+                        "deny": {{ "access": ["{}"] }}
+                    }},
+                    "g_override": {{
+                        "description": "override group",
+                        "deny_override": ["{}"]
+                    }}
+                }}
+            }}"#,
+            deny_str, deny_str,
+        );
+        let policy = load_policy(&json).expect("parse failed");
+
+        // Override AFTER deny -- normal case
+        let mut caps = CapabilitySet::new();
+        let resolved = resolve_groups(
+            &policy,
+            &["g_deny".to_string(), "g_override".to_string()],
+            &mut caps,
+        )
+        .expect("resolve failed");
+        assert!(
+            resolved.deny_paths.is_empty(),
+            "deny_override should have removed the matching deny path, but got: {:?}",
+            resolved.deny_paths
+        );
+
+        // Override BEFORE deny -- must also work (order-independent)
+        let mut caps2 = CapabilitySet::new();
+        let resolved2 = resolve_groups(
+            &policy,
+            &["g_override".to_string(), "g_deny".to_string()],
+            &mut caps2,
+        )
+        .expect("resolve failed");
+        assert!(
+            resolved2.deny_paths.is_empty(),
+            "deny_override must be order-independent, but got: {:?}",
+            resolved2.deny_paths
+        );
+    }
+
+    #[test]
+    fn test_deny_override_absent_path_is_skipped() {
+        let json = r#"{
+            "meta": { "version": 2, "schema_version": "2.0" },
+            "groups": {
+                "g_deny": {
+                    "description": "deny group",
+                    "deny": { "access": ["/nonexistent/test/path"] }
+                },
+                "g_override_absent": {
+                    "description": "override with non-existent path",
+                    "deny_override": ["/nonexistent/deny_override_target_9999"]
+                }
+            }
+        }"#;
+        let policy = load_policy(json).expect("parse failed");
+        let mut caps = CapabilitySet::new();
+
+        let resolved = resolve_groups(
+            &policy,
+            &["g_deny".to_string(), "g_override_absent".to_string()],
+            &mut caps,
+        )
+        .expect("resolve failed");
+
+        assert_eq!(
+            resolved.deny_paths.len(),
+            1,
+            "Non-existent deny_override path should be skipped (deny stays), got: {:?}",
+            resolved.deny_paths
         );
     }
 
