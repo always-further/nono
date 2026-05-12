@@ -96,3 +96,30 @@ the orchestrator-approved escalation rule. The Plan 34-04b plan-close
 smoke-check expected `Upstream-commit:` count of 5; actual is 4
 (829c341a deferred); `Manual-replay:` count stays at 1 (only
 `f0abd413`).
+
+## P34-DEFER-01-1: query_ext::test_query_path_denied Windows-path canonicalization
+
+**Discovered during:** Plan 34-01 D-34-D2 close-gate 1 (`cargo test --workspace --all-features`)
+
+**Date:** 2026-05-11
+
+**Scope:** `query_ext::tests::test_query_path_denied` asserts that the
+suggested-flag output for a POSIX path `/some/random/path` round-trips
+to `--read /some/random`. On Windows, the path canonicalization layer
+prefixes the result with `\?\C:\` (UNC long-path form), producing
+`--read \?\C:\some\random`. The test passes on Linux/macOS hosts.
+
+**Pre-existing:** Verified pre-existing on `aca306a54b3d8f0858fc5376068b2715ec2f1e6c`
+(the base HEAD before Plan 34-01 cherry-picks landed) — same `left/right` mismatch
+when run against the baseline `query_ext.rs`. Plan 34-01's upstream cherry-picks
+(notably `034be703`) modify the surrounding diagnostic message format but do NOT
+introduce the path-canonicalization mismatch.
+
+**Path forward:** Either gate the test to `#[cfg(not(target_os = "windows"))]`
+(Phase 22-style pattern) or add a Windows-specific variant that asserts the
+UNC-prefixed form. Deferred to a Windows-test-hygiene plan; not blocking for
+Plan 34-01 close.
+
+**Tracking:** Plan 34-01 SUMMARY records the gate-1 single-test failure as
+out-of-scope per the executor's "auto-fix scope boundary" rule (only fix
+issues directly caused by current-task changes; this was pre-existing).

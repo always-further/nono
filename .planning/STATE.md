@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Linux POC Unblock + Deferreds Closure
 status: executing
-last_updated: "2026-05-11T23:26:39.067Z"
+last_updated: "2026-05-12T00:38:48.052Z"
 last_activity: 2026-05-11
 progress:
   total_phases: 8
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-04-29 at v2.3 milestone scope-lock)
 ## Current Position
 
 Phase: 34
-Plan: Not started
-Status: Ready to execute
-Milestone: v2.2 — 3/3 phases complete (Phase 22 ✓ 2026-04-28, Phase 23 ✓ 2026-04-29, Phase 24 ✓ 2026-04-27), 9/9 plans complete. v2.2 ready to ship.
+Plan: 34-01 closed (2026-05-11); 34-00 + 34-04 + 34-04b previously closed; next ready: 34-02 (Wave 2) once 34-03 + 34-06 wave-1 plans close
+Status: In progress — Wave 1 partial
+Milestone: v2.3 — Phase 34 in progress (4 of 12 plans closed: 34-00 G-25-DRIFT-01 closure, 34-04 PATH-CANON-SCHEMA, 34-04b FP-CANONICAL-SCHEMA, 34-01 CLI-CONSOLIDATION). Wave 1 remaining: 34-03 KEYRING, 34-06 TRUST-SCAN.
 
   - v1.0 Windows Alpha — shipped 2026-03-31 (tag `v1.0`).
   - v2.0 Windows Gap Closure — shipped 2026-04-18 (tag `v2.0` local; merge-to-main pending on pre-milestone quick task).
@@ -46,6 +46,8 @@ Next actions:
   - `/gsd-discuss-phase 23` or `/gsd-plan-phase 23` — scope AUD-05 (Windows AIPC broker audit emissions) as the last v2.2 phase. Plan 23-01 threads ledger-append calls into each `handle_*_request` in `crates/nono-cli/src/exec_strategy_windows/supervisor.rs` (File, Socket, Pipe, JobObject, Event, Mutex), preserves WR-01 reject-stage asymmetry, and survives `AppliedLabelsGuard` Drop flush.
   - After Phase 23 closes, `/gsd-complete-milestone v2.2` to archive the milestone.
   - Pre-merge `windows-squash` → `main` quick task remains a candidate for milestone-close timing.
+
+Last activity: 2026-05-11 -- Phase 34 Plan 34-01 (CLI consolidation, cluster C2 v0.41.0) closed: 6/6 upstream cherry-picks + 1 fmt-fix landed on main (commits fc76c772..23ad9242); D-19 trailer smoke 6/6, D-34-E1 invariant 0 hits, fork-defense grep counts 7/7 held; D-34-D2 mandatory gates 1/2/5 PASS (gate 1 with 1 pre-existing out-of-scope Windows-path test failure logged as P34-DEFER-01-1); cross-target clippy gates 3/4 documented-deferred to CI (linker/cc not installed on dev host); admin-required gates 6/7/8 documented-skipped; `nono profile` is canonical CLI surface; `nono policy` works as deprecation shim. Final main sha 23ad92427c6a47767c6cca97d5521f96e9130c63. Push to origin/main deferred to user.
 
 Last activity: 2026-05-11 -- Phase 34 planning complete
 
