@@ -515,18 +515,46 @@ The following variables are expanded in all path fields (`filesystem.*`, includi
 
 Always use these variables instead of hardcoded absolute paths to keep profiles portable across machines and users.
 
-## 7. Key Rules
+## 7. Platform Predicates
+
+Profile entries that list paths, group names, URL origins, or env credentials can be unconditional strings or conditional objects with `when`.
+
+```json
+{
+  "groups": {
+    "include": [
+      "agent_common",
+      { "name": "agent_linux", "when": "linux" },
+      { "name": "agent_macos", "when": "macos" }
+    ]
+  },
+  "filesystem": {
+    "read": [
+      "$HOME/.agent",
+      { "path": "$HOME/Library/Application Support/Agent", "when": "macos" },
+      { "path": "$XDG_CONFIG_HOME/agent", "when": "linux" }
+    ]
+  },
+  "env_credentials": {
+    "agent_key": { "env_var": "AGENT_API_KEY", "when": ["linux", "macos:>=15"] }
+  }
+}
+```
+
+Supported predicate forms include `linux`, `macos`, `linux:fedora`, `linux:rhel-like`, `linux:ubuntu:>=24.04`, `macos:>=15`, negation such as `!linux:nixos`, and arrays for any-of matching.
+
+## 8. Key Rules
 
 - A profile with no `groups.include` has no deny rules. Always include appropriate deny groups for untrusted workloads.
 - `filesystem.bypass_protection` only removes the deny rule. It does not grant access. You must also add the path via `filesystem.allow`, `filesystem.read`, or `filesystem.write` (or the matching `*_file` variant).
 - `filesystem.suppress_save_prompt` only suppresses save-profile suggestions. It does not grant access, remove deny rules, or hide diagnostics.
 - `groups.exclude` removes groups from the resolved set. This weakens the sandbox. Use it only when you understand which protections you are removing.
 - `extends` chains resolve recursively up to depth 10. Circular inheritance is an error.
-- Platform-specific groups (suffix `_macos` or `_linux`) are filtered at resolution time. Include both variants for cross-platform profiles.
+- Prefer `when` predicates for package-specific platform differences. Put shared OS baseline paths in built-in policy groups instead.
 - `network.block: true` blocks all network access. It cannot be combined with proxy settings.
 - `custom_credentials` upstream URLs must use HTTPS. HTTP is only accepted for loopback addresses (localhost, 127.0.0.1, ::1).
 
-## 8. Migration from previous schema
+## 9. Migration from previous schema
 
 Issue [#594](https://github.com/always-further/nono/issues/594) restructured the profile JSON schema. The old `policy.*` namespace has been dissolved into `filesystem`, `groups`, and `commands`; `security.groups` and `security.allowed_commands` have moved to top-level `groups.include` and `commands.allow`.
 

@@ -29,31 +29,111 @@ pub struct ProfileMeta {
     pub author: Option<String>,
 }
 
+pub(crate) fn deserialize_conditional_path_vec<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_conditional_string_vec(deserializer, "path")
+}
+
+fn deserialize_conditional_name_vec<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_conditional_string_vec(deserializer, "name")
+}
+
+fn deserialize_conditional_origin_vec<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_conditional_string_vec(deserializer, "origin")
+}
+
+fn deserialize_conditional_string_vec<'de, D>(
+    deserializer: D,
+    value_key: &'static str,
+) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        match value {
+            serde_json::Value::String(item) => result.push(item),
+            serde_json::Value::Object(mut object) => {
+                let item_value = object.remove(value_key).ok_or_else(|| {
+                    serde::de::Error::custom(format!("conditional entry is missing '{value_key}'"))
+                })?;
+                let item = item_value
+                    .as_str()
+                    .ok_or_else(|| {
+                        serde::de::Error::custom(format!(
+                            "conditional entry '{value_key}' must be a string"
+                        ))
+                    })?
+                    .to_string();
+                let when = match object.remove("when") {
+                    Some(when_value) => Some(
+                        crate::platform::When::deserialize(when_value)
+                            .map_err(serde::de::Error::custom)?,
+                    ),
+                    None => None,
+                };
+                if !object.is_empty() {
+                    let keys = object.keys().cloned().collect::<Vec<_>>().join(", ");
+                    return Err(serde::de::Error::custom(format!(
+                        "conditional entry has unknown field(s): {keys}"
+                    )));
+                }
+                if crate::platform::when_matches_current(when.as_ref())
+                    .map_err(serde::de::Error::custom)?
+                {
+                    result.push(item);
+                }
+            }
+            _ => {
+                return Err(serde::de::Error::custom(format!(
+                    "conditional entry must be a string or object with '{value_key}'"
+                )));
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Filesystem configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilesystemConfig {
     /// Directories with read+write access
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub allow: Vec<String>,
     /// Directories with read-only access
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub read: Vec<String>,
     /// Directories with write-only access
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub write: Vec<String>,
     /// Single files with read+write access
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub allow_file: Vec<String>,
     /// Single files with read-only access
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub read_file: Vec<String>,
     /// Single files with write-only access
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub write_file: Vec<String>,
     /// Single AF_UNIX socket paths — connect only.
     /// Implies read access on the socket path. See issue #685.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub unix_socket: Vec<String>,
     /// Single AF_UNIX socket paths — connect and bind.
     /// Implies read+write access on the socket path when it exists, or
@@ -62,20 +142,20 @@ pub struct FilesystemConfig {
     /// Dangling symlinks are rejected at grant time. For runtime-generated
     /// filenames (e.g. PID-suffixed paths) prefer `unix_socket_dir_bind`
     /// so the implied fs grant stays scoped to a dedicated directory.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub unix_socket_bind: Vec<String>,
     /// Directories where any direct-child AF_UNIX socket may be connected to.
     /// Non-recursive. Implies read access on the directory.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub unix_socket_dir: Vec<String>,
     /// Directories where any direct-child AF_UNIX socket may be connected to
     /// or bound. Non-recursive. Implies read+write access on the directory.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub unix_socket_dir_bind: Vec<String>,
     /// Paths denied filesystem access. Canonical location for deny entries
     /// in the #594 schema; the legacy deny-access key drains here via
     /// `deprecated_schema::LegacyPolicyPatch`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub deny: Vec<String>,
     /// Paths exempted from group-level deny rules.
     ///
@@ -87,14 +167,18 @@ pub struct FilesystemConfig {
     ///
     /// Renamed from the legacy deny-override key in the #594 schema;
     /// the new name makes the "does not grant access" semantics explicit.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub bypass_protection: Vec<String>,
     /// Paths whose runtime denials should not be offered in the save-profile
     /// prompt. This does not grant access, remove deny rules, or hide the
     /// diagnostic footer; it only suppresses repeated save suggestions for
     /// paths the user has decided not to grant.
     /// ALIAS(canonical="suppress_save_prompt", introduced="v0.52.0", remove_by="indefinite", issue="#875")
-    #[serde(default, alias = "ignore")]
+    #[serde(
+        default,
+        alias = "ignore",
+        deserialize_with = "deserialize_conditional_path_vec"
+    )]
     pub suppress_save_prompt: Vec<String>,
 }
 
@@ -102,9 +186,9 @@ pub struct FilesystemConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupsConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_name_vec")]
     pub include: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_name_vec")]
     pub exclude: Vec<String>,
 }
 
@@ -958,12 +1042,63 @@ impl NetworkConfig {
 /// Maps keystore account names to environment variable names.
 /// Secrets are loaded from the system keystore (macOS Keychain / Linux Secret Service)
 /// under the service name "nono".
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SecretsConfig {
     /// Map of keystore account name -> environment variable name
     /// Example: { "openai_api_key" = "OPENAI_API_KEY" }
     #[serde(flatten)]
     pub mappings: HashMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for SecretsConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = HashMap::<String, serde_json::Value>::deserialize(deserializer)?;
+        let mut mappings = HashMap::with_capacity(raw.len());
+        for (key, value) in raw {
+            match value {
+                serde_json::Value::String(env_var) => {
+                    mappings.insert(key, env_var);
+                }
+                serde_json::Value::Object(mut object) => {
+                    let env_var = object
+                        .remove("env_var")
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .ok_or_else(|| {
+                            serde::de::Error::custom(
+                                "conditional credential entry is missing string 'env_var'",
+                            )
+                        })?;
+                    let when = match object.remove("when") {
+                        Some(when_value) => Some(
+                            crate::platform::When::deserialize(when_value)
+                                .map_err(serde::de::Error::custom)?,
+                        ),
+                        None => None,
+                    };
+                    if !object.is_empty() {
+                        let keys = object.keys().cloned().collect::<Vec<_>>().join(", ");
+                        return Err(serde::de::Error::custom(format!(
+                            "conditional credential entry has unknown field(s): {keys}"
+                        )));
+                    }
+                    if crate::platform::when_matches_current(when.as_ref())
+                        .map_err(serde::de::Error::custom)?
+                    {
+                        mappings.insert(key, env_var);
+                    }
+                }
+                _ => {
+                    return Err(serde::de::Error::custom(
+                        "credential entry must be a string or object with 'env_var'",
+                    ));
+                }
+            }
+        }
+        Ok(Self { mappings })
+    }
 }
 
 /// Hook configuration for an agent
@@ -1215,7 +1350,7 @@ pub struct OpenUrlConfig {
     /// Allowed URL origins (scheme + host, e.g., "https://console.anthropic.com").
     /// The supervisor validates each URL open request against this list.
     /// An empty list means no URLs are allowed.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_conditional_origin_vec")]
     pub allow_origins: Vec<String>,
     /// Allow opening http://localhost and http://127.0.0.1 URLs (for OAuth2 callbacks).
     #[serde(default)]
@@ -5946,5 +6081,92 @@ mod tests {
             Some("file:///run/secrets/api-token".to_string())
         );
         assert_eq!(cred.env_var, Some("MY_API_KEY".to_string()));
+    }
+
+    #[test]
+    fn profile_when_filters_filesystem_groups_credentials_and_open_urls() {
+        let current = crate::platform::current_os_name();
+        let other = if current == "linux" { "macos" } else { "linux" };
+        let json = format!(
+            r#"{{
+                "meta": {{ "name": "conditional-test" }},
+                "groups": {{
+                    "include": [
+                        "always_group",
+                        {{ "name": "matching_group", "when": "{current}" }},
+                        {{ "name": "skipped_group", "when": "{other}" }}
+                    ]
+                }},
+                "filesystem": {{
+                    "read": [
+                        "/always",
+                        {{ "path": "/matching", "when": "{current}" }},
+                        {{ "path": "/skipped", "when": "{other}" }}
+                    ],
+                    "deny": [
+                        {{ "path": "/denied", "when": "{current}" }},
+                        {{ "path": "/not-denied", "when": "{other}" }}
+                    ]
+                }},
+                "env_credentials": {{
+                    "plain": "PLAIN_TOKEN",
+                    "matching": {{ "env_var": "MATCH_TOKEN", "when": "{current}" }},
+                    "skipped": {{ "env_var": "SKIP_TOKEN", "when": "{other}" }}
+                }},
+                "open_urls": {{
+                    "allow_origins": [
+                        "https://always.example",
+                        {{ "origin": "https://match.example", "when": "{current}" }},
+                        {{ "origin": "https://skip.example", "when": "{other}" }}
+                    ]
+                }}
+            }}"#
+        );
+
+        let profile = parse_profile_bytes(json.as_bytes()).expect("parse profile");
+        assert_eq!(
+            profile.groups.include,
+            vec!["always_group".to_string(), "matching_group".to_string()]
+        );
+        assert_eq!(
+            profile.filesystem.read,
+            vec!["/always".to_string(), "/matching".to_string()]
+        );
+        assert_eq!(profile.filesystem.deny, vec!["/denied".to_string()]);
+        assert_eq!(
+            profile.env_credentials.mappings.get("plain"),
+            Some(&"PLAIN_TOKEN".to_string())
+        );
+        assert_eq!(
+            profile.env_credentials.mappings.get("matching"),
+            Some(&"MATCH_TOKEN".to_string())
+        );
+        assert!(!profile.env_credentials.mappings.contains_key("skipped"));
+        let origins = profile.open_urls.expect("open urls").allow_origins;
+        assert_eq!(
+            origins,
+            vec![
+                "https://always.example".to_string(),
+                "https://match.example".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn conditional_profile_entries_reject_unknown_fields() {
+        let json = br#"{
+            "meta": { "name": "conditional-unknown-field-test" },
+            "filesystem": {
+                "read": [
+                    { "path": "/tmp/example", "whenn": "linux" }
+                ]
+            }
+        }"#;
+
+        let err = parse_profile_bytes(json).expect_err("unknown conditional field should error");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
     }
 }

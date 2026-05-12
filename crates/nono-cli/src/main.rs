@@ -34,6 +34,7 @@ mod output;
 mod package;
 mod package_cmd;
 mod package_status;
+mod platform;
 mod policy;
 mod profile;
 mod profile_cmd;

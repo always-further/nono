@@ -904,13 +904,7 @@ fn validate_relative_path(path: &str) -> Result<()> {
 }
 
 fn current_platform() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        "unknown"
-    }
+    crate::platform::current_os_name()
 }
 
 fn compare_versions(left: &str, right: &str) -> Result<Ordering> {

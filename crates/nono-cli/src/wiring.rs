@@ -33,9 +33,15 @@ use std::path::{Path, PathBuf};
 
 /// A single declarative wiring step. Tagged by `type` so the manifest
 /// JSON reads naturally — `{ "type": "symlink", ... }`.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WiringDirective {
+    /// Internal no-op produced when a manifest directive's `when`
+    /// predicate does not match this host. This variant is never
+    /// recorded in the lockfile.
+    #[serde(skip_serializing)]
+    Skipped,
+
     /// Create a symlink at `link` pointing to `target`. Both fields
     /// are variable-expanded. If `link` already exists as a symlink
     /// pointing at the right `target`, no-op. If it points elsewhere,
@@ -87,6 +93,90 @@ pub enum WiringDirective {
     /// trip, same as `JsonMerge` on formatting). Mapping keys must
     /// be strings; custom YAML tags are rejected.
     YamlMerge { file: String, patch: String },
+}
+
+impl<'de> Deserialize<'de> for WiringDirective {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let serde_json::Value::Object(object) = &mut value {
+            if let Some(when_value) = object.remove("when") {
+                let when = crate::platform::When::deserialize(when_value)
+                    .map_err(serde::de::Error::custom)?;
+                if !crate::platform::when_matches_current(Some(&when))
+                    .map_err(serde::de::Error::custom)?
+                {
+                    return Ok(Self::Skipped);
+                }
+            }
+        }
+
+        // Keep this in lockstep with `WiringDirective`. The duplicate raw
+        // enum lets deserialization remove manifest-only `when` before
+        // applying the closed tagged directive vocabulary.
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum RawWiringDirective {
+            Symlink {
+                link: String,
+                target: String,
+            },
+            WriteFile {
+                source: String,
+                dest: String,
+            },
+            JsonMerge {
+                file: String,
+                patch: String,
+            },
+            JsonArrayAppend {
+                file: String,
+                path: String,
+                patch_entries: String,
+                key_field: String,
+            },
+            TomlBlock {
+                file: String,
+                marker_id: String,
+                content: String,
+            },
+            YamlMerge {
+                file: String,
+                patch: String,
+            },
+        }
+
+        let raw = serde_json::from_value::<RawWiringDirective>(value)
+            .map_err(serde::de::Error::custom)?;
+        Ok(match raw {
+            RawWiringDirective::Symlink { link, target } => Self::Symlink { link, target },
+            RawWiringDirective::WriteFile { source, dest } => Self::WriteFile { source, dest },
+            RawWiringDirective::JsonMerge { file, patch } => Self::JsonMerge { file, patch },
+            RawWiringDirective::JsonArrayAppend {
+                file,
+                path,
+                patch_entries,
+                key_field,
+            } => Self::JsonArrayAppend {
+                file,
+                path,
+                patch_entries,
+                key_field,
+            },
+            RawWiringDirective::TomlBlock {
+                file,
+                marker_id,
+                content,
+            } => Self::TomlBlock {
+                file,
+                marker_id,
+                content,
+            },
+            RawWiringDirective::YamlMerge { file, patch } => Self::YamlMerge { file, patch },
+        })
+    }
 }
 
 /// What a single directive did, recorded into the lockfile so removal
@@ -252,6 +342,7 @@ fn execute_one(
     report: &mut WiringReport,
 ) -> Result<()> {
     match directive {
+        WiringDirective::Skipped => {}
         WiringDirective::Symlink { link, target } => {
             let link_path = expand_to_path(link, ctx)?;
             let target_path = expand_to_path(target, ctx)?;
@@ -2149,6 +2240,43 @@ mod tests {
                 "summary should identify the directive: {}",
                 failures[0].record_summary
             );
+        });
+    }
+
+    #[test]
+    fn wiring_when_filters_directives_before_execution() {
+        let current = crate::platform::current_os_name();
+        let other = if current == "linux" { "macos" } else { "linux" };
+        let json = format!(
+            r#"[
+                {{
+                    "type": "write_file",
+                    "source": "match.txt",
+                    "dest": "$HOME/match.txt",
+                    "when": "{current}"
+                }},
+                {{
+                    "type": "write_file",
+                    "source": "skip.txt",
+                    "dest": "$HOME/skip.txt",
+                    "when": "{other}"
+                }}
+            ]"#
+        );
+        let directives: Vec<WiringDirective> = serde_json::from_str(&json).expect("parse wiring");
+        assert!(matches!(directives[1], WiringDirective::Skipped));
+
+        with_fake_home(|home| {
+            let pack = home.join("pack");
+            fs::create_dir_all(&pack).expect("mkdir pack");
+            fs::write(pack.join("match.txt"), "match").expect("write match");
+            fs::write(pack.join("skip.txt"), "skip").expect("write skip");
+            let ctx = ctx_in(home, pack);
+            let report = exec(&directives, &ctx).expect("execute");
+
+            assert!(home.join("match.txt").exists());
+            assert!(!home.join("skip.txt").exists());
+            assert_eq!(report.records.len(), 1);
         });
     }
 }

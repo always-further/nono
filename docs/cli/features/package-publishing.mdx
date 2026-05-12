@@ -92,6 +92,56 @@ Important constraints:
 - `plugin` artifacts without `install_dir` install at their relative path inside the pack store. With `install_dir`, they're also fan-out copied into the user's home — useful for shared scripts but rarely needed for Claude Code packs (the marketplace symlink exposes the whole pack tree).
 - `min_nono_version` should be set to the lowest CLI version your pack will work on. Older clients refuse to install.
 
+### Platform-Specific Content
+
+Use `platforms` for install compatibility, and `when` for content inside a pack:
+
+- `platforms: ["linux", "macos"]` means the package can be pulled on those operating systems.
+- `when` on individual profile entries or wiring directives means that entry applies only on matching hosts.
+
+Profiles accept object entries anywhere paths or group names are listed:
+
+```json
+{
+  "groups": {
+    "include": [
+      "agent_common",
+      { "name": "agent_linux", "when": "linux" },
+      { "name": "agent_macos", "when": "macos" }
+    ]
+  },
+  "filesystem": {
+    "read": [
+      "$HOME/.agent",
+      { "path": "$HOME/Library/Application Support/Agent", "when": "macos" },
+      { "path": "$XDG_CONFIG_HOME/agent", "when": "linux" }
+    ]
+  }
+}
+```
+
+Wiring directives also accept `when`:
+
+```json
+{
+  "type": "symlink",
+  "link": "$HOME/.agent/plugin",
+  "target": "$PACK_DIR/.agent-plugin",
+  "when": "linux"
+}
+```
+
+Predicates support OS, Linux distro and distro-family, version comparisons, negation, and any-of arrays:
+
+```json
+{ "path": "/etc/pki", "when": "linux:rhel-like" }
+{ "path": "/private/var/db/sudo", "when": "macos:>=15" }
+{ "path": "/some/path", "when": ["linux:fedora:>=43", "linux:rhel-like:>=9"] }
+{ "path": "/legacy/path", "when": "!linux:nixos" }
+```
+
+If a pack uses `when`, set `min_nono_version` to a CLI release that supports predicates. Older CLIs must refuse the pack rather than silently applying conditional entries unconditionally.
+
 ### Profiles That Replace a Former Preset
 
 If your pack ships a profile with an `install_as` name that used to be compiled into the CLI (e.g. `claude-code` was a preset until v0.43), you also need to register it in the migration table so users on older versions get a friendly auto-pull prompt instead of a "profile not found" error. See [PACK_PROVIDED_PROFILES](#registering-a-pack-provided-profile) below.

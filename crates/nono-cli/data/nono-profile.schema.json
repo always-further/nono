@@ -210,6 +210,59 @@
       "enum": ["shared_memory_only", "full"],
       "description": "IPC mode for the sandboxed process. 'shared_memory_only' allows POSIX shared memory but denies semaphores. 'full' enables both shared memory and semaphores (required for Python multiprocessing and similar runtimes)."
     },
+    "WhenPredicate": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      ],
+      "description": "Platform predicate string or any-of array, e.g. linux, macos:>=15, linux:fedora-like:>=43, linux:fedora:>=43:workstation, or !linux:nixos."
+    },
+    "ConditionalPath": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path": { "type": "string" },
+            "when": { "$ref": "#/$defs/WhenPredicate" }
+          }
+        }
+      ]
+    },
+    "ConditionalName": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string" },
+            "when": { "$ref": "#/$defs/WhenPredicate" }
+          }
+        }
+      ]
+    },
+    "ConditionalOrigin": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["origin"],
+          "properties": {
+            "origin": { "type": "string" },
+            "when": { "$ref": "#/$defs/WhenPredicate" }
+          }
+        }
+      ]
+    },
     "FilesystemConfig": {
       "type": "object",
       "description": "Filesystem access rules for the sandboxed process.",
@@ -217,52 +270,52 @@
       "properties": {
         "allow": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Directories with read+write access."
         },
         "read": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Directories with read-only access."
         },
         "write": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Directories with write-only access."
         },
         "allow_file": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Single files with read+write access."
         },
         "read_file": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Single files with read-only access."
         },
         "write_file": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Single files with write-only access."
         },
         "deny": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Paths denied filesystem access. Denies apply regardless of other allow rules."
         },
         "bypass_protection": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Paths exempted from group-level deny rules. Each path must also appear in an allow/read/write section to actually grant access; bypass_protection only removes the deny."
         },
         "suppress_save_prompt": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Paths whose runtime denials should not be offered in the save-profile prompt. Does not grant access, remove deny rules, or hide diagnostic output."
         },
         "ignore": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalPath" },
           "description": "Alias for suppress_save_prompt. Prefer filesystem.suppress_save_prompt in new profiles."
         }
       }
@@ -274,12 +327,12 @@
       "properties": {
         "include": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalName" },
           "description": "Policy group names to include. Groups are resolved against policy.json."
         },
         "exclude": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalName" },
           "description": "Policy group names to remove from the resolved group set (subtractive composition)."
         }
       }
@@ -596,8 +649,24 @@
       "type": "object",
       "description": "Maps keystore account names (or op://, apple-password://, env:// URIs) to environment variable names. Secrets are loaded from the system keystore under the service name \"nono\".",
       "additionalProperties": {
-        "type": "string",
-        "description": "Environment variable name to inject the secret value into."
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Environment variable name to inject the secret value into."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["env_var"],
+            "properties": {
+              "env_var": {
+                "type": "string",
+                "description": "Environment variable name to inject the secret value into."
+              },
+              "when": { "$ref": "#/$defs/WhenPredicate" }
+            }
+          }
+        ]
       }
     },
     "EnvironmentConfig": {
@@ -685,7 +754,7 @@
       "properties": {
         "allow_origins": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/$defs/ConditionalOrigin" },
           "description": "Allowed URL origins (scheme + host, e.g., \"https://console.anthropic.com\"). The supervisor validates each URL open request against this list. An empty list means no URLs are allowed."
         },
         "allow_localhost": {

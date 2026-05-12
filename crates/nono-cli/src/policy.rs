@@ -61,13 +61,22 @@ pub struct Group {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AllowOps {
     /// Paths granted read access
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "profile::deserialize_conditional_path_vec"
+    )]
     pub read: Vec<String>,
     /// Paths granted write-only access
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "profile::deserialize_conditional_path_vec"
+    )]
     pub write: Vec<String>,
     /// Paths granted read+write access
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "profile::deserialize_conditional_path_vec"
+    )]
     pub readwrite: Vec<String>,
 }
 
@@ -75,7 +84,10 @@ pub struct AllowOps {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DenyOps {
     /// Paths denied all content access (read+write; metadata still allowed)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "profile::deserialize_conditional_path_vec"
+    )]
     pub access: Vec<String>,
     /// Block file deletion globally
     #[serde(default)]
@@ -175,13 +187,7 @@ impl ProfileDef {
 
 /// Current platform identifier
 pub(crate) fn current_platform() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        "unknown"
-    }
+    crate::platform::current_os_name()
 }
 
 /// Check if a group applies to the current platform
