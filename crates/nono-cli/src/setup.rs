@@ -401,6 +401,13 @@ impl SetupRunner {
             );
         }
 
+        println!("  * Linux AF_UNIX mediation: off by default");
+        println!("    - For stricter IPC isolation, set linux.af_unix_mediation = \"pathname\"");
+        println!("    - Then grant required pathname sockets with filesystem.unix_socket entries");
+        println!(
+            "    - In public-facing or privacy-sensitive deployments that keep it off, run nono inside a stronger outer boundary such as a MicroVM"
+        );
+
         println!("  * Filesystem ruleset creation verified");
 
         // WSL2 environment detection and feature matrix

@@ -262,6 +262,10 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     } else {
         None
     };
+    #[cfg(not(target_os = "windows"))]
+    let supervisor_network_audit_events = audit_state
+        .as_ref()
+        .map(|_| std::sync::Mutex::new(Vec::<nono::undo::NetworkAuditEvent>::new()));
 
     // Plan 22-05a Task 7 (upstream 6ecade2e): when --audit-sign-key is set,
     // resolve the URI through the keystore (fail-closed if missing) and
@@ -307,6 +311,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         open_url_origins: &proxy.open_url_origins,
         open_url_allow_localhost: proxy.open_url_allow_localhost,
         audit_recorder: audit_recorder.as_deref(),
+        network_audit_events: supervisor_network_audit_events.as_ref(),
         redaction_policy,
         allow_launch_services_active: proxy.allow_launch_services_active,
         #[cfg(target_os = "linux")]
@@ -321,6 +326,12 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         },
         #[cfg(target_os = "linux")]
         unix_socket_allowlist: caps.unix_socket_capabilities(),
+        #[cfg(target_os = "linux")]
+        linux_network_notify_mode: if config.seccomp_proxy_fallback {
+            exec_strategy::LinuxNetworkNotifyMode::ProxyOnly
+        } else {
+            exec_strategy::LinuxNetworkNotifyMode::AfUnixOnly
+        },
     };
     #[cfg(target_os = "windows")]
     let supervisor_cfg = exec_strategy::SupervisorConfig {
@@ -458,7 +469,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     // Note: fork delegates `finalize_supervised_exit` to `execute_supervised`
     // (it's called from inside exec_strategy.rs / exec_strategy_windows/mod.rs
     // where the `audit_snapshot_state` is threaded via RollbackExitContext).
-    // Upstream 4ec61c29 placed the finalize call here; in the fork the
+    // Upstream a0222be2 placed the finalize call here; in the fork the
     // audit_snapshot_state is forwarded through `execute_supervised` instead.
 
     Ok(exit_code)

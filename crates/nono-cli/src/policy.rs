@@ -166,6 +166,7 @@ impl ProfileDef {
             filesystem: self.filesystem.clone(),
             policy,
             network: self.network.clone(),
+            linux: profile::LinuxConfig::default(),
             env_credentials: self.env_credentials.clone(),
             // Plan 34-08a Task 3 (D-20 manual replay of upstream `1b412a7`):
             // built-in policy.json profiles don't declare env-filter today;

@@ -1770,8 +1770,9 @@ pub fn respond_notif_errno(notify_fd: std::os::fd::RawFd, notif_id: u64, errno: 
 
 /// Continue a seccomp notification, letting the child's original syscall run.
 ///
-/// This preserves the original syscall semantics exactly. It is safe only when
-/// the syscall is already authorized by the sandbox's allow-list.
+/// This resumes the original syscall with its original userspace arguments.
+/// Do not use it after making an authorization decision from child-controlled
+/// pointer memory unless the policy accepts the resulting TOCTOU window.
 pub fn continue_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
     let resp = SeccompNotifResp {
         id: notif_id,
@@ -2136,6 +2137,55 @@ fn build_seccomp_proxy_filter(has_bind_ports: bool) -> Vec<SockFilterInsn> {
     ]
 }
 
+/// Build a BPF filter for opt-in pathname AF_UNIX mediation.
+///
+/// The filter routes `connect()` and `bind()` to the supervisor so it can
+/// inspect `sockaddr_un` paths. Everything else is allowed by this filter:
+/// TCP policy remains Landlock's job on V4+ kernels.
+///
+/// Instruction layout:
+/// ```text
+///  0: ld  [nr]
+///  1: jeq SYS_CONNECT jt=+2 (-> 4: notify)
+///  2: jeq SYS_BIND    jt=+1 (-> 4: notify)
+///  3: ret ALLOW
+///  4: ret USER_NOTIF
+/// ```
+fn build_seccomp_af_unix_filter() -> Vec<SockFilterInsn> {
+    vec![
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_NR_OFFSET,
+        },
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 2,
+            jf: 0,
+            k: SYS_CONNECT as u32,
+        },
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: SYS_BIND as u32,
+        },
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_USER_NOTIF,
+        },
+    ]
+}
+
 /// Install a seccomp-notify BPF filter for proxy-only network mode.
 ///
 /// Returns the notify fd that the supervisor must poll for connect/bind
@@ -2148,9 +2198,23 @@ fn build_seccomp_proxy_filter(has_bind_ports: bool) -> Vec<SockFilterInsn> {
 ///
 /// Returns an error if the seccomp syscall fails.
 pub fn install_seccomp_proxy_filter(has_bind_ports: bool) -> Result<std::os::fd::OwnedFd> {
-    use std::os::fd::FromRawFd;
+    install_seccomp_notify_filter(&build_seccomp_proxy_filter(has_bind_ports), "proxy filter")
+}
 
-    let filter = build_seccomp_proxy_filter(has_bind_ports);
+/// Install a seccomp-notify BPF filter for pathname AF_UNIX mediation.
+///
+/// # Errors
+///
+/// Returns an error if the seccomp syscall fails.
+pub fn install_seccomp_af_unix_filter() -> Result<std::os::fd::OwnedFd> {
+    install_seccomp_notify_filter(&build_seccomp_af_unix_filter(), "AF_UNIX mediation filter")
+}
+
+fn install_seccomp_notify_filter(
+    filter: &[SockFilterInsn],
+    label: &str,
+) -> Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
 
     let prog = SockFprog {
         len: filter.len() as u16,
@@ -2197,8 +2261,9 @@ pub fn install_seccomp_proxy_filter(has_bind_ports: bool) -> Result<std::os::fd:
 
         if ret < 0 {
             return Err(NonoError::SandboxInit(format!(
-                "seccomp(SECCOMP_SET_MODE_FILTER) for proxy filter failed: {}. \
+                "seccomp(SECCOMP_SET_MODE_FILTER) for {} failed: {}. \
                  Requires kernel >= 5.0 with SECCOMP_FILTER_FLAG_NEW_LISTENER.",
+                label,
                 std::io::Error::last_os_error()
             )));
         }
@@ -2219,12 +2284,11 @@ pub fn install_seccomp_proxy_filter(has_bind_ports: bool) -> Result<std::os::fd:
 ///
 /// # TOCTOU Warning
 ///
-/// For connect/bind, the kernel copies sockaddr into kernel memory via
-/// `move_addr_to_kernel()` before the seccomp filter runs. The userspace
-/// copy we read here may differ from what the kernel uses, but we use
-/// `SECCOMP_USER_NOTIF_FLAG_CONTINUE` which lets the kernel proceed with
-/// its already-copied data. The userspace read is only used for the
-/// allow/deny decision.
+/// Seccomp notification happens at syscall entry, before `connect(2)` or
+/// `bind(2)` copies the sockaddr into kernel memory. The userspace memory
+/// read here is therefore child-controlled and can race with another thread.
+/// Callers must not use `SECCOMP_USER_NOTIF_FLAG_CONTINUE` after authorizing
+/// pointer-derived data unless that TOCTOU window is explicitly acceptable.
 ///
 /// Always call `notif_id_valid()` after reading to verify the notification
 /// is still pending.
@@ -3433,6 +3497,18 @@ mod tests {
         assert_eq!(filter[17].code, BPF_RET | BPF_K);
         let errno_ret = SECCOMP_RET_ERRNO | (libc::EACCES as u32);
         assert_eq!(filter[17].k, errno_ret);
+    }
+
+    #[test]
+    fn test_build_seccomp_af_unix_filter_notifies_connect_bind_only() {
+        let filter = build_seccomp_af_unix_filter();
+        assert_eq!(filter.len(), 5);
+        assert_eq!(filter[0].code, BPF_LD | BPF_W | BPF_ABS);
+        assert_eq!(filter[0].k, SECCOMP_DATA_NR_OFFSET);
+        assert_eq!(filter[1].k, SYS_CONNECT as u32);
+        assert_eq!(filter[2].k, SYS_BIND as u32);
+        assert_eq!(filter[3].k, SECCOMP_RET_ALLOW);
+        assert_eq!(filter[4].k, SECCOMP_RET_USER_NOTIF);
     }
 
     #[test]

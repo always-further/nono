@@ -45,6 +45,10 @@
       "$ref": "#/$defs/NetworkConfig",
       "description": "Network access configuration including proxy settings, credential injection, and port allowlists."
     },
+    "linux": {
+      "$ref": "#/$defs/LinuxConfig",
+      "description": "Linux-specific hardening controls."
+    },
     "env_credentials": {
       "$ref": "#/$defs/SecretsConfig",
       "description": "Maps keystore account names (or op://, apple-password://, env:// URIs) to environment variable names. Secrets are loaded from the system keystore at startup."
@@ -237,6 +241,25 @@
       "type": "string",
       "enum": ["error", "insecure_proxy"],
       "description": "WSL2 proxy fallback policy. 'error' (default) refuses to run if proxy-only mode cannot be kernel-enforced. 'insecure_proxy' allows degraded execution where the credential proxy injects credentials but the sandboxed process is not prevented from bypassing the proxy."
+    },
+    "LinuxConfig": {
+      "type": "object",
+      "description": "Linux-specific hardening controls.",
+      "additionalProperties": false,
+      "properties": {
+        "af_unix_mediation": {
+          "oneOf": [
+            { "$ref": "#/$defs/LinuxAfUnixMediation" },
+            { "type": "null" }
+          ],
+          "description": "Opt-in pathname AF_UNIX mediation. 'off' preserves compatibility. 'pathname' requires explicit filesystem.unix_socket* grants for pathname Unix socket connect/bind."
+        }
+      }
+    },
+    "LinuxAfUnixMediation": {
+      "type": "string",
+      "enum": ["off", "pathname"],
+      "description": "Linux pathname AF_UNIX mediation mode."
     },
     "ProfileSignalMode": {
       "type": "string",

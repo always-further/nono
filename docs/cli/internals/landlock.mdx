@@ -130,6 +130,55 @@ nono why --scope signal --profile claude-code
 nono why --scope abstract-unix-socket --profile claude-code
 ```
 
+## Pathname Unix Socket Mediation
+
+Landlock filesystem rules and pathname Unix socket IPC are separate security
+surfaces. On Linux, a process that can reach a filesystem-backed Unix socket
+path may be able to communicate with a user-session service through that
+socket unless nono separately mediates AF_UNIX `connect(2)` and `bind(2)`.
+
+For compatibility, this mediation is off by default on Landlock V4+ kernels.
+Profiles that need stricter IPC isolation can opt in:
+
+```json
+{
+  "linux": {
+    "af_unix_mediation": "pathname"
+  },
+  "filesystem": {
+    "unix_socket": ["$XDG_RUNTIME_DIR/bus"],
+    "unix_socket_dir_bind": ["$TMPDIR/my-tool"]
+  }
+}
+```
+
+When enabled, pathname AF_UNIX sockets are default-deny and must match explicit
+`filesystem.unix_socket*` grants. Broad filesystem read/write grants no longer
+imply permission to talk to every socket under those paths.
+
+Allowed pathname sockets are resumed through Linux seccomp user notification.
+Because seccomp receives the syscall before the kernel copies `sockaddr_un`
+from userspace, a multi-threaded sandboxed process can race an allowed
+`connect(2)` or `bind(2)` by mutating that userspace address before the kernel
+continues the syscall. Denied sockets do not have this race because nono returns
+`EACCES` directly and the kernel never runs the original syscall. Treat this
+mode as a strong default-deny IPC hardening layer; avoid broad socket grants for
+untrusted multi-threaded workloads.
+
+High-risk socket categories include user service managers, session buses,
+keyring and credential agents, SSH/GPG agents, container runtimes, and package
+manager daemons. Hardened profiles should grant only the specific sockets they
+need.
+
+<Warning>
+  If you run with `linux.af_unix_mediation` off in a public-facing,
+  multi-tenant, privacy-sensitive, or otherwise high-risk deployment, run nono
+  inside a stronger outer isolation boundary such as a MicroVM. Firecracker
+  style MicroVMs are a good fit for service deployments where the VM boundary
+  can isolate host user-session services and credentials from the sandboxed
+  agent.
+</Warning>
+
 ## Enforcement Status
 
 nono reports the enforcement status after applying the sandbox:

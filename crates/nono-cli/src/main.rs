@@ -270,6 +270,8 @@ mod tests {
             capability_elevation: false,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
+            #[cfg(target_os = "linux")]
+            af_unix_mediation: crate::profile::LinuxAfUnixMediation::Off,
             allow_launch_services_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
@@ -319,6 +321,8 @@ mod tests {
             capability_elevation: false,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
+            #[cfg(target_os = "linux")]
+            af_unix_mediation: crate::profile::LinuxAfUnixMediation::Off,
             allow_launch_services_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,

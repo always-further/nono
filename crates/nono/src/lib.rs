@@ -68,7 +68,7 @@ pub use capability::{
 };
 pub use diagnostic::{
     CommandContext, DenialReason, DenialRecord, DiagnosticFormatter, DiagnosticMode,
-    SandboxViolation,
+    IpcDenialRecord, SandboxViolation,
 };
 pub use error::{NonoError, Result, CGROUP_V2_HINT};
 pub use keystore::{

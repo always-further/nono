@@ -538,8 +538,7 @@ pub(super) fn handle_seccomp_notification(
 /// `Allow` to `continue_notif(…)` and `Deny` to `respond_notif_errno(…, EACCES)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NetworkDecision {
-    /// Let the kernel proceed with the already-copied sockaddr
-    /// (`SECCOMP_USER_NOTIF_FLAG_CONTINUE`).
+    /// Allow the operation.
     Allow,
     /// Fail the syscall with `EACCES`.
     Deny,
@@ -599,6 +598,17 @@ pub(super) fn decide_network_notification(
                 return NetworkDecision::Deny;
             }
         }
+    }
+
+    if matches!(
+        config.linux_network_notify_mode,
+        LinuxNetworkNotifyMode::AfUnixOnly
+    ) {
+        debug!(
+            "AF_UNIX-only seccomp mediation: allowing non-AF_UNIX syscall family={} nr={}",
+            sockaddr.family, syscall
+        );
+        return NetworkDecision::Allow;
     }
 
     match syscall {
@@ -790,12 +800,16 @@ fn canonicalize_unix_socket_bind_path(
 /// the sockaddr from the child's memory and delegates the allow/deny
 /// decision to [`decide_network_notification`].
 ///
-/// Uses SECCOMP_USER_NOTIF_FLAG_CONTINUE on approval (safe for connect/bind
-/// because the kernel has already copied sockaddr into kernel memory).
+/// Denials return `EACCES` directly. Approvals currently use
+/// `SECCOMP_USER_NOTIF_FLAG_CONTINUE`, which preserves platform compatibility
+/// but carries the documented userspace-pointer TOCTOU limitation described
+/// by `read_notif_sockaddr`.
 pub(super) fn handle_network_notification(
     notify_fd: std::os::fd::RawFd,
     config: &SupervisorConfig<'_>,
     rate_limiter: &mut RateLimiter,
+    denials: &mut Vec<DenialRecord>,
+    ipc_denials: &mut Vec<nono::diagnostic::IpcDenialRecord>,
 ) -> nono::error::Result<()> {
     use nono::sandbox::{
         continue_notif, deny_notif, notif_id_valid, read_notif_sockaddr, recv_notif,
@@ -829,8 +843,6 @@ pub(super) fn handle_network_notification(
 
     match decide_network_notification(notif.pid, notif.data.nr, &sockaddr, config) {
         NetworkDecision::Allow => {
-            // SECCOMP_USER_NOTIF_FLAG_CONTINUE: let the kernel proceed with its
-            // already-copied sockaddr. Safe for connect/bind (move_addr_to_kernel).
             if let Err(e) = continue_notif(notify_fd, notif.id) {
                 debug!("continue_notif failed for network notification: {}", e);
                 // Must respond to avoid leaving the child blocked. Propagate if
@@ -839,11 +851,230 @@ pub(super) fn handle_network_notification(
             }
         }
         NetworkDecision::Deny => {
+            record_af_unix_ipc_denial(&sockaddr, notif.pid, notif.data.nr, denials, ipc_denials);
             respond_notif_errno(notify_fd, notif.id, libc::EACCES)?;
+            if let Err(err) = record_network_audit_denial(config, &sockaddr, notif.data.nr) {
+                warn!("Failed to record network denial audit event: {}", err);
+            }
         }
     }
 
     Ok(())
+}
+
+fn record_af_unix_ipc_denial(
+    sockaddr: &nono::sandbox::SockaddrInfo,
+    child_pid: u32,
+    syscall: i32,
+    denials: &mut Vec<DenialRecord>,
+    ipc_denials: &mut Vec<nono::diagnostic::IpcDenialRecord>,
+) {
+    if sockaddr.family != libc::AF_UNIX as u16 {
+        return;
+    }
+
+    let op = unix_socket_op_for_syscall(syscall);
+    let operation = op
+        .map(|op| op.to_string())
+        .unwrap_or_else(|| format!("syscall {syscall}"));
+    let (target, reason, suggested_flag, path_record) = ipc_denial_details(sockaddr, child_pid, op);
+
+    ipc_denials.push(nono::diagnostic::IpcDenialRecord {
+        target,
+        operation,
+        reason,
+        suggested_flag,
+    });
+
+    let Some((display_path, op)) = path_record else {
+        return;
+    };
+    let access = match op {
+        UnixSocketOp::Connect => AccessMode::Read,
+        UnixSocketOp::Bind => AccessMode::ReadWrite,
+    };
+
+    record_denial(
+        denials,
+        DenialRecord {
+            path: display_path,
+            access,
+            reason: DenialReason::UnixSocketDenied,
+        },
+    );
+}
+
+type PathIpcDenial = Option<(std::path::PathBuf, UnixSocketOp)>;
+
+fn ipc_denial_details(
+    sockaddr: &nono::sandbox::SockaddrInfo,
+    child_pid: u32,
+    op: Option<UnixSocketOp>,
+) -> (String, String, Option<String>, PathIpcDenial) {
+    match sockaddr.unix_kind {
+        Some(nono::sandbox::UnixSocketKind::Pathname) => {
+            let Some(path) = sockaddr.unix_path.as_deref() else {
+                return (
+                    "unix:<unparsed-pathname>".to_string(),
+                    "pathname not parsed".to_string(),
+                    None,
+                    None,
+                );
+            };
+            let Some(op) = op else {
+                return (
+                    path.display().to_string(),
+                    "unexpected syscall".to_string(),
+                    None,
+                    None,
+                );
+            };
+            let resolved = resolve_af_unix_sockaddr_path(child_pid, path)
+                .unwrap_or_else(|_| path.to_path_buf());
+            let display_path = match op {
+                UnixSocketOp::Connect => match resolved.canonicalize() {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return (
+                            resolved.display().to_string(),
+                            format!("canonicalize failed: {err}"),
+                            None,
+                            None,
+                        );
+                    }
+                },
+                UnixSocketOp::Bind => match canonicalize_unix_socket_bind_path(&resolved) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        return (
+                            resolved.display().to_string(),
+                            format!("canonicalize failed: {err}"),
+                            None,
+                            None,
+                        );
+                    }
+                },
+            };
+            let flag = match op {
+                UnixSocketOp::Connect => "--allow-unix-socket",
+                UnixSocketOp::Bind => "--allow-unix-socket-bind",
+            };
+            (
+                display_path.display().to_string(),
+                "no matching unix_socket capability".to_string(),
+                Some(format!("{flag} {}", display_path.display())),
+                Some((display_path, op)),
+            )
+        }
+        Some(nono::sandbox::UnixSocketKind::Abstract) => (
+            "unix:<abstract>".to_string(),
+            "abstract namespace is not covered by pathname capabilities".to_string(),
+            None,
+            None,
+        ),
+        Some(nono::sandbox::UnixSocketKind::Unnamed) | None => (
+            "unix:<unnamed>".to_string(),
+            "no pathname to authorize".to_string(),
+            None,
+            None,
+        ),
+    }
+}
+
+fn record_network_audit_denial(
+    config: &SupervisorConfig<'_>,
+    sockaddr: &nono::sandbox::SockaddrInfo,
+    syscall: i32,
+) -> nono::Result<()> {
+    let target = network_audit_target(sockaddr);
+    let reason = network_audit_denial_reason(sockaddr, syscall);
+    let event = nono::undo::NetworkAuditEvent {
+        timestamp_unix_ms: current_unix_millis(),
+        mode: nono::undo::NetworkAuditMode::Connect,
+        decision: nono::undo::NetworkAuditDecision::Deny,
+        route_id: None,
+        auth_mechanism: None,
+        auth_outcome: None,
+        managed_credential_active: None,
+        injection_mode: None,
+        denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
+        target,
+        port: if sockaddr.port == 0 {
+            None
+        } else {
+            Some(sockaddr.port)
+        },
+        method: None,
+        path: None,
+        status: None,
+        reason: Some(reason),
+    };
+
+    if let Some(events_mutex) = config.network_audit_events {
+        let mut events = events_mutex
+            .lock()
+            .map_err(|_| NonoError::Snapshot("Network audit event lock poisoned".to_string()))?;
+        events.push(event.clone());
+    }
+
+    if let Some(recorder_mutex) = config.audit_recorder {
+        let mut recorder = recorder_mutex
+            .lock()
+            .map_err(|_| NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
+        recorder.record_network_event(event)?;
+    }
+
+    Ok(())
+}
+
+fn network_audit_target(sockaddr: &nono::sandbox::SockaddrInfo) -> String {
+    if sockaddr.family == libc::AF_UNIX as u16 {
+        return match sockaddr.unix_kind {
+            Some(nono::sandbox::UnixSocketKind::Pathname) => sockaddr
+                .unix_path
+                .as_ref()
+                .map(|path| format!("unix:{}", path.display()))
+                .unwrap_or_else(|| "unix:<unparsed>".to_string()),
+            Some(nono::sandbox::UnixSocketKind::Abstract) => "unix:<abstract>".to_string(),
+            Some(nono::sandbox::UnixSocketKind::Unnamed) | None => "unix:<unnamed>".to_string(),
+        };
+    }
+
+    format!(
+        "family={} loopback={}",
+        sockaddr.family, sockaddr.is_loopback
+    )
+}
+
+fn network_audit_denial_reason(sockaddr: &nono::sandbox::SockaddrInfo, syscall: i32) -> String {
+    if sockaddr.family == libc::AF_UNIX as u16 {
+        let op = unix_socket_op_for_syscall(syscall)
+            .map(|op| op.to_string())
+            .unwrap_or_else(|| format!("syscall {syscall}"));
+        return match sockaddr.unix_kind {
+            Some(nono::sandbox::UnixSocketKind::Pathname) => {
+                format!("pathname AF_UNIX {op} denied: no matching unix_socket capability")
+            }
+            Some(nono::sandbox::UnixSocketKind::Abstract) => {
+                format!("abstract AF_UNIX {op} denied: not covered by pathname capabilities")
+            }
+            Some(nono::sandbox::UnixSocketKind::Unnamed) | None => {
+                format!("unnamed AF_UNIX {op} denied: no pathname to authorize")
+            }
+        };
+    }
+
+    format!(
+        "network syscall {syscall} denied for family={} port={}",
+        sockaddr.family, sockaddr.port
+    )
+}
+
+fn current_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Check if a path matches any capability in the initial set.
@@ -1120,11 +1351,13 @@ mod tests {
                 open_url_origins: &[],
                 open_url_allow_localhost: false,
                 audit_recorder: None,
+                network_audit_events: None,
                 redaction_policy: &REDACTION_POLICY,
                 allow_launch_services_active: false,
                 proxy_port,
                 proxy_bind_ports,
                 unix_socket_allowlist,
+                linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             }
         }
 
@@ -1186,6 +1419,15 @@ mod tests {
 
         fn test_pid() -> u32 {
             std::process::id()
+        }
+
+        fn make_af_unix_only_config<'a>(
+            backend: &'a DenyAllBackend,
+            unix_socket_allowlist: &'a [UnixSocketCapability],
+        ) -> SupervisorConfig<'a> {
+            let mut config = make_config(backend, 0, Vec::new(), unix_socket_allowlist);
+            config.linux_network_notify_mode = LinuxNetworkNotifyMode::AfUnixOnly;
+            config
         }
 
         /// Pathname `bind(AF_UNIX, "/tmp/…")` is mediated by explicit
@@ -1376,6 +1618,20 @@ mod tests {
             assert_eq!(
                 decide_network_notification(test_pid(), SYS_BIND, &inet_loopback(4000), &config),
                 NetworkDecision::Deny
+            );
+        }
+
+        #[test]
+        fn af_unix_only_mode_allows_non_af_unix_to_continue() {
+            let backend = DenyAllBackend;
+            let config = make_af_unix_only_config(&backend, &[]);
+            assert_eq!(
+                decide_network_notification(test_pid(), SYS_CONNECT, &inet_external(8080), &config),
+                NetworkDecision::Allow
+            );
+            assert_eq!(
+                decide_network_notification(test_pid(), SYS_BIND, &inet_loopback(4000), &config),
+                NetworkDecision::Allow
             );
         }
     }

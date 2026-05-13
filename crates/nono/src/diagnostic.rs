@@ -56,6 +56,8 @@ pub enum DenialReason {
     RateLimited,
     /// Approval backend returned an error
     BackendError,
+    /// Pathname Unix socket was denied by IPC mediation
+    UnixSocketDenied,
 }
 
 /// Record of a denied access attempt during a supervised session.
@@ -67,6 +69,19 @@ pub struct DenialRecord {
     pub access: AccessMode,
     /// Why it was denied
     pub reason: DenialReason,
+}
+
+/// Record of a denied IPC attempt during a supervised session.
+#[derive(Debug, Clone)]
+pub struct IpcDenialRecord {
+    /// IPC resource that was denied, e.g. `/run/user/1000/bus` or `unix:<abstract>`.
+    pub target: String,
+    /// Operation attempted, e.g. `connect` or `bind`.
+    pub operation: String,
+    /// Why it was denied.
+    pub reason: String,
+    /// Suggested CLI flag when this denial can be fixed by an explicit grant.
+    pub suggested_flag: Option<String>,
 }
 
 /// Best-effort sandbox violation recovered from OS-native logging.
@@ -647,6 +662,7 @@ pub struct DiagnosticFormatter<'a> {
     caps: &'a CapabilitySet,
     mode: DiagnosticMode,
     denials: &'a [DenialRecord],
+    ipc_denials: &'a [IpcDenialRecord],
     sandbox_violations: &'a [SandboxViolation],
     /// Paths that are write-protected due to trust verification
     protected_paths: &'a [PathBuf],
@@ -678,6 +694,7 @@ impl<'a> DiagnosticFormatter<'a> {
             caps,
             mode: DiagnosticMode::Standard,
             denials: &[],
+            ipc_denials: &[],
             sandbox_violations: &[],
             protected_paths: &[],
             primary_verdict: None,
@@ -703,6 +720,13 @@ impl<'a> DiagnosticFormatter<'a> {
     #[must_use]
     pub fn with_denials(mut self, denials: &'a [DenialRecord]) -> Self {
         self.denials = denials;
+        self
+    }
+
+    /// Add IPC denial records from a supervised session.
+    #[must_use]
+    pub fn with_ipc_denials(mut self, denials: &'a [IpcDenialRecord]) -> Self {
+        self.ipc_denials = denials;
         self
     }
 
@@ -1100,14 +1124,17 @@ impl<'a> DiagnosticFormatter<'a> {
         let primary_verdict = self.primary_observation_verdict();
         let has_observation = self.has_error_observation();
 
+        let has_ipc_denials = !self.ipc_denials.is_empty();
+
         if self.denials.is_empty()
+            && !has_ipc_denials
             && matches!(
                 primary_verdict.as_ref(),
                 Some(ErrorVerdict::MissingPath(_)) | Some(ErrorVerdict::NonSandboxFailure(_))
             )
         {
             lines.push(format_command_failed_not_sandbox_line(exit_code));
-        } else if exit_code == 0 && has_observation && self.denials.is_empty() {
+        } else if exit_code == 0 && has_observation && self.denials.is_empty() && !has_ipc_denials {
             lines.push(format_command_succeeded_with_stderr_line());
         } else {
             lines.extend(self.format_exit_explanation(exit_code));
@@ -1127,7 +1154,14 @@ impl<'a> DiagnosticFormatter<'a> {
             .chain(violation_denials)
             .collect();
 
-        if all_denials.is_empty() {
+        if !self.ipc_denials.is_empty() {
+            self.format_ipc_denial_guidance(&mut lines);
+            if !all_denials.is_empty() || !non_fs_violations.is_empty() {
+                lines.push("[nono]".to_string());
+            }
+        }
+
+        if all_denials.is_empty() && self.ipc_denials.is_empty() {
             // No denials from either source.
             if !non_fs_violations.is_empty() {
                 // Non-filesystem violations (mach-lookup, signal, etc.) —
@@ -1151,7 +1185,7 @@ impl<'a> DiagnosticFormatter<'a> {
             self.format_grant_help(&mut lines);
             lines.push("[nono]".to_string());
             self.format_follow_up_guidance(&mut lines, None);
-        } else {
+        } else if !all_denials.is_empty() {
             // Deduplicate by path, merging access modes. Classification into
             // actionable vs. policy-blocked is done by the consolidated
             // formatter using policy_explanations when available.
@@ -1356,11 +1390,40 @@ impl<'a> DiagnosticFormatter<'a> {
     ) {
         const MAX_INLINE_LIST: usize = 10;
 
-        let total = denials.len();
+        let (unix_socket_denials, path_denials): (Vec<&DenialRecord>, Vec<&DenialRecord>) = denials
+            .iter()
+            .partition(|denial| denial.reason == DenialReason::UnixSocketDenied);
+
+        if !unix_socket_denials.is_empty() {
+            let total = unix_socket_denials.len();
+            let plural_s = if total == 1 { "" } else { "s" };
+            lines.push(format!(
+                "[nono] IPC denial: {} pathname Unix socket{} blocked.",
+                total, plural_s
+            ));
+            for (idx, denial) in unix_socket_denials.iter().enumerate() {
+                if idx >= MAX_INLINE_LIST {
+                    lines.push(format!("[nono]   ... and {} more", total - idx));
+                    break;
+                }
+                lines.push(format!("[nono]   {}", denial.path.display()));
+            }
+            let flags: Vec<String> = unix_socket_denials
+                .iter()
+                .map(|d| self.suggested_flag_for_denial(d))
+                .collect();
+            lines.push(format!("[nono] Fix: {}", flags.join(" ")));
+        }
+
+        if path_denials.is_empty() {
+            return;
+        }
+
+        let total = path_denials.len();
         let mut actionable: Vec<&DenialRecord> = Vec::new();
         let mut policy_blocked: Vec<&DenialRecord> = Vec::new();
 
-        for denial in denials {
+        for denial in &path_denials {
             if self.is_denial_policy_blocked(denial) {
                 policy_blocked.push(denial);
             } else {
@@ -1374,7 +1437,7 @@ impl<'a> DiagnosticFormatter<'a> {
             total, plural_s
         ));
 
-        for (idx, denial) in denials.iter().enumerate() {
+        for (idx, denial) in path_denials.iter().enumerate() {
             if idx >= MAX_INLINE_LIST {
                 lines.push(format!("[nono]   … and {} more", total - idx));
                 break;
@@ -1420,6 +1483,36 @@ impl<'a> DiagnosticFormatter<'a> {
         }
     }
 
+    fn format_ipc_denial_guidance(&self, lines: &mut Vec<String>) {
+        const MAX_INLINE_LIST: usize = 10;
+
+        let total = self.ipc_denials.len();
+        let plural_s = if total == 1 { "" } else { "s" };
+        lines.push(format!(
+            "[nono] IPC denial: {} Unix socket operation{} blocked.",
+            total, plural_s
+        ));
+        for (idx, denial) in self.ipc_denials.iter().enumerate() {
+            if idx >= MAX_INLINE_LIST {
+                lines.push(format!("[nono]   ... and {} more", total - idx));
+                break;
+            }
+            lines.push(format!(
+                "[nono]   {} {} ({})",
+                denial.operation, denial.target, denial.reason
+            ));
+        }
+
+        let flags: Vec<&str> = self
+            .ipc_denials
+            .iter()
+            .filter_map(|denial| denial.suggested_flag.as_deref())
+            .collect();
+        if !flags.is_empty() {
+            lines.push(format!("[nono] Fix: {}", flags.join(" ")));
+        }
+    }
+
     /// Return true when the denial cannot be fixed by a path flag alone —
     /// i.e. the path is blocked by the sensitive-path policy and requires a
     /// profile with `policy.bypass_protection`.
@@ -1440,6 +1533,15 @@ impl<'a> DiagnosticFormatter<'a> {
     /// explanation's `suggested_flag` (which knows about parent-directory
     /// canonicalization) and falls back to a local computation otherwise.
     fn suggested_flag_for_denial(&self, denial: &DenialRecord) -> String {
+        if denial.reason == DenialReason::UnixSocketDenied {
+            let flag = if denial.access.contains(AccessMode::Write) {
+                "--allow-unix-socket-bind"
+            } else {
+                "--allow-unix-socket"
+            };
+            return format!("{} {}", flag, denial.path.display());
+        }
+
         if let Some(flag) = self
             .policy_explanations
             .iter()
@@ -1977,6 +2079,7 @@ fn stricter_reason(a: DenialReason, b: DenialReason) -> DenialReason {
     fn rank(r: &DenialReason) -> u8 {
         match r {
             DenialReason::PolicyBlocked => 5,
+            DenialReason::UnixSocketDenied => 5,
             DenialReason::InsufficientAccess => 4,
             DenialReason::UserDenied => 3,
             DenialReason::RateLimited => 2,
@@ -3042,6 +3145,26 @@ mod tests {
         // Policy-blocked paths cannot be fixed with a path flag.
         assert!(!output.contains("Fix: --read /etc/shadow"));
         assert!(!output.contains("--allow <path>"));
+    }
+
+    #[test]
+    fn test_supervised_unix_socket_denial_uses_ipc_guidance() {
+        let caps = make_test_caps();
+        let denials = vec![DenialRecord {
+            path: PathBuf::from("/run/user/1000/bus"),
+            access: AccessMode::Read,
+            reason: DenialReason::UnixSocketDenied,
+        }];
+        let formatter = DiagnosticFormatter::new(&caps)
+            .with_mode(DiagnosticMode::Supervised)
+            .with_denials(&denials);
+        let output = formatter.format_footer(1);
+
+        assert!(output.contains("IPC denial: 1 pathname Unix socket blocked."));
+        assert!(output.contains("/run/user/1000/bus"));
+        assert!(output.contains("Fix: --allow-unix-socket /run/user/1000/bus"));
+        assert!(!output.contains("No path denials were observed"));
+        assert!(!output.contains("--read /run/user/1000/bus"));
     }
 
     #[test]

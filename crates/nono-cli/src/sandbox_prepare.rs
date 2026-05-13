@@ -78,6 +78,8 @@ pub(crate) struct PreparedSandbox {
     pub(crate) capability_elevation: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,
+    #[cfg(target_os = "linux")]
+    pub(crate) af_unix_mediation: crate::profile::LinuxAfUnixMediation,
     pub(crate) allow_launch_services_active: bool,
     pub(crate) open_url_origins: Vec<String>,
     pub(crate) open_url_allow_localhost: bool,
@@ -295,6 +297,8 @@ pub(crate) fn prepare_sandbox_with_context(
                 capability_elevation: false,
                 #[cfg(target_os = "linux")]
                 wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::default(),
+                #[cfg(target_os = "linux")]
+                af_unix_mediation: crate::profile::LinuxAfUnixMediation::default(),
                 allow_launch_services_active: false,
                 open_url_origins: Vec::new(),
                 open_url_allow_localhost: false,
@@ -321,6 +325,8 @@ pub(crate) fn prepare_sandbox_with_context(
         capability_elevation,
         #[cfg(target_os = "linux")]
         wsl2_proxy_policy,
+        #[cfg(target_os = "linux")]
+        af_unix_mediation,
         workdir_access: profile_workdir_access,
         rollback_exclude_patterns: profile_rollback_patterns,
         rollback_exclude_globs: profile_rollback_globs,
@@ -507,6 +513,8 @@ pub(crate) fn prepare_sandbox_with_context(
             capability_elevation,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy,
+            #[cfg(target_os = "linux")]
+            af_unix_mediation,
             allow_launch_services_active,
             open_url_origins,
             open_url_allow_localhost,

@@ -47,35 +47,20 @@ pub(crate) struct RollbackExitContext<'a> {
     pub(crate) rollback_state: Option<RollbackRuntimeState>,
     /// The rollback status recorded at session start (from `initialize_rollback_state`).
     pub(crate) rollback_status: RollbackStatus,
-    /// Plan 22-05a Decision 5 minimal scope: the audit-integrity recorder
-    /// (when `--audit-integrity` is set). `finalize_supervised_exit` emits the
-    /// `session_ended` event and calls `finalize()` to populate
-    /// `audit_event_count` + `audit_integrity` on `SessionMetadata`. `None`
-    /// when audit-integrity was not requested (zero-overhead path; existing
-    /// callers see byte-identical behavior to pre-22-05a).
-    pub(crate) audit_recorder: Option<&'a std::sync::Arc<Mutex<AuditRecorder>>>,
+    pub(crate) audit_recorder: Option<&'a Mutex<AuditRecorder>>,
     /// Upstream 4ec61c29: lightweight pre/post Merkle root capture for
     /// audit-only sessions. When `Some`, `finalize_supervised_exit`
     /// recomputes the root post-execution and stores both roots in
     /// `SessionMetadata.merkle_roots` for tamper-evidence (no full
     /// snapshot storage overhead).
     pub(crate) audit_snapshot_state: Option<AuditSnapshotState>,
-    /// Upstream 02ee0bd1 AUD-03 SHA-256 portion: canonical path + SHA-256
-    /// of the launched binary, captured by `exec_identity::compute()`
-    /// before sandbox apply for supervised sessions only. Persisted into
-    /// `SessionMetadata.executable_identity`. The Windows signature-trust
-    /// addition is reserved for Plan 22-05b (sibling field; no mutation
-    /// of this type).
-    pub(crate) executable_identity: Option<ExecutableIdentity>,
-    /// Upstream 6ecade2e (AUD-02): when `--audit-sign-key` is set,
-    /// `finalize_supervised_exit` signs the audit-integrity Merkle root +
-    /// chain head + session id and writes
-    /// `<session_dir>/audit-attestation.bundle`. The resulting
-    /// `AuditAttestationSummary` is persisted into
-    /// `SessionMetadata.audit_attestation`. `None` when attestation was
-    /// not requested.
-    pub(crate) audit_signer: Option<&'a AuditSigner>,
+    pub(crate) audit_tracked_paths: Vec<PathBuf>,
+    pub(crate) supervisor_network_audit_events:
+        Option<&'a Mutex<Vec<nono::undo::NetworkAuditEvent>>>,
+    pub(crate) audit_integrity_enabled: bool,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
+    pub(crate) executable_identity: Option<&'a ExecutableIdentity>,
+    pub(crate) audit_signer: Option<&'a AuditSigner>,
     pub(crate) redaction_policy: &'a nono::ScrubPolicy,
     pub(crate) started: &'a str,
     pub(crate) ended: &'a str,
@@ -578,9 +563,12 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         rollback_status,
         audit_recorder,
         audit_snapshot_state,
+        audit_tracked_paths,
+        supervisor_network_audit_events,
+        audit_integrity_enabled,
+        proxy_handle,
         executable_identity,
         audit_signer,
-        proxy_handle,
         redaction_policy,
         started,
         ended,
@@ -594,21 +582,23 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
         Vec::new,
         nono_proxy::server::ProxyHandle::drain_audit_events,
     );
-
-    // Plan 22-05a Decision 5 minimal scope: emit the trailing
-    // `session_ended` event before the recorder is finalized so the
-    // hash-chain commits to the exit code. `finalize()` returns
-    // `Some(AuditIntegritySummary)` whenever ANY event was appended.
-    // T-22-05a-03 mitigation: this flush completes BEFORE
-    // `AppliedLabelsGuard::drop` triggers (the guard is owned by callers
-    // upstream of `execute_supervised`; this fn runs synchronously inside
-    // `execute_supervised` before its return).
-    let (audit_event_count, audit_integrity_summary) = if let Some(mutex) = audit_recorder {
-        let mut recorder = mutex
+    if let Some(events_mutex) = supervisor_network_audit_events {
+        let mut supervisor_events = events_mutex.lock().map_err(|_| {
+            nono::NonoError::Snapshot("Network audit event lock poisoned".to_string())
+        })?;
+        network_events.extend(supervisor_events.drain(..));
+    }
+    let (audit_event_count, audit_integrity_summary) = if let Some(recorder_mutex) = audit_recorder {
+        let mut recorder = recorder_mutex
             .lock()
             .map_err(|_| NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
         recorder.record_session_ended(ended.to_string(), exit_code)?;
-        (recorder.event_count(), recorder.finalize())
+        let integrity = if audit_integrity_enabled {
+            recorder.finalize()
+        } else {
+            None
+        };
+        (recorder.event_count(), integrity)
     } else {
         (0, None)
     };
@@ -643,7 +633,7 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
             started: started.to_string(),
             ended: Some(ended.to_string()),
             command: scrubbed_command.clone(),
-            executable_identity: executable_identity.clone(),
+            executable_identity: executable_identity.cloned(),
             tracked_paths,
             snapshot_count: manager.snapshot_count(),
             exit_code: Some(exit_code),
@@ -691,14 +681,14 @@ pub(crate) fn finalize_supervised_exit(ctx: RollbackExitContext<'_>) -> Result<(
                     let final_root = snap.manager.compute_merkle_root()?;
                     (vec![snap.baseline_root, final_root], snap.tracked_paths)
                 }
-                None => (Vec::new(), Vec::new()),
+                None => (Vec::new(), audit_tracked_paths),
             };
             let meta = nono::undo::SessionMetadata {
                 session_id: audit_state.session_id.clone(),
                 started: started.to_string(),
                 ended: Some(ended.to_string()),
                 command: scrubbed_command,
-                executable_identity,
+                executable_identity: executable_identity.cloned(),
                 tracked_paths,
                 snapshot_count: 0,
                 exit_code: Some(exit_code),
