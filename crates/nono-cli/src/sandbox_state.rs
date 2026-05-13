@@ -266,27 +266,37 @@ pub fn load_sandbox_state() -> Option<SandboxState> {
     Some(state)
 }
 
-/// Check if a process with the given PID is currently running
-#[cfg(unix)]
-fn is_process_running(pid: u32) -> bool {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
+// WR-02 fix (REVIEW.md): the previous `is_process_running` PID-liveness
+// helper was removed alongside the PID-based cleanup logic. The current
+// state-file naming scheme uses random hex (see
+// `execution_runtime::next_capability_state_file_path`), so liveness
+// cannot be inferred from the filename. `cleanup_stale_state_files`
+// below uses mtime instead.
 
-    let nix_pid = Pid::from_raw(pid as i32);
-    match kill(nix_pid, None) {
-        Ok(()) => true,
-        Err(nix::errno::Errno::ESRCH) => false,
-        Err(nix::errno::Errno::EPERM) => true,
-        _ => true,
-    }
-}
+/// WR-02 fix (REVIEW.md): cleanup window for stale sandbox state files.
+///
+/// State files older than this are eligible for cleanup. Set to 7 days so a
+/// developer who leaves a `nono run` shell open over a weekend still finds
+/// its session file intact on Monday. Tuned conservatively because the
+/// alternative (parsing a PID out of the filename to detect liveness) does
+/// not work with the random-hex naming scheme introduced by
+/// `execution_runtime::next_capability_state_file_path` (8 random bytes →
+/// 16 hex chars per file, no PID embedded).
+const STALE_STATE_FILE_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 
-#[cfg(not(unix))]
-fn is_process_running(_pid: u32) -> bool {
-    true
-}
-
-/// Clean up stale sandbox state files from previous nono runs
+/// Clean up stale sandbox state files from previous nono runs.
+///
+/// State files are written to `std::env::temp_dir()` with the naming pattern
+/// `.nono-<16-hex-chars>.json` (see
+/// `execution_runtime::next_capability_state_file_path`). Because the suffix
+/// is random hex (not a PID), liveness cannot be inferred from the filename.
+/// This function instead removes any matching file whose modification time
+/// is older than `STALE_STATE_FILE_MAX_AGE_SECS`. The mtime-based heuristic
+/// is robust to the naming scheme — a single fresh state file is touched on
+/// every supervised run, so the window stays bounded.
+///
+/// Errors during stat/remove are downgraded to `debug!` lines: cleanup is
+/// best-effort and must never block a real `nono run` invocation.
 pub fn cleanup_stale_state_files() {
     let temp_dir = std::env::temp_dir();
 
@@ -298,9 +308,10 @@ pub fn cleanup_stale_state_files() {
         }
     };
 
-    let current_pid = std::process::id();
+    let max_age = std::time::Duration::from_secs(STALE_STATE_FILE_MAX_AGE_SECS);
+    let now = std::time::SystemTime::now();
     let mut cleaned_count = 0;
-    let mut skipped_count = 0;
+    let mut kept_count = 0;
 
     for entry in entries.flatten() {
         let file_name = match entry.file_name().to_str() {
@@ -312,31 +323,50 @@ pub fn cleanup_stale_state_files() {
             continue;
         }
 
-        let pid_str = file_name
-            .trim_start_matches(".nono-")
-            .trim_end_matches(".json");
-
-        let pid = match pid_str.parse::<u32>() {
-            Ok(p) => p,
-            Err(_) => {
-                debug!("Skipping state file with invalid PID: {}", file_name);
+        // Use mtime (not name parsing) so the random-hex suffix shape from
+        // execution_runtime::next_capability_state_file_path is supported.
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                debug!(
+                    "Failed to stat candidate state file {}: {}",
+                    file_name, e
+                );
                 continue;
             }
         };
-
-        if pid == current_pid {
-            continue;
-        }
-
-        if is_process_running(pid) {
-            skipped_count += 1;
+        let mtime = match metadata.modified() {
+            Ok(t) => t,
+            Err(e) => {
+                debug!(
+                    "Failed to read mtime for state file {}: {}",
+                    file_name, e
+                );
+                continue;
+            }
+        };
+        let age = match now.duration_since(mtime) {
+            Ok(d) => d,
+            Err(_) => {
+                // Clock skew (mtime in the future). Treat as fresh — never
+                // delete a file we cannot reason about.
+                kept_count += 1;
+                continue;
+            }
+        };
+        if age < max_age {
+            kept_count += 1;
             continue;
         }
 
         let file_path = temp_dir.join(&file_name);
         match std::fs::remove_file(&file_path) {
             Ok(()) => {
-                debug!("Cleaned up stale state file for PID {}: {}", pid, file_name);
+                debug!(
+                    "Cleaned up stale state file {} (age {}s)",
+                    file_name,
+                    age.as_secs()
+                );
                 cleaned_count += 1;
             }
             Err(e) => {
@@ -347,8 +377,8 @@ pub fn cleanup_stale_state_files() {
 
     if cleaned_count > 0 {
         debug!(
-            "Cleanup complete: removed {} stale state file(s), {} active",
-            cleaned_count, skipped_count
+            "Cleanup complete: removed {} stale state file(s), {} kept",
+            cleaned_count, kept_count
         );
     }
 }
