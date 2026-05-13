@@ -675,3 +675,189 @@ fn promote_yes_with_diff_emits_summary_not_full_diff() {
         "stderr must contain summary stats; got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Commit Group 3 tests: validate --draft + round-trip serde
+// ---------------------------------------------------------------------------
+
+/// REQ-PORT-CLOSURE-03 Task C3-01 Test 1:
+/// `validate --draft myagent` resolves under `profile-drafts/`.
+/// `validate myagent` (without --draft) must fail (canonical does not exist).
+#[test]
+fn validate_draft_resolves_drafts_dir() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create draft via `init --draft`
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let init_out = cmd
+        .args(["profile", "init", "--draft", "myagent"])
+        .output()
+        .expect("init --draft");
+    assert!(
+        init_out.status.success(),
+        "init --draft must succeed; stderr: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+
+    // validate --draft myagent must succeed (resolves draft path)
+    let mut cmd2 = nono_bin();
+    with_config_dir(&mut cmd2, dir.path());
+    let validate_out = cmd2
+        .args(["profile", "validate", "--draft", "myagent"])
+        .output()
+        .expect("validate --draft");
+    assert!(
+        validate_out.status.success(),
+        "validate --draft must succeed; stderr: {}",
+        String::from_utf8_lossy(&validate_out.stderr)
+    );
+
+    // validate myagent (without --draft) must fail (no canonical)
+    let mut cmd3 = nono_bin();
+    with_config_dir(&mut cmd3, dir.path());
+    let validate_canonical_out = cmd3
+        .args(["profile", "validate", "myagent"])
+        .output()
+        .expect("validate without --draft");
+    assert!(
+        !validate_canonical_out.status.success(),
+        "validate without --draft must fail when no canonical exists"
+    );
+}
+
+/// REQ-PORT-CLOSURE-03 Task C3-01 Test 2:
+/// `validate --draft --strict myagent` fails on a draft with legacy `override_deny` key.
+#[test]
+fn validate_draft_strict_fails_legacy_keys() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create draft with legacy `override_deny` key directly
+    let drafts_dir = dir.path().join("nono").join("profile-drafts");
+    std::fs::create_dir_all(&drafts_dir).expect("create drafts dir");
+    let draft_path = drafts_dir.join("legacytest.json");
+    let legacy_json = r#"{
+  "meta": { "name": "legacytest", "version": "1.0" },
+  "security": { "groups": [] },
+  "policy": { "override_deny": ["/tmp/secret"] }
+}"#;
+    std::fs::write(&draft_path, legacy_json).expect("write legacy draft");
+
+    // validate --draft --strict legacytest must fail
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let out = cmd
+        .args(["profile", "validate", "--draft", "--strict", "legacytest"])
+        .output()
+        .expect("validate --draft --strict");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "validate --draft --strict must fail on legacy keys; stderr: {stderr}"
+    );
+    // Should mention legacy key or override_deny
+    assert!(
+        stderr.contains("override_deny") || stderr.contains("legacy") || stderr.contains("strict"),
+        "stderr must mention legacy key or strict failure; got: {stderr}"
+    );
+}
+
+/// REQ-PORT-CLOSURE-03 Task C3-01 Test 3:
+/// `validate --draft --strict myagent` succeeds on a clean draft (no legacy keys).
+#[test]
+fn validate_draft_and_strict_compose() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create draft via `init --draft`
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let init_out = cmd
+        .args(["profile", "init", "--draft", "cleantest"])
+        .output()
+        .expect("init --draft");
+    assert!(
+        init_out.status.success(),
+        "init --draft must succeed; stderr: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+
+    // validate --draft --strict cleantest must succeed (no legacy keys)
+    let mut cmd2 = nono_bin();
+    with_config_dir(&mut cmd2, dir.path());
+    let out = cmd2
+        .args(["profile", "validate", "--draft", "--strict", "cleantest"])
+        .output()
+        .expect("validate --draft --strict");
+    assert!(
+        out.status.success(),
+        "validate --draft --strict must succeed on clean draft; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// REQ-PORT-CLOSURE-03 acceptance #5: init --draft → edit → promote → load
+/// canonical → deserialize as Profile → matches draft (modulo sidecar).
+#[test]
+fn draft_promote_roundtrip_serde() {
+    let dir = TempDir::new().expect("create temp dir");
+    let name = "rttest";
+
+    // 1. init --draft
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let out = cmd
+        .args(["profile", "init", "--draft", name])
+        .output()
+        .expect("init --draft");
+    assert!(
+        out.status.success(),
+        "init --draft failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 2. Edit draft (add a group)
+    let draft_path = dir
+        .path()
+        .join("nono")
+        .join("profile-drafts")
+        .join(format!("{name}.json"));
+    let mut profile_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&draft_path).expect("read draft"))
+            .expect("parse draft");
+    profile_json["security"]["groups"] = serde_json::json!(["web-dev-read"]);
+    std::fs::write(
+        &draft_path,
+        serde_json::to_string_pretty(&profile_json).expect("serialize draft"),
+    )
+    .expect("write draft");
+
+    // 3. promote --yes (no canonical exists; first-time promote)
+    let mut cmd2 = nono_bin();
+    with_config_dir(&mut cmd2, dir.path());
+    let out2 = cmd2
+        .args(["profile", "promote", "--yes", name])
+        .output()
+        .expect("promote --yes");
+    assert!(
+        out2.status.success(),
+        "promote --yes failed: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+
+    // 4. Canonical now exists; deserialize
+    let canonical_path = dir
+        .path()
+        .join("nono")
+        .join("profiles")
+        .join(format!("{name}.json"));
+    let canonical_bytes = std::fs::read(&canonical_path).expect("read canonical");
+    let canonical_value: serde_json::Value =
+        serde_json::from_slice(&canonical_bytes).expect("parse canonical");
+
+    // 5. Matches the edited draft (modulo sidecar, which is cleaned up on promote)
+    assert_eq!(
+        canonical_value["security"]["groups"],
+        serde_json::json!(["web-dev-read"]),
+        "canonical profile must contain the group added in the draft"
+    );
+}

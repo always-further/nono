@@ -1327,7 +1327,7 @@ pub struct ProfileDiffArgs {
 
 #[derive(Parser, Debug)]
 pub struct ProfileValidateArgs {
-    /// Profile JSON file to validate
+    /// Profile JSON file to validate (or profile name when `--draft` is used)
     pub file: PathBuf,
     /// Output as JSON
     #[arg(long)]
@@ -1336,6 +1336,12 @@ pub struct ProfileValidateArgs {
     /// mode warns to stderr but continues; `--strict` exits non-zero.
     #[arg(long)]
     pub strict: bool,
+    /// Resolve the input under `profile-drafts/` instead of `profiles/`. When
+    /// set, `file` is treated as a profile name (not a file path) and routed
+    /// to `get_user_profile_draft_path`. Composes with `--strict`.
+    /// Phase 36.5 D-36.5-A2.
+    #[arg(long)]
+    pub draft: bool,
 }
 
 #[derive(Parser, Debug)]

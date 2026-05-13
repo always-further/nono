@@ -97,6 +97,27 @@ smoke-check expected `Upstream-commit:` count of 5; actual is 4
 (829c341a deferred); `Manual-replay:` count stays at 1 (only
 `f0abd413`).
 
+#### Phase 36.5 closure (2026-05-13)
+
+P34-DEFER-04b-2 → CLOSED. Absorbed via Phase 36.5 plan `36.5-01-DRAFTS-ABSORPTION-PLAN.md` (single PR, 3 sequenced commits, D-20 manual-replay of upstream 829c341a). Closes REQ-PORT-CLOSURE-03.
+
+Surface delivered:
+- `nono profile init --draft <name>` + `--refresh` mode
+- `nono profile validate --draft <name>` (composes with `--strict`)
+- `nono profile promote <name>` + `--yes` non-interactive
+- `NonoError::ActionRequired { expected, actual, resolve_via }` typed-struct variant + C FFI map to `NonoErrorCode::ErrConfigParse`
+- `crates/nono-cli/src/package_status.rs` (218 LOC; yanked-pack `ActionRequired` enforcement wired into `prepare_profile`)
+- Shadowing safeguards: refuse-always on built-in / package-managed (NO `--force` — deliberate security deviation from upstream per D-36.5-D2)
+
+Fork-divergence deltas captured (per RESEARCH §Summary 1-8):
+- Struct-shape `ActionRequired` (upstream uses single-tuple) — typed for pattern-matching consumers
+- `get_package_for_profile` / `load_profile_extends` substituted for upstream's missing `find_pack_store_profile`
+- Sidecar `<name>.base` file (matches upstream — NOT in-JSON field per RESEARCH §Pitfall 5)
+- Unix-only `O_NOFOLLOW` cfg-gated for cross-platform compile
+- `--yes` emits one-line summary (not full diff) for CI ergonomics
+
+Closure verified by: D-36.5-C4 8-step close gate (Windows + Linux + macOS clippy, full test suite green, gates 6-8 documented-skipped).
+
 ## P34-DEFER-01-1: query_ext::test_query_path_denied Windows-path canonicalization
 
 **Discovered during:** Plan 34-01 D-34-D2 close-gate 1 (`cargo test --workspace --all-features`)

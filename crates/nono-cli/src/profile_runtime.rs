@@ -140,6 +140,16 @@ fn pre_create_landlock_profiles_dir() -> crate::Result<()> {
     Ok(())
 }
 
+/// Pre-create the profile-drafts directory if missing. Cross-platform
+/// (unlike the Linux-only `pre_create_landlock_profiles_dir`). Best-effort:
+/// non-fatal if the create fails (the actual create happens in setup_profiles).
+/// Phase 36.5 D-36.5-B1.
+fn pre_create_drafts_dir() {
+    if let Ok(drafts_dir) = crate::package::profile_drafts_dir() {
+        let _ = std::fs::create_dir_all(&drafts_dir);
+    }
+}
+
 pub(crate) fn prepare_profile(
     args: &SandboxArgs,
     silent: bool,
@@ -148,8 +158,17 @@ pub(crate) fn prepare_profile(
     #[cfg(target_os = "linux")]
     pre_create_landlock_profiles_dir()?;
 
+    // Phase 36.5: pre-create profile-drafts dir cross-platform (D-36.5-B1).
+    pre_create_drafts_dir();
+
     let loaded_profile = if let Some(ref profile_name) = args.profile {
         let profile = profile::load_profile(profile_name)?;
+        // Phase 36.5: enforce package status (e.g., refuse load if installed
+        // pack is yanked). Mitigates T-36.5-06 (registry-spoof — RegistryClient
+        // routes through resolve_registry_url allowlist) and provides the
+        // upstream's ActionRequired second-callsite for yanked packs.
+        // Advisory-only by default; strict via NONO_REQUIRE_PACK_STATUS=1.
+        crate::package_status::enforce_for_active_profile(Some(profile_name.as_str()), silent)?;
         install_profile_hooks(Some(profile_name.as_str()), &profile, silent);
         Some(profile)
     } else {

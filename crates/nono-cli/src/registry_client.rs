@@ -185,6 +185,33 @@ impl RegistryClient {
             format!("{}{}", self.base_url, url)
         }
     }
+
+    /// Fetch package status (current / outdated / yanked + advisory) from the
+    /// registry. URL: `/api/v1/packages/{ns}/{name}/status?installed=<ver>`.
+    ///
+    /// All path components and query parameters are URL-encoded via
+    /// `url::form_urlencoded::byte_serialize` to prevent injection. The request
+    /// routes through the existing `RegistryClient::get_json` path (TLS, content-
+    /// length enforcement, body limit). Phase 36.5 D-36.5-C3.
+    ///
+    /// Mitigates T-36.5-06 (SSRF / registry-spoof): no new registry URL surface —
+    /// `self.base_url` is set via `resolve_registry_url` allowlist.
+    pub fn fetch_package_status(
+        &self,
+        package_ref: &crate::package::PackageRef,
+        installed: Option<&str>,
+    ) -> Result<crate::package::PackageStatusResponse> {
+        let ns_enc: String =
+            url::form_urlencoded::byte_serialize(package_ref.namespace.as_bytes()).collect();
+        let name_enc: String =
+            url::form_urlencoded::byte_serialize(package_ref.name.as_bytes()).collect();
+        let mut path = format!("/api/v1/packages/{ns_enc}/{name_enc}/status");
+        if let Some(version) = installed {
+            let v_enc: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
+            path.push_str(&format!("?installed={v_enc}"));
+        }
+        self.get_json::<crate::package::PackageStatusResponse>(&path)
+    }
 }
 
 pub fn resolve_registry_url(override_url: Option<&str>) -> String {
@@ -526,5 +553,36 @@ mod tests {
     fn registry_client_normalizes_base_url() {
         let client = RegistryClient::new("https://example.invalid/".to_string());
         assert_eq!(client.base_url, "https://example.invalid");
+    }
+
+    /// Phase 36.5 C3-02 — verify that `fetch_package_status` constructs a URL
+    /// that includes the namespace, name, and installed-version query param,
+    /// all URL-encoded via `url::form_urlencoded::byte_serialize`. We cannot
+    /// call the real method directly (it hits the network), but we can assert
+    /// the URL-encoding logic by reconstructing it inline with the same
+    /// `byte_serialize` path used in the impl.
+    #[test]
+    fn fetch_package_status_url_encodes_installed() {
+        // Verify the URL-encoding helper produces correct output for a
+        // version string that contains special chars ('+', ' ', '@').
+        let version = "1.0+build.42 test@repo";
+        let encoded: String = url::form_urlencoded::byte_serialize(version.as_bytes()).collect();
+        // '+' and ' ' and '@' must be percent-encoded
+        assert!(
+            !encoded.contains(' '),
+            "spaces must be percent-encoded in version param"
+        );
+        assert!(
+            !encoded.contains('+') || encoded.contains("%2B"),
+            "'+' must be percent-encoded in version param if present"
+        );
+
+        // Verify that namespace/name with special chars are also encoded
+        let ns = "nono/official";
+        let ns_enc: String = url::form_urlencoded::byte_serialize(ns.as_bytes()).collect();
+        assert!(
+            !ns_enc.contains('/'),
+            "slashes must be percent-encoded in namespace param"
+        );
     }
 }

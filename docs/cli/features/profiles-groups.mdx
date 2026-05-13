@@ -690,3 +690,74 @@ If you'd like a built-in profile for a tool not listed here:
    - Any special considerations
 
 Built-in profiles are reviewed for security before inclusion.
+
+## Profile drafts
+
+Profile drafts give operators a review-driven workflow for editing profiles:
+create a draft, edit it offline, then promote it to canonical with diff
+review. The drafts directory lives at `%APPDATA%\nono\profile-drafts\` on
+Windows or `~/.config/nono/profile-drafts/` on Linux/macOS — a sibling of
+the existing `profiles/` directory.
+
+### Workflow
+
+1. **Create:** `nono profile init --draft myagent` writes
+   `profile-drafts/myagent.json` via atomic write. If a canonical
+   `profiles/myagent.json` already exists, a sidecar `myagent.base` file
+   is also written containing the SHA-256 hash of the canonical bytes.
+2. **Edit:** Open the draft in any editor.
+3. **Promote:** `nono profile promote myagent` shows a structural diff
+   against the canonical profile, prompts `[y/N]`, and (on yes) atomically
+   renames `profile-drafts/myagent.json` to `profiles/myagent.json`. Use
+   `--yes` for non-interactive CI flows.
+
+### Safeguards
+
+- **Stale-draft replay protection (SHA-256 base-hash).** If the canonical
+  profile changes after a draft is created, `promote` refuses with
+  `NonoError::ActionRequired` (exit code matches `ErrConfigParse`). To
+  reconcile: `nono profile init --draft --refresh myagent`. The refresh
+  preserves your draft edits and updates only the sidecar `.base` file.
+- **Built-in shadowing protection (no `--force`).** `promote` refuses if
+  the draft name matches a built-in profile (e.g., `claude-code`, `codex`)
+  unless you have already created a user override. This is a deliberate
+  security-posture deviation from upstream nono, which has a `--force`
+  override. To override a built-in: `nono profile init --force <name>`
+  (a different code path with explicit confirmation).
+- **Package-managed shadowing protection.** `promote` refuses if the
+  canonical profile is owned by an installed package. Remove the source
+  package first: `nono package remove <ref>`.
+
+### Validation
+
+`nono profile validate --draft <name>` validates a draft file under
+`profile-drafts/` (instead of `profiles/`). Composes with `--strict` to
+fail closed on legacy `override_deny` keys.
+
+### Package-status enforcement posture (advisory vs strict)
+
+By default, nono's package-status enforcement (which raises
+`NonoError::ActionRequired` for yanked official packs) is **advisory-only**:
+
+- Lockfile load failure is silently treated as "no packs installed".
+- Network-fetch failure for the registry status endpoint is silently
+  treated as "status unknown, proceed".
+- Missing installed version for an official pack profile is silently
+  treated as "not depending on this pack".
+
+This matches upstream's best-effort posture and avoids breaking profile
+load on transient network issues.
+
+For deployments that require **strict enforcement** (regulated environments,
+CI gates, security-critical hosts), set the environment variable
+`NONO_REQUIRE_PACK_STATUS=1`. When set AND the active profile depends on
+an official pack (e.g., `claude-code`, `claude-no-keychain`, `codex`),
+ALL three silent paths above become fatal `NonoError::ActionRequired`
+errors. The CLI will refuse to load the profile until the operator
+resolves the underlying state (install the pack, restore registry
+connectivity, etc.).
+
+This is the recommended posture for any deployment where a network
+attacker must not be able to bypass yanked-pack detection by failing the
+registry call (CLAUDE.md § Permission Scope: "Configuration load failures
+must be fatal").

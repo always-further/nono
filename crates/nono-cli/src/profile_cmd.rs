@@ -2760,6 +2760,23 @@ pub(crate) fn cmd_validate(args: ProfileValidateArgs) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
+    // Phase 36.5 D-36.5-A2: When `--draft` is set, treat `args.file` as a
+    // profile name and route to `profile-drafts/<name>.json`. Composes with
+    // `--strict` (orthogonal flags per D-36.5-A2 — draft branch changes only
+    // the file path resolution; the rest of the validation body is unchanged).
+    let input_file: std::path::PathBuf = if args.draft {
+        let name = args.file.to_string_lossy();
+        if !profile::is_valid_profile_name(&name) {
+            return Err(NonoError::ProfileParse(format!(
+                "Invalid profile name '{}' for --draft (alphanumeric + hyphens only)",
+                name
+            )));
+        }
+        profile::get_user_profile_draft_path(&name)?
+    } else {
+        args.file.clone()
+    };
+
     // Plan 36-01a (Task 2): Detect the legacy `override_deny` key and
     // route to errors (--strict) or warnings (default) based on args.strict.
     //
@@ -2781,7 +2798,7 @@ pub(crate) fn cmd_validate(args: ProfileValidateArgs) -> Result<()> {
     // main parse in Step 1 below surfaces real parse errors.
     {
         let counter: &DeprecationCounter = &GLOBAL_DEPRECATION_COUNTER;
-        if let Ok(raw) = fs::read_to_string(&args.file) {
+        if let Ok(raw) = fs::read_to_string(&input_file) {
             if let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(legacy_val) = root.get("policy").and_then(|p| p.get("override_deny")) {
                     // Build a synthetic {"override_deny": [...]} value so we
@@ -2827,7 +2844,7 @@ pub(crate) fn cmd_validate(args: ProfileValidateArgs) -> Result<()> {
     }
 
     // Step 1: Load profile (parse JSON + resolve inheritance)
-    let profile = match profile::load_profile_from_path(&args.file) {
+    let profile = match profile::load_profile_from_path(&input_file) {
         Ok(p) => Some(p),
         Err(e) => {
             let label = classify_profile_error(&e);
@@ -2873,7 +2890,7 @@ pub(crate) fn cmd_validate(args: ProfileValidateArgs) -> Result<()> {
 
     if args.json {
         let val = serde_json::json!({
-            "file": args.file.display().to_string(),
+            "file": input_file.display().to_string(),
             "valid": errors.is_empty(),
             "errors": errors,
             "warnings": warnings,
@@ -2889,7 +2906,7 @@ pub(crate) fn cmd_validate(args: ProfileValidateArgs) -> Result<()> {
     println!(
         "{}: validating {}",
         prefix(),
-        theme::fg(&args.file.display().to_string(), t.text)
+        theme::fg(&input_file.display().to_string(), t.text)
     );
     println!();
 
@@ -3715,6 +3732,7 @@ mod tests {
             file: path,
             json: false,
             strict: false,
+            draft: false,
         };
         let result = cmd_validate(args);
         assert!(result.is_ok(), "valid profile should pass validation");
@@ -3737,6 +3755,7 @@ mod tests {
             file: path,
             json: false,
             strict: false,
+            draft: false,
         };
         let result = cmd_validate(args);
         assert!(result.is_err(), "invalid group should fail validation");
@@ -3760,6 +3779,7 @@ mod tests {
             file: path,
             json: false,
             strict: false,
+            draft: false,
         };
         let result = cmd_validate(args);
         assert!(

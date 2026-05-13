@@ -192,6 +192,34 @@ pub struct PackageSearchResponse {
     pub packages: Vec<PackageSearchResult>,
 }
 
+/// Response from registry `/api/v1/packages/{ns}/{name}/status` endpoint.
+/// Phase 36.5 D-36.5-C3 (package_status.rs companion port).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageStatusResponse {
+    pub namespace: String,
+    pub name: String,
+    /// One of: `"current"`, `"outdated"`, `"yanked"`, or `None` (unknown).
+    #[serde(default)]
+    pub installed_status: Option<String>,
+    #[serde(default)]
+    pub latest_version: Option<String>,
+    #[serde(default)]
+    pub yanked_reason: Option<String>,
+    #[serde(default)]
+    pub replacement_version: Option<String>,
+    #[serde(default)]
+    pub advisory: Option<PackageAdvisory>,
+}
+
+/// Security advisory attached to a `PackageStatusResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageAdvisory {
+    /// Severity classification (e.g., `"high"`, `"medium"`, `"low"`).
+    pub severity: String,
+    /// Short operator-facing summary of the advisory.
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullResponse {
     pub namespace: String,
@@ -485,5 +513,47 @@ mod tests {
         let bad4: std::result::Result<ArtifactType, _> =
             serde_json::from_str("\"nonexistent-variant\"");
         assert!(bad4.is_err()); // hyphenated variant rejected (snake_case enforced)
+    }
+
+    // ---------------------------------------------------------------------------
+    // PackageStatusResponse / PackageAdvisory tests (Phase 36.5 C3-02)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn package_status_response_serde_roundtrip() {
+        let status = PackageStatusResponse {
+            namespace: "nono-official".into(),
+            name: "claude".into(),
+            installed_status: Some("yanked".into()),
+            latest_version: Some("v1.2".into()),
+            yanked_reason: Some("CVE-2026-1234".into()),
+            replacement_version: Some("v1.3".into()),
+            advisory: Some(PackageAdvisory {
+                severity: "high".into(),
+                summary: "Remote code execution via crafted profile".into(),
+            }),
+        };
+        let json = serde_json::to_string(&status).expect("serialize");
+        let parsed: PackageStatusResponse = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.namespace, status.namespace);
+        assert_eq!(parsed.name, status.name);
+        assert_eq!(parsed.installed_status, status.installed_status);
+        assert_eq!(parsed.latest_version, status.latest_version);
+        assert_eq!(parsed.yanked_reason, status.yanked_reason);
+        assert_eq!(parsed.replacement_version, status.replacement_version);
+        let adv = parsed.advisory.expect("advisory must round-trip");
+        assert_eq!(adv.severity, "high");
+        assert_eq!(adv.summary, "Remote code execution via crafted profile");
+    }
+
+    #[test]
+    fn package_status_response_partial_deserialize() {
+        // Minimal JSON with all optional fields set to null
+        let json = r#"{"namespace":"x","name":"y","installed_status":null,"latest_version":null,"yanked_reason":null,"replacement_version":null,"advisory":null}"#;
+        let parsed: PackageStatusResponse = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(parsed.namespace, "x");
+        assert_eq!(parsed.name, "y");
+        assert!(parsed.installed_status.is_none());
+        assert!(parsed.advisory.is_none());
     }
 }

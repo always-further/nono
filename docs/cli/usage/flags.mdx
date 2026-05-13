@@ -144,6 +144,41 @@ Subcommands:
 - `keygen` - Generate a new signing key pair
 - `export-key` - Export the public key for a signing key
 
+## `nono profile` Options
+
+### `--draft`
+
+Routes `nono profile init` and `nono profile validate` to the `profile-drafts/`
+directory (sibling of `profiles/`) instead of the canonical profiles dir. Drafts
+are a review-driven workflow: create with `init --draft <name>`, edit, then
+`nono profile promote <name>` to apply.
+
+```bash
+nono profile init --draft myagent
+nono profile validate --draft myagent
+```
+
+### `--refresh`
+
+(Requires `--draft`.) Re-reads the current canonical profile, recomputes the
+SHA-256 base-hash, and rewrites the draft's sidecar `<name>.base` file. Preserves
+the draft JSON content — use to reconcile a stale base-hash after the canonical
+profile changes underneath you.
+
+```bash
+nono profile init --draft --refresh myagent
+```
+
+### `--yes`
+
+(On `nono profile promote` only.) Skip the interactive `[y/N]` review prompt;
+promote unconditionally on hash-match. Does NOT bypass shadow-detection or
+base-hash verification — those checks always fail-closed.
+
+```bash
+nono profile promote myagent --yes
+```
+
 ## `nono learn` Options
 
 <Note>

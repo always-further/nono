@@ -43,6 +43,7 @@ mod open_url_runtime;
 mod output;
 mod package;
 mod package_cmd;
+mod package_status;
 mod policy;
 mod profile;
 mod profile_cmd;
