@@ -105,6 +105,11 @@ subdirectories. The implied filesystem grant is recursive (Landlock's
 only expressible granularity), so socket scope is enforced separately by
 the supervisor (Linux) or Seatbelt path emission (macOS).
 
+Today, macOS enforces the direct-child versus subtree distinction in Seatbelt.
+Linux V4+ currently relies on Landlock filesystem rules for pathname AF_UNIX,
+so directory socket grants are recursive there until the seccomp AF_UNIX
+allowlist mediation path is enabled.
+
 Under restricted network modes (`--block-net` or `--network-profile`),
 `connect(2)` to a Unix socket requires an explicit `unix_socket*` grant
 — a plain `allow_file`/`allow` grant no longer implicitly permits it.

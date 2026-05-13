@@ -819,9 +819,17 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
         }
     }
 
-    // Add rules for each filesystem capability
-    // These MUST succeed - caller explicitly requested these capabilities
-    // Failing silently would violate the principle of least surprise and fail-secure design
+    // Add rules for each filesystem capability.
+    //
+    // These MUST succeed - caller explicitly requested these capabilities.
+    // Failing silently would violate the principle of least surprise and
+    // fail-secure design.
+    //
+    // Pathname AF_UNIX socket grants currently enter Linux enforcement only
+    // through their implied FsCapability. Landlock PathBeneath is recursive for
+    // directory grants, so SocketScope::DirChildren and SocketScope::DirSubtree
+    // are not distinguishable on this Linux path until the seccomp AF_UNIX
+    // allowlist work enforces UnixSocketCapability::covers().
     let ioctl_dev_available = AccessFs::from_all(target_abi).contains(AccessFs::IoctlDev);
 
     for cap in caps.fs_capabilities() {

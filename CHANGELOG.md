@@ -2,6 +2,14 @@
 
 ## [Unreleased] - v2.6 Phase 45
 
+### Notes
+
+- Socket grant state now records explicit socket scope. New subtree socket
+  grants require this metadata; rolling back to older nono builds may read
+  those state entries as file-scoped grants.
+
+## [0.54.0] - 2026-05-13
+
 ### BREAKING (fork — Phase 45 Plan 45-02)
 
 - **AIPC wire-format change: `ApprovalDecision::Granted` replaced by `ApprovalDecision::Approved(ResourceGrant)` (SC#2 compile-time guarantee).**

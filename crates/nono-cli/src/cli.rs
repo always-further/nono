@@ -1548,14 +1548,16 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
     pub allow_unix_socket_bind: Vec<PathBuf>,
 
-    /// Allow connect() to any AF_UNIX socket directly within this directory
-    /// (non-recursive; implies --read)
+    /// Allow connect() to any AF_UNIX socket directly within this directory.
+    /// Non-recursive on macOS and future Linux AF_UNIX mediation; current
+    /// Linux Landlock filesystem fallback is recursive.
     #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
     pub allow_unix_socket_dir: Vec<PathBuf>,
 
     /// Allow connect() and bind() on any AF_UNIX socket directly within this
-    /// directory (non-recursive; implies --allow). Use for runtime-generated
-    /// socket filenames (PID-derived paths, etc.).
+    /// directory. Non-recursive on macOS and future Linux AF_UNIX mediation;
+    /// current Linux Landlock filesystem fallback is recursive. Use for
+    /// runtime-generated socket filenames (PID-derived paths, etc.).
     #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
     pub allow_unix_socket_dir_bind: Vec<PathBuf>,
 
@@ -1948,14 +1950,16 @@ pub struct WrapSandboxArgs {
     #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
     pub allow_unix_socket_bind: Vec<PathBuf>,
 
-    /// Allow connect() to any AF_UNIX socket directly within this directory
-    /// (non-recursive; implies --read)
+    /// Allow connect() to any AF_UNIX socket directly within this directory.
+    /// Non-recursive on macOS and future Linux AF_UNIX mediation; current
+    /// Linux Landlock filesystem fallback is recursive.
     #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
     pub allow_unix_socket_dir: Vec<PathBuf>,
 
     /// Allow connect() and bind() on any AF_UNIX socket directly within this
-    /// directory (non-recursive; implies --allow). Use for runtime-generated
-    /// socket filenames (PID-derived paths, etc.).
+    /// directory. Non-recursive on macOS and future Linux AF_UNIX mediation;
+    /// current Linux Landlock filesystem fallback is recursive. Use for
+    /// runtime-generated socket filenames (PID-derived paths, etc.).
     #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
     pub allow_unix_socket_dir_bind: Vec<PathBuf>,
 

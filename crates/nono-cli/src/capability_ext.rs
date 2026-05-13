@@ -8,7 +8,7 @@ use crate::policy;
 use crate::profile::{expand_vars, Profile};
 use crate::protected_paths::{self, ProtectedRoots};
 use nono::{
-    AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result,
+    AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result, SocketScope,
     UnixSocketCapability, UnixSocketMode,
 };
 use std::path::{Path, PathBuf};
@@ -62,29 +62,23 @@ fn try_new_unix_socket_file(
     }
 }
 
-/// Try to create a directory-scoped AF_UNIX socket capability.
-fn try_new_unix_socket_dir(
+/// Try to create a directory-backed AF_UNIX socket capability.
+fn try_new_unix_socket_dir_scoped(
     path: &Path,
     mode: UnixSocketMode,
+    scope: SocketScope,
     label: &str,
 ) -> Result<Option<UnixSocketCapability>> {
-    match UnixSocketCapability::new_dir(path, mode) {
-        Ok(cap) => Ok(Some(cap)),
-        Err(NonoError::PathNotFound(_)) => {
-            info!("{}: {}", label, path.display());
-            Ok(None)
+    let result = match scope {
+        SocketScope::DirChildren => UnixSocketCapability::new_dir(path, mode),
+        SocketScope::DirSubtree => UnixSocketCapability::new_dir_subtree(path, mode),
+        SocketScope::File => {
+            return Err(NonoError::SandboxInit(
+                "unix socket directory grant requires a directory scope".to_string(),
+            ));
         }
-        Err(e) => Err(e),
-    }
-}
-
-/// Try to create a subtree-scoped AF_UNIX socket capability.
-fn try_new_unix_socket_subtree(
-    path: &Path,
-    mode: UnixSocketMode,
-    label: &str,
-) -> Result<Option<UnixSocketCapability>> {
-    match UnixSocketCapability::new_dir_subtree(path, mode) {
+    };
+    match result {
         Ok(cap) => Ok(Some(cap)),
         Err(NonoError::PathNotFound(_)) => {
             info!("{}: {}", label, path.display());
@@ -188,7 +182,12 @@ fn add_cli_unix_socket_caps(
 
     for path in &args.allow_unix_socket_dir {
         validate_requested_dir(path, "CLI", protected_roots, allow_parent_of_protected)?;
-        let sock_cap = try_new_unix_socket_dir(path, UnixSocketMode::Connect, LBL_SOCK_DIR)?;
+        let sock_cap = try_new_unix_socket_dir_scoped(
+            path,
+            UnixSocketMode::Connect,
+            SocketScope::DirChildren,
+            LBL_SOCK_DIR,
+        )?;
         if let Some(cap) = sock_cap {
             caps.add_unix_socket(cap);
             if let Some(cap) = try_new_dir(path, AccessMode::Read, LBL_FS_DIR_IMPLIED)? {
@@ -199,8 +198,12 @@ fn add_cli_unix_socket_caps(
 
     for path in &args.allow_unix_socket_dir_bind {
         validate_requested_dir(path, "CLI", protected_roots, allow_parent_of_protected)?;
-        let sock_cap =
-            try_new_unix_socket_dir(path, UnixSocketMode::ConnectBind, LBL_SOCK_DIR_BIND)?;
+        let sock_cap = try_new_unix_socket_dir_scoped(
+            path,
+            UnixSocketMode::ConnectBind,
+            SocketScope::DirChildren,
+            LBL_SOCK_DIR_BIND,
+        )?;
         if let Some(cap) = sock_cap {
             caps.add_unix_socket(cap);
             if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, LBL_FS_DIR_IMPLIED)? {
@@ -211,8 +214,12 @@ fn add_cli_unix_socket_caps(
 
     for path in &args.allow_unix_socket_subtree {
         validate_requested_dir(path, "CLI", protected_roots, allow_parent_of_protected)?;
-        let sock_cap =
-            try_new_unix_socket_subtree(path, UnixSocketMode::Connect, LBL_SOCK_SUBTREE)?;
+        let sock_cap = try_new_unix_socket_dir_scoped(
+            path,
+            UnixSocketMode::Connect,
+            SocketScope::DirSubtree,
+            LBL_SOCK_SUBTREE,
+        )?;
         if let Some(cap) = sock_cap {
             caps.add_unix_socket(cap);
             if let Some(cap) = try_new_dir(path, AccessMode::Read, LBL_FS_DIR_IMPLIED)? {
@@ -223,8 +230,12 @@ fn add_cli_unix_socket_caps(
 
     for path in &args.allow_unix_socket_subtree_bind {
         validate_requested_dir(path, "CLI", protected_roots, allow_parent_of_protected)?;
-        let sock_cap =
-            try_new_unix_socket_subtree(path, UnixSocketMode::ConnectBind, LBL_SOCK_SUBTREE_BIND)?;
+        let sock_cap = try_new_unix_socket_dir_scoped(
+            path,
+            UnixSocketMode::ConnectBind,
+            SocketScope::DirSubtree,
+            LBL_SOCK_SUBTREE_BIND,
+        )?;
         if let Some(cap) = sock_cap {
             caps.add_unix_socket(cap);
             if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, LBL_FS_DIR_IMPLIED)? {
@@ -844,8 +855,12 @@ impl CapabilitySetExt for CapabilitySet {
                 "Profile unix socket dir '{}' does not exist, skipping",
                 path_template
             );
-            if let Some(mut cap) = try_new_unix_socket_dir(&path, UnixSocketMode::Connect, &label)?
-            {
+            if let Some(mut cap) = try_new_unix_socket_dir_scoped(
+                &path,
+                UnixSocketMode::Connect,
+                SocketScope::DirChildren,
+                &label,
+            )? {
                 cap.source = CapabilitySource::Profile;
                 caps.add_unix_socket(cap);
                 if let Some(mut cap) = try_new_dir(&path, AccessMode::Read, &label)? {
@@ -867,9 +882,12 @@ impl CapabilitySetExt for CapabilitySet {
                 "Profile unix socket dir '{}' does not exist, skipping",
                 path_template
             );
-            if let Some(mut cap) =
-                try_new_unix_socket_dir(&path, UnixSocketMode::ConnectBind, &label)?
-            {
+            if let Some(mut cap) = try_new_unix_socket_dir_scoped(
+                &path,
+                UnixSocketMode::ConnectBind,
+                SocketScope::DirChildren,
+                &label,
+            )? {
                 cap.source = CapabilitySource::Profile;
                 caps.add_unix_socket(cap);
                 if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
@@ -891,9 +909,12 @@ impl CapabilitySetExt for CapabilitySet {
                 "Profile unix socket subtree '{}' does not exist, skipping",
                 path_template
             );
-            if let Some(mut cap) =
-                try_new_unix_socket_subtree(&path, UnixSocketMode::Connect, &label)?
-            {
+            if let Some(mut cap) = try_new_unix_socket_dir_scoped(
+                &path,
+                UnixSocketMode::Connect,
+                SocketScope::DirSubtree,
+                &label,
+            )? {
                 cap.source = CapabilitySource::Profile;
                 caps.add_unix_socket(cap);
                 if let Some(mut cap) = try_new_dir(&path, AccessMode::Read, &label)? {
@@ -915,9 +936,12 @@ impl CapabilitySetExt for CapabilitySet {
                 "Profile unix socket subtree '{}' does not exist, skipping",
                 path_template
             );
-            if let Some(mut cap) =
-                try_new_unix_socket_subtree(&path, UnixSocketMode::ConnectBind, &label)?
-            {
+            if let Some(mut cap) = try_new_unix_socket_dir_scoped(
+                &path,
+                UnixSocketMode::ConnectBind,
+                SocketScope::DirSubtree,
+                &label,
+            )? {
                 cap.source = CapabilitySource::Profile;
                 caps.add_unix_socket(cap);
                 if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
@@ -3061,7 +3085,6 @@ mod tests {
         assert_eq!(socks.len(), 1);
         assert_eq!(socks[0].mode, UnixSocketMode::Connect);
         assert!(socks[0].is_directory());
-        assert_eq!(socks[0].scope, SocketScope::DirChildren);
         assert_eq!(socks[0].scope, SocketScope::DirChildren);
 
         let fs_match = caps

@@ -1384,6 +1384,13 @@ mod tests {
     #[test]
     fn test_generate_profile_unix_socket_subtree_emits_subpath() {
         let mut caps = CapabilitySet::new().proxy_only(54321);
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/tmp/mydir"),
+            resolved: PathBuf::from("/private/tmp/mydir"),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
         caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/tmp/mydir"),
             resolved: PathBuf::from("/private/tmp/mydir"),
@@ -1397,6 +1404,10 @@ mod tests {
         assert!(
             profile.contains("(allow network-outbound (subpath \"/private/tmp/mydir\"))"),
             "subtree unix socket grants must emit recursive subpath: {profile}"
+        );
+        assert!(
+            profile.contains("(allow file-read* (subpath \"/private/tmp/mydir\"))"),
+            "subtree unix socket implied filesystem grant must allow recursive traversal: {profile}"
         );
         assert!(
             profile.contains("(allow network-outbound (subpath \"/tmp/mydir\"))"),
