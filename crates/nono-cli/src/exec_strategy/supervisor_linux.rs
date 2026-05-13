@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::trust_intercept::TrustInterceptor;
-use nono::{AccessMode, try_canonicalize};
+use nono::{AccessMode, UnixSocketCapability, UnixSocketOp, try_canonicalize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InitialCapability {
@@ -553,19 +553,15 @@ pub(super) enum NetworkDecision {
 ///
 /// Policy:
 ///
-/// 1. **Pathname `AF_UNIX` is allowed** (issue #685). Filesystem-backed Unix
-///    sockets like `/tmp/test.sock` are IPC bound to a real path, so
-///    Landlock's filesystem rules decide access: a bind/connect succeeds
-///    only if the path is inside an allowed grant, and fails otherwise.
-///    This restores parity with Landlock V4+, where `LANDLOCK_ACCESS_NET_*`
-///    only scopes TCP and pathname `AF_UNIX` is governed by fs rules.
+/// 1. **Pathname `AF_UNIX` is allowlist-mediated.** Filesystem-backed Unix
+///    sockets like `/tmp/test.sock` are IPC bound to a real path, so the
+///    supervisor canonicalizes that path and checks it against explicit
+///    [`UnixSocketCapability`] grants.
 ///
 ///    **Abstract and unnamed `AF_UNIX` are denied.** The abstract namespace
-///    (`sun_path[0] == '\0'`) lives outside the filesystem, so Landlock has
-///    no way to mediate it — a blanket allow would open a covert IPC
-///    channel that bypasses the sandbox. Unnamed sockets (addrlen == 2)
-///    have no path to check and no use case that motivated this fix.
-///    Future work (#696) may add an explicit allowlist for abstract paths.
+///    (`sun_path[0] == '\0'`) lives outside the filesystem, so pathname
+///    capabilities cannot mediate it. Unnamed sockets (addrlen == 2) have
+///    no path to check.
 ///
 /// 2. For `AF_INET`/`AF_INET6`:
 ///    - `connect()` is allowed only to `127.0.0.1:proxy_port` (the nono proxy).
@@ -578,23 +574,18 @@ pub(super) fn decide_network_notification(
 ) -> NetworkDecision {
     use nono::sandbox::{SYS_BIND, SYS_CONNECT, UnixSocketKind};
 
-    // AF_UNIX: allow only filesystem-backed (pathname) sockets — Landlock's
-    // filesystem rules will then decide whether the specific path is
-    // reachable. Abstract/unnamed sockets bypass fs rules, so deny them.
+    // AF_UNIX: allow only filesystem-backed (pathname) sockets that match an
+    // explicit socket capability. Abstract/unnamed sockets bypass pathname
+    // mediation, so deny them.
     if sockaddr.family == libc::AF_UNIX as u16 {
         match sockaddr.unix_kind {
             Some(UnixSocketKind::Pathname) => {
-                debug!(
-                    "Proxy seccomp: allowing AF_UNIX pathname syscall (nr={}); \
-                     governed by Landlock fs rules",
-                    syscall
-                );
-                return NetworkDecision::Allow;
+                return decide_af_unix_pathname(syscall, sockaddr, config);
             }
             Some(UnixSocketKind::Abstract) => {
                 debug!(
                     "Proxy seccomp: denying AF_UNIX abstract-namespace syscall (nr={}); \
-                     not mediated by Landlock fs rules",
+                     not mediated by pathname socket capabilities",
                     syscall
                 );
                 return NetworkDecision::Deny;
@@ -646,6 +637,124 @@ pub(super) fn decide_network_notification(
             );
             NetworkDecision::Deny
         }
+    }
+}
+
+fn decide_af_unix_pathname(
+    syscall: i32,
+    sockaddr: &nono::sandbox::SockaddrInfo,
+    config: &SupervisorConfig<'_>,
+) -> NetworkDecision {
+    let Some(path) = sockaddr.unix_path.as_deref() else {
+        debug!(
+            "Proxy seccomp: denying AF_UNIX pathname syscall (nr={}) without parsed path",
+            syscall
+        );
+        return NetworkDecision::Deny;
+    };
+
+    let Some(op) = unix_socket_op_for_syscall(syscall) else {
+        warn!(
+            "Unexpected AF_UNIX syscall {} in proxy seccomp handler, denying",
+            syscall
+        );
+        return NetworkDecision::Deny;
+    };
+
+    let canonical = match op {
+        UnixSocketOp::Connect => match path.canonicalize() {
+            Ok(path) => path,
+            Err(err) => {
+                debug!(
+                    "Proxy seccomp: denying AF_UNIX connect to {}: canonicalize failed: {}",
+                    path.display(),
+                    err
+                );
+                return NetworkDecision::Deny;
+            }
+        },
+        UnixSocketOp::Bind => match canonicalize_unix_socket_bind_path(path) {
+            Ok(path) => path,
+            Err(err) => {
+                debug!(
+                    "Proxy seccomp: denying AF_UNIX bind to {}: canonicalize failed: {}",
+                    path.display(),
+                    err
+                );
+                return NetworkDecision::Deny;
+            }
+        },
+    };
+
+    if unix_socket_allowlist_allows(config.unix_socket_allowlist, canonical.as_path(), op) {
+        debug!(
+            "Proxy seccomp: allowing AF_UNIX {} on {}",
+            op,
+            canonical.display()
+        );
+        NetworkDecision::Allow
+    } else {
+        debug!(
+            "Proxy seccomp: denying AF_UNIX {} on {}: no matching capability",
+            op,
+            canonical.display()
+        );
+        NetworkDecision::Deny
+    }
+}
+
+fn unix_socket_op_for_syscall(syscall: i32) -> Option<UnixSocketOp> {
+    use nono::sandbox::{SYS_BIND, SYS_CONNECT};
+
+    match syscall {
+        SYS_CONNECT => Some(UnixSocketOp::Connect),
+        SYS_BIND => Some(UnixSocketOp::Bind),
+        _ => None,
+    }
+}
+
+fn unix_socket_allowlist_allows(
+    allowlist: &[UnixSocketCapability],
+    path: &std::path::Path,
+    op: UnixSocketOp,
+) -> bool {
+    allowlist.iter().any(|cap| {
+        cap.covers(path)
+            && match op {
+                UnixSocketOp::Connect => true,
+                UnixSocketOp::Bind => cap.mode.permits_bind(),
+            }
+    })
+}
+
+fn canonicalize_unix_socket_bind_path(
+    path: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "socket path has no parent directory",
+                )
+            })?;
+            let file_name = path.file_name().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "socket path has no final component",
+                )
+            })?;
+            let resolved_parent = parent.canonicalize()?;
+            if !resolved_parent.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "socket parent is not a directory",
+                ));
+            }
+            Ok(resolved_parent.join(file_name))
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -941,16 +1050,18 @@ mod tests {
     // --- decide_network_notification tests (issue #685) ---------------------
     //
     // These exercise the proxy-only seccomp fallback path that runs on
-    // Landlock < V4 kernels. The key invariant: `AF_UNIX` must be allowed
-    // through so Landlock's filesystem rules decide access, matching V4+
-    // behavior where `LANDLOCK_ACCESS_NET_*` only scopes TCP.
+    // Landlock < V4 kernels. The key invariant: pathname `AF_UNIX` must be
+    // checked against the explicit Unix-socket allowlist instead of being
+    // decided by TCP proxy ports.
 
     mod network_decision {
         use super::super::{NetworkDecision, SupervisorConfig, decide_network_notification};
         use nix::libc;
-        use nono::ApprovalBackend;
         use nono::sandbox::{SYS_BIND, SYS_CONNECT, SockaddrInfo, UnixSocketKind};
         use nono::supervisor::{ApprovalDecision, CapabilityRequest};
+        use nono::{ApprovalBackend, UnixSocketCapability, UnixSocketMode};
+        use std::os::unix::net::UnixListener;
+        use std::path::{Path, PathBuf};
 
         struct DenyAllBackend;
         impl ApprovalBackend for DenyAllBackend {
@@ -971,6 +1082,7 @@ mod tests {
             backend: &'a DenyAllBackend,
             proxy_port: u16,
             proxy_bind_ports: Vec<u16>,
+            unix_socket_allowlist: &'a [UnixSocketCapability],
         ) -> SupervisorConfig<'a> {
             static REDACTION_POLICY: std::sync::LazyLock<nono::ScrubPolicy> =
                 std::sync::LazyLock::new(nono::ScrubPolicy::secure_default);
@@ -987,10 +1099,11 @@ mod tests {
                 allow_launch_services_active: false,
                 proxy_port,
                 proxy_bind_ports,
+                unix_socket_allowlist,
             }
         }
 
-        fn unix_pathname() -> SockaddrInfo {
+        fn unix_pathname(path: &Path) -> SockaddrInfo {
             // Matches what read_notif_sockaddr() produces for a
             // filesystem-backed AF_UNIX socket (e.g. /tmp/test.sock).
             SockaddrInfo {
@@ -998,6 +1111,7 @@ mod tests {
                 port: 0,
                 is_loopback: true,
                 unix_kind: Some(UnixSocketKind::Pathname),
+                unix_path: Some(path.to_path_buf()),
             }
         }
 
@@ -1007,6 +1121,7 @@ mod tests {
                 port: 0,
                 is_loopback: true,
                 unix_kind: Some(UnixSocketKind::Abstract),
+                unix_path: None,
             }
         }
 
@@ -1016,6 +1131,7 @@ mod tests {
                 port: 0,
                 is_loopback: true,
                 unix_kind: Some(UnixSocketKind::Unnamed),
+                unix_path: None,
             }
         }
 
@@ -1025,6 +1141,7 @@ mod tests {
                 port,
                 is_loopback: true,
                 unix_kind: None,
+                unix_path: None,
             }
         }
 
@@ -1034,50 +1151,134 @@ mod tests {
                 port,
                 is_loopback: false,
                 unix_kind: None,
+                unix_path: None,
             }
         }
 
-        /// Regression test for #685: pathname `bind(AF_UNIX, "/tmp/…")` was
-        /// being denied because `SockaddrInfo.port` is 0 for unix sockets
-        /// and port 0 is never in `proxy_bind_ports`. It must now allow so
-        /// Landlock's filesystem rules decide whether the path is reachable.
+        fn socket_path(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+            dir.path().join(name)
+        }
+
+        /// Pathname `bind(AF_UNIX, "/tmp/…")` is mediated by explicit
+        /// Unix-socket grants, not TCP bind ports.
         #[test]
-        fn af_unix_pathname_bind_is_allowed() {
+        fn af_unix_pathname_bind_is_allowed_by_connect_bind_grant() {
             let backend = DenyAllBackend;
-            let config = make_config(&backend, 0, Vec::new());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = socket_path(&dir, "test.sock");
+            let allowlist = vec![
+                UnixSocketCapability::new_file(&path, UnixSocketMode::ConnectBind)
+                    .expect("socket grant"),
+            ];
+            let config = make_config(&backend, 0, Vec::new(), &allowlist);
             assert_eq!(
-                decide_network_notification(SYS_BIND, &unix_pathname(), &config),
+                decide_network_notification(SYS_BIND, &unix_pathname(&path), &config),
                 NetworkDecision::Allow,
-                "pathname AF_UNIX bind must be allowed so Landlock fs rules govern access"
+                "pathname AF_UNIX bind must be allowed when a connect+bind grant covers it"
             );
         }
 
-        /// Regression test for #685: pathname `connect(AF_UNIX, "/tmp/…")`
-        /// was the failure mode for `tsx`'s IPC pipe and other runtimes.
+        /// Pathname `connect(AF_UNIX, "/tmp/…")` is allowed only when the
+        /// canonical socket path matches the explicit allowlist.
         #[test]
-        fn af_unix_pathname_connect_is_allowed() {
+        fn af_unix_pathname_connect_is_allowed_by_grant() {
             let backend = DenyAllBackend;
-            let config = make_config(&backend, 8080, Vec::new());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = socket_path(&dir, "test.sock");
+            let _listener = UnixListener::bind(&path).expect("bind unix listener");
+            let allowlist = vec![
+                UnixSocketCapability::new_file(&path, UnixSocketMode::Connect)
+                    .expect("socket grant"),
+            ];
+            let config = make_config(&backend, 8080, Vec::new(), &allowlist);
             assert_eq!(
-                decide_network_notification(SYS_CONNECT, &unix_pathname(), &config),
+                decide_network_notification(SYS_CONNECT, &unix_pathname(&path), &config),
                 NetworkDecision::Allow,
-                "pathname AF_UNIX connect must be allowed independent of proxy_port"
+                "pathname AF_UNIX connect must be allowed when a connect grant covers it"
+            );
+        }
+
+        #[test]
+        fn af_unix_pathname_connect_without_grant_is_denied() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = socket_path(&dir, "test.sock");
+            let _listener = UnixListener::bind(&path).expect("bind unix listener");
+            let config = make_config(&backend, 8080, Vec::new(), &[]);
+            assert_eq!(
+                decide_network_notification(SYS_CONNECT, &unix_pathname(&path), &config),
+                NetworkDecision::Deny
+            );
+        }
+
+        #[test]
+        fn af_unix_pathname_bind_requires_connect_bind_grant() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = socket_path(&dir, "test.sock");
+            let allowlist = vec![
+                UnixSocketCapability::new_file(&path, UnixSocketMode::Connect)
+                    .expect("socket grant"),
+            ];
+            let config = make_config(&backend, 0, Vec::new(), &allowlist);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&path), &config),
+                NetworkDecision::Deny
+            );
+        }
+
+        #[test]
+        fn af_unix_dir_children_does_not_allow_nested_path() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let nested = dir.path().join("nested");
+            std::fs::create_dir(&nested).expect("create nested dir");
+            let direct_path = socket_path(&dir, "direct.sock");
+            let nested_path = nested.join("nested.sock");
+            let allowlist = vec![
+                UnixSocketCapability::new_dir(dir.path(), UnixSocketMode::ConnectBind)
+                    .expect("socket dir grant"),
+            ];
+            let config = make_config(&backend, 0, Vec::new(), &allowlist);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&direct_path), &config),
+                NetworkDecision::Allow
+            );
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&nested_path), &config),
+                NetworkDecision::Deny
+            );
+        }
+
+        #[test]
+        fn af_unix_dir_subtree_allows_nested_path() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let nested = dir.path().join("nested");
+            std::fs::create_dir(&nested).expect("create nested dir");
+            let nested_path = nested.join("nested.sock");
+            let allowlist = vec![
+                UnixSocketCapability::new_dir_subtree(dir.path(), UnixSocketMode::ConnectBind)
+                    .expect("socket subtree grant"),
+            ];
+            let config = make_config(&backend, 0, Vec::new(), &allowlist);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&nested_path), &config),
+                NetworkDecision::Allow
             );
         }
 
         /// Scope-limit test: abstract-namespace AF_UNIX (`sun_path[0] == 0`)
-        /// is *not* governed by Landlock filesystem rules, so a blanket
-        /// allow would open a covert IPC channel that bypasses the sandbox.
-        /// #685 is explicitly about filesystem-path sockets; abstract stays
-        /// denied pending #696 (explicit allowlist).
+        /// is not covered by pathname socket capabilities, so it stays
+        /// denied.
         #[test]
         fn af_unix_abstract_is_denied() {
             let backend = DenyAllBackend;
-            let config = make_config(&backend, 0, Vec::new());
+            let config = make_config(&backend, 0, Vec::new(), &[]);
             assert_eq!(
                 decide_network_notification(SYS_BIND, &unix_abstract(), &config),
                 NetworkDecision::Deny,
-                "abstract AF_UNIX must be denied — Landlock fs rules do not reach it"
+                "abstract AF_UNIX must be denied because pathname grants do not cover it"
             );
             assert_eq!(
                 decide_network_notification(SYS_CONNECT, &unix_abstract(), &config),
@@ -1086,12 +1287,11 @@ mod tests {
         }
 
         /// Unnamed AF_UNIX (`addrlen == 2`) has no path to check, so fail
-        /// closed — consistent with abstract handling and outside #685's
-        /// scope.
+        /// closed — consistent with abstract handling.
         #[test]
         fn af_unix_unnamed_is_denied() {
             let backend = DenyAllBackend;
-            let config = make_config(&backend, 0, Vec::new());
+            let config = make_config(&backend, 0, Vec::new(), &[]);
             assert_eq!(
                 decide_network_notification(SYS_BIND, &unix_unnamed(), &config),
                 NetworkDecision::Deny
@@ -1105,7 +1305,7 @@ mod tests {
         #[test]
         fn af_inet_connect_to_external_host_denied() {
             let backend = DenyAllBackend;
-            let config = make_config(&backend, 8080, Vec::new());
+            let config = make_config(&backend, 8080, Vec::new(), &[]);
             assert_eq!(
                 decide_network_notification(SYS_CONNECT, &inet_external(8080), &config),
                 NetworkDecision::Deny
@@ -1117,7 +1317,7 @@ mod tests {
         #[test]
         fn af_inet_bind_on_disallowed_port_denied() {
             let backend = DenyAllBackend;
-            let config = make_config(&backend, 0, vec![3000]);
+            let config = make_config(&backend, 0, vec![3000], &[]);
             assert_eq!(
                 decide_network_notification(SYS_BIND, &inet_loopback(4000), &config),
                 NetworkDecision::Deny
