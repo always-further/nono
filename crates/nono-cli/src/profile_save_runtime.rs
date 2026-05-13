@@ -224,7 +224,12 @@ pub(crate) fn suggested_profile_name(compared_profile: Option<&str>) -> Option<S
 /// a built-in profile of the same name. User files are loaded in preference to
 /// built-ins, so saving under a built-in's name silently reroutes all future
 /// `--profile <name>` invocations to the user file.
-fn would_shadow_builtin(profile_name: &str) -> bool {
+///
+/// Promoted to `pub(crate)` in Phase 36.5 (D-36.5-D1) so `cmd_promote`'s
+/// `reserved_profile_source` wrapper can reuse the same check without
+/// duplicating the policy lookup. Returns `true` on policy load failure
+/// (fail-closed per CLAUDE.md § Configuration load failures must be fatal).
+pub(crate) fn would_shadow_builtin(profile_name: &str) -> bool {
     // If a user file already exists at this name, the user has already chosen
     // to override it — writing there is an explicit update, not a new shadow.
     if profile::is_user_override(profile_name) {

@@ -128,6 +128,22 @@ fn main() {
 
     if let Err(e) = run_cli(cli) {
         error!("{}", e);
+        // Phase 36.5 D-36.5-A3 / D-36.5-D3: ActionRequired surfaces the
+        // multi-line resolution text from `resolve_via` to stderr, then exits
+        // non-zero. C FFI consumers see this as ErrConfigParse (-9) per D-36.5-B3.
+        if let nono::NonoError::ActionRequired {
+            expected,
+            actual,
+            resolve_via,
+        } = &e
+        {
+            eprintln!("nono: action required: {resolve_via}");
+            if !expected.is_empty() && !actual.is_empty() {
+                eprintln!("  expected: {expected}");
+                eprintln!("  actual:   {actual}");
+            }
+            std::process::exit(2);
+        }
         eprintln!("nono: {}", e);
         std::process::exit(1);
     }

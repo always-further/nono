@@ -6,8 +6,8 @@
 
 use crate::cli::{
     ProfileCmdArgs, ProfileCommands, ProfileDiffArgs, ProfileGroupsArgs, ProfileGuideArgs,
-    ProfileInitArgs, ProfileListArgs, ProfilePatchArgs, ProfileSchemaArgs, ProfileShowArgs,
-    ProfileValidateArgs,
+    ProfileInitArgs, ProfileListArgs, ProfilePatchArgs, ProfilePromoteArgs, ProfileSchemaArgs,
+    ProfileShowArgs, ProfileValidateArgs,
 };
 use crate::config::embedded;
 use crate::deprecated_schema::{DeprecationCounter, LegacyPolicyPatch, GLOBAL_DEPRECATION_COUNTER};
@@ -19,7 +19,8 @@ use nono::{NonoError, Result};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::path::Path;
 
 /// Serialize a value to pretty-printed JSON, propagating serialization errors.
 fn to_json(val: &serde_json::Value) -> Result<String> {
@@ -45,6 +46,7 @@ pub fn run_profile(args: ProfileCmdArgs) -> Result<()> {
         ProfileCommands::Groups(args) => cmd_groups(args),
         ProfileCommands::Schema(args) => cmd_schema(args),
         ProfileCommands::Guide(args) => cmd_guide(args),
+        ProfileCommands::Promote(args) => cmd_promote(args),
     }
 }
 
@@ -60,6 +62,151 @@ pub fn run_profile(args: ProfileCmdArgs) -> Result<()> {
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Symlink-safe file helpers (Phase 36.5 D-36.5-B4 / T-36.5-04 / T-36.5-05)
+// ---------------------------------------------------------------------------
+
+/// Read a regular file with symlink-safe semantics.
+///
+/// - Cross-platform: `symlink_metadata` precheck refuses any path whose
+///   `file_type().is_symlink()` returns true (closes TOCTOU on the open(2)
+///   call).
+/// - Unix: also adds `nix::libc::O_NOFOLLOW` to the `OpenOptions` for
+///   defense in depth (refuses symlinks at the kernel level).
+/// - Windows: relies on the precheck only (no `O_NOFOLLOW` analog).
+///
+/// Mitigates T-36.5-05 (symlink escape). Adapted from upstream 829c341a
+/// `read_regular_file` — D-20 manual-replay shape.
+fn read_regular_file(path: &Path, label: &str) -> nono::Result<Vec<u8>> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| nono::NonoError::ProfileRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(nono::NonoError::ProfileParse(format!(
+            "{label} must not be a symlink: {}",
+            path.display()
+        )));
+    }
+    if !meta.file_type().is_file() {
+        return Err(nono::NonoError::ProfileParse(format!(
+            "{label} is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| nono::NonoError::ProfileRead {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| nono::NonoError::ProfileRead {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+    Ok(bytes)
+}
+
+/// Check whether a path exists AND is a regular file (not symlink, not dir).
+fn regular_file_exists(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta.file_type().is_file(),
+        Err(_) => false,
+    }
+}
+
+/// Atomic write with PID-suffixed tempfile + fsync. Reliable for cross-
+/// directory rename targets (e.g., promote: `profile-drafts/<n>.json` →
+/// `profiles/<n>.json` on same volume). Adapted from upstream 829c341a.
+///
+/// Mitigates T-36.5-04 (atomic-write TOCTOU). On Windows `fs::rename` is
+/// atomic on same-volume targets via MoveFileExW + MOVEFILE_REPLACE_EXISTING.
+/// All paths under `nono_config_dir()` share the same volume by construction.
+fn atomic_write_file(path: &Path, contents: &[u8]) -> nono::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        nono::NonoError::ProfileParse(format!("invalid profile path {}", path.display()))
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| nono::NonoError::ProfileRead {
+        path: parent.to_path_buf(),
+        source: e,
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        nono::NonoError::ProfileParse(format!("invalid profile path {}", path.display()))
+    })?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(file_name);
+    tmp_name.push(format!(".tmp.{}", std::process::id()));
+    let tmp_path = parent.join(tmp_name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp_path)
+        .map_err(|e| nono::NonoError::ProfileRead {
+            path: tmp_path.clone(),
+            source: e,
+        })?;
+    if let Err(error) = file.write_all(contents) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(nono::NonoError::ProfileRead {
+            path: tmp_path,
+            source: error,
+        });
+    }
+    if let Err(error) = file.sync_all() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(nono::NonoError::ProfileRead {
+            path: tmp_path,
+            source: error,
+        });
+    }
+    drop(file);
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(nono::NonoError::ProfileRead {
+            path: path.to_path_buf(),
+            source: error,
+        });
+    }
+    Ok(())
+}
+
+/// Verify the sidecar `<name>.base` hash against the SHA-256 of the current
+/// canonical profile bytes. Returns `Err(ActionRequired)` on mismatch with
+/// `resolve_via: "nono profile init --draft --refresh <name>"`.
+///
+/// Mitigates T-36.5-01 (stale-draft replay attack).
+fn verify_base_hash(base_path: &Path, current_bytes: &[u8], name: &str) -> nono::Result<()> {
+    let base_bytes = read_regular_file(base_path, "profile draft base hash")?;
+    let provided = std::str::from_utf8(&base_bytes)
+        .map_err(|e| nono::NonoError::ProfileParse(format!("base hash is not UTF-8: {e}")))?
+        .trim();
+    if provided.len() != 64 || !provided.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(nono::NonoError::ProfileParse(format!(
+            "invalid base hash in {}",
+            base_path.display()
+        )));
+    }
+    let current = sha256_hex(current_bytes);
+    if !provided.eq_ignore_ascii_case(&current) {
+        return Err(nono::NonoError::ActionRequired {
+            expected: provided.to_string(),
+            actual: current,
+            resolve_via: format!("nono profile init --draft --refresh {name}"),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -156,10 +303,8 @@ fn cmd_init(args: ProfileInitArgs) -> Result<()> {
             })?;
             let hash = sha256_hex(&canonical_bytes);
             let base_path = profile::get_user_profile_draft_base_path(&args.name)?;
-            // Atomic-write sidecar (.base file)
-            let tmp_path = base_path.with_extension("base.tmp");
-            fs::write(&tmp_path, &hash).map_err(NonoError::Io)?;
-            fs::rename(&tmp_path, &base_path).map_err(NonoError::Io)?;
+            // Atomic-write sidecar (.base file) via canonical helper (T-36.5-04)
+            atomic_write_file(&base_path, hash.as_bytes())?;
         }
     }
 
@@ -207,12 +352,337 @@ fn cmd_init_refresh(name: &str) -> Result<()> {
     })?;
     let hash_hex = sha256_hex(&canonical_bytes);
     let base_path = profile::get_user_profile_draft_base_path(name)?;
-    // Atomic-write sidecar
-    let tmp_path = base_path.with_extension("base.tmp");
-    fs::write(&tmp_path, &hash_hex).map_err(NonoError::Io)?;
-    fs::rename(&tmp_path, &base_path).map_err(NonoError::Io)?;
+    // Atomic-write sidecar via canonical helper (T-36.5-04)
+    atomic_write_file(&base_path, hash_hex.as_bytes())?;
     eprintln!("{}: refreshed base-hash for draft '{name}'", prefix());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// nono profile promote (Phase 36.5 D-36.5-A3 / D-36.5-D1..D4)
+// ---------------------------------------------------------------------------
+
+/// Cross-platform interactive [y/N] prompt for promote confirmation.
+///
+/// On Unix: delegates to `profile_save_runtime::confirm` which reads from
+/// `/dev/tty` for reliable stdin behavior. On Windows: reads from stdin
+/// directly (no /dev/tty analog). `profile_save_runtime` is
+/// `#[cfg(not(target_os = "windows"))]`-gated so we cannot use it here.
+fn promote_confirm(prompt: &str, default_yes: bool) -> nono::Result<bool> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        crate::profile_save_runtime::confirm(prompt, default_yes)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::BufRead;
+        eprint!("{prompt} [{}] ", if default_yes { "Y/n" } else { "y/N" });
+        let stdin = std::io::stdin();
+        let line = stdin
+            .lock()
+            .lines()
+            .next()
+            .ok_or_else(|| nono::NonoError::ProfileParse("failed to read stdin".to_string()))?
+            .map_err(nono::NonoError::Io)?;
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+            return Ok(default_yes);
+        }
+        Ok(trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes"))
+    }
+}
+
+/// Shadow-detection wrapper. Returns `Some("built-in")` or
+/// `Some("package-managed")` if the profile name is reserved; `None` if
+/// promote may proceed. Phase 36.5 D-36.5-D1.
+///
+/// Built-in check is inlined here (not delegated to
+/// `profile_save_runtime::would_shadow_builtin`) because
+/// `profile_save_runtime` is `#[cfg(not(target_os = "windows"))]`-gated.
+/// Semantics are identical to `profile_save_runtime::would_shadow_builtin`:
+/// fail-closed on policy load error; returns false if user already overrides.
+fn reserved_profile_source(name: &str) -> nono::Result<Option<&'static str>> {
+    // Built-in check: replicate would_shadow_builtin logic inline for cross-platform
+    // availability. profile_save_runtime is Unix-only.
+    let shadows_builtin = if crate::profile::is_user_override(name) {
+        false
+    } else {
+        match crate::policy::load_embedded_policy() {
+            Ok(policy) => policy.profiles.contains_key(name),
+            // Fail-closed: refuse if policy can't be loaded (CLAUDE.md § Fail Secure)
+            Err(_) => true,
+        }
+    };
+    if shadows_builtin {
+        return Ok(Some("built-in"));
+    }
+    // Package-managed check: get_package_for_profile returns Option<PathBuf>.
+    // Drift correction (RESEARCH §Pitfall 2): upstream uses find_pack_store_profile
+    // which does NOT exist in fork. Use get_package_for_profile at profile/mod.rs:1936.
+    if crate::profile::get_package_for_profile(name).is_some() {
+        return Ok(Some("package-managed"));
+    }
+    Ok(None)
+}
+
+/// Build the multi-line resolution string for shadow refusals.
+/// D-36.5-D3 — constant-template + name only; NO env-var / credential / URL
+/// embedding (V7 security constraint).
+fn shadow_resolve_via(name: &str, source: &str) -> String {
+    let pack_clause = if source == "package-managed" {
+        "\n               or remove the source package first (`nono package remove <ref>`)"
+            .to_string()
+    } else {
+        String::new()
+    };
+    format!(
+        "rename the draft (`nono profile init --draft <new-name>`)\n               \
+         or override at the user layer (`nono profile init --force {name}` then edit){pack_clause}"
+    )
+}
+
+/// Promote a profile draft to canonical. Performs (in order):
+///
+/// 1. Name validation via `is_valid_profile_name`.
+/// 2. Path resolution (draft + canonical + sidecar).
+/// 3. Shadow-detection (refuse-always on built-in / package-managed; NO --force per D-36.5-D2).
+/// 4. Base-hash verification (skipped if no canonical — first-time promote).
+/// 5. Diff render (one-line summary if --yes; structural diff otherwise).
+/// 6. Prompt [y/N] unless --yes.
+/// 7. Atomic rename `profile-drafts/<n>.json` → `profiles/<n>.json`.
+/// 8. Sidecar `.base` cleanup.
+///
+/// Phase 36.5 D-36.5-A3 + D-36.5-D1..D4.
+fn cmd_promote(args: ProfilePromoteArgs) -> nono::Result<()> {
+    // 1. Validate name (mitigates path traversal — T-36.5-05 + CLAUDE.md req)
+    if !crate::profile::is_valid_profile_name(&args.name) {
+        return Err(nono::NonoError::ProfileParse(format!(
+            "Invalid profile name '{}' (alphanumeric + hyphens only)",
+            args.name
+        )));
+    }
+
+    // 2. Resolve paths
+    let draft_path = crate::profile::get_user_profile_draft_path(&args.name)?;
+    let canonical_path = crate::profile::get_user_profile_path(&args.name)?;
+    let base_path = crate::profile::get_user_profile_draft_base_path(&args.name)?;
+
+    // Confirm draft exists
+    if !regular_file_exists(&draft_path) {
+        return Err(nono::NonoError::ProfileParse(format!(
+            "no draft to promote at {}",
+            draft_path.display()
+        )));
+    }
+
+    // 3. Shadow-detection — refuse-always (D-36.5-D2 NO --force)
+    if let Some(source) = reserved_profile_source(&args.name)? {
+        return Err(nono::NonoError::ActionRequired {
+            expected: canonical_path.display().to_string(),
+            actual: draft_path.display().to_string(),
+            resolve_via: format!(
+                "profile '{}' is a {} profile and cannot be promoted over.\n  \
+                 Resolve via: {}",
+                args.name,
+                source,
+                shadow_resolve_via(&args.name, source),
+            ),
+        });
+    }
+
+    // 4. Base-hash verification (skip if no canonical — first-time promote)
+    let first_time = !regular_file_exists(&canonical_path);
+    if !first_time {
+        let canonical_bytes = read_regular_file(&canonical_path, "canonical profile")?;
+        verify_base_hash(&base_path, &canonical_bytes, &args.name)?;
+    }
+
+    // 5. Render diff (skipped one-line for --yes per Pitfall 8)
+    let draft_bytes = read_regular_file(&draft_path, "profile draft")?;
+    if !first_time {
+        if args.yes {
+            // One-line summary for CI ergonomics
+            let canonical_bytes = read_regular_file(&canonical_path, "canonical profile")?;
+            let summary = profile_diff_summary(&canonical_bytes, &draft_bytes);
+            eprintln!("{}: Promoting draft '{}': {}", prefix(), args.name, summary);
+        } else {
+            eprintln!("Diff against {}:", canonical_path.display());
+            let canonical_bytes = read_regular_file(&canonical_path, "canonical profile")?;
+            render_profile_diff(&canonical_bytes, &draft_bytes);
+            // 6. Interactive prompt
+            if !promote_confirm("Promote draft?", false)? {
+                eprintln!("{}: promote aborted", prefix());
+                return Ok(());
+            }
+        }
+    } else if !args.yes {
+        // First-time promote — still prompt for review
+        eprintln!("First-time promote (no existing canonical profile).");
+        if !promote_confirm("Promote draft?", false)? {
+            eprintln!("{}: promote aborted", prefix());
+            return Ok(());
+        }
+    } else {
+        eprintln!("{}: First-time promote of draft '{}'", prefix(), args.name);
+    }
+
+    // 7. Atomic rename — same-volume atomicity on Windows MoveFileExW + POSIX
+    let canonical_parent = canonical_path.parent().ok_or_else(|| {
+        nono::NonoError::ProfileParse(format!(
+            "invalid canonical path {}",
+            canonical_path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(canonical_parent).map_err(nono::NonoError::Io)?;
+    std::fs::rename(&draft_path, &canonical_path).map_err(nono::NonoError::Io)?;
+
+    // 8. Cleanup sidecar (best-effort — promote already succeeded)
+    if regular_file_exists(&base_path) {
+        let _ = std::fs::remove_file(&base_path);
+    }
+
+    eprintln!("{}: promoted to {}", prefix(), canonical_path.display());
+    Ok(())
+}
+
+/// One-line summary "N added, M removed, K changed" for --yes flows.
+/// Loads both byte slices as `Profile` via `parse_profile_bytes` (Task C2-04),
+/// computes counts, returns a single string.
+///
+/// `added` / `removed` / `changed` are summed across five BTreeSet diffs:
+/// `security.groups`, `filesystem.deny`, `filesystem.bypass_protection`,
+/// `commands.allow`, `commands.deny`. Per D-36.5-D4.
+fn profile_diff_summary(canonical_bytes: &[u8], draft_bytes: &[u8]) -> String {
+    match (
+        crate::profile::parse_profile_bytes(canonical_bytes),
+        crate::profile::parse_profile_bytes(draft_bytes),
+    ) {
+        (Ok(p1), Ok(p2)) => {
+            // 1. security.groups
+            let g1: BTreeSet<&str> = p1.security.groups.iter().map(|s| s.as_str()).collect();
+            let g2: BTreeSet<&str> = p2.security.groups.iter().map(|s| s.as_str()).collect();
+            let groups_added = g2.difference(&g1).count();
+            let groups_removed = g1.difference(&g2).count();
+            // 2. filesystem.deny
+            let fd1: BTreeSet<&str> = p1.filesystem.deny.iter().map(|s| s.as_str()).collect();
+            let fd2: BTreeSet<&str> = p2.filesystem.deny.iter().map(|s| s.as_str()).collect();
+            let fd_added = fd2.difference(&fd1).count();
+            let fd_removed = fd1.difference(&fd2).count();
+            // 3. filesystem.bypass_protection
+            let fb1: BTreeSet<&str> = p1
+                .filesystem
+                .bypass_protection
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            let fb2: BTreeSet<&str> = p2
+                .filesystem
+                .bypass_protection
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            let fb_added = fb2.difference(&fb1).count();
+            let fb_removed = fb1.difference(&fb2).count();
+            // 4. commands.allow
+            let ca1: BTreeSet<&str> = p1.commands.allow.iter().map(|s| s.as_str()).collect();
+            let ca2: BTreeSet<&str> = p2.commands.allow.iter().map(|s| s.as_str()).collect();
+            let ca_added = ca2.difference(&ca1).count();
+            let ca_removed = ca1.difference(&ca2).count();
+            // 5. commands.deny
+            let cd1: BTreeSet<&str> = p1.commands.deny.iter().map(|s| s.as_str()).collect();
+            let cd2: BTreeSet<&str> = p2.commands.deny.iter().map(|s| s.as_str()).collect();
+            let cd_added = cd2.difference(&cd1).count();
+            let cd_removed = cd1.difference(&cd2).count();
+
+            let added = groups_added + fd_added + fb_added + ca_added + cd_added;
+            let removed = groups_removed + fd_removed + fb_removed + ca_removed + cd_removed;
+            let changed = std::cmp::min(groups_added, groups_removed)
+                + std::cmp::min(fd_added, fd_removed)
+                + std::cmp::min(fb_added, fb_removed)
+                + std::cmp::min(ca_added, ca_removed)
+                + std::cmp::min(cd_added, cd_removed);
+            format!("{added} added, {removed} removed, {changed} changed")
+        }
+        _ => "(could not parse profiles for summary)".to_string(),
+    }
+}
+
+/// Render a structural JSON-aware diff between two Profile byte slices to
+/// stderr. Extracted from `cmd_diff` body (D-36.5-D4) so `cmd_promote`
+/// shares one rendering surface.
+///
+/// Renders five BTreeSet diff surfaces:
+/// 1. `security.groups`
+/// 2. `filesystem.deny`
+/// 3. `filesystem.bypass_protection`
+/// 4. `commands.allow`
+/// 5. `commands.deny`
+fn render_profile_diff(canonical_bytes: &[u8], draft_bytes: &[u8]) {
+    match (
+        crate::profile::parse_profile_bytes(canonical_bytes),
+        crate::profile::parse_profile_bytes(draft_bytes),
+    ) {
+        (Ok(p1), Ok(p2)) => {
+            // 1. security.groups
+            let g1: BTreeSet<&str> = p1.security.groups.iter().map(|s| s.as_str()).collect();
+            let g2: BTreeSet<&str> = p2.security.groups.iter().map(|s| s.as_str()).collect();
+            for added in g2.difference(&g1) {
+                eprintln!("  + group: {added}");
+            }
+            for removed in g1.difference(&g2) {
+                eprintln!("  - group: {removed}");
+            }
+            // 2. filesystem.deny
+            let fd1: BTreeSet<&str> = p1.filesystem.deny.iter().map(|s| s.as_str()).collect();
+            let fd2: BTreeSet<&str> = p2.filesystem.deny.iter().map(|s| s.as_str()).collect();
+            for added in fd2.difference(&fd1) {
+                eprintln!("  + filesystem.deny: {added}");
+            }
+            for removed in fd1.difference(&fd2) {
+                eprintln!("  - filesystem.deny: {removed}");
+            }
+            // 3. filesystem.bypass_protection
+            let fb1: BTreeSet<&str> = p1
+                .filesystem
+                .bypass_protection
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            let fb2: BTreeSet<&str> = p2
+                .filesystem
+                .bypass_protection
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            for added in fb2.difference(&fb1) {
+                eprintln!("  + filesystem.bypass_protection: {added}");
+            }
+            for removed in fb1.difference(&fb2) {
+                eprintln!("  - filesystem.bypass_protection: {removed}");
+            }
+            // 4. commands.allow
+            let ca1: BTreeSet<&str> = p1.commands.allow.iter().map(|s| s.as_str()).collect();
+            let ca2: BTreeSet<&str> = p2.commands.allow.iter().map(|s| s.as_str()).collect();
+            for added in ca2.difference(&ca1) {
+                eprintln!("  + commands.allow: {added}");
+            }
+            for removed in ca1.difference(&ca2) {
+                eprintln!("  - commands.allow: {removed}");
+            }
+            // 5. commands.deny
+            let cd1: BTreeSet<&str> = p1.commands.deny.iter().map(|s| s.as_str()).collect();
+            let cd2: BTreeSet<&str> = p2.commands.deny.iter().map(|s| s.as_str()).collect();
+            for added in cd2.difference(&cd1) {
+                eprintln!("  + commands.deny: {added}");
+            }
+            for removed in cd1.difference(&cd2) {
+                eprintln!("  - commands.deny: {removed}");
+            }
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("  (could not parse profiles for diff render: {e})");
+        }
+    }
 }
 
 /// Build a skeleton profile JSON value with controlled field ordering.
@@ -3295,6 +3765,232 @@ mod tests {
         assert!(
             result.is_err(),
             "excluding required group should fail validation"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helper tests (Phase 36.5 Task C2-02)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn sha256_hex_of_known_bytes() {
+        // SHA-256 of empty input is well-known
+        let result = sha256_hex(b"");
+        assert_eq!(
+            result,
+            "e3b0c44298fc1c149afbf4c8996fb924\
+             27ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_produces_lowercase_hex() {
+        let result = sha256_hex(b"hello");
+        assert_eq!(result.len(), 64, "SHA-256 hex must be 64 chars");
+        assert!(
+            result.chars().all(|c| c.is_ascii_hexdigit()),
+            "SHA-256 hex must be lowercase hexadecimal: {result}"
+        );
+    }
+
+    #[test]
+    fn read_regular_file_reads_normal_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("regular.txt");
+        let content = b"hello world 1234567890";
+        std::fs::write(&path, content).expect("write");
+        let result = read_regular_file(&path, "test file").expect("read_regular_file");
+        assert_eq!(result, content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_regular_file_rejects_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        let symlink_path = dir.path().join("link.txt");
+        std::fs::write(&target, b"content").expect("write target");
+        std::os::unix::fs::symlink(&target, &symlink_path).expect("create symlink");
+        let result = read_regular_file(&symlink_path, "test file");
+        assert!(result.is_err(), "should reject symlink");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("symlink"),
+            "error message should mention 'symlink': {msg}"
+        );
+    }
+
+    #[test]
+    fn read_regular_file_rejects_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = read_regular_file(dir.path(), "test dir");
+        assert!(result.is_err(), "should reject directory");
+        let msg = result
+            .expect_err("expected error for directory")
+            .to_string();
+        assert!(
+            msg.contains("not a regular file"),
+            "error message should mention 'not a regular file': {msg}"
+        );
+    }
+
+    #[test]
+    fn read_regular_file_rejects_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("nonexistent.txt");
+        let result = read_regular_file(&missing, "missing file");
+        assert!(result.is_err(), "should error on missing file");
+        // Should be a ProfileRead error (io error)
+        assert!(
+            matches!(
+                result.expect_err("expected error for missing file"),
+                nono::NonoError::ProfileRead { .. }
+            ),
+            "expected ProfileRead error for missing file"
+        );
+    }
+
+    #[test]
+    fn atomic_write_file_creates_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("output.txt");
+        let content = b"atomic write content";
+        atomic_write_file(&path, content).expect("atomic_write_file");
+        assert!(path.exists(), "target file should exist after atomic write");
+        let read_back = std::fs::read(&path).expect("read back");
+        assert_eq!(read_back, content);
+    }
+
+    #[test]
+    fn atomic_write_file_overwrites_existing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("overwrite.txt");
+        std::fs::write(&path, b"old content").expect("write old");
+        let new_content = b"new content";
+        atomic_write_file(&path, new_content).expect("atomic_write_file overwrite");
+        let read_back = std::fs::read(&path).expect("read back");
+        assert_eq!(read_back, new_content, "should overwrite existing content");
+        // No .tmp.* files should leak in parent dir
+        let leaked: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "no .tmp.* files should remain after atomic write"
+        );
+    }
+
+    #[test]
+    fn atomic_write_file_uses_pid_suffix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("subdir").join("file.txt");
+        // We can only indirectly verify PID suffix: the parent dir must be
+        // created by the helper (subdir does not pre-exist).
+        atomic_write_file(&path, b"content").expect("atomic_write_file with mkdir");
+        assert!(
+            path.exists(),
+            "target should exist even when parent was created"
+        );
+    }
+
+    #[test]
+    fn verify_base_hash_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical_bytes = b"canonical profile content";
+        let hash = sha256_hex(canonical_bytes);
+        let base_path = dir.path().join("myagent.base");
+        std::fs::write(&base_path, &hash).expect("write base hash");
+        let result = verify_base_hash(&base_path, canonical_bytes, "myagent");
+        assert!(
+            result.is_ok(),
+            "hash match should return Ok(()): {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_base_hash_mismatch_returns_action_required() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original_bytes = b"original content";
+        let hash_of_original = sha256_hex(original_bytes);
+        let base_path = dir.path().join("myagent.base");
+        std::fs::write(&base_path, &hash_of_original).expect("write base hash");
+        // Now verify against DIFFERENT content
+        let modified_bytes = b"modified content";
+        let result = verify_base_hash(&base_path, modified_bytes, "myagent");
+        assert!(result.is_err(), "hash mismatch should return Err");
+        let err = result.expect_err("expected ActionRequired error on hash mismatch");
+        match &err {
+            nono::NonoError::ActionRequired {
+                expected,
+                actual,
+                resolve_via,
+            } => {
+                assert_eq!(
+                    expected, &hash_of_original,
+                    "expected should be sidecar hash"
+                );
+                assert_eq!(
+                    actual,
+                    &sha256_hex(modified_bytes),
+                    "actual should be current hash"
+                );
+                assert!(
+                    resolve_via.contains("--refresh"),
+                    "resolve_via should contain '--refresh': {resolve_via}"
+                );
+            }
+            other => panic!("expected ActionRequired, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_base_hash_rejects_invalid_hex() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base_path = dir.path().join("invalid.base");
+        std::fs::write(&base_path, b"not-64-hex").expect("write invalid hash");
+        let result = verify_base_hash(&base_path, b"any content", "myagent");
+        assert!(result.is_err(), "invalid hex should fail");
+        let msg = result
+            .expect_err("expected error for invalid hex")
+            .to_string();
+        assert!(
+            msg.contains("invalid base hash"),
+            "error should mention 'invalid base hash': {msg}"
+        );
+    }
+
+    #[test]
+    fn regular_file_exists_true_for_regular() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("exists.txt");
+        std::fs::write(&path, b"content").expect("write");
+        assert!(
+            regular_file_exists(&path),
+            "should return true for regular file"
+        );
+        assert!(
+            !regular_file_exists(dir.path()),
+            "should return false for directory"
+        );
+        assert!(
+            !regular_file_exists(&dir.path().join("missing.txt")),
+            "should return false for missing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_file_exists_false_for_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        let symlink_path = dir.path().join("link.txt");
+        std::fs::write(&target, b"content").expect("write target");
+        std::os::unix::fs::symlink(&target, &symlink_path).expect("create symlink");
+        assert!(
+            !regular_file_exists(&symlink_path),
+            "should return false for symlink"
         );
     }
 }

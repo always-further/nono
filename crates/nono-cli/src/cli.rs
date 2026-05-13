@@ -1224,6 +1224,8 @@ pub enum ProfileCommands {
     Schema(ProfileSchemaArgs),
     /// Print the profile authoring guide
     Guide(ProfileGuideArgs),
+    /// Promote a profile draft to canonical (Phase 36.5 D-36.5-A3)
+    Promote(ProfilePromoteArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -1346,6 +1348,17 @@ pub struct ProfileGroupsArgs {
     /// Show all platforms (not just current)
     #[arg(long)]
     pub all_platforms: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfilePromoteArgs {
+    /// Draft profile name to promote (must exist under profile-drafts/).
+    pub name: String,
+    /// Skip the interactive [y/N] prompt; promote unconditionally on hash-match.
+    /// Per D-36.5-A3. NOTE: --yes does NOT bypass shadow-detection or base-hash
+    /// verification — those checks always fail-closed.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Parser, Debug, Clone, Default)]

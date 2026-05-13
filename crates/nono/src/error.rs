@@ -195,6 +195,41 @@ pub enum NonoError {
         summary: String,
     },
 
+    /// Operator intervention required before the operation can proceed.
+    ///
+    /// Carries structured fields so consumers (CLI, FFI, tests) can branch on
+    /// the specific cause without parsing the `Display` string. Maps to C FFI
+    /// `NonoErrorCode::ErrConfigParse` (-9) — no new code value is added.
+    /// (Phase 36.5 D-36.5-B2 / D-36.5-B3.)
+    ///
+    /// # Field convention by callsite
+    ///
+    /// | Callsite                     | `expected`                | `actual`                            | `resolve_via`                                          |
+    /// |------------------------------|---------------------------|-------------------------------------|--------------------------------------------------------|
+    /// | Base-hash mismatch (promote) | 64-char lowercase hex     | 64-char lowercase hex               | `nono profile init --draft --refresh <name>`           |
+    /// | Shadow-refusal (built-in)    | canonical profile path    | draft path                          | multi-line resolution text per D-36.5-D3               |
+    /// | Shadow-refusal (pack-managed)| canonical profile path    | draft path                          | multi-line resolution text per D-36.5-D3               |
+    /// | Package-status (yanked)      | canonical package ref     | `installed: <ver> (status: yanked)` | multi-line `yanked_message(...)` output                |
+    ///
+    /// **Security (V7 / T-36.5-07):** `resolve_via` MUST be constructed from
+    /// constant strings + resource paths/names ONLY. Never embed an env-var
+    /// value, a credential, or a registry URL. The
+    /// `action_required_display_does_not_leak_env` test asserts this.
+    ///
+    /// **Fork divergence:** upstream `829c341a` uses a single-tuple shape
+    /// `ActionRequired(String)`; the fork's struct shape (D-36.5-B2) is
+    /// pattern-match-friendly and gives the C FFI consumer typed access via
+    /// the Display string format.
+    #[error("Action required: base-hash mismatch (expected: {expected}; actual: {actual}; resolve via: {resolve_via})")]
+    ActionRequired {
+        /// Expected resource state (hash, canonical path, or canonical ref).
+        expected: String,
+        /// Actual observed state.
+        actual: String,
+        /// Operator-actionable resolution instruction (multi-line for shadow / advisory).
+        resolve_via: String,
+    },
+
     // Trust/attestation errors
     #[error("Trust verification failed for {path}: {reason}")]
     TrustVerification { path: String, reason: String },
@@ -237,6 +272,67 @@ pub type Result<T> = std::result::Result<T, NonoError>;
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn action_required_display_format_base_hash() {
+        let err = NonoError::ActionRequired {
+            expected: "a".repeat(64),
+            actual: "b".repeat(64),
+            resolve_via: "nono profile init --draft --refresh myagent".into(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&"a".repeat(64)),
+            "Display missing expected hash: {msg}"
+        );
+        assert!(
+            msg.contains(&"b".repeat(64)),
+            "Display missing actual hash: {msg}"
+        );
+        assert!(
+            msg.contains("nono profile init --draft --refresh myagent"),
+            "Display missing resolve_via: {msg}"
+        );
+        assert!(
+            msg.contains("base-hash mismatch"),
+            "Display missing 'base-hash mismatch' prefix: {msg}"
+        );
+    }
+
+    #[test]
+    fn action_required_display_does_not_leak_env() {
+        let err = NonoError::ActionRequired {
+            expected: "p1".into(),
+            actual: "p2".into(),
+            resolve_via: "do X".into(),
+        };
+        let msg = err.to_string();
+        assert!(
+            !msg.contains('$'),
+            "Display must not contain '$' (env-var leak): {msg}"
+        );
+        assert!(
+            !msg.contains("%APPDATA%"),
+            "Display must not contain '%APPDATA%': {msg}"
+        );
+        assert!(
+            !msg.contains("AKIA"),
+            "Display must not contain 'AKIA' (credential prefix): {msg}"
+        );
+    }
+
+    #[test]
+    fn action_required_is_pattern_matchable() {
+        let err = NonoError::ActionRequired {
+            expected: "x".into(),
+            actual: "y".into(),
+            resolve_via: "z".into(),
+        };
+        assert!(
+            matches!(err, NonoError::ActionRequired { .. }),
+            "ActionRequired must be pattern-matchable via matches! macro"
+        );
+    }
 
     #[test]
     fn label_apply_failed_display_includes_path_hresult_and_hint() {

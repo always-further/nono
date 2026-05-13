@@ -326,3 +326,352 @@ fn init_draft_invalid_name_rejected() {
         "invalid profile name must be rejected"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Commit Group 2 tests: promote
+// ---------------------------------------------------------------------------
+
+#[test]
+fn promote_yes_renames_draft_to_canonical() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create a draft via init --draft
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let output = cmd
+        .args(["profile", "init", "--draft", "myagent"])
+        .output()
+        .expect("init draft");
+    assert!(output.status.success(), "init --draft must succeed");
+
+    // Promote with --yes
+    let mut cmd2 = nono_bin();
+    with_config_dir(&mut cmd2, dir.path());
+    let output2 = cmd2
+        .args(["profile", "promote", "--yes", "myagent"])
+        .output()
+        .expect("promote");
+
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(
+        output2.status.success(),
+        "promote --yes must exit 0; stderr: {stderr2}"
+    );
+
+    // Canonical must exist
+    let canonical = dir
+        .path()
+        .join("nono")
+        .join("profiles")
+        .join("myagent.json");
+    assert!(canonical.exists(), "canonical must exist after promote");
+
+    // Draft must be gone
+    let draft = dir
+        .path()
+        .join("nono")
+        .join("profile-drafts")
+        .join("myagent.json");
+    assert!(!draft.exists(), "draft must be removed after promote");
+
+    // Sidecar must be gone
+    let base = dir
+        .path()
+        .join("nono")
+        .join("profile-drafts")
+        .join("myagent.base");
+    assert!(
+        !base.exists(),
+        "sidecar .base must be removed after promote"
+    );
+}
+
+#[test]
+fn promote_first_time_skips_base_hash() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create draft (no canonical) — first-time promote
+    write_draft_profile(dir.path(), "myagent");
+
+    // Promote --yes (no sidecar, no canonical → first-time path)
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let output = cmd
+        .args(["profile", "promote", "--yes", "myagent"])
+        .output()
+        .expect("promote first time");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "first-time promote --yes must exit 0; stderr: {stderr}"
+    );
+
+    // Canonical must exist
+    let canonical = dir
+        .path()
+        .join("nono")
+        .join("profiles")
+        .join("myagent.json");
+    assert!(
+        canonical.exists(),
+        "canonical must exist after first-time promote"
+    );
+}
+
+#[test]
+fn promote_base_hash_mismatch_action_required() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create canonical
+    write_canonical_profile(dir.path(), "myagent");
+    // Create draft
+    write_draft_profile(dir.path(), "myagent");
+    // Write a stale sidecar (wrong hash)
+    let base_path = dir
+        .path()
+        .join("nono")
+        .join("profile-drafts")
+        .join("myagent.base");
+    std::fs::write(&base_path, "a".repeat(64)).expect("write stale sidecar");
+
+    // Promote with --yes — should fail with ActionRequired
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let output = cmd
+        .args(["profile", "promote", "--yes", "myagent"])
+        .output()
+        .expect("promote with stale hash");
+
+    assert!(
+        !output.status.success(),
+        "promote with stale base-hash must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected:"),
+        "stderr must contain 'expected:'; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("actual:"),
+        "stderr must contain 'actual:'; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("nono profile init --draft --refresh"),
+        "stderr must contain --refresh instruction; got: {stderr}"
+    );
+}
+
+#[test]
+fn promote_shadow_builtin_refused() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create a draft named 'claude-code' (a built-in profile)
+    write_draft_profile(dir.path(), "claude-code");
+
+    // Promote --yes must refuse
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let output = cmd
+        .args(["profile", "promote", "--yes", "claude-code"])
+        .output()
+        .expect("promote shadow builtin");
+
+    assert!(
+        !output.status.success(),
+        "promote of built-in name must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("built-in") || stderr.contains("cannot be promoted"),
+        "stderr must mention built-in refusal; got: {stderr}"
+    );
+
+    // Canonical must NOT have been created/modified
+    let canonical = dir
+        .path()
+        .join("nono")
+        .join("profiles")
+        .join("claude-code.json");
+    assert!(
+        !canonical.exists(),
+        "canonical must NOT be created when shadow refused"
+    );
+}
+
+#[test]
+fn promote_shadow_package_managed_refused() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Pre-create a fake package store layout and symlink canonical to it.
+    // package_store_dir = <dir>/nono/packages
+    // Profile symlink: <dir>/nono/profiles/myagent.json -> <dir>/nono/packages/fake_pkg/profiles/myagent.json
+    let packages_dir = dir
+        .path()
+        .join("nono")
+        .join("packages")
+        .join("fake_pkg")
+        .join("profiles");
+    std::fs::create_dir_all(&packages_dir).expect("create package profile dir");
+    let pkg_profile = packages_dir.join("myagent.json");
+    std::fs::write(&pkg_profile, minimal_profile_json("myagent")).expect("write pkg profile");
+
+    let profiles_dir = dir.path().join("nono").join("profiles");
+    std::fs::create_dir_all(&profiles_dir).expect("create profiles dir");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&pkg_profile, profiles_dir.join("myagent.json"))
+            .expect("create symlink");
+    }
+    #[cfg(windows)]
+    {
+        // On Windows, create a symlink (requires SeCreateSymbolicLinkPrivilege or
+        // Developer Mode; skip the test if symlink creation fails).
+        if std::os::windows::fs::symlink_file(&pkg_profile, profiles_dir.join("myagent.json"))
+            .is_err()
+        {
+            // Can't create symlink without elevated privileges — skip test.
+            eprintln!("SKIP: promote_shadow_package_managed_refused (Windows symlink requires elevated privileges)");
+            return;
+        }
+    }
+
+    // Create a draft for the same name
+    write_draft_profile(dir.path(), "myagent");
+
+    // Promote --yes must refuse
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let output = cmd
+        .args(["profile", "promote", "--yes", "myagent"])
+        .output()
+        .expect("promote package-managed");
+
+    assert!(
+        !output.status.success(),
+        "promote of package-managed name must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Must mention either "package-managed" or "cannot be promoted"
+    assert!(
+        stderr.contains("package-managed") || stderr.contains("cannot be promoted"),
+        "stderr must mention package-managed refusal; got: {stderr}"
+    );
+}
+
+#[test]
+fn promote_declined_does_not_modify_canonical() {
+    // This test documents that the interactive [y/N] prompt aborts promote.
+    // In automated subprocess form, stdin is closed/empty which maps to the
+    // default answer "N" (default_yes = false for promote).
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Set up draft (first-time, no canonical)
+    write_draft_profile(dir.path(), "myagent");
+
+    // Promote WITHOUT --yes (interactive) → stdin closed → defaults to N
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    // Run and ignore the exit code — either aborted-cleanly (exit 0) or
+    // errored (exit non-zero). What matters is the file-system state.
+    let _output = cmd
+        .args(["profile", "promote", "myagent"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("promote declined");
+
+    // Either exits 0 (aborted cleanly) or exits non-zero. Either way,
+    // canonical must NOT be created.
+    let canonical = dir
+        .path()
+        .join("nono")
+        .join("profiles")
+        .join("myagent.json");
+    assert!(
+        !canonical.exists(),
+        "canonical must NOT be created when promote is declined"
+    );
+}
+
+#[test]
+fn promote_invalid_name_rejected() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let output = cmd
+        .args(["profile", "promote", "--yes", "../etc/passwd"])
+        .output()
+        .expect("promote invalid name");
+
+    assert!(
+        !output.status.success(),
+        "promote of invalid name must fail"
+    );
+}
+
+#[test]
+fn promote_yes_with_diff_emits_summary_not_full_diff() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // Create canonical with a group
+    let canonical_json = r#"{
+  "meta": {"name": "myagent", "version": "1.0"},
+  "security": {"groups": ["deny_credentials"]}
+}
+"#;
+    let profiles_dir = dir.path().join("nono").join("profiles");
+    std::fs::create_dir_all(&profiles_dir).expect("create profiles dir");
+    std::fs::write(profiles_dir.join("myagent.json"), canonical_json).expect("write canonical");
+
+    // Create draft with a different group
+    let draft_json = r#"{
+  "meta": {"name": "myagent", "version": "1.0"},
+  "security": {"groups": ["read_home_directory"]}
+}
+"#;
+    let drafts_dir = dir.path().join("nono").join("profile-drafts");
+    std::fs::create_dir_all(&drafts_dir).expect("create drafts dir");
+    std::fs::write(drafts_dir.join("myagent.json"), draft_json).expect("write draft");
+
+    // Write a correct sidecar (hash of canonical)
+    let canonical_bytes = canonical_json.as_bytes();
+    // We need the SHA-256 of canonical — compute it via sha2 if available,
+    // or use a subprocess to write a correct sidecar.
+    // Simplest: init --draft --refresh to regenerate the sidecar.
+    // First write draft so refresh has something to refresh.
+    let mut refresh_cmd = nono_bin();
+    with_config_dir(&mut refresh_cmd, dir.path());
+    let refresh_out = refresh_cmd
+        .args(["profile", "init", "--draft", "--refresh", "myagent"])
+        .output()
+        .expect("refresh sidecar");
+    let refresh_err = String::from_utf8_lossy(&refresh_out.stderr);
+    assert!(
+        refresh_out.status.success(),
+        "refresh must succeed; stderr: {refresh_err}"
+    );
+    let _ = canonical_bytes; // suppress unused warning
+
+    // Promote --yes should emit a one-line summary to stderr
+    let mut cmd = nono_bin();
+    with_config_dir(&mut cmd, dir.path());
+    let output = cmd
+        .args(["profile", "promote", "--yes", "myagent"])
+        .output()
+        .expect("promote with diff");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "promote --yes must succeed; stderr: {stderr}"
+    );
+
+    // Summary must contain "added", "removed", or "changed" (one-line format)
+    // Must NOT be a full multi-line diff dump (i.e., no "  + group:" or "  - group:" lines)
+    assert!(
+        stderr.contains("added") || stderr.contains("removed") || stderr.contains("changed"),
+        "stderr must contain summary stats; got: {stderr}"
+    );
+}

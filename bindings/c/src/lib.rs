@@ -94,7 +94,11 @@ pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
         nono::NonoError::ConfigParse(_)
         | nono::NonoError::AttachBusy
         | nono::NonoError::ConfigWrite { .. }
-        | nono::NonoError::ConfigRead { .. } => NonoErrorCode::ErrConfigParse,
+        | nono::NonoError::ConfigRead { .. }
+        // Phase 36.5 D-36.5-B3: ActionRequired maps to ErrConfigParse uniformly
+        // across base-hash / shadow / package-status callsites. C consumers
+        // pattern-match on the Display string if structured distinction is needed.
+        | nono::NonoError::ActionRequired { .. } => NonoErrorCode::ErrConfigParse,
         nono::NonoError::ProfileNotFound(_)
         | nono::NonoError::ProfileRead { .. }
         | nono::NonoError::ProfileParse(_)
@@ -247,8 +251,25 @@ pub extern "C" fn nono_version() -> *mut c_char {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Phase 36.5 D-36.5-B3: ActionRequired maps to ErrConfigParse (-9) in the
+    /// C FFI layer. No new error code value is introduced.
+    #[test]
+    fn action_required_maps_to_err_config_parse() {
+        let err = nono::NonoError::ActionRequired {
+            expected: String::new(),
+            actual: String::new(),
+            resolve_via: "x".into(),
+        };
+        let code = map_error(&err);
+        assert!(
+            matches!(code, types::NonoErrorCode::ErrConfigParse),
+            "ActionRequired must map to ErrConfigParse; got {code:?}"
+        );
+    }
 
     #[test]
     fn test_last_error_initially_null() {

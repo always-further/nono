@@ -2188,6 +2188,52 @@ fn merge_implicit_default_groups(profile: &mut Profile) -> Result<()> {
     Ok(())
 }
 
+/// Parse a profile from raw bytes. Performs the same legacy-key fail-closed
+/// check as `parse_profile_file` (WR-01 / Plan 36-04b) — `--strict` mode
+/// rejects raw drafts with both `override_deny` AND `bypass_protection` keys;
+/// non-strict mode emits a one-time stderr warn via `DeprecationCounter`.
+///
+/// Used by `cmd_promote` to parse draft bytes without committing to a
+/// `&Path` indirection. Upstream `829c341a` introduced this helper; the
+/// fork's WR-01 fail-closed branch must remain (Plan 36-04b carry-forward).
+///
+/// # ORDER-OF-OPERATIONS (WR-01 fail-closed preservation per Plan 36-04b
+/// REQ-WRU-01/02; this ORDER IS SECURITY-CRITICAL):
+///
+/// 1. Convert bytes to `&str` for raw-key inspection.
+/// 2. Run `detect_legacy_override_deny_key` (one-time deprecation warning).
+/// 3. Run `raw_profile_has_both_bypass_and_override_keys` fail-closed check
+///    FIRST (before any deserialize). If both legacy `override_deny` AND
+///    canonical `bypass_protection` keys are present, refuse.
+/// 4. Final `serde_json::from_str::<Profile>` typed deserialize.
+/// 5. Run `validate_profile_custom_credentials` + `validate_env_credential_keys`
+///    + `validate_profile_aipc_tokens` (same as `parse_profile_file`).
+pub(crate) fn parse_profile_bytes(bytes: &[u8]) -> Result<Profile> {
+    let content = std::str::from_utf8(bytes)
+        .map_err(|e| NonoError::ProfileParse(format!("profile bytes are not valid UTF-8: {e}")))?;
+    // Step 2 — one-time deprecation warning for legacy `override_deny` key.
+    detect_legacy_override_deny_key(content);
+    // Step 3 — fail-closed dual-key check (WR-01). This MUST run before
+    // any deserialize so the deserializer cannot mask the dual-key state.
+    if raw_profile_has_both_bypass_and_override_keys(content) {
+        return Err(NonoError::ProfileParse(
+            "profile bytes: `policy.bypass_protection` and `policy.override_deny` \
+             must not be set simultaneously. Use only `bypass_protection`; \
+             `override_deny` is the legacy alias and cannot coexist with the \
+             canonical key (D-36-B3 / WR-01)."
+                .to_string(),
+        ));
+    }
+    // Step 4 — final typed deserialize.
+    let profile: Profile =
+        serde_json::from_str(content).map_err(|e| NonoError::ProfileParse(e.to_string()))?;
+    // Step 5 — post-parse validation (mirrors parse_profile_file).
+    validate_profile_custom_credentials(&profile)?;
+    validate_env_credential_keys(&profile)?;
+    validate_profile_aipc_tokens(&profile)?;
+    Ok(profile)
+}
+
 /// Parse a profile JSON file without resolving inheritance.
 ///
 /// Returns the raw deserialized `Profile` with `extends` still set.
