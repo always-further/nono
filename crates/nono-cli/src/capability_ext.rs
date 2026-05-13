@@ -594,6 +594,19 @@ impl CapabilitySetExt for CapabilitySet {
             caps.add_allowed_command(cmd.as_str());
         }
 
+        // Plan 36-01b: canonical `commands.{allow,deny}` section per upstream
+        // f0abd413 (v0.47.0). Wired here so that
+        // `{"commands": {"deny": ["rm"]}}` profiles take effect at runtime
+        // instead of silently no-opping. Fixes CR-01 (REVIEW.md): the
+        // canonical section deserialised but was never read by
+        // `CapabilitySet::from_profile`.
+        for cmd in &profile.commands.allow {
+            caps.add_allowed_command(cmd.clone());
+        }
+        for cmd in &profile.commands.deny {
+            caps.add_blocked_command(cmd);
+        }
+
         // Apply signal mode from profile (None defaults to Isolated)
         let mode = profile
             .security
@@ -1106,6 +1119,57 @@ mod tests {
         assert!(
             caps.allowed_commands().contains(&"shred".to_string()),
             "profile allowed_commands should include 'shred'"
+        );
+    }
+
+    /// CR-01 regression (REVIEW.md, Plan 36-01b): the canonical
+    /// `commands.{allow,deny}` profile section must wire into
+    /// `CapabilitySet::from_profile`. Before the fix, this profile
+    /// section deserialised but was never read, silently no-opping
+    /// security-relevant deny rules (fail-open).
+    #[test]
+    fn test_from_profile_commands_allow_deny_canonical_section() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("commands-canonical.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "commands-canonical" },
+                "filesystem": { "allow": ["/tmp"] },
+                "commands": {
+                    "allow": ["git", "cargo"],
+                    "deny": ["rm", "dd"]
+                }
+            }"#,
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) = from_profile_locked(&profile, workdir.path(), &args).expect("build caps");
+
+        // Canonical `commands.allow` must appear in allowed_commands().
+        assert!(
+            caps.allowed_commands().contains(&"git".to_string()),
+            "profile commands.allow should include 'git' (CR-01)"
+        );
+        assert!(
+            caps.allowed_commands().contains(&"cargo".to_string()),
+            "profile commands.allow should include 'cargo' (CR-01)"
+        );
+
+        // Canonical `commands.deny` must appear in blocked_commands().
+        // This is the security-correctness invariant: a profile that says
+        // "deny rm" must structurally deny `rm`, not silently allow it.
+        assert!(
+            caps.blocked_commands().contains(&"rm".to_string()),
+            "profile commands.deny should include 'rm' (CR-01 fail-secure)"
+        );
+        assert!(
+            caps.blocked_commands().contains(&"dd".to_string()),
+            "profile commands.deny should include 'dd' (CR-01 fail-secure)"
         );
     }
 
