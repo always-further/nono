@@ -1134,53 +1134,53 @@ pub fn execute_supervised(
                     }
                 } else if install_network_notify {
                     if let Some(fd) = child_sock_fd {
-                        let notify_result = if config.seccomp_proxy_fallback {
-                            let has_bind = match effective_caps.network_mode() {
-                                nono::NetworkMode::ProxyOnly { bind_ports, .. } => {
-                                    !bind_ports.is_empty()
-                                }
-                                _ => false,
-                            };
-                            nono::sandbox::install_seccomp_proxy_filter(has_bind)
-                        } else {
-                            nono::sandbox::install_seccomp_af_unix_filter()
-                        };
-
-                        match notify_result {
-                            Ok(proxy_notify_fd) => {
-                                if let Err(_e) = nono::supervisor::socket::send_fd_via_socket(
-                                    fd,
-                                    proxy_notify_fd.as_raw_fd(),
-                                ) {
-                                    // CR-01: static byte string in post-fork child.
-                                    const MSG_PROXY_SEND: &[u8] =
-                                        b"nono: failed to send proxy seccomp notify fd\n";
-                                    // SAFETY: write and _exit are async-signal-safe.
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDERR_FILENO,
-                                            MSG_PROXY_SEND.as_ptr().cast::<libc::c_void>(),
-                                            MSG_PROXY_SEND.len(),
-                                        );
-                                        libc::_exit(126);
-                                    }
-                                }
+                    let notify_result = if config.seccomp_proxy_fallback {
+                        let has_bind = match effective_caps.network_mode() {
+                            nono::NetworkMode::ProxyOnly { bind_ports, .. } => {
+                                !bind_ports.is_empty()
                             }
-                            Err(_e) => {
+                            _ => false,
+                        };
+                        nono::sandbox::install_seccomp_proxy_filter(has_bind)
+                    } else {
+                        nono::sandbox::install_seccomp_af_unix_filter()
+                    };
+
+                    match notify_result {
+                        Ok(proxy_notify_fd) => {
+                            if let Err(_e) = nono::supervisor::socket::send_fd_via_socket(
+                                fd,
+                                proxy_notify_fd.as_raw_fd(),
+                            ) {
                                 // CR-01: static byte string in post-fork child.
-                                const MSG_PROXY_FAIL: &[u8] =
-                                    b"nono: seccomp proxy filter not available\n";
+                                const MSG_PROXY_SEND: &[u8] =
+                                    b"nono: failed to send proxy seccomp notify fd\n";
                                 // SAFETY: write and _exit are async-signal-safe.
                                 unsafe {
                                     libc::write(
                                         libc::STDERR_FILENO,
-                                        MSG_PROXY_FAIL.as_ptr().cast::<libc::c_void>(),
-                                        MSG_PROXY_FAIL.len(),
+                                        MSG_PROXY_SEND.as_ptr().cast::<libc::c_void>(),
+                                        MSG_PROXY_SEND.len(),
                                     );
                                     libc::_exit(126);
                                 }
                             }
                         }
+                        Err(_e) => {
+                            // CR-01: static byte string in post-fork child.
+                            const MSG_PROXY_FAIL: &[u8] =
+                                b"nono: seccomp proxy filter not available\n";
+                            // SAFETY: write and _exit are async-signal-safe.
+                            unsafe {
+                                libc::write(
+                                    libc::STDERR_FILENO,
+                                    MSG_PROXY_FAIL.as_ptr().cast::<libc::c_void>(),
+                                    MSG_PROXY_FAIL.len(),
+                                );
+                                libc::_exit(126);
+                            }
+                        }
+                    }
                     }
                 }
 
@@ -4104,10 +4104,19 @@ mod tests {
                     None, // no PTY relay
                 );
 
+                #[cfg(target_os = "linux")]
+                let (status, denials, ipc_denials) = result
+                    .map_err(|e| format!("supervisor loop: {e}"))
+                    .expect("supervisor loop failed");
+
+                #[cfg(not(target_os = "linux"))]
                 let (status, denials) = result
                     .map_err(|e| format!("supervisor loop: {e}"))
                     .expect("supervisor loop failed");
+
                 assert!(denials.is_empty(), "no denials expected");
+                #[cfg(target_os = "linux")]
+                assert!(ipc_denials.is_empty(), "no IPC denials expected");
 
                 // Child exited with code 42
                 match status {
@@ -4201,10 +4210,11 @@ mod tests {
                     None, // no PTY relay
                 );
 
-                let (status, denials) = result
+                let (status, denials, ipc_denials) = result
                     .map_err(|e| format!("supervisor loop: {e}"))
                     .expect("supervisor loop should not deadlock");
                 assert!(denials.is_empty());
+                assert!(ipc_denials.is_empty());
 
                 match status {
                     WaitStatus::Exited(_, code) => assert_eq!(code, 0),

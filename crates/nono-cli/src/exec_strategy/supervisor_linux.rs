@@ -931,29 +931,18 @@ fn ipc_denial_details(
             };
             let resolved = resolve_af_unix_sockaddr_path(child_pid, path)
                 .unwrap_or_else(|_| path.to_path_buf());
-            let display_path = match op {
-                UnixSocketOp::Connect => match resolved.canonicalize() {
-                    Ok(path) => path,
-                    Err(err) => {
-                        return (
-                            resolved.display().to_string(),
-                            format!("canonicalize failed: {err}"),
-                            None,
-                            None,
-                        );
-                    }
-                },
-                UnixSocketOp::Bind => match canonicalize_unix_socket_bind_path(&resolved) {
-                    Ok(path) => path,
-                    Err(err) => {
-                        return (
-                            resolved.display().to_string(),
-                            format!("canonicalize failed: {err}"),
-                            None,
-                            None,
-                        );
-                    }
-                },
+            let canonical = match op {
+                UnixSocketOp::Connect => resolved.canonicalize(),
+                UnixSocketOp::Bind => canonicalize_unix_socket_bind_path(&resolved),
+            };
+            let Ok(display_path) = canonical else {
+                return (
+                    resolved.display().to_string(),
+                    "no matching unix_socket capability; target could not be canonicalized"
+                        .to_string(),
+                    None,
+                    None,
+                );
             };
             let flag = match op {
                 UnixSocketOp::Connect => "--allow-unix-socket",
@@ -1071,10 +1060,26 @@ fn network_audit_denial_reason(sockaddr: &nono::sandbox::SockaddrInfo, syscall: 
 }
 
 fn current_unix_millis() -> u64 {
-    std::time::SystemTime::now()
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let wall_clock = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+
+    let mut previous = LAST.load(std::sync::atomic::Ordering::Relaxed);
+    loop {
+        let next = wall_clock.max(previous.saturating_add(1));
+        match LAST.compare_exchange_weak(
+            previous,
+            next,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => return next,
+            Err(observed) => previous = observed,
+        }
+    }
 }
 
 /// Check if a path matches any capability in the initial set.
@@ -1311,7 +1316,9 @@ mod tests {
     // decided by TCP proxy ports.
 
     mod network_decision {
-        use super::super::{NetworkDecision, SupervisorConfig, decide_network_notification};
+        use super::super::{
+            LinuxNetworkNotifyMode, NetworkDecision, SupervisorConfig, decide_network_notification,
+        };
         use nix::libc;
         use nono::sandbox::{SYS_BIND, SYS_CONNECT, SockaddrInfo, UnixSocketKind};
         use nono::supervisor::{ApprovalDecision, CapabilityRequest};
