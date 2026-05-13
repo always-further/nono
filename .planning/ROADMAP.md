@@ -112,7 +112,7 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 - [x] **Phase 36.5: Profile drafts feature absorption (optional)** — REQ-PORT-CLOSURE-03 (upstream 829c341a `nono profile promote` + `--draft` + package_status.rs + profile-drafts directory infrastructure). ~1 week. Planner-discretion split from Phase 36 to keep the deep-closure plan from getting unwieldy. (completed 2026-05-13)
 - [ ] **Phase 37: v2.3 carry-forward Linux/macOS execution** — REQ-RESL-NIX-01..03 (Plan 25-01 cgroup v2 + setrlimit RESL backends) + REQ-PKGS-01 + REQ-PKGS-04 (Plan 26-02 streaming refactor + auto-pull). Plan + CONTEXT artifacts already committed in v2.3 (`3ed80d38` + `86efcdeb`); execution requires Linux/macOS host. ~2 weeks once host available.
 - [ ] **Phase 38: REQ-AAH-01 native host re-validation (optional)** — REQ-AAHX-HOST-01. Tactical confirmation pass on Linux/macOS host that the Phase 27 transitive closure (via 27.1 + 27.2) holds without a host-native gap. Skip if field-validation surfaces no gap. ~2-3 days.
-- [ ] **Phase 39: UPST4 audit** — REQ-UPST4-01. Mirror Phase 33 shape. DIVERGENCE-LEDGER.md inventory of upstream v0.52.0..v0.53.0+ divergence (3 confirmed tags at milestone start: v0.52.1 `21bbb82e`, v0.52.2 `e8bf0148`, v0.53.0 `c4b25b82`; may grow). Per-cluster disposition + parity-strategy review against Phase 33 ADR. ~1 week.
+- [x] **Phase 39: UPST4 audit** — REQ-UPST4-01. Mirror Phase 33 shape. DIVERGENCE-LEDGER.md inventory of upstream v0.52.0..v0.53.0+ divergence (3 confirmed tags at milestone start: v0.52.1 `21bbb82e`, v0.52.2 `e8bf0148`, v0.53.0 `c4b25b82`; may grow). Per-cluster disposition + parity-strategy review against Phase 33 ADR. ~1 week. (completed 2026-05-13)
 - [ ] **Phase 40: UPST4 sync execution** — REQ-UPST4-02. Mirror Phase 34 shape. Cherry-pick + D-20 manual replay per UPST4 audit dispositions. D-19 trailer convention + Windows-only-files invariant inherited from Phase 22+34. ~2-3 weeks.
 
 **Out of scope (explicit deferrals to v2.5 or later):**
@@ -214,7 +214,9 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 
 **Requirements:** REQ-UPST4-01. See `.planning/REQUIREMENTS.md`.
 
-**Plans:** 0 plans — to be populated during `/gsd-plan-phase 39`.
+**Plans:** 1 / 1 plans complete
+
+- [x] 39-01-DIVERGENCE-AUDIT-PLAN.md — REQ-UPST4-01 (DIVERGENCE-LEDGER.md curated for v0.52.0..v0.53.0 with `windows-touch` column + `## ADR review` section; UPST5 stub queued under v2.5 backlog; Phase 33 ADR remains Accepted)
 
 **Estimated effort:** ~1 week.
 
@@ -233,3 +235,21 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 **Estimated effort:** ~2-3 weeks.
 
 **Reference:** `.planning/REQUIREMENTS.md` § REQ-UPST4-02, `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/` (Phase 34 execution-shape template), `.planning/templates/upstream-sync-quick.md` (Option A continue base case).
+
+## v2.5 backlog
+
+These entries are queued under v2.5 per the Phase 33 ADR `### Future audit cadence` rule — "per upstream release, lazily-evaluated". They activate when v2.5 scope locks; until then they live here as forward-cadence anchors.
+
+### Phase TBD-NN: UPST5 — Upstream v0.53.0…+ sync audit
+
+**Goal:** Mirror Phase 33 / Phase 39 audit shape. Inventory of upstream divergence from v0.53.0 forward (commits accumulated post-Phase 39 audit cutoff `c4b25b82`, including v0.54.0 `6b00932f` and any subsequent v0.55.0+ tags). Per-cluster disposition + parity-strategy review against Phase 33 ADR. **First audit where the `windows-touch: yes` column will fire** (Phase 39 audit-walk surfaced `5d821c12 fix(platform): correctly parse windows registry dword values` + `0748cced feat(platform): implement robust windows platform detection` in `v0.54.0~5^2` — both authored 2026-05-12, post-v0.53.0; D-39-C3 conservative-default `fork-preserve` disposition will apply unless UPST5 auditor confirms via diff inspection that straight cherry-pick is safe).
+
+**Depends on:** Phase 40 (UPST4 execution baseline lands fork at v0.53.0).
+
+**Requirements:** TBD when v2.5 scope locks.
+
+**Plans:** 0 / TBD — to be populated during `/gsd-plan-phase TBD-NN`.
+
+**Estimated effort:** ~1 week (mirrors Phase 39 sizing).
+
+**Reference:** `.planning/phases/33-windows-parity-upstream-0-52-divergence/` (audit-shape template), `.planning/phases/39-upst4-audit/` (Phase 39 worked example with `windows-touch` column + § ADR review section), `docs/architecture/upstream-parity-strategy.md` § Future audit cadence (Phase 33 ADR cadence rule).
