@@ -200,7 +200,7 @@ Context: Phase 33 ADR's "per upstream release, lazily-evaluated" cadence rule fi
 | PORT-CLOSURE-01 | Windows env-filter wiring | 35 | Not started | P34-DEFER-08a-1 |
 | PORT-CLOSURE-02 | Full deprecated_schema module port | 36 | Not started | P34-DEFER-04b-1; heaviest single REQ |
 | PORT-CLOSURE-03 | Profile drafts feature absorption | 36.5 | Not started | P34-DEFER-04b-2 |
-| PORT-CLOSURE-04 | yaml_merge wiring trio + base abstraction | 36 | Not started | P34-DEFER-06-1 + 09-2 |
+| PORT-CLOSURE-04 | yaml_merge wiring trio + base abstraction | 36 | In Progress (#2+#3+#4 met; #1 deferred v2.5-FU-3) | P34-DEFER-06-1 + 09-2 |
 | PORT-CLOSURE-05 | ExecConfig refactor + escape-quote pipeline | 36 | Not started | P34-DEFER-08b-1 + 08b-2 |
 | PORT-CLOSURE-06 | Linux Landlock profiles-dir pre-creation | 35 | Not started | P34-DEFER-09-1 |
 | PORT-CLOSURE-07 | Windows test-harness hygiene | 35 | Not started | P34-DEFER-01-1 + 10-1 |
