@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::trust_intercept::TrustInterceptor;
-use nono::{try_canonicalize, AccessMode};
+use nono::{AccessMode, UnixSocketCapability, UnixSocketOp, try_canonicalize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InitialCapability {
@@ -78,6 +78,27 @@ impl RateLimiter {
     }
 }
 
+/// Read the TGID (thread group ID / process ID) of a thread from /proc/<tid>/status.
+///
+/// `seccomp_data.pid` is the TID of the requesting thread, not the TGID. `/proc/self`
+/// is a symlink to `/proc/<tgid>`, so for correct procfs self-resolution we need the TGID.
+/// This matters when a grandchild process (e.g. nono→sh→bun) makes an openat syscall:
+/// `notif.pid` is bun's TID, not sh's PID, so we must look up bun's TGID to resolve
+/// `/proc/self/maps` to `/proc/<bun_tgid>/maps` instead of `/proc/<sh_pid>/maps`.
+///
+/// Runs in the unsandboxed supervisor context. Falls back to `tid` if the status file
+/// cannot be read (process already exited; the subsequent TOCTOU check will reject it).
+fn read_tgid(tid: u32) -> u32 {
+    std::fs::read_to_string(format!("/proc/{}/status", tid))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Tgid:\t"))
+                .and_then(|l| l["Tgid:\t".len()..].trim().parse::<u32>().ok())
+        })
+        .unwrap_or(tid)
+}
+
 /// Handle a seccomp notification on Linux.
 ///
 /// Flow:
@@ -114,9 +135,9 @@ pub(super) fn handle_seccomp_notification(
     mut trust_interceptor: Option<&mut TrustInterceptor>,
 ) -> Result<()> {
     use nono::sandbox::{
-        classify_access_from_flags, continue_notif, deny_notif, inject_fd, notif_id_valid,
-        read_notif_path, read_open_how, recv_notif, resolve_notif_path, respond_notif_errno,
-        validate_openat2_size, SYS_OPENAT, SYS_OPENAT2,
+        SYS_OPENAT, SYS_OPENAT2, classify_access_from_flags, continue_notif, deny_notif, inject_fd,
+        notif_id_valid, read_notif_path, read_open_how, recv_notif, resolve_notif_path,
+        respond_notif_errno, validate_openat2_size,
     };
 
     // 1. Receive the notification
@@ -191,7 +212,17 @@ pub(super) fn handle_seccomp_notification(
         }
     };
 
-    let procfs_context = ProcfsAccessContext::new(child.as_raw() as u32, Some(notif.pid));
+    // Use the requesting process's TGID (not TID) as process_pid so that /proc/self
+    // resolves to /proc/<tgid>/... for grandchild processes (e.g. nono→sh→bun).
+    // notif.pid is the TID; for single-threaded processes TID==TGID, but for
+    // multithreaded or grandchild processes we need the actual process leader PID.
+    let child_pid = child.as_raw() as u32;
+    let notifying_tgid = if notif.pid == child_pid {
+        child_pid
+    } else {
+        read_tgid(notif.pid)
+    };
+    let procfs_context = ProcfsAccessContext::new(notifying_tgid, Some(notif.pid));
     let resolved_path = match resolve_procfs_path_for_child(&path, Some(procfs_context)) {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -201,6 +232,28 @@ pub(super) fn handle_seccomp_notification(
         }
     };
     let canonicalized = try_canonicalize(&resolved_path);
+
+    // For the initial capability match, map a grandchild's /proc/<tgid> path back to the
+    // direct child's /proc/<child_pid>, because initial_caps are built from the direct
+    // child's /proc/self remapping (remap_procfs_self_references uses child.as_raw()).
+    // Any descendant process should benefit from the same proc-self read policy.
+    //
+    // Security note: this substitution only affects the policy LOOKUP KEY. The actual file
+    // opened by open_path_for_access continues to use `procfs_context` with notifying_tgid,
+    // so the correct /proc/<notifying_tgid>/... file is opened. validate_procfs_access also
+    // uses notifying_tgid as allowed_pid, blocking cross-process procfs reads.
+    let cap_check_path: std::borrow::Cow<std::path::Path> = if notifying_tgid != child_pid {
+        let notifying_prefix = format!("/proc/{}", notifying_tgid);
+        if let Ok(rel) = canonicalized.strip_prefix(&notifying_prefix) {
+            let mut p = std::path::PathBuf::from(format!("/proc/{}", child_pid));
+            p.push(rel);
+            std::borrow::Cow::Owned(p)
+        } else {
+            std::borrow::Cow::Borrowed(canonicalized.as_path())
+        }
+    } else {
+        std::borrow::Cow::Borrowed(canonicalized.as_path())
+    };
 
     // 4. Check protected roots BEFORE initial-set fast-path.
     let protected_root = crate::protected_paths::overlapping_protected_root(
@@ -237,7 +290,7 @@ pub(super) fn handle_seccomp_notification(
     // the requested access mode is already granted, proceed immediately. If the
     // path matches but only with narrower access, record the denial here so the
     // footer can explain the near-miss precisely.
-    match match_initial_capability(&canonicalized, access, initial_caps) {
+    match match_initial_capability(&cap_check_path, access, initial_caps) {
         InitialCapabilityMatch::Insufficient(cap) => {
             debug!(
                 "Seccomp: path {} matched initial capability {} but {} access was requested",
@@ -266,15 +319,15 @@ pub(super) fn handle_seccomp_notification(
                     Some(procfs_context),
                 ) {
                     Ok(file) => {
-                        if notif_id_valid(notify_fd, notif.id)? {
-                            if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
-                                debug!(
-                                    "inject_fd failed for initial-set proc path {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                                let _ = deny_notif(notify_fd, notif.id);
-                            }
+                        if notif_id_valid(notify_fd, notif.id)?
+                            && let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd())
+                        {
+                            debug!(
+                                "inject_fd failed for initial-set proc path {}: {}",
+                                path.display(),
+                                e
+                            );
+                            let _ = deny_notif(notify_fd, notif.id);
                         }
                     }
                     Err(e) => {
@@ -298,15 +351,15 @@ pub(super) fn handle_seccomp_notification(
                         }
                     }
                 }
-            } else if notif_id_valid(notify_fd, notif.id)? {
-                if let Err(e) = continue_notif(notify_fd, notif.id) {
-                    debug!(
-                        "continue_notif failed for initial-set path {}: {}",
-                        path.display(),
-                        e
-                    );
-                    let _ = deny_notif(notify_fd, notif.id);
-                }
+            } else if notif_id_valid(notify_fd, notif.id)?
+                && let Err(e) = continue_notif(notify_fd, notif.id)
+            {
+                debug!(
+                    "continue_notif failed for initial-set path {}: {}",
+                    path.display(),
+                    e
+                );
+                let _ = deny_notif(notify_fd, notif.id);
             }
             return Ok(());
         }
@@ -324,15 +377,15 @@ pub(super) fn handle_seccomp_notification(
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.raw_os_error() == Some(libc::ENOTDIR) =>
         {
-            if notif_id_valid(notify_fd, notif.id)? {
-                if let Err(send_err) = continue_notif(notify_fd, notif.id) {
-                    debug!(
-                        "continue_notif failed for missing path {}: {}",
-                        path.display(),
-                        send_err
-                    );
-                    let _ = deny_notif(notify_fd, notif.id);
-                }
+            if notif_id_valid(notify_fd, notif.id)?
+                && let Err(send_err) = continue_notif(notify_fd, notif.id)
+            {
+                debug!(
+                    "continue_notif failed for missing path {}: {}",
+                    path.display(),
+                    send_err
+                );
+                let _ = deny_notif(notify_fd, notif.id);
             }
             return Ok(());
         }
@@ -394,7 +447,6 @@ pub(super) fn handle_seccomp_notification(
     };
 
     // 8. Delegate to approval backend (for both instruction and non-instruction files)
-    #[allow(deprecated)]
     let request = nono::supervisor::CapabilityRequest {
         request_id: format!("seccomp-{}", unique_request_id()),
         path: path.clone(),
@@ -402,10 +454,6 @@ pub(super) fn handle_seccomp_notification(
         reason: Some("Sandbox intercepted file operation (seccomp-notify)".to_string()),
         child_pid: child.as_raw() as u32,
         session_id: config.session_id.to_string(),
-        session_token: String::new(),
-        kind: nono::supervisor::types::HandleKind::File,
-        target: None,
-        access_mask: 0,
     };
 
     let decision = match config.approval_backend.request_capability(&request) {
@@ -445,7 +493,7 @@ pub(super) fn handle_seccomp_notification(
 
     // 10. Act on the decision
     // Pass verified_digest to enable TOCTOU re-verification for instruction files
-    if decision.is_approved() {
+    if decision.is_granted() {
         match open_path_for_access(
             &path,
             &access,
@@ -483,15 +531,239 @@ pub(super) fn handle_seccomp_notification(
     Ok(())
 }
 
+/// Decision produced by [`decide_network_notification`].
+///
+/// Split out as an explicit type so the (testable) policy logic is decoupled
+/// from the (untestable) seccomp-notify response plumbing. Callers translate
+/// `Allow` to `continue_notif(…)` and `Deny` to `respond_notif_errno(…, EACCES)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NetworkDecision {
+    /// Let the kernel proceed with the already-copied sockaddr
+    /// (`SECCOMP_USER_NOTIF_FLAG_CONTINUE`).
+    Allow,
+    /// Fail the syscall with `EACCES`.
+    Deny,
+}
+
+/// Pure policy function: given a trapped syscall and the sockaddr the child
+/// passed in, decide whether the supervisor should allow or deny it.
+///
+/// Factored out of [`handle_network_notification`] so it can be unit-tested
+/// without a live seccomp-notify fd.
+///
+/// Policy:
+///
+/// 1. **Pathname `AF_UNIX` is allowlist-mediated.** Filesystem-backed Unix
+///    sockets like `/tmp/test.sock` are IPC bound to a real path, so the
+///    supervisor canonicalizes that path and checks it against explicit
+///    [`UnixSocketCapability`] grants.
+///
+///    **Abstract and unnamed `AF_UNIX` are denied.** The abstract namespace
+///    (`sun_path[0] == '\0'`) lives outside the filesystem, so pathname
+///    capabilities cannot mediate it. Unnamed sockets (addrlen == 2) have
+///    no path to check.
+///
+/// 2. For `AF_INET`/`AF_INET6`:
+///    - `connect()` is allowed only to `127.0.0.1:proxy_port` (the nono proxy).
+///    - `bind()` is allowed only on ports in `proxy_bind_ports`.
+///    - Everything else is denied.
+pub(super) fn decide_network_notification(
+    syscall: i32,
+    sockaddr: &nono::sandbox::SockaddrInfo,
+    config: &SupervisorConfig<'_>,
+) -> NetworkDecision {
+    use nono::sandbox::{SYS_BIND, SYS_CONNECT, UnixSocketKind};
+
+    // AF_UNIX: allow only filesystem-backed (pathname) sockets that match an
+    // explicit socket capability. Abstract/unnamed sockets bypass pathname
+    // mediation, so deny them.
+    if sockaddr.family == libc::AF_UNIX as u16 {
+        match sockaddr.unix_kind {
+            Some(UnixSocketKind::Pathname) => {
+                return decide_af_unix_pathname(syscall, sockaddr, config);
+            }
+            Some(UnixSocketKind::Abstract) => {
+                debug!(
+                    "Proxy seccomp: denying AF_UNIX abstract-namespace syscall (nr={}); \
+                     not mediated by pathname socket capabilities",
+                    syscall
+                );
+                return NetworkDecision::Deny;
+            }
+            Some(UnixSocketKind::Unnamed) | None => {
+                debug!(
+                    "Proxy seccomp: denying AF_UNIX unnamed/unclassified syscall (nr={})",
+                    syscall
+                );
+                return NetworkDecision::Deny;
+            }
+        }
+    }
+
+    match syscall {
+        SYS_CONNECT => {
+            // Allow connect only to loopback + proxy port
+            if sockaddr.is_loopback && sockaddr.port == config.proxy_port {
+                debug!(
+                    "Proxy seccomp: allowing connect to loopback:{}",
+                    sockaddr.port
+                );
+                NetworkDecision::Allow
+            } else {
+                debug!(
+                    "Proxy seccomp: denying connect to family={} port={} loopback={}",
+                    sockaddr.family, sockaddr.port, sockaddr.is_loopback
+                );
+                NetworkDecision::Deny
+            }
+        }
+        SYS_BIND => {
+            // Allow bind only on configured bind ports
+            if config.proxy_bind_ports.contains(&sockaddr.port) {
+                debug!("Proxy seccomp: allowing bind on port {}", sockaddr.port);
+                NetworkDecision::Allow
+            } else {
+                debug!(
+                    "Proxy seccomp: denying bind on port {} (allowed: {:?})",
+                    sockaddr.port, config.proxy_bind_ports
+                );
+                NetworkDecision::Deny
+            }
+        }
+        other => {
+            warn!(
+                "Unexpected syscall {} in proxy seccomp handler, denying",
+                other
+            );
+            NetworkDecision::Deny
+        }
+    }
+}
+
+fn decide_af_unix_pathname(
+    syscall: i32,
+    sockaddr: &nono::sandbox::SockaddrInfo,
+    config: &SupervisorConfig<'_>,
+) -> NetworkDecision {
+    let Some(path) = sockaddr.unix_path.as_deref() else {
+        debug!(
+            "Proxy seccomp: denying AF_UNIX pathname syscall (nr={}) without parsed path",
+            syscall
+        );
+        return NetworkDecision::Deny;
+    };
+
+    let Some(op) = unix_socket_op_for_syscall(syscall) else {
+        warn!(
+            "Unexpected AF_UNIX syscall {} in proxy seccomp handler, denying",
+            syscall
+        );
+        return NetworkDecision::Deny;
+    };
+
+    let canonical = match op {
+        UnixSocketOp::Connect => match path.canonicalize() {
+            Ok(path) => path,
+            Err(err) => {
+                debug!(
+                    "Proxy seccomp: denying AF_UNIX connect to {}: canonicalize failed: {}",
+                    path.display(),
+                    err
+                );
+                return NetworkDecision::Deny;
+            }
+        },
+        UnixSocketOp::Bind => match canonicalize_unix_socket_bind_path(path) {
+            Ok(path) => path,
+            Err(err) => {
+                debug!(
+                    "Proxy seccomp: denying AF_UNIX bind to {}: canonicalize failed: {}",
+                    path.display(),
+                    err
+                );
+                return NetworkDecision::Deny;
+            }
+        },
+    };
+
+    if unix_socket_allowlist_allows(config.unix_socket_allowlist, canonical.as_path(), op) {
+        debug!(
+            "Proxy seccomp: allowing AF_UNIX {} on {}",
+            op,
+            canonical.display()
+        );
+        NetworkDecision::Allow
+    } else {
+        debug!(
+            "Proxy seccomp: denying AF_UNIX {} on {}: no matching capability",
+            op,
+            canonical.display()
+        );
+        NetworkDecision::Deny
+    }
+}
+
+fn unix_socket_op_for_syscall(syscall: i32) -> Option<UnixSocketOp> {
+    use nono::sandbox::{SYS_BIND, SYS_CONNECT};
+
+    match syscall {
+        SYS_CONNECT => Some(UnixSocketOp::Connect),
+        SYS_BIND => Some(UnixSocketOp::Bind),
+        _ => None,
+    }
+}
+
+fn unix_socket_allowlist_allows(
+    allowlist: &[UnixSocketCapability],
+    path: &std::path::Path,
+    op: UnixSocketOp,
+) -> bool {
+    allowlist.iter().any(|cap| {
+        cap.covers(path)
+            && match op {
+                UnixSocketOp::Connect => true,
+                UnixSocketOp::Bind => cap.mode.permits_bind(),
+            }
+    })
+}
+
+fn canonicalize_unix_socket_bind_path(
+    path: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "socket path has no parent directory",
+                )
+            })?;
+            let file_name = path.file_name().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "socket path has no final component",
+                )
+            })?;
+            let resolved_parent = parent.canonicalize()?;
+            if !resolved_parent.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "socket parent is not a directory",
+                ));
+            }
+            Ok(resolved_parent.join(file_name))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Handle a seccomp notification for connect() or bind() syscalls.
 ///
 /// This is the proxy-only fallback for kernels without Landlock AccessNet.
 /// The BPF filter routes connect/bind to USER_NOTIF; this function reads
-/// the sockaddr from the child's memory and allows or denies based on
-/// the configured proxy port and bind ports.
-///
-/// For connect: allow only loopback + proxy port. Deny everything else.
-/// For bind: allow only ports in the bind_ports list. Deny everything else.
+/// the sockaddr from the child's memory and delegates the allow/deny
+/// decision to [`decide_network_notification`].
 ///
 /// Uses SECCOMP_USER_NOTIF_FLAG_CONTINUE on approval (safe for connect/bind
 /// because the kernel has already copied sockaddr into kernel memory).
@@ -502,7 +774,7 @@ pub(super) fn handle_network_notification(
 ) -> nono::error::Result<()> {
     use nono::sandbox::{
         continue_notif, deny_notif, notif_id_valid, read_notif_sockaddr, recv_notif,
-        respond_notif_errno, SYS_BIND, SYS_CONNECT,
+        respond_notif_errno,
     };
 
     let notif = recv_notif(notify_fd)?;
@@ -530,58 +802,20 @@ pub(super) fn handle_network_notification(
         return Ok(());
     }
 
-    let allowed = match notif.data.nr {
-        SYS_CONNECT => {
-            // Allow connect only to loopback + proxy port
-            let port_match = sockaddr.port == config.proxy_port;
-            if sockaddr.is_loopback && port_match {
-                debug!(
-                    "Proxy seccomp: allowing connect to loopback:{}",
-                    sockaddr.port
-                );
-                true
-            } else {
-                debug!(
-                    "Proxy seccomp: denying connect to family={} port={} loopback={}",
-                    sockaddr.family, sockaddr.port, sockaddr.is_loopback
-                );
-                false
+    match decide_network_notification(notif.data.nr, &sockaddr, config) {
+        NetworkDecision::Allow => {
+            // SECCOMP_USER_NOTIF_FLAG_CONTINUE: let the kernel proceed with its
+            // already-copied sockaddr. Safe for connect/bind (move_addr_to_kernel).
+            if let Err(e) = continue_notif(notify_fd, notif.id) {
+                debug!("continue_notif failed for network notification: {}", e);
+                // Must respond to avoid leaving the child blocked. Propagate if
+                // deny also fails — the notification is orphaned.
+                return deny_notif(notify_fd, notif.id);
             }
         }
-        SYS_BIND => {
-            // Allow bind only on configured bind ports
-            let port_allowed = config.proxy_bind_ports.contains(&sockaddr.port);
-            if port_allowed {
-                debug!("Proxy seccomp: allowing bind on port {}", sockaddr.port);
-                true
-            } else {
-                debug!(
-                    "Proxy seccomp: denying bind on port {} (allowed: {:?})",
-                    sockaddr.port, config.proxy_bind_ports
-                );
-                false
-            }
+        NetworkDecision::Deny => {
+            respond_notif_errno(notify_fd, notif.id, libc::EACCES)?;
         }
-        other => {
-            warn!(
-                "Unexpected syscall {} in proxy seccomp handler, denying",
-                other
-            );
-            false
-        }
-    };
-
-    if allowed {
-        // SECCOMP_USER_NOTIF_FLAG_CONTINUE: let the kernel proceed with its
-        // already-copied sockaddr. Safe for connect/bind (move_addr_to_kernel).
-        if let Err(e) = continue_notif(notify_fd, notif.id) {
-            debug!("continue_notif failed for network notification: {}", e);
-            // Must respond to avoid leaving the child blocked. Propagate if
-            // deny also fails — the notification is orphaned.
-            return deny_notif(notify_fd, notif.id);
-        }
-    } else {
-        respond_notif_errno(notify_fd, notif.id, libc::EACCES)?;
     }
 
     Ok(())
@@ -811,6 +1045,284 @@ mod tests {
             ),
             InitialCapabilityMatch::Insufficient(_)
         ));
+    }
+
+    // --- decide_network_notification tests (issue #685) ---------------------
+    //
+    // These exercise the proxy-only seccomp fallback path that runs on
+    // Landlock < V4 kernels. The key invariant: pathname `AF_UNIX` must be
+    // checked against the explicit Unix-socket allowlist instead of being
+    // decided by TCP proxy ports.
+
+    mod network_decision {
+        use super::super::{NetworkDecision, SupervisorConfig, decide_network_notification};
+        use nix::libc;
+        use nono::sandbox::{SYS_BIND, SYS_CONNECT, SockaddrInfo, UnixSocketKind};
+        use nono::supervisor::{ApprovalDecision, CapabilityRequest};
+        use nono::{ApprovalBackend, UnixSocketCapability, UnixSocketMode};
+        use std::os::unix::net::UnixListener;
+        use std::path::{Path, PathBuf};
+
+        struct DenyAllBackend;
+        impl ApprovalBackend for DenyAllBackend {
+            fn request_capability(
+                &self,
+                _req: &CapabilityRequest,
+            ) -> nono::Result<ApprovalDecision> {
+                Ok(ApprovalDecision::Denied {
+                    reason: "test".to_string(),
+                })
+            }
+            fn backend_name(&self) -> &str {
+                "deny-all-test"
+            }
+        }
+
+        fn make_config<'a>(
+            backend: &'a DenyAllBackend,
+            proxy_port: u16,
+            proxy_bind_ports: Vec<u16>,
+            unix_socket_allowlist: &'a [UnixSocketCapability],
+        ) -> SupervisorConfig<'a> {
+            static REDACTION_POLICY: std::sync::LazyLock<nono::ScrubPolicy> =
+                std::sync::LazyLock::new(nono::ScrubPolicy::secure_default);
+            SupervisorConfig {
+                protected_roots: &[],
+                approval_backend: backend,
+                session_id: "test-net-decision",
+                attach_initial_client: false,
+                detach_sequence: None,
+                open_url_origins: &[],
+                open_url_allow_localhost: false,
+                audit_recorder: None,
+                redaction_policy: &REDACTION_POLICY,
+                allow_launch_services_active: false,
+                proxy_port,
+                proxy_bind_ports,
+                unix_socket_allowlist,
+            }
+        }
+
+        fn unix_pathname(path: &Path) -> SockaddrInfo {
+            // Matches what read_notif_sockaddr() produces for a
+            // filesystem-backed AF_UNIX socket (e.g. /tmp/test.sock).
+            SockaddrInfo {
+                family: libc::AF_UNIX as u16,
+                port: 0,
+                is_loopback: true,
+                unix_kind: Some(UnixSocketKind::Pathname),
+                unix_path: Some(path.to_path_buf()),
+            }
+        }
+
+        fn unix_abstract() -> SockaddrInfo {
+            SockaddrInfo {
+                family: libc::AF_UNIX as u16,
+                port: 0,
+                is_loopback: true,
+                unix_kind: Some(UnixSocketKind::Abstract),
+                unix_path: None,
+            }
+        }
+
+        fn unix_unnamed() -> SockaddrInfo {
+            SockaddrInfo {
+                family: libc::AF_UNIX as u16,
+                port: 0,
+                is_loopback: true,
+                unix_kind: Some(UnixSocketKind::Unnamed),
+                unix_path: None,
+            }
+        }
+
+        fn inet_loopback(port: u16) -> SockaddrInfo {
+            SockaddrInfo {
+                family: libc::AF_INET as u16,
+                port,
+                is_loopback: true,
+                unix_kind: None,
+                unix_path: None,
+            }
+        }
+
+        fn inet_external(port: u16) -> SockaddrInfo {
+            SockaddrInfo {
+                family: libc::AF_INET as u16,
+                port,
+                is_loopback: false,
+                unix_kind: None,
+                unix_path: None,
+            }
+        }
+
+        fn socket_path(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+            dir.path().join(name)
+        }
+
+        /// Pathname `bind(AF_UNIX, "/tmp/…")` is mediated by explicit
+        /// Unix-socket grants, not TCP bind ports.
+        #[test]
+        fn af_unix_pathname_bind_is_allowed_by_connect_bind_grant() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = socket_path(&dir, "test.sock");
+            let allowlist = vec![
+                UnixSocketCapability::new_file(&path, UnixSocketMode::ConnectBind)
+                    .expect("socket grant"),
+            ];
+            let config = make_config(&backend, 0, Vec::new(), &allowlist);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&path), &config),
+                NetworkDecision::Allow,
+                "pathname AF_UNIX bind must be allowed when a connect+bind grant covers it"
+            );
+        }
+
+        /// Pathname `connect(AF_UNIX, "/tmp/…")` is allowed only when the
+        /// canonical socket path matches the explicit allowlist.
+        #[test]
+        fn af_unix_pathname_connect_is_allowed_by_grant() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = socket_path(&dir, "test.sock");
+            let _listener = UnixListener::bind(&path).expect("bind unix listener");
+            let allowlist = vec![
+                UnixSocketCapability::new_file(&path, UnixSocketMode::Connect)
+                    .expect("socket grant"),
+            ];
+            let config = make_config(&backend, 8080, Vec::new(), &allowlist);
+            assert_eq!(
+                decide_network_notification(SYS_CONNECT, &unix_pathname(&path), &config),
+                NetworkDecision::Allow,
+                "pathname AF_UNIX connect must be allowed when a connect grant covers it"
+            );
+        }
+
+        #[test]
+        fn af_unix_pathname_connect_without_grant_is_denied() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = socket_path(&dir, "test.sock");
+            let _listener = UnixListener::bind(&path).expect("bind unix listener");
+            let config = make_config(&backend, 8080, Vec::new(), &[]);
+            assert_eq!(
+                decide_network_notification(SYS_CONNECT, &unix_pathname(&path), &config),
+                NetworkDecision::Deny
+            );
+        }
+
+        #[test]
+        fn af_unix_pathname_bind_requires_connect_bind_grant() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = socket_path(&dir, "test.sock");
+            let allowlist = vec![
+                UnixSocketCapability::new_file(&path, UnixSocketMode::Connect)
+                    .expect("socket grant"),
+            ];
+            let config = make_config(&backend, 0, Vec::new(), &allowlist);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&path), &config),
+                NetworkDecision::Deny
+            );
+        }
+
+        #[test]
+        fn af_unix_dir_children_does_not_allow_nested_path() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let nested = dir.path().join("nested");
+            std::fs::create_dir(&nested).expect("create nested dir");
+            let direct_path = socket_path(&dir, "direct.sock");
+            let nested_path = nested.join("nested.sock");
+            let allowlist = vec![
+                UnixSocketCapability::new_dir(dir.path(), UnixSocketMode::ConnectBind)
+                    .expect("socket dir grant"),
+            ];
+            let config = make_config(&backend, 0, Vec::new(), &allowlist);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&direct_path), &config),
+                NetworkDecision::Allow
+            );
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&nested_path), &config),
+                NetworkDecision::Deny
+            );
+        }
+
+        #[test]
+        fn af_unix_dir_subtree_allows_nested_path() {
+            let backend = DenyAllBackend;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let nested = dir.path().join("nested");
+            std::fs::create_dir(&nested).expect("create nested dir");
+            let nested_path = nested.join("nested.sock");
+            let allowlist = vec![
+                UnixSocketCapability::new_dir_subtree(dir.path(), UnixSocketMode::ConnectBind)
+                    .expect("socket subtree grant"),
+            ];
+            let config = make_config(&backend, 0, Vec::new(), &allowlist);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_pathname(&nested_path), &config),
+                NetworkDecision::Allow
+            );
+        }
+
+        /// Scope-limit test: abstract-namespace AF_UNIX (`sun_path[0] == 0`)
+        /// is not covered by pathname socket capabilities, so it stays
+        /// denied.
+        #[test]
+        fn af_unix_abstract_is_denied() {
+            let backend = DenyAllBackend;
+            let config = make_config(&backend, 0, Vec::new(), &[]);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_abstract(), &config),
+                NetworkDecision::Deny,
+                "abstract AF_UNIX must be denied because pathname grants do not cover it"
+            );
+            assert_eq!(
+                decide_network_notification(SYS_CONNECT, &unix_abstract(), &config),
+                NetworkDecision::Deny,
+            );
+        }
+
+        /// Unnamed AF_UNIX (`addrlen == 2`) has no path to check, so fail
+        /// closed — consistent with abstract handling.
+        #[test]
+        fn af_unix_unnamed_is_denied() {
+            let backend = DenyAllBackend;
+            let config = make_config(&backend, 0, Vec::new(), &[]);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &unix_unnamed(), &config),
+                NetworkDecision::Deny
+            );
+        }
+
+        /// Security-critical: the `AF_UNIX → Allow` short-circuit must not
+        /// leak into AF_INET. A child connecting to an external host on
+        /// `proxy_port` must still be denied — otherwise the proxy could be
+        /// bypassed.
+        #[test]
+        fn af_inet_connect_to_external_host_denied() {
+            let backend = DenyAllBackend;
+            let config = make_config(&backend, 8080, Vec::new(), &[]);
+            assert_eq!(
+                decide_network_notification(SYS_CONNECT, &inet_external(8080), &config),
+                NetworkDecision::Deny
+            );
+        }
+
+        /// Proves the refactor didn't collapse AF_INET bind to unconditional
+        /// Allow. A port not in `proxy_bind_ports` must still fail.
+        #[test]
+        fn af_inet_bind_on_disallowed_port_denied() {
+            let backend = DenyAllBackend;
+            let config = make_config(&backend, 0, vec![3000], &[]);
+            assert_eq!(
+                decide_network_notification(SYS_BIND, &inet_loopback(4000), &config),
+                NetworkDecision::Deny
+            );
+        }
     }
 }
 
