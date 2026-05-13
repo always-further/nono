@@ -7,7 +7,7 @@ use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath,
     PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, Scope,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 
@@ -1608,15 +1608,14 @@ pub fn deny_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
 /// Kind of AF_UNIX socket, determined from `sun_path` and `addrlen`.
 ///
 /// See `unix(7)`. This distinction matters for policy because only
-/// [`UnixSocketKind::Pathname`] sockets are governed by filesystem rules.
-/// Abstract and unnamed sockets live in a separate namespace that Landlock's
-/// filesystem rules cannot reach, so the supervisor must decide them
-/// explicitly.
+/// [`UnixSocketKind::Pathname`] sockets can be matched against filesystem
+/// paths. Abstract and unnamed sockets live in a separate namespace, so the
+/// supervisor must decide them explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnixSocketKind {
     /// Filesystem-backed: `sun_path` is a null-terminated filesystem path
     /// (e.g. `/tmp/test.sock`). Access is governed by filesystem permissions
-    /// and — in our case — by Landlock's filesystem rules.
+    /// and nono's pathname socket capability allowlist.
     Pathname,
     /// Linux abstract namespace: `sun_path[0] == '\0'` and bytes `[1..]` form
     /// the abstract name. Not backed by any filesystem, so Landlock's
@@ -1662,6 +1661,9 @@ pub struct SockaddrInfo {
     /// For `AF_UNIX`: kind of socket (pathname / abstract / unnamed). `None`
     /// for non-UNIX address families.
     pub unix_kind: Option<UnixSocketKind>,
+    /// For pathname `AF_UNIX`: filesystem path from `sockaddr_un.sun_path`.
+    /// `None` for non-UNIX, abstract, unnamed, or unclassified sockets.
+    pub unix_path: Option<PathBuf>,
 }
 
 /// Seccomp network fallback mode determined during sandbox apply.
@@ -1719,8 +1721,8 @@ pub fn seccomp_network_fallback_mode(caps: &CapabilitySet) -> SeccompNetFallback
 ///
 /// - `AF_INET`/`AF_INET6`: allow connect to `localhost:proxy_port`;
 ///   allow bind on ports in the configured bind-ports list; deny others.
-/// - pathname `AF_UNIX` (#685): allow both connect and bind. Landlock's
-///   filesystem rules are the upstream gate on which paths are reachable.
+/// - pathname `AF_UNIX`: route to the supervisor, which checks the explicit
+///   Unix socket capability allowlist against the requested path.
 /// - abstract/unnamed `AF_UNIX`: deny (see `decide_network_notification`).
 ///
 /// `has_bind_ports` is retained for API compatibility but no longer
@@ -1759,9 +1761,9 @@ fn build_seccomp_proxy_filter(_has_bind_ports: bool) -> Vec<SockFilterInsn> {
     let errno_ret = SECCOMP_RET_ERRNO | (libc::EACCES as u32);
 
     // bind() always routes to USER_NOTIF so the supervisor can make the
-    // per-family decision (deny AF_INET to non-allowed TCP ports; allow
-    // pathname AF_UNIX per issue #685). The previous variant took a
-    // has_bind_ports short-circuit to ERRNO when no TCP bind ports were
+    // per-family decision (deny AF_INET to non-allowed TCP ports; check
+    // pathname AF_UNIX against the explicit socket allowlist). The previous
+    // variant took a has_bind_ports short-circuit to ERRNO when no TCP bind ports were
     // configured, which unconditionally failed AF_UNIX bind — a real
     // regression that only manifested on Landlock V2 kernels (where this
     // seccomp fallback fires). The has_bind_ports parameter is retained
@@ -2026,6 +2028,7 @@ pub fn install_seccomp_proxy_filter(has_bind_ports: bool) -> Result<std::os::fd:
 /// too small to parse.
 pub fn read_notif_sockaddr(pid: u32, addr_ptr: u64, addrlen: u64) -> Result<SockaddrInfo> {
     use std::io::Read;
+    use std::os::unix::ffi::OsStringExt;
 
     // Minimum size: sa_family (2 bytes)
     if addrlen < 2 {
@@ -2041,9 +2044,20 @@ pub fn read_notif_sockaddr(pid: u32, addr_ptr: u64, addrlen: u64) -> Result<Sock
     std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(addr_ptr))
         .map_err(|e| NonoError::SandboxInit(format!("Failed to seek in {}: {}", mem_path, e)))?;
 
-    // Read up to sizeof(sockaddr_in6) = 28 bytes. This covers both IPv4 (16) and IPv6 (28).
-    let read_len = std::cmp::min(addrlen as usize, 28);
-    let mut buf = [0u8; 28];
+    let sockaddr_un_len = std::mem::size_of::<libc::sockaddr_un>();
+    let max_sockaddr_len = sockaddr_un_len.max(28);
+    let requested_len = usize::try_from(addrlen).map_err(|_| {
+        NonoError::SandboxInit(format!("sockaddr length too large to parse: {addrlen}"))
+    })?;
+    const SOCKADDR_STACK_LEN: usize = 128;
+    if max_sockaddr_len > SOCKADDR_STACK_LEN {
+        return Err(NonoError::SandboxInit(format!(
+            "maximum sockaddr length {} exceeds stack buffer {}",
+            max_sockaddr_len, SOCKADDR_STACK_LEN
+        )));
+    }
+    let read_len = std::cmp::min(requested_len, max_sockaddr_len);
+    let mut buf = [0u8; SOCKADDR_STACK_LEN];
     let n = file.read(&mut buf[..read_len]).map_err(|e| {
         NonoError::SandboxInit(format!("Failed to read sockaddr from {}: {}", mem_path, e))
     })?;
@@ -2076,6 +2090,7 @@ pub fn read_notif_sockaddr(pid: u32, addr_ptr: u64, addrlen: u64) -> Result<Sock
                 port,
                 is_loopback,
                 unix_kind: None,
+                unix_path: None,
             })
         }
         libc::AF_INET6 => {
@@ -2100,17 +2115,40 @@ pub fn read_notif_sockaddr(pid: u32, addr_ptr: u64, addrlen: u64) -> Result<Sock
                 port,
                 is_loopback: is_loopback || is_v4_mapped_loopback,
                 unix_kind: None,
+                unix_path: None,
             })
         }
         libc::AF_UNIX => {
+            if requested_len > sockaddr_un_len {
+                return Err(NonoError::SandboxInit(format!(
+                    "sockaddr_un length {} exceeds maximum {}",
+                    requested_len, sockaddr_un_len
+                )));
+            }
             // sun_path starts at offset 2. buf has `n` bytes total; we need
             // addrlen to distinguish unnamed from path-bearing sockets.
             let sun_path_first_byte = if n >= 3 { Some(buf[2]) } else { None };
+            let unix_kind = classify_af_unix(addrlen, sun_path_first_byte);
+            let unix_path = if matches!(unix_kind, UnixSocketKind::Pathname) {
+                let path_bytes = &buf[2..n];
+                let nul_pos = path_bytes
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(path_bytes.len());
+                if nul_pos == 0 {
+                    None
+                } else {
+                    Some(std::ffi::OsString::from_vec(path_bytes[..nul_pos].to_vec()).into())
+                }
+            } else {
+                None
+            };
             Ok(SockaddrInfo {
                 family,
                 port: 0,
                 is_loopback: true, // Unix sockets are always local
-                unix_kind: Some(classify_af_unix(addrlen, sun_path_first_byte)),
+                unix_kind: Some(unix_kind),
+                unix_path,
             })
         }
         _ => Ok(SockaddrInfo {
@@ -2118,6 +2156,7 @@ pub fn read_notif_sockaddr(pid: u32, addr_ptr: u64, addrlen: u64) -> Result<Sock
             port: 0,
             is_loopback: false,
             unix_kind: None,
+            unix_path: None,
         }),
     }
 }
@@ -3203,6 +3242,7 @@ mod tests {
             port: 8080,
             is_loopback: true,
             unix_kind: None,
+            unix_path: None,
         };
         assert!(info.is_loopback);
         assert_eq!(info.port, 8080);
@@ -3215,6 +3255,7 @@ mod tests {
             port: 443,
             is_loopback: true,
             unix_kind: None,
+            unix_path: None,
         };
         assert!(info.is_loopback);
     }
@@ -3226,6 +3267,7 @@ mod tests {
             port: 80,
             is_loopback: false,
             unix_kind: None,
+            unix_path: None,
         };
         assert!(!info.is_loopback);
     }
@@ -3237,6 +3279,7 @@ mod tests {
             port: 0,
             is_loopback: true,
             unix_kind: Some(UnixSocketKind::Pathname),
+            unix_path: Some(PathBuf::from("/tmp/test.sock")),
         };
         assert!(info.is_loopback);
         assert_eq!(info.port, 0);
