@@ -152,6 +152,14 @@ pub struct FilesystemConfig {
     /// or bound. Non-recursive. Implies read+write access on the directory.
     #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub unix_socket_dir_bind: Vec<String>,
+    /// Directories where any descendant AF_UNIX socket may be connected to.
+    /// Recursive. Implies read access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_subtree: Vec<String>,
+    /// Directories where any descendant AF_UNIX socket may be connected to or
+    /// bound. Recursive. Implies read+write access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_subtree_bind: Vec<String>,
     /// Paths denied filesystem access. Canonical location for deny entries
     /// in the #594 schema; the legacy deny-access key drains here via
     /// `deprecated_schema::LegacyPolicyPatch`.
@@ -2345,6 +2353,14 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &base.filesystem.unix_socket_dir_bind,
                 &child.filesystem.unix_socket_dir_bind,
             ),
+            unix_socket_subtree: dedup_append(
+                &base.filesystem.unix_socket_subtree,
+                &child.filesystem.unix_socket_subtree,
+            ),
+            unix_socket_subtree_bind: dedup_append(
+                &base.filesystem.unix_socket_subtree_bind,
+                &child.filesystem.unix_socket_subtree_bind,
+            ),
             deny: dedup_append(&base.filesystem.deny, &child.filesystem.deny),
             bypass_protection: dedup_append(
                 &base.filesystem.bypass_protection,
@@ -4224,6 +4240,8 @@ mod tests {
                 unix_socket_bind: vec![],
                 unix_socket_dir: vec![],
                 unix_socket_dir_bind: vec![],
+                unix_socket_subtree: vec![],
+                unix_socket_subtree_bind: vec![],
                 deny: vec!["/base/policy-deny".to_string()],
                 bypass_protection: vec!["/base/override-deny".to_string()],
                 suppress_save_prompt: vec!["/base/no-prompt".to_string()],
@@ -4299,6 +4317,8 @@ mod tests {
                 unix_socket_bind: vec![],
                 unix_socket_dir: vec![],
                 unix_socket_dir_bind: vec![],
+                unix_socket_subtree: vec![],
+                unix_socket_subtree_bind: vec![],
                 deny: vec!["/child/policy-deny".to_string()],
                 bypass_protection: vec!["/child/override-deny".to_string()],
                 suppress_save_prompt: vec!["/child/no-prompt".to_string()],

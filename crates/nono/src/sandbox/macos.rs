@@ -420,24 +420,37 @@ fn emit_unix_socket_rules(profile: &mut String, caps: &CapabilitySet) -> Result<
             &["network-outbound"]
         };
 
-        if cap.is_directory {
-            let escaped = regex_escape_path_for_seatbelt(resolved_str)?;
-            let escaped_orig = original_str
-                .map(regex_escape_path_for_seatbelt)
-                .transpose()?;
-            for op in operations {
-                profile.push_str(&format!("(allow {} (regex \"^{}/[^/]+$\"))\n", op, escaped));
-                if let Some(ref e) = escaped_orig {
-                    profile.push_str(&format!("(allow {} (regex \"^{}/[^/]+$\"))\n", op, e));
+        match cap.scope {
+            crate::SocketScope::File => {
+                let escaped = escape_path(resolved_str)?;
+                let escaped_orig = original_str.map(escape_path).transpose()?;
+                for op in operations {
+                    profile.push_str(&format!("(allow {} (path \"{}\"))\n", op, escaped));
+                    if let Some(ref e) = escaped_orig {
+                        profile.push_str(&format!("(allow {} (path \"{}\"))\n", op, e));
+                    }
                 }
             }
-        } else {
-            let escaped = escape_path(resolved_str)?;
-            let escaped_orig = original_str.map(escape_path).transpose()?;
-            for op in operations {
-                profile.push_str(&format!("(allow {} (path \"{}\"))\n", op, escaped));
-                if let Some(ref e) = escaped_orig {
-                    profile.push_str(&format!("(allow {} (path \"{}\"))\n", op, e));
+            crate::SocketScope::DirChildren => {
+                let escaped = regex_escape_path_for_seatbelt(resolved_str)?;
+                let escaped_orig = original_str
+                    .map(regex_escape_path_for_seatbelt)
+                    .transpose()?;
+                for op in operations {
+                    profile.push_str(&format!("(allow {} (regex \"^{}/[^/]+$\"))\n", op, escaped));
+                    if let Some(ref e) = escaped_orig {
+                        profile.push_str(&format!("(allow {} (regex \"^{}/[^/]+$\"))\n", op, e));
+                    }
+                }
+            }
+            crate::SocketScope::DirSubtree => {
+                let escaped = escape_path(resolved_str)?;
+                let escaped_orig = original_str.map(escape_path).transpose()?;
+                for op in operations {
+                    profile.push_str(&format!("(allow {} (subpath \"{}\"))\n", op, escaped));
+                    if let Some(ref e) = escaped_orig {
+                        profile.push_str(&format!("(allow {} (subpath \"{}\"))\n", op, e));
+                    }
                 }
             }
         }
@@ -1391,7 +1404,7 @@ mod tests {
         caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/tmp/test.sock"),
             resolved: PathBuf::from("/private/tmp/test.sock"),
-            is_directory: false,
+            scope: crate::SocketScope::File,
             mode: crate::UnixSocketMode::Connect,
             source: CapabilitySource::User,
         });
@@ -1416,7 +1429,7 @@ mod tests {
         caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/var/run/app.sock"),
             resolved: PathBuf::from("/private/var/run/app.sock"),
-            is_directory: false,
+            scope: crate::SocketScope::File,
             mode: crate::UnixSocketMode::ConnectBind,
             source: CapabilitySource::User,
         });
@@ -1455,7 +1468,7 @@ mod tests {
         caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/var/run/client.sock"),
             resolved: PathBuf::from("/private/var/run/client.sock"),
-            is_directory: false,
+            scope: crate::SocketScope::File,
             mode: crate::UnixSocketMode::Connect,
             source: CapabilitySource::User,
         });
@@ -1481,7 +1494,7 @@ mod tests {
         caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/tmp/mydir"),
             resolved: PathBuf::from("/private/tmp/mydir"),
-            is_directory: true,
+            scope: crate::SocketScope::DirChildren,
             mode: crate::UnixSocketMode::ConnectBind,
             source: CapabilitySource::User,
         });
@@ -1504,6 +1517,37 @@ mod tests {
         assert!(
             !profile.contains("(allow network-outbound (subpath"),
             "directory unix socket grants must NOT use recursive subpath"
+        );
+    }
+
+    #[test]
+    fn test_generate_profile_unix_socket_subtree_emits_subpath() {
+        let mut caps = CapabilitySet::new().proxy_only(54321);
+        caps.add_unix_socket(crate::UnixSocketCapability {
+            original: PathBuf::from("/tmp/mydir"),
+            resolved: PathBuf::from("/private/tmp/mydir"),
+            scope: crate::SocketScope::DirSubtree,
+            mode: crate::UnixSocketMode::ConnectBind,
+            source: CapabilitySource::User,
+        });
+
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(
+            profile.contains("(allow network-outbound (subpath \"/private/tmp/mydir\"))"),
+            "subtree unix socket grants must emit recursive subpath: {profile}"
+        );
+        assert!(
+            profile.contains("(allow network-outbound (subpath \"/tmp/mydir\"))"),
+            "symlinked original must also emit subpath form"
+        );
+        assert!(
+            profile.contains("(allow network-bind (subpath \"/private/tmp/mydir\"))"),
+            "ConnectBind subtree grant must emit network-bind subpath"
+        );
+        assert!(
+            !profile.contains("(regex \"^/private/tmp/mydir/[^/]+$\")"),
+            "subtree grant must not use direct-child regex"
         );
     }
 
@@ -1580,7 +1624,7 @@ mod tests {
         caps.add_unix_socket(crate::UnixSocketCapability {
             original: PathBuf::from("/tmp/test.sock"),
             resolved: PathBuf::from("/private/tmp/test.sock"),
-            is_directory: false,
+            scope: crate::SocketScope::File,
             mode: crate::UnixSocketMode::Connect,
             source: CapabilitySource::User,
         });

@@ -127,10 +127,10 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
 
         for cap in &user_caps {
             let mode_badge = format_unix_socket_mode_badge(cap.mode);
-            let scope_suffix = if cap.is_directory {
-                "  (directory grant — sockets inside only, non-recursive)"
-            } else {
-                ""
+            let scope_suffix = match cap.scope {
+                nono::SocketScope::File => "",
+                nono::SocketScope::DirChildren => "  (directory grant — direct child sockets only)",
+                nono::SocketScope::DirSubtree => "  (subtree grant — recursive socket paths)",
             };
             if verbose > 0 {
                 let source_str = format!("{}", cap.source);

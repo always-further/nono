@@ -3,7 +3,7 @@
 //! This module provides serialization of capability state for diagnostic purposes.
 
 use crate::capability::{
-    AccessMode, CapabilitySet, FsCapability, UnixSocketCapability, UnixSocketMode,
+    AccessMode, CapabilitySet, FsCapability, SocketScope, UnixSocketCapability, UnixSocketMode,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -41,8 +41,12 @@ pub struct UnixSocketCapState {
     pub original: PathBuf,
     /// Resolved canonical path
     pub resolved: PathBuf,
-    /// Whether the grant is directory-scoped (non-recursive)
-    pub is_directory: bool,
+    /// Path matching scope for this socket grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<SocketScope>,
+    /// Legacy state field from before `SocketScope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_directory: Option<bool>,
     /// Mode string: "connect" or "connect+bind"
     pub mode: String,
 }
@@ -68,7 +72,8 @@ impl SandboxState {
                 .map(|cap| UnixSocketCapState {
                     original: cap.original.clone(),
                     resolved: cap.resolved.clone(),
-                    is_directory: cap.is_directory,
+                    scope: Some(cap.scope),
+                    is_directory: None,
                     mode: cap.mode.to_string(),
                 })
                 .collect(),
@@ -131,10 +136,20 @@ impl SandboxState {
             // - Crafted JSON smuggling: attacker sets an evil `original`
             //   and legit `resolved`; the reconstructed cap's actual
             //   resolved won't match the crafted one, so we reject.
-            let cap = if sock.is_directory {
-                UnixSocketCapability::new_dir(&sock.original, mode)?
-            } else {
-                UnixSocketCapability::new_file(&sock.original, mode)?
+            let scope = sock.scope.unwrap_or_else(|| {
+                if sock.is_directory.unwrap_or(false) {
+                    SocketScope::DirChildren
+                } else {
+                    SocketScope::File
+                }
+            });
+
+            let cap = match scope {
+                SocketScope::File => UnixSocketCapability::new_file(&sock.original, mode)?,
+                SocketScope::DirChildren => UnixSocketCapability::new_dir(&sock.original, mode)?,
+                SocketScope::DirSubtree => {
+                    UnixSocketCapability::new_dir_subtree(&sock.original, mode)?
+                }
             };
             if cap.resolved != sock.resolved {
                 return Err(crate::error::NonoError::ConfigParse(format!(
@@ -238,7 +253,32 @@ mod tests {
         assert_eq!(after.resolved, before.resolved);
         assert_eq!(after.original, before.original);
         assert_eq!(after.mode, before.mode);
-        assert_eq!(after.is_directory, before.is_directory);
+        assert_eq!(after.scope, before.scope);
+    }
+
+    #[test]
+    fn test_unix_socket_state_legacy_is_directory_maps_to_dir_children() {
+        use tempfile::tempdir;
+        let dir = tempdir().expect("tempdir");
+        let json = format!(
+            r#"{{
+            "fs": [],
+            "unix_sockets": [{{
+                "original": "{}",
+                "resolved": "{}",
+                "is_directory": true,
+                "mode": "connect"
+            }}],
+            "net_blocked": false
+        }}"#,
+            dir.path().display(),
+            dir.path().canonicalize().expect("canonicalize").display()
+        );
+        let state = SandboxState::from_json(&json).expect("state json");
+        let caps = state.to_caps().expect("to_caps");
+        let sockets = caps.unix_socket_capabilities();
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(sockets[0].scope, SocketScope::DirChildren);
     }
 
     #[test]

@@ -365,6 +365,25 @@ directory. Non-recursive. Use for runtime-generated socket filenames.
 nono run --block-net --allow-unix-socket-dir-bind $TMPDIR/tsx-$UID -- tsx app.ts
 ```
 
+#### `--allow-unix-socket-subtree`
+
+Allow `connect(2)` to any AF_UNIX socket within this directory subtree
+(recursive — nested subdirectories are covered). Implies read access on the
+directory.
+
+```bash
+nono run --block-net --allow-unix-socket-subtree $TMPDIR/nx -- nx serve
+```
+
+#### `--allow-unix-socket-subtree-bind`
+
+Allow `connect(2)` and `bind(2)` on any AF_UNIX socket within this directory
+subtree. Implies read/write access on the directory.
+
+```bash
+nono run --block-net --allow-unix-socket-subtree-bind $TMPDIR/nx -- nx serve
+```
+
 ### Network Control
 
 #### `--block-net`

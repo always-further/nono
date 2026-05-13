@@ -74,7 +74,9 @@ Profiles use JSON format:
     "unix_socket": [],
     "unix_socket_bind": [],
     "unix_socket_dir": [],
-    "unix_socket_dir_bind": []
+    "unix_socket_dir_bind": [],
+    "unix_socket_subtree": [],
+    "unix_socket_subtree_bind": []
   },
   "network": {
     "block": false
@@ -94,12 +96,15 @@ sockets are never grantable — only filesystem-backed socket paths.
 | `unix_socket_bind` | `connect` + `bind`, single socket file | ReadWrite on the file (exists) or on the parent directory (pending — bind will create the file) |
 | `unix_socket_dir` | `connect` only, any direct child of a directory | Read on the directory (recursive) |
 | `unix_socket_dir_bind` | `connect` + `bind`, any direct child of a directory | ReadWrite on the directory (recursive) |
+| `unix_socket_subtree` | `connect` only, any descendant of a directory | Read on the directory (recursive) |
+| `unix_socket_subtree_bind` | `connect` + `bind`, any descendant of a directory | ReadWrite on the directory (recursive) |
 
-Directory forms are **non-recursive at the socket layer**: only sockets
-directly inside the named directory are covered, not those in
+`unix_socket_dir*` forms are **non-recursive at the socket layer**: only
+sockets directly inside the named directory are covered. Use
+`unix_socket_subtree*` when a tool creates sockets below nested
 subdirectories. The implied filesystem grant is recursive (Landlock's
-only expressible granularity), so the non-recursion is enforced
-separately by the supervisor (Linux) or Seatbelt regex emission (macOS).
+only expressible granularity), so socket scope is enforced separately by
+the supervisor (Linux) or Seatbelt path emission (macOS).
 
 Under restricted network modes (`--block-net` or `--network-profile`),
 `connect(2)` to a Unix socket requires an explicit `unix_socket*` grant

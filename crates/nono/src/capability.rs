@@ -232,6 +232,43 @@ impl std::fmt::Display for UnixSocketOp {
     }
 }
 
+/// Path matching scope for a pathname AF_UNIX socket capability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketScope {
+    /// A single socket path; matches only the canonical file path.
+    #[default]
+    File,
+    /// Any direct child of a directory; does not match grandchildren.
+    DirChildren,
+    /// Any descendant of a directory subtree.
+    DirSubtree,
+}
+
+impl SocketScope {
+    /// Human-readable label for summaries and diagnostics.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            SocketScope::File => "file",
+            SocketScope::DirChildren => "dir-children",
+            SocketScope::DirSubtree => "dir-subtree",
+        }
+    }
+
+    /// Whether this scope is directory-backed.
+    #[must_use]
+    pub fn is_directory(self) -> bool {
+        matches!(self, SocketScope::DirChildren | SocketScope::DirSubtree)
+    }
+}
+
+impl std::fmt::Display for SocketScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// A capability granting AF_UNIX socket access on a filesystem path.
 ///
 /// Only pathname sockets (filesystem-backed) are grantable through this
@@ -247,7 +284,7 @@ impl std::fmt::Display for UnixSocketOp {
 ///   socket file).
 /// - `lib-policy-free`: this is a pure data type. Policy coupling (e.g.
 ///   auto-granting an implied `FsCapability`) lives in `nono-cli`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UnixSocketCapability {
     /// Original path as specified by the caller, pre-canonicalisation.
     /// Retained for diagnostic output and for macOS dual-path emission
@@ -255,15 +292,49 @@ pub struct UnixSocketCapability {
     pub original: PathBuf,
     /// Canonical absolute path.
     pub resolved: PathBuf,
-    /// If `true`, the grant covers any pathname socket *directly* within
-    /// `resolved` (non-recursive: children only, not grandchildren).
-    /// If `false`, the grant is file-scoped and matches only `resolved`.
-    pub is_directory: bool,
+    /// Path matching scope for this grant.
+    pub scope: SocketScope,
     /// Which socket operations are permitted.
     pub mode: UnixSocketMode,
     /// Where this capability originated.
     #[serde(default)]
     pub source: CapabilitySource,
+}
+
+impl<'de> Deserialize<'de> for UnixSocketCapability {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            original: PathBuf,
+            resolved: PathBuf,
+            #[serde(default)]
+            scope: Option<SocketScope>,
+            #[serde(default)]
+            is_directory: Option<bool>,
+            mode: UnixSocketMode,
+            #[serde(default)]
+            source: CapabilitySource,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let scope = wire.scope.unwrap_or_else(|| {
+            if wire.is_directory.unwrap_or(false) {
+                SocketScope::DirChildren
+            } else {
+                SocketScope::File
+            }
+        });
+        Ok(Self {
+            original: wire.original,
+            resolved: wire.resolved,
+            scope,
+            mode: wire.mode,
+            source: wire.source,
+        })
+    }
 }
 
 impl UnixSocketCapability {
@@ -335,7 +406,7 @@ impl UnixSocketCapability {
         Ok(Self {
             original: path.to_path_buf(),
             resolved,
-            is_directory: false,
+            scope: SocketScope::File,
             mode,
             source: CapabilitySource::User,
         })
@@ -351,7 +422,28 @@ impl UnixSocketCapability {
     /// (cf. [`validate_platform_rule`]'s rejection of root-level subpath
     /// grants for filesystem rules). Use explicit subdirectory paths.
     pub fn new_dir(path: impl AsRef<Path>, mode: UnixSocketMode) -> Result<Self> {
+        Self::new_dir_with_scope(path, mode, SocketScope::DirChildren)
+    }
+
+    /// Grant for any pathname socket within a directory subtree.
+    ///
+    /// Recursive: sockets in nested subdirectories are covered. The directory
+    /// itself must already exist.
+    pub fn new_dir_subtree(path: impl AsRef<Path>, mode: UnixSocketMode) -> Result<Self> {
+        Self::new_dir_with_scope(path, mode, SocketScope::DirSubtree)
+    }
+
+    fn new_dir_with_scope(
+        path: impl AsRef<Path>,
+        mode: UnixSocketMode,
+        scope: SocketScope,
+    ) -> Result<Self> {
         let path = path.as_ref();
+        if !scope.is_directory() {
+            return Err(NonoError::SandboxInit(
+                "unix socket directory constructor requires a directory scope".to_string(),
+            ));
+        }
 
         let resolved = path.canonicalize().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -377,7 +469,7 @@ impl UnixSocketCapability {
         Ok(Self {
             original: path.to_path_buf(),
             resolved,
-            is_directory: true,
+            scope,
             mode,
             source: CapabilitySource::User,
         })
@@ -386,25 +478,41 @@ impl UnixSocketCapability {
     /// True if `sockaddr_path` is covered by this grant.
     ///
     /// - File grants: `sockaddr_path == resolved` exactly.
-    /// - Directory grants: `sockaddr_path`'s parent equals `resolved`,
-    ///   component-wise (non-recursive). Subdirectories are not covered.
+    /// - Direct-child directory grants: `sockaddr_path`'s parent equals
+    ///   `resolved`, component-wise (non-recursive).
+    /// - Subtree directory grants: `sockaddr_path` starts with `resolved`,
+    ///   component-wise.
     ///
     /// Uses `Path` component semantics; never string prefix
     /// (`path-component-compare` invariant).
     #[must_use]
     pub fn covers(&self, sockaddr_path: &Path) -> bool {
-        if self.is_directory {
-            sockaddr_path.parent() == Some(self.resolved.as_path())
-        } else {
-            sockaddr_path == self.resolved.as_path()
+        match self.scope {
+            SocketScope::File => sockaddr_path == self.resolved.as_path(),
+            SocketScope::DirChildren => sockaddr_path.parent() == Some(self.resolved.as_path()),
+            SocketScope::DirSubtree => {
+                sockaddr_path != self.resolved.as_path()
+                    && sockaddr_path.starts_with(&self.resolved)
+            }
         }
+    }
+
+    /// Whether this grant is directory-backed.
+    #[must_use]
+    pub fn is_directory(&self) -> bool {
+        self.scope.is_directory()
     }
 }
 
 impl std::fmt::Display for UnixSocketCapability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let scope = if self.is_directory { "dir " } else { "" };
-        write!(f, "{}{} ({})", scope, self.resolved.display(), self.mode)
+        write!(
+            f,
+            "{} {} ({})",
+            self.scope.label(),
+            self.resolved.display(),
+            self.mode
+        )
     }
 }
 
@@ -866,6 +974,20 @@ impl CapabilitySet {
         mode: UnixSocketMode,
     ) -> Result<Self> {
         let cap = UnixSocketCapability::new_dir(path, mode)?;
+        self.unix_sockets.push(cap);
+        Ok(self)
+    }
+
+    /// Add a subtree-scoped AF_UNIX socket capability (builder pattern).
+    ///
+    /// Grants cover any pathname socket below the directory recursively. The
+    /// directory must exist at grant time.
+    pub fn allow_unix_socket_subtree(
+        mut self,
+        path: impl AsRef<Path>,
+        mode: UnixSocketMode,
+    ) -> Result<Self> {
+        let cap = UnixSocketCapability::new_dir_subtree(path, mode)?;
         self.unix_sockets.push(cap);
         Ok(self)
     }
@@ -1473,7 +1595,7 @@ impl CapabilitySet {
 
     /// Deduplicate [`UnixSocketCapability`] entries in-place.
     ///
-    /// Two entries collide when they share `(resolved, is_directory)`.
+    /// Two entries collide when they share `(resolved, scope)`.
     /// Merge rules match [`Self::deduplicate`]'s user-intent policy:
     ///
     /// - **User-intent beats system/group.** When a user- or profile-
@@ -1491,13 +1613,13 @@ impl CapabilitySet {
     fn deduplicate_unix_sockets(&mut self) {
         use std::collections::HashMap;
 
-        let mut seen: HashMap<(PathBuf, bool), usize> = HashMap::new();
+        let mut seen: HashMap<(PathBuf, SocketScope), usize> = HashMap::new();
         let mut to_remove: Vec<usize> = Vec::new();
         let mut mode_upgrades: Vec<(usize, UnixSocketMode)> = Vec::new();
         let mut original_updates: Vec<(usize, PathBuf)> = Vec::new();
 
         for (i, cap) in self.unix_sockets.iter().enumerate() {
-            let key = (cap.resolved.clone(), cap.is_directory);
+            let key = (cap.resolved.clone(), cap.scope);
             if let Some(&existing_idx) = seen.get(&key) {
                 let existing = &self.unix_sockets[existing_idx];
 
@@ -1610,12 +1732,11 @@ impl CapabilitySet {
         if !self.unix_sockets.is_empty() {
             lines.push("Unix sockets:".to_string());
             for cap in &self.unix_sockets {
-                let scope = if cap.is_directory { "dir" } else { "file" };
                 lines.push(format!(
                     "  {} [{}] ({})",
                     cap.resolved.display(),
                     cap.mode,
-                    scope
+                    cap.scope
                 ));
             }
         }
@@ -2835,7 +2956,7 @@ mod tests {
 
         let cap = UnixSocketCapability::new_file(&path, UnixSocketMode::Connect).unwrap();
         assert_eq!(cap.mode, UnixSocketMode::Connect);
-        assert!(!cap.is_directory);
+        assert!(!cap.is_directory());
         assert!(cap.resolved.is_absolute());
     }
 
@@ -2848,7 +2969,7 @@ mod tests {
 
         let cap = UnixSocketCapability::new_file(&missing, UnixSocketMode::ConnectBind).unwrap();
         assert_eq!(cap.mode, UnixSocketMode::ConnectBind);
-        assert!(!cap.is_directory);
+        assert!(!cap.is_directory());
         // Resolved path is canonical-parent + final component
         assert_eq!(cap.resolved.file_name().unwrap(), "pending.sock");
         assert!(cap.resolved.parent().unwrap().is_absolute());
@@ -2882,7 +3003,19 @@ mod tests {
         let dir = tempdir().unwrap();
 
         let cap = UnixSocketCapability::new_dir(dir.path(), UnixSocketMode::Connect).unwrap();
-        assert!(cap.is_directory);
+        assert!(cap.is_directory());
+        assert_eq!(cap.scope, SocketScope::DirChildren);
+        assert!(cap.resolved.is_absolute());
+    }
+
+    #[test]
+    fn test_unix_socket_subtree_on_existing_directory() {
+        let dir = tempdir().unwrap();
+
+        let cap =
+            UnixSocketCapability::new_dir_subtree(dir.path(), UnixSocketMode::Connect).unwrap();
+        assert!(cap.is_directory());
+        assert_eq!(cap.scope, SocketScope::DirSubtree);
         assert!(cap.resolved.is_absolute());
     }
 
@@ -2949,6 +3082,24 @@ mod tests {
     }
 
     #[test]
+    fn test_unix_socket_covers_directory_subtree() {
+        let dir = tempdir().unwrap();
+        let cap =
+            UnixSocketCapability::new_dir_subtree(dir.path(), UnixSocketMode::Connect).unwrap();
+
+        let child = cap.resolved.join("x.sock");
+        assert!(cap.covers(&child), "direct child should be covered");
+
+        let grandchild = cap.resolved.join("sub").join("x.sock");
+        assert!(cap.covers(&grandchild), "grandchild should be covered");
+
+        assert!(
+            !cap.covers(&cap.resolved),
+            "directory itself is not a socket"
+        );
+    }
+
+    #[test]
     fn test_unix_socket_covers_does_not_string_prefix() {
         // Regression: a directory grant for /tmp/foo must NOT cover
         // /tmp/foobar/x.sock, which a naive string starts_with would match.
@@ -2972,13 +3123,18 @@ mod tests {
         let file_cap = UnixSocketCapability::new_file(&path, UnixSocketMode::Connect).unwrap();
         let rendered = format!("{file_cap}");
         assert!(rendered.contains("connect"));
-        assert!(!rendered.starts_with("dir"));
+        assert!(rendered.starts_with("file "));
 
         let dir_cap =
             UnixSocketCapability::new_dir(dir.path(), UnixSocketMode::ConnectBind).unwrap();
         let rendered = format!("{dir_cap}");
         assert!(rendered.contains("connect+bind"));
-        assert!(rendered.starts_with("dir "));
+        assert!(rendered.starts_with("dir-children "));
+
+        let subtree_cap =
+            UnixSocketCapability::new_dir_subtree(dir.path(), UnixSocketMode::Connect).unwrap();
+        let rendered = format!("{subtree_cap}");
+        assert!(rendered.starts_with("dir-subtree "));
     }
 
     #[test]
@@ -3057,6 +3213,26 @@ mod tests {
     }
 
     #[test]
+    fn test_capability_set_unix_socket_allowed_subtree_grant() {
+        let dir = tempdir().unwrap();
+        let caps = CapabilitySet::new()
+            .allow_unix_socket_subtree(dir.path(), UnixSocketMode::Connect)
+            .unwrap();
+
+        let direct_child = dir.path().canonicalize().unwrap().join("x.sock");
+        let grandchild = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("nested")
+            .join("x.sock");
+
+        assert!(caps.unix_socket_allowed(&direct_child, UnixSocketOp::Connect));
+        assert!(caps.unix_socket_allowed(&grandchild, UnixSocketOp::Connect));
+        assert!(!caps.unix_socket_allowed(&direct_child, UnixSocketOp::Bind));
+    }
+
+    #[test]
     fn test_deduplicate_unix_sockets_merges_identical_grants() {
         let dir = tempdir().unwrap();
         let sock = dir.path().join("a.sock");
@@ -3105,14 +3281,14 @@ mod tests {
         let group_cap = UnixSocketCapability {
             original: sock.clone(),
             resolved: sock.canonicalize().unwrap(),
-            is_directory: false,
+            scope: SocketScope::File,
             mode: UnixSocketMode::ConnectBind,
             source: CapabilitySource::Group("example_group".to_string()),
         };
         let user_cap = UnixSocketCapability {
             original: sock.clone(),
             resolved: sock.canonicalize().unwrap(),
-            is_directory: false,
+            scope: SocketScope::File,
             mode: UnixSocketMode::Connect,
             source: CapabilitySource::User,
         };
