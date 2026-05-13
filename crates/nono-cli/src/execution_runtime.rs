@@ -6,7 +6,48 @@ use crate::supervised_runtime::{execute_supervised_runtime, SupervisedRuntimeCon
 use crate::{config, exec_strategy, output, sandbox_state};
 use nono::{CapabilitySet, NonoError, Result, Sandbox};
 use std::path::Path;
+#[cfg(not(target_os = "windows"))]
+use std::time::Duration;
 use tracing::{error, info};
+
+// Plan 36-03 Commit 2: per upstream b5f0a3ab, the startup-timeout hint for
+// known interactive CLIs launched without their recommended built-in profile
+// is reduced from 10 seconds to 5 seconds.
+#[cfg(not(target_os = "windows"))]
+const PROFILE_HINT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Returns true if a startup timeout should be applied for the given invocation.
+///
+/// A timeout is only meaningful when a recommended profile exists (i.e., the
+/// user is running a known interactive CLI without their recommended profile)
+/// and no explicit arguments were provided (no-arg invocation is the common
+/// "stuck" pattern).
+#[cfg(not(target_os = "windows"))]
+fn should_apply_startup_timeout(
+    recommended_profile: Option<&str>,
+    cmd_args: &[impl AsRef<std::ffi::OsStr>],
+) -> bool {
+    recommended_profile.is_some() && cmd_args.is_empty()
+}
+
+/// Compute the effective startup-timeout profile to display.
+///
+/// Returns `None` when the user has already selected the recommended profile
+/// (or its local override), indicating they are intentionally running without
+/// the default profile and the timeout hint is not helpful.
+#[cfg(not(target_os = "windows"))]
+fn startup_timeout_profile<'a>(
+    recommended_profile: Option<&'a str>,
+    explicit_profile: Option<&str>,
+) -> Option<&'a str> {
+    let recommended = recommended_profile?;
+    if let Some(explicit) = explicit_profile {
+        if explicit == recommended || explicit == format!("{recommended}-local") {
+            return None;
+        }
+    }
+    Some(recommended)
+}
 
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
@@ -47,6 +88,18 @@ fn next_capability_state_file_path() -> std::path::PathBuf {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     std::env::temp_dir().join(format!(".nono-{suffix}.json"))
+}
+
+/// Compute the canonical path and SHA-256 identity of the launched executable.
+///
+/// Delegates to `crate::exec_identity::compute` which owns the implementation;
+/// this thin wrapper exists so `execution_runtime` tests can call the same
+/// name-shape that upstream b5f0a3ab uses in its test module, and so the
+/// audit-identity call at the `execute_sandboxed` launch point is clearly named.
+fn compute_executable_identity(
+    resolved_program: &std::path::Path,
+) -> crate::Result<nono::undo::ExecutableIdentity> {
+    crate::exec_identity::compute(resolved_program)
 }
 
 pub(crate) fn execution_start_dir(
@@ -129,11 +182,15 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     }
 
     let resolved_program = exec_strategy::resolve_program(&command[0])?;
+    let known_builtin_profile = recommended_builtin_profile(&resolved_program);
     let recommended_profile = if flags.session.profile_name.is_none() {
-        recommended_builtin_profile(&resolved_program)
+        known_builtin_profile
     } else {
         None
     };
+    #[cfg(not(target_os = "windows"))]
+    let startup_timeout_profile =
+        startup_timeout_profile(known_builtin_profile, flags.session.profile_name.as_deref());
 
     let recommended_program_name = resolved_program
         .file_name()
@@ -193,7 +250,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     // bubbles `NonoError::CommandExecution`; we propagate that so the user
     // sees a concrete diagnostic rather than running with no audit identity.
     let executable_identity = if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
-        Some(crate::exec_identity::compute(&resolved_program)?)
+        Some(compute_executable_identity(&resolved_program)?)
     } else {
         None
     };
@@ -322,8 +379,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
             .profile_name
             .as_deref()
             .or(recommended_profile),
-        startup_timeout: if should_apply_startup_timeout(recommended_profile, &cmd_args) {
-            recommended_profile.map(|profile| exec_strategy::StartupTimeoutConfig {
+        startup_timeout: if should_apply_startup_timeout(startup_timeout_profile, &cmd_args) {
+            startup_timeout_profile.map(|profile| exec_strategy::StartupTimeoutConfig {
                 timeout: PROFILE_HINT_STARTUP_TIMEOUT,
                 program: recommended_program_name,
                 profile,
@@ -464,7 +521,10 @@ fn write_capability_state_file(
 
 #[cfg(test)]
 mod tests {
+    use super::compute_executable_identity;
     use super::recommended_builtin_profile;
+    #[cfg(not(target_os = "windows"))]
+    use super::startup_timeout_profile;
     use std::path::Path;
 
     #[test]
@@ -482,5 +542,40 @@ mod tests {
     #[test]
     fn recommended_builtin_profile_ignores_unknown_commands() {
         assert_eq!(recommended_builtin_profile(Path::new("/usr/bin/env")), None);
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn compute_executable_identity_resolves_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binary = dir.path().join("fake_binary");
+        std::fs::write(&binary, b"fake binary content for identity test").expect("write");
+        let identity = compute_executable_identity(&binary).expect("compute identity");
+        let canonical = binary.canonicalize().expect("canonicalize");
+        assert_eq!(identity.resolved_path, canonical);
+        // SHA-256 hex digest is always 64 hex characters
+        assert_eq!(identity.sha256.to_string().len(), 64);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn startup_timeout_profile_ignores_matching_explicit_profile_only() {
+        assert_eq!(
+            startup_timeout_profile(Some("claude-code"), None),
+            Some("claude-code")
+        );
+        assert_eq!(
+            startup_timeout_profile(Some("claude-code"), Some("default")),
+            Some("claude-code")
+        );
+        assert_eq!(
+            startup_timeout_profile(Some("claude-code"), Some("claude-code")),
+            None
+        );
+        assert_eq!(
+            startup_timeout_profile(Some("claude-code"), Some("claude-code-local")),
+            None
+        );
+        assert_eq!(startup_timeout_profile(None, Some("default")), None);
     }
 }

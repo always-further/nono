@@ -1,7 +1,7 @@
 use crate::exec_strategy::StartupTimeoutConfig;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
 pub(crate) fn print_terminal_safe_stderr(message: &str) {
@@ -29,33 +29,18 @@ fn prompt_startup_termination(timeout_cfg: StartupTimeoutConfig<'_>, has_output:
         )
     };
 
-    let tty_in = match std::fs::File::open("/dev/tty") {
-        Ok(file) => file,
-        Err(_) => {
-            print_terminal_safe_stderr(&format!(
-                "{}\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
-                description,
-                timeout_cfg.program,
-                timeout_cfg.profile,
-                timeout_cfg.profile,
-                timeout_cfg.program,
-            ));
-            return false;
-        }
-    };
-
     let mut tty_out = match std::fs::OpenOptions::new().write(true).open("/dev/tty") {
         Ok(file) => file,
         Err(_) => {
             print_terminal_safe_stderr(&format!(
-                "{}\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}",
+                "{}\n[nono] `{}` usually needs the built-in `{}` profile.\n[nono] Try: nono run --profile {} -- {}\n[nono] Terminating startup-blocked process so diagnostics can show denied paths.",
                 description,
                 timeout_cfg.program,
                 timeout_cfg.profile,
                 timeout_cfg.profile,
                 timeout_cfg.program,
             ));
-            return false;
+            return true;
         }
     };
 
@@ -71,23 +56,12 @@ fn prompt_startup_termination(timeout_cfg: StartupTimeoutConfig<'_>, has_output:
         "[nono] Try: nono run --profile {} -- {}",
         timeout_cfg.profile, timeout_cfg.program
     );
-    let _ = write!(tty_out, "[nono] Do you wish to terminate? [y/N] ");
+    let _ = writeln!(
+        tty_out,
+        "[nono] Terminating startup-blocked process so diagnostics can show denied paths."
+    );
     let _ = tty_out.flush();
-
-    let mut reader = io::BufReader::new(tty_in);
-    let mut input = String::new();
-    if reader.read_line(&mut input).is_err() {
-        let _ = writeln!(tty_out, "\n[nono] Continuing to wait.");
-        return false;
-    }
-
-    let affirmative = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-    if affirmative {
-        let _ = writeln!(tty_out, "[nono] Terminating startup-blocked process.");
-    } else {
-        let _ = writeln!(tty_out, "[nono] Continuing to wait.");
-    }
-    affirmative
+    true
 }
 
 struct StartupPromptTerminalGuard {
@@ -167,7 +141,7 @@ pub(crate) fn prompt_startup_termination_for_child(
     if let Some(proxy) = pty {
         let paused_terminal = proxy.pause_terminal_for_prompt();
         let terminate = prompt_startup_termination(timeout_cfg, has_output);
-        if paused_terminal {
+        if paused_terminal && !terminate {
             proxy.resume_terminal_after_prompt();
         }
         return terminate;

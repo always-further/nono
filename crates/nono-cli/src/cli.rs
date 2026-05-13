@@ -2302,6 +2302,10 @@ pub struct LearnArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub no_rdns: bool,
 
+    /// Enable detailed strace/dtrace output for path-discovery diagnostics
+    #[arg(long, help_heading = "OPTIONS")]
+    pub trace: bool,
+
     /// Enable verbose output
     #[arg(long, short = 'v', action = clap::ArgAction::Count, help_heading = "OPTIONS")]
     pub verbose: u8,
@@ -2325,6 +2329,7 @@ impl LearnArgs {
             timeout: None,
             all: false,
             no_rdns: false,
+            trace: false,
             verbose: 0,
             command: vec!["echo".to_string(), "test".to_string()],
             help: None,

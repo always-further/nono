@@ -133,21 +133,23 @@ pub(crate) fn offer_save_run_profile(
 fn prompt_profile_name(suggested: Option<&str>) -> Result<Option<String>> {
     let mut first = true;
     loop {
-        if first {
+        let prompt = if first {
             if let Some(suggested_name) = suggested {
-                prompt_print(
+                format!(
                     "Save denied paths as user profile? Enter a name (suggested: {}, or press Enter to skip): ",
-                    &[suggested_name],
-                );
+                    suggested_name
+                )
             } else {
-                prompt_print(
-                    "Save denied paths as user profile? Enter a name (or press Enter to skip): ",
-                    &[],
-                );
+                "Save denied paths as user profile? Enter a name (or press Enter to skip): "
+                    .to_string()
             }
-            first = false;
         } else {
-            prompt_print("Enter a name (or press Enter to skip): ", &[]);
+            "Enter a name (or press Enter to skip): ".to_string()
+        };
+        prompt_print(&prompt, &[]);
+
+        if first {
+            first = false;
         }
 
         let input = read_input_line()?;

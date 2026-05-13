@@ -47,6 +47,21 @@ use env_sanitization::should_skip_env_var;
 // Re-exported for cross-module consumers; profile_runtime uses a local copy.
 pub(crate) use env_sanitization::validate_env_var_patterns;
 
+// Plan 36-03 Commit 2: per upstream b5f0a3ab, the post-exit PTY drain
+// quiet period is reduced from 250ms to 100ms.
+//
+// REGRESSION COVERAGE per D-36-D3: this MUST NOT regress Phase 17
+// attach-streaming (crates/nono-cli/tests/attach_streaming_integration.rs)
+// or Phase 31 broker ConPTY (crates/nono-shell-broker/). Phase 15 5-row
+// detached-console smoke gate (close-gate step 6) double-checks.
+//
+// The usage site (`drain_master_output`) is in f782ddcd (intermediate upstream
+// commit). This constant is declared here so the fork's value matches upstream
+// b5f0a3ab once `drain_master_output` is ported in a future plan.
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+const POST_EXIT_PTY_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+
 /// Platform-specific guard returned by [`apply_resource_limits_unix`].
 ///
 /// Holds platform-specific state for the duration of the child's execution.
@@ -1494,23 +1509,40 @@ pub fn execute_supervised(
                 DiagnosticMode::Standard
             };
 
-            let should_print_diagnostics = !config.no_diagnostics
-                && (exit_code != 0 || !denials.is_empty() || error_observation.has_findings());
+            #[cfg(target_os = "macos")]
+            let sandbox_violations = if supervisor.is_some() {
+                let include_historical_sandbox_log =
+                    exit_code != 0 || !denials.is_empty() || error_observation.has_findings();
+                match sandbox_log_collector {
+                    Some(collector) if include_historical_sandbox_log => collector.finish(),
+                    Some(collector) => collector.finish_realtime_only(),
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            #[cfg(not(target_os = "macos"))]
+            let sandbox_violations = Vec::new();
+
+            // Resolve policy explanations for denied paths so the diagnostic
+            // can show group names and fix guidance inline. On macOS this is
+            // also the source for the run-time profile save prompt.
+            let policy_explanations =
+                build_policy_explanations(&denials, &sandbox_violations, config.caps);
+            let prompt_policy_explanations = policy_explanations.clone();
+            let prompt_error_observation = error_observation.clone();
+
+            let should_print_diagnostics = should_print_diagnostic_footer(
+                config.no_diagnostics,
+                exit_code,
+                &denials,
+                &sandbox_violations,
+                &error_observation,
+            );
 
             // Print diagnostic footer on non-zero exit or when the PTY
-            // output shows a likely sandbox-related issue.
+            // output or OS sandbox logs show a likely sandbox-related issue.
             if should_print_diagnostics {
-                #[cfg(target_os = "macos")]
-                let sandbox_violations = if supervisor.is_some() {
-                    sandbox_log_collector
-                        .map(crate::sandbox_log::SandboxLogCollector::finish)
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                #[cfg(not(target_os = "macos"))]
-                let sandbox_violations = Vec::new();
-
                 let diag_session_id = if supervisor.is_some() {
                     pty_session_id
                         .or_else(|| supervisor.map(|s| s.session_id))
@@ -1518,13 +1550,6 @@ pub fn execute_supervised(
                 } else {
                     None
                 };
-
-                // Resolve policy explanations for denied paths so the
-                // diagnostic can show group names and fix guidance inline.
-                let policy_explanations =
-                    build_policy_explanations(&denials, &sandbox_violations, config.caps);
-                let prompt_policy_explanations = policy_explanations.clone();
-                let prompt_error_observation = error_observation.clone();
 
                 let mut formatter = DiagnosticFormatter::new(config.caps)
                     .with_mode(mode)
@@ -1544,17 +1569,26 @@ pub fn execute_supervised(
                 }
                 let footer = formatter.format_footer(exit_code);
                 crate::output::print_diagnostic_footer(&footer);
+            }
 
-                if exit_code != 0 {
-                    offer_profile_save_for_child(
-                        pty_proxy.as_mut(),
-                        &prompt_policy_explanations,
-                        &prompt_error_observation,
-                        config.caps,
-                        config.command,
-                        config.profile_save_base,
-                    )?;
-                }
+            if should_offer_profile_save(
+                config.no_diagnostics,
+                exit_code,
+                &prompt_policy_explanations,
+                &prompt_error_observation,
+            ) {
+                // Clear the forwarding target before prompting. The child is
+                // already dead; keeping CHILD_PID set would cause forward_signal
+                // to send Ctrl-C to the dead PID, swallowing it silently.
+                clear_signal_forwarding_target();
+                offer_profile_save_for_child(
+                    pty_proxy.as_mut(),
+                    &prompt_policy_explanations,
+                    &prompt_error_observation,
+                    config.caps,
+                    config.command,
+                    config.profile_save_base,
+                )?;
             }
 
             Ok(exit_code)
@@ -1612,6 +1646,15 @@ fn build_policy_explanations(
             .or_insert(access);
     }
 
+    if has_keychain_service_violation(sandbox_violations) {
+        if let Some(path) = login_keychain_db_path() {
+            paths
+                .entry(path)
+                .and_modify(|a| *a = merge(*a, AccessMode::Read))
+                .or_insert(AccessMode::Read);
+        }
+    }
+
     let mut explanations = Vec::new();
     for (path, access) in paths {
         match crate::query_ext::query_path(&path, access, caps, &[]) {
@@ -1640,6 +1683,59 @@ fn build_policy_explanations(
     }
 
     explanations
+}
+
+fn has_keychain_service_violation(violations: &[nono::SandboxViolation]) -> bool {
+    violations.iter().any(|violation| {
+        violation.operation == "mach-lookup"
+            && violation
+                .target
+                .as_deref()
+                .is_some_and(is_keychain_service_name)
+    })
+}
+
+fn is_keychain_service_name(service: &str) -> bool {
+    matches!(
+        service,
+        "com.apple.SecurityServer"
+            | "com.apple.securityd"
+            | "com.apple.security.keychaind"
+            | "com.apple.secd"
+            | "com.apple.security.agent"
+    )
+}
+
+fn login_keychain_db_path() -> Option<PathBuf> {
+    crate::config::validated_home()
+        .ok()
+        .map(|home| PathBuf::from(home).join("Library/Keychains/login.keychain-db"))
+}
+
+fn should_print_diagnostic_footer(
+    no_diagnostics: bool,
+    exit_code: i32,
+    denials: &[nono::diagnostic::DenialRecord],
+    sandbox_violations: &[nono::SandboxViolation],
+    error_observation: &nono::diagnostic::ErrorObservation,
+) -> bool {
+    !no_diagnostics
+        && (exit_code != 0
+            || !denials.is_empty()
+            || !sandbox_violations.is_empty()
+            || error_observation.has_findings())
+}
+
+fn should_offer_profile_save(
+    no_diagnostics: bool,
+    exit_code: i32,
+    policy_explanations: &[nono::diagnostic::PolicyExplanation],
+    error_observation: &nono::diagnostic::ErrorObservation,
+) -> bool {
+    !no_diagnostics
+        && (exit_code != 0
+            || !policy_explanations.is_empty()
+            || !error_observation.path_hints.is_empty())
 }
 
 /// Close inherited file descriptors, keeping stdin/stdout/stderr and specified FDs.
@@ -1744,7 +1840,7 @@ fn wait_for_child_with_pty(
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline {
-                    let has_output = pty.has_observed_output();
+                    let has_output = pty.has_visible_output();
                     if Instant::now() >= deadline && !has_output && !startup_prompted {
                         startup_prompted = true;
                         let terminate = prompt_startup_termination_for_child(
@@ -2222,7 +2318,7 @@ fn run_supervisor_loop(
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline {
-                    let has_output = pty.as_ref().is_some_and(|p| p.has_observed_output());
+                    let has_output = pty.as_ref().is_some_and(|p| p.has_visible_output());
                     if Instant::now() >= deadline && !has_output && !startup_prompted {
                         startup_prompted = true;
                         let terminate = prompt_startup_termination_for_child(
@@ -2466,7 +2562,7 @@ fn run_supervisor_loop(
         match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline {
-                    let has_output = pty.as_ref().is_some_and(|p| p.has_observed_output());
+                    let has_output = pty.as_ref().is_some_and(|p| p.has_visible_output());
                     if Instant::now() >= deadline && !has_output && !startup_prompted {
                         startup_prompted = true;
                         let terminate = prompt_startup_termination_for_child(
@@ -4144,5 +4240,96 @@ mod tests {
         assert!(dir.exists(), "shim dir should exist before drop");
         drop(shim);
         assert!(!dir.exists(), "shim dir should be removed on drop");
+    }
+
+    #[test]
+    fn test_diagnostic_footer_triggers_on_successful_sandbox_violation() {
+        let violations = vec![nono::SandboxViolation {
+            operation: "file-read-data".to_string(),
+            target: Some("/tmp/secret.txt".to_string()),
+        }];
+        let denials = Vec::new();
+        let observation = nono::diagnostic::ErrorObservation::default();
+
+        assert!(should_print_diagnostic_footer(
+            false,
+            0,
+            &denials,
+            &violations,
+            &observation,
+        ));
+        assert!(!should_print_diagnostic_footer(
+            true,
+            0,
+            &denials,
+            &violations,
+            &observation,
+        ));
+    }
+
+    #[test]
+    fn test_profile_save_prompt_triggers_on_policy_explanation_with_zero_exit() {
+        let explanations = vec![nono::diagnostic::PolicyExplanation {
+            path: PathBuf::from("/tmp/secret.txt"),
+            access: nono::AccessMode::Read,
+            reason: "path_not_granted".to_string(),
+            details: None,
+            policy_source: None,
+            suggested_flag: Some("--read-file /tmp/secret.txt".to_string()),
+        }];
+        let observation = nono::diagnostic::ErrorObservation::default();
+
+        assert!(should_offer_profile_save(
+            false,
+            0,
+            &explanations,
+            &observation,
+        ));
+    }
+
+    #[test]
+    fn test_keychain_mach_violation_adds_profile_save_explanation() {
+        let _env_lock = crate::test_env::ENV_LOCK.lock().expect("env lock");
+        let temp_home = tempfile::TempDir::new().expect("temp home");
+        let home = temp_home.path().canonicalize().expect("canonical home");
+        let _env =
+            crate::test_env::EnvVarGuard::set_all(&[("HOME", home.to_str().expect("home path"))]);
+        let keychain = home.join("Library/Keychains/login.keychain-db");
+        std::fs::create_dir_all(keychain.parent().expect("keychain parent")).expect("mkdir");
+        std::fs::write(&keychain, b"db").expect("write keychain fixture");
+
+        let violations = vec![nono::SandboxViolation {
+            operation: "mach-lookup".to_string(),
+            target: Some("com.apple.SecurityServer".to_string()),
+        }];
+
+        let explanations = build_policy_explanations(&[], &violations, &nono::CapabilitySet::new());
+
+        let explanation = explanations
+            .iter()
+            .find(|explanation| explanation.path == keychain)
+            .expect("keychain explanation");
+        assert_eq!(explanation.access, nono::AccessMode::Read);
+        #[cfg(target_os = "macos")]
+        assert_eq!(explanation.reason, "sensitive_path");
+    }
+
+    #[test]
+    fn test_profile_save_prompt_preserves_nonzero_exit_behavior() {
+        let explanations = Vec::new();
+        let observation = nono::diagnostic::ErrorObservation::default();
+
+        assert!(should_offer_profile_save(
+            false,
+            1,
+            &explanations,
+            &observation,
+        ));
+        assert!(!should_offer_profile_save(
+            true,
+            1,
+            &explanations,
+            &observation,
+        ));
     }
 }

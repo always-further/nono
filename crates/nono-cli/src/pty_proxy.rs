@@ -797,9 +797,12 @@ impl PtyProxy {
         self.screen.render_plaintext()
     }
 
-    /// Returns true once the child has emitted any PTY output.
-    pub fn has_observed_output(&self) -> bool {
-        !self.scrollback.is_empty()
+    /// Returns true once the child has rendered visible terminal content.
+    pub fn has_visible_output(&self) -> bool {
+        self.screen
+            .render_plaintext()
+            .chars()
+            .any(|ch| !ch.is_whitespace())
     }
 
     fn attach_replay_bytes(&self) -> Vec<u8> {

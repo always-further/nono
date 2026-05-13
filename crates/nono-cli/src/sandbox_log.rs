@@ -154,7 +154,16 @@ impl SandboxLogCollector {
     }
 
     #[must_use]
-    pub fn finish(mut self) -> Vec<SandboxViolation> {
+    pub fn finish(self) -> Vec<SandboxViolation> {
+        self.finish_inner(true)
+    }
+
+    #[must_use]
+    pub fn finish_realtime_only(self) -> Vec<SandboxViolation> {
+        self.finish_inner(false)
+    }
+
+    fn finish_inner(mut self, include_historical_fallback: bool) -> Vec<SandboxViolation> {
         // Kill the real-time stream — it may or may not have captured
         // events depending on timing.
         let _ = self.child.kill();
@@ -179,7 +188,7 @@ impl SandboxLogCollector {
         // (e.g. `cat`). The child can exit before the log system delivers
         // the denial event. Fall back to a historical log query which is
         // deterministic — events are already committed by this point.
-        if violations.is_empty() {
+        if include_historical_fallback && violations.is_empty() {
             let filter = ViolationFilter {
                 pid: Some(self.child_pid),
                 process_name: self.command_name.clone(),
