@@ -138,12 +138,16 @@ Signed-off-by: oscarmackjr-twg <oscar.mack.jr@gmail.com>
        ```bash
        cargo build --workspace
        ```
+    7. Verify no unfilled placeholders in this PLAN.md (D-40-E5):
+       ```bash
+       grep -oE '\{[a-z_]+\}' .planning/phases/40-upst4-sync-execution/40-01-PROXY-HARDENING-PLAN.md | wc -l  # Expected: 0
+       ```
   </action>
   <verify>
     <automated>git fetch upstream --tags &amp;&amp; cargo build --workspace</automated>
   </verify>
   <acceptance_criteria>
-    - Wave 0 SUMMARY files both present; nono::scrub exported from lib.rs; all 5 C1 SHAs reachable; Windows-only sentinel recorded; baseline build green.
+    - Wave 0 SUMMARY files both present; nono::scrub exported from lib.rs; all 5 C1 SHAs reachable; Windows-only sentinel recorded; baseline build green; zero unfilled PLAN.md placeholders.
   </acceptance_criteria>
   <done>
     Ready for C1 chain.
@@ -161,6 +165,7 @@ Signed-off-by: oscarmackjr-twg <oscar.mack.jr@gmail.com>
     - Cargo.toml (read current [features] section — understand keyring/dbus feature graph before abc86f6)
     - git show 5e6e7ca eedfbcd be8cd00 abc86f6 d57375e (read ALL 5 diffs before any cherry-pick)
     - .planning/templates/upstream-sync-quick.md § Fork-divergence catalog (Conflict-file inventory for nono-proxy paths)
+    - .planning/phases/39-upst4-audit/DIVERGENCE-LEDGER.md § Cluster C1 row
   </read_first>
   <action>
     Read all 5 diffs via `git show` before touching anything. Then cherry-pick in order.

@@ -151,12 +151,16 @@ Upstream-author: <Name> <<email>>
        ```bash
        cargo build --workspace
        ```
+    6. Verify no unfilled placeholders in this PLAN.md (D-40-E5):
+       ```bash
+       grep -oE '\{[a-z_]+\}' .planning/phases/40-upst4-sync-execution/40-04-RELEASE-RIDE-PLAN.md | wc -l  # Expected: 0
+       ```
   </action>
   <verify>
     <automated>git fetch upstream --tags &amp;&amp; cargo build --workspace</automated>
   </verify>
   <acceptance_criteria>
-    - Wave 0 SUMMARY files both present; all 5 C7 SHAs reachable; Windows-only sentinel recorded; baseline build green.
+    - Wave 0 SUMMARY files both present; all 5 C7 SHAs reachable; Windows-only sentinel recorded; baseline build green; zero unfilled PLAN.md placeholders.
   </acceptance_criteria>
   <done>
     Ready for C7 chain.
@@ -175,6 +179,7 @@ Upstream-author: <Name> <<email>>
     - crates/nono/src/diagnostic.rs (read current error reporting structure before 5a61808)
     - git show 5b61971 5a61808 21bbb82 e8bf014 c4b25b8 (read ALL 5 diffs before any cherry-pick)
     - .planning/templates/upstream-sync-quick.md § Fork-divergence catalog
+    - .planning/phases/39-upst4-audit/DIVERGENCE-LEDGER.md § Cluster C7 row
   </read_first>
   <action>
     Read all 5 diffs first. Then cherry-pick in order (feature commits first, release bumps second).

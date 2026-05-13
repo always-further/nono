@@ -101,6 +101,7 @@ Fork-only wiring preserved: [explicit list: credential.rs Windows injection, Pha
 
 Upstream-replayed-from: <sha>
 
+Co-Authored-By: Claude <noreply@anthropic.com>
 Signed-off-by: Oscar Mack <oscar.mack.jr@gmail.com>
 Signed-off-by: oscarmackjr-twg <oscar.mack.jr@gmail.com>
 ```
@@ -144,9 +145,10 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
     - crates/nono-proxy/src/tls_intercept/handle.rs (read current TLS intercept handle)
   </read_first>
   <action>
-    **Step 0: Verify Plan 40-05 closed:**
+    **Step 0: Verify Plan 40-05 closed + placeholder smoke check:**
     ```bash
     test -f .planning/phases/40-upst4-sync-execution/40-05-FP-PROFILE-SAVE-SUMMARY.md || echo "BLOCKED: Plan 40-05 not closed"
+    grep -oE '\{[a-z_]+\}' .planning/phases/40-upst4-sync-execution/40-06-FP-PROXY-TLS-PLAN.md | wc -l  # Expected: 0
     ```
 
     **Step 1: Fetch upstream + read all 3 C5 diffs:**
@@ -203,6 +205,7 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
   </verify>
   <acceptance_criteria>
     - Plan 40-05 SUMMARY present (else BLOCKED).
+    - Zero unfilled PLAN.md placeholders confirmed.
     - All 3 C5 SHAs reachable.
     - Full diffs of all 3 commits read and understood.
     - Fork-only credential.rs Windows injection surface inventoried.
@@ -283,6 +286,7 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
 
     Upstream-replayed-from: 8ddb143 54c7552
 
+    Co-Authored-By: Claude <noreply@anthropic.com>
     Signed-off-by: Oscar Mack <oscar.mack.jr@gmail.com>
     Signed-off-by: oscarmackjr-twg <oscar.mack.jr@gmail.com>
     EOF
@@ -338,6 +342,7 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
 
     Upstream-replayed-from: f77e0e3
 
+    Co-Authored-By: Claude <noreply@anthropic.com>
     Signed-off-by: Oscar Mack <oscar.mack.jr@gmail.com>
     Signed-off-by: oscarmackjr-twg <oscar.mack.jr@gmail.com>
     EOF
@@ -351,6 +356,7 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
     git log --format='%B' HEAD~${COMMIT_COUNT}..HEAD | grep -c '^Upstream-replayed-from: '   # MUST be >= 1
     git log --format='%B' HEAD~${COMMIT_COUNT}..HEAD | grep -c '^Fork-only wiring preserved:'   # MUST be >= 1
     git log --format='%B' HEAD~${COMMIT_COUNT}..HEAD | grep -c '^Upstream intent:'   # MUST be >= 1
+    git log --format='%B' HEAD~${COMMIT_COUNT}..HEAD | grep -c '^Co-Authored-By: Claude'   # MUST equal COMMIT_COUNT
     git log -1 --format='%H' -- crates/nono-cli/src/exec_strategy_windows/
     # MUST equal PRE_PLAN_WINDOWS_SHA from Task 1
     ```
@@ -361,6 +367,7 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
   <acceptance_criteria>
     - 2-3 manual replay commits (per Task 1 plan), each with all 5 D-40-B3 sections.
     - NO `Upstream-commit:` lines in any commit body (not D-19 cherry-picks).
+    - Each D-20 replay commit body includes `Co-Authored-By: Claude <noreply@anthropic.com>` per D-40-B3; `git log --format='%B' HEAD~N..HEAD | grep -c '^Co-Authored-By: Claude'` equals replay-commit count.
     - D-40-E1: `git diff --stat HEAD~2 HEAD -- crates/ | grep -E '_windows|exec_strategy_windows' | wc -l` returns 0.
     - Windows-only sentinel SHA unchanged from Task 1 baseline.
     - `grep -c 'cfg.*windows\|windows.*credential\|keyring' crates/nono-proxy/src/credential.rs` >= pre-task count (Windows injection preserved).
@@ -410,6 +417,8 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
     git log --format='%B' HEAD~${COMMIT_COUNT}..HEAD | grep -c '^Upstream-commit: '   # MUST be 0
     # D-40-B3 section smoke:
     git log --format='%B' HEAD~${COMMIT_COUNT}..HEAD | grep -c '^Fork-only wiring preserved:'   # MUST be >= 1
+    # D-40-B3 Co-Authored-By smoke (D-40-B3 requirement):
+    git log --format='%B' HEAD~${COMMIT_COUNT}..HEAD | grep -c '^Co-Authored-By: Claude'   # MUST equal COMMIT_COUNT
 
     # D-40-E1 final:
     git diff --stat HEAD~${COMMIT_COUNT} HEAD -- crates/ | grep -E '_windows|exec_strategy_windows' | wc -l   # MUST be 0
@@ -427,6 +436,7 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
     - Gates 1+2+5: PASS. Gates 3+4+6+7+8: PASS or documented-skipped.
     - `git log --format='%B' HEAD~N..HEAD | grep -c '^Upstream-commit: '` returns 0 (confirmed D-20 replay, not cherry-pick).
     - `git log --format='%B' HEAD~N..HEAD | grep -c '^Fork-only wiring preserved:'` returns >= 1.
+    - `git log --format='%B' HEAD~N..HEAD | grep -c '^Co-Authored-By: Claude'` equals replay-commit count (D-40-B3 Co-Authored-By verified).
     - D-40-E1: 0 Windows-file edits across the replay chain.
     - Windows credential injection grep baseline preserved.
   </acceptance_criteria>
@@ -509,6 +519,7 @@ Note: `Upstream-replayed-from:` does NOT trigger the `^Upstream-commit: ` grep; 
 - `git log --format='%B' HEAD~N..HEAD | grep -c '^Upstream-commit: '` returns 0 (D-20 replay confirmed).
 - `git log --format='%B' HEAD~N..HEAD | grep -c '^Fork-only wiring preserved:'` returns >= 1.
 - `git log --format='%B' HEAD~N..HEAD | grep -c '^Upstream intent:'` returns >= 1.
+- `git log --format='%B' HEAD~N..HEAD | grep -c '^Co-Authored-By: Claude'` equals replay-commit count (D-40-B3 Co-Authored-By verified).
 - `git diff --stat HEAD~N HEAD -- crates/ | grep -E '_windows|exec_strategy_windows' | wc -l` returns 0.
 - `grep -c 'cfg.*windows\|keyring' crates/nono-proxy/src/credential.rs` >= pre-plan count.
 - f77e0e3 policy semantics: `grep -c 'passthrough\|no.*cred\|two.*match\|2.*match' crates/nono-proxy/src/credential.rs` >= 1.

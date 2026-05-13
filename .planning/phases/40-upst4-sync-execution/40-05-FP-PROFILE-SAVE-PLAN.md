@@ -97,6 +97,7 @@ Fork-only wiring preserved: [explicit list of file paths/symbols/cfg-arms that t
 
 Upstream-replayed-from: 9b07bf7 (or eb6cb09)
 
+Co-Authored-By: Claude <noreply@anthropic.com>
 Signed-off-by: Oscar Mack <oscar.mack.jr@gmail.com>
 Signed-off-by: oscarmackjr-twg <oscar.mack.jr@gmail.com>
 ```
@@ -131,10 +132,11 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
     - crates/nono-cli/src/profile/mod.rs (read current profile struct — deprecated_schema + profile-drafts surface)
   </read_first>
   <action>
-    **Step 0: Verify Wave 1 closed (STOP if not):**
+    **Step 0: Verify Wave 1 closed (STOP if not) + placeholder smoke check:**
     ```bash
     test -f .planning/phases/40-upst4-sync-execution/40-01-PROXY-HARDENING-SUMMARY.md || echo "BLOCKED: Wave 1 Plan 40-01 not closed"
     test -f .planning/phases/40-upst4-sync-execution/40-04-RELEASE-RIDE-SUMMARY.md || echo "BLOCKED: Wave 1 Plan 40-04 not closed"
+    grep -oE '\{[a-z_]+\}' .planning/phases/40-upst4-sync-execution/40-05-FP-PROFILE-SAVE-PLAN.md | wc -l  # Expected: 0
     ```
 
     **Step 1: Fetch and read the upstream diffs:**
@@ -218,6 +220,7 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
   </verify>
   <acceptance_criteria>
     - Wave 1 SUMMARY files both present (else BLOCKED).
+    - Zero unfilled PLAN.md placeholders confirmed.
     - git show 9b07bf7 and git show eb6cb09 both run successfully and diffs read.
     - All 6 surface-overlap questions answered with numeric output.
     - Trial cherry-pick attempted and result recorded.
@@ -289,7 +292,7 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
     # - Colliding with Phase 36.5 promote/--draft surface
     # - Adding new Windows-gated code (D-40-E6)
 
-    # Commit body MUST have all 5 D-40-B3 sections:
+    # Commit body MUST have all 5 D-40-B3 sections + Co-Authored-By per D-40-B3:
     git add -p   # Stage only the denial-suppression behavior changes
     git commit -m "$(cat <<'EOF'
     feat(profile-save): suppress save-profile prompts for denied paths
@@ -317,6 +320,7 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
 
     Upstream-replayed-from: 9b07bf7
 
+    Co-Authored-By: Claude <noreply@anthropic.com>
     Signed-off-by: Oscar Mack <oscar.mack.jr@gmail.com>
     Signed-off-by: oscarmackjr-twg <oscar.mack.jr@gmail.com>
     EOF
@@ -339,6 +343,7 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
 
     Upstream-replayed-from: eb6cb09
 
+    Co-Authored-By: Claude <noreply@anthropic.com>
     Signed-off-by: Oscar Mack <oscar.mack.jr@gmail.com>
     Signed-off-by: oscarmackjr-twg <oscar.mack.jr@gmail.com>
     EOF
@@ -363,7 +368,7 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
   </verify>
   <acceptance_criteria>
     - If WILL-SYNC branch: 2 commits with D-19 trailers (Upstream-commit: × 2, Upstream-author: × 2 lowercase 'a').
-    - If D-20 branch: 1-2 commits with all 5 D-40-B3 sections; NO Upstream-commit: lines.
+    - If D-20 branch: 1-2 commits with all 5 D-40-B3 sections; NO Upstream-commit: lines; each commit body includes `Co-Authored-By: Claude <noreply@anthropic.com>` per D-40-B3.
     - Either branch: D-40-E1 zero Windows-file edits; `cargo build --workspace` exits 0.
     - Phase 18.1 surface: `grep -c 'build_prompt_text\|HandleKind' crates/nono-cli/src/terminal_approval.rs` >= pre-plan count.
     - profile/mod.rs deprecated_schema + profile-drafts surface intact.
@@ -409,6 +414,8 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
     # If will-sync: git log --format='%B' HEAD~2..HEAD | grep -c '^Upstream-commit: '  # MUST be 2
     # If D-20 replay: git log --format='%B' HEAD~2..HEAD | grep -c '^Upstream-commit: '  # MUST be 0
     # If D-20 replay: git log --format='%B' HEAD~2..HEAD | grep -c '^Fork-only wiring preserved:'  # MUST be >= 1
+    # If D-20 replay: Co-Authored-By check (D-40-B3 requirement):
+    git log --format='%B' HEAD~2..HEAD | grep -c '^Co-Authored-By: Claude'   # MUST equal D-20 replay commit count
 
     # D-40-E1 final:
     git diff --stat HEAD~2 HEAD -- crates/ | grep -E '_windows|exec_strategy_windows' | wc -l   # MUST be 0
@@ -420,6 +427,7 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
   <acceptance_criteria>
     - Gates 1+2+5: PASS. Gates 3+4+6+7+8: PASS or documented-skipped.
     - Branch-appropriate trailer or body section check passes.
+    - If D-20 replay: `git log --format='%B' HEAD~N..HEAD | grep -c '^Co-Authored-By: Claude'` equals replay-commit count.
     - D-40-E1: 0 Windows-file edits.
   </acceptance_criteria>
   <done>
@@ -493,7 +501,7 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
 - All 8 D-40-C2 close-gates pass.
 - ## Disposition resolution section documented (will-sync or D-20).
 - If will-sync: `git log --format='%B' HEAD~2..HEAD | grep -c '^Upstream-commit: '` returns 2.
-- If D-20: `git log --format='%B' HEAD~2..HEAD | grep -c '^Upstream-commit: '` returns 0; D-40-B3 sections present.
+- If D-20: `git log --format='%B' HEAD~2..HEAD | grep -c '^Upstream-commit: '` returns 0; D-40-B3 sections present; `grep -c '^Co-Authored-By: Claude'` equals replay-commit count.
 - `git diff --stat HEAD~2 HEAD -- crates/ | grep -E '_windows|exec_strategy_windows' | wc -l` returns 0.
 - Phase 18.1 surface: `grep -c 'build_prompt_text\|HandleKind' crates/nono-cli/src/terminal_approval.rs` >= pre-plan count.
 - profile/mod.rs deprecated_schema + profile-drafts intact.
