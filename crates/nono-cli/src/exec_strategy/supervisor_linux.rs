@@ -1216,6 +1216,7 @@ mod tests {
             let backend = DenyAllBackend;
             let dir = tempfile::tempdir().expect("tempdir");
             let path = socket_path(&dir, "test.sock");
+            let _listener = UnixListener::bind(&path).expect("bind unix listener");
             let allowlist = vec![
                 UnixSocketCapability::new_file(&path, UnixSocketMode::Connect)
                     .expect("socket grant"),
