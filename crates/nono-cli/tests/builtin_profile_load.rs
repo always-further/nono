@@ -45,8 +45,9 @@ fn profile_show_json(name: &str) -> serde_json::Value {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("nono profile show {name:?} --json produced invalid JSON: {e}\nstdout:\n{stdout}"))
+    serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("nono profile show {name:?} --json produced invalid JSON: {e}\nstdout:\n{stdout}")
+    })
 }
 
 /// T-36-01d-1 (REQ-PORT-CLOSURE-02 #5):
@@ -75,11 +76,9 @@ fn test_builtin_profile_claude_code_loads_canonical_sections() {
     );
 
     // The bypass path must reference the keychain directory.
-    let has_keychains = bypass.iter().any(|v| {
-        v.as_str()
-            .map(|s| s.contains("Keychains"))
-            .unwrap_or(false)
-    });
+    let has_keychains = bypass
+        .iter()
+        .any(|v| v.as_str().map(|s| s.contains("Keychains")).unwrap_or(false));
     assert!(
         has_keychains,
         "claude-code: policy.bypass_protection must contain a Keychains path; got: {bypass:?}"
