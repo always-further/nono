@@ -2178,7 +2178,7 @@ fn resolve_validate_target(input: &std::path::Path) -> std::path::PathBuf {
     {
         return p;
     }
-    if let Some(p) = profile::find_pack_store_profile(name) {
+    if let Some((p, _)) = profile::find_pack_store_profile(name) {
         return p;
     }
     input.to_path_buf()

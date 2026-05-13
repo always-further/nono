@@ -1632,7 +1632,7 @@ pub fn load_profile_extends(name_or_path: &str) -> Option<Vec<String>> {
 
     // Pack-store: any installed pack that declares a profile artifact with
     // matching `install_as`.
-    if let Some(profile_path) = find_pack_store_profile(name_or_path) {
+    if let Some((profile_path, _)) = find_pack_store_profile(name_or_path) {
         return parse_profile_file(&profile_path)
             .ok()
             .and_then(|p| p.extends);
@@ -1682,12 +1682,16 @@ pub fn load_profile(name_or_path: &str) -> Result<Profile> {
                 // Pull completed AND the wiring interpreter ran during
                 // install — no extra "wire" pass needed here. Just
                 // re-resolve through the pack-store branch and load.
-                if let Some(profile_path) = find_pack_store_profile(name_or_path) {
+                if let Some((profile_path, pack_key)) = find_pack_store_profile(name_or_path) {
                     tracing::info!(
                         "Loading pack-store profile from: {}",
                         profile_path.display()
                     );
-                    return finalize_profile(load_from_file(&profile_path)?);
+                    let mut profile = finalize_profile(load_from_file(&profile_path)?)?;
+                    if !profile.packs.contains(&pack_key) {
+                        profile.packs.push(pack_key);
+                    }
+                    return Ok(profile);
                 }
                 Err(NonoError::ProfileNotFound(format!(
                     "{name_or_path}\n  the registry pack pulled but did not install \
@@ -1770,12 +1774,17 @@ fn load_profile_inner(name_or_path: &str) -> Result<Option<Profile>> {
         tracing::info!("Loading user profile from: {}", profile_path.display());
         return finalize_profile(load_from_file(&profile_path)?).map(Some);
     }
-    if let Some(profile_path) = find_pack_store_profile(name_or_path) {
+    if let Some((profile_path, pack_key)) = find_pack_store_profile(name_or_path) {
         tracing::info!(
             "Loading pack-store profile from: {}",
             profile_path.display()
         );
-        let profile = finalize_profile(load_from_file(&profile_path)?)?;
+        let mut profile = finalize_profile(load_from_file(&profile_path)?)?;
+        // Inject the source pack ref so it's always present in the
+        // verification list, even if the profile JSON doesn't declare it.
+        if !profile.packs.contains(&pack_key) {
+            profile.packs.push(pack_key);
+        }
         // If we just resolved through `always-further/claude`, also offer
         // to strip pre-0.43 inbuilt-hook leftovers. Catches the path
         // where users `nono pull always-further/claude` directly,
@@ -1828,7 +1837,10 @@ fn profile_path_is_in_pack(profile_path: &Path, store: &Path, ns: &str, name: &s
 /// resolved by returning the first (alphabetical by `<namespace>/<name>`)
 /// — collisions are rare and the resolver is best-effort; the operator
 /// can pin via the user profile dir if needed.
-pub(crate) fn find_pack_store_profile(name: &str) -> Option<PathBuf> {
+/// Returns `(profile_path, pack_key)` for the first installed pack that
+/// provides a profile artifact matching `name` (by `install_as` or alias).
+/// Returns `None` if no pack provides a matching profile.
+pub(crate) fn find_pack_store_profile(name: &str) -> Option<(PathBuf, String)> {
     let store = crate::package::package_store_dir().ok()?;
     if !store.exists() {
         return None;
@@ -1890,7 +1902,7 @@ pub(crate) fn find_pack_store_profile(name: &str) -> Option<PathBuf> {
         }
     }
     matches.sort_by(|a, b| a.0.cmp(&b.0));
-    matches.into_iter().next().map(|(_, p)| p)
+    matches.into_iter().next().map(|(key, path)| (path, key))
 }
 
 /// Returns true if the string looks like a registry package reference
@@ -2246,8 +2258,15 @@ fn load_base_profile_raw(
     }
 
     // 2. Pack-store: any installed pack with a matching `install_as`.
-    if let Some(profile_path) = find_pack_store_profile(name) {
-        return Ok(ResolvedBase::Global(parse_profile_file(&profile_path)?));
+    // Inject the source pack key into `packs` so it propagates through
+    // the merge chain and reaches verification even if the profile JSON
+    // doesn't declare its own pack.
+    if let Some((profile_path, pack_key)) = find_pack_store_profile(name) {
+        let mut base = parse_profile_file(&profile_path)?;
+        if !base.packs.contains(&pack_key) {
+            base.packs.push(pack_key);
+        }
+        return Ok(ResolvedBase::Global(base));
     }
 
     // 3. Built-in profile from embedded policy.
@@ -2270,8 +2289,12 @@ fn load_base_profile_raw(
         let outcome = crate::migration::check_and_run(name)?;
         match outcome {
             crate::migration::MigrationOutcome::Migrated => {
-                if let Some(profile_path) = find_pack_store_profile(name) {
-                    return Ok(ResolvedBase::Global(parse_profile_file(&profile_path)?));
+                if let Some((profile_path, pack_key)) = find_pack_store_profile(name) {
+                    let mut base = parse_profile_file(&profile_path)?;
+                    if !base.packs.contains(&pack_key) {
+                        base.packs.push(pack_key);
+                    }
+                    return Ok(ResolvedBase::Global(base));
                 }
             }
             crate::migration::MigrationOutcome::Skipped => {
