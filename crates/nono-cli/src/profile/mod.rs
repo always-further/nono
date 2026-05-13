@@ -156,6 +156,70 @@ mod canonical_schema_rename_tests {
         assert!(!raw_profile_has_legacy_override_deny_key("not json"));
         assert!(!raw_profile_has_legacy_override_deny_key("{"));
     }
+
+    // ----------------------------------------------------------------
+    // Plan 36-01b: canonical section sub-struct serde invariants
+    // Tests reference FilesystemConfig (extended) + CommandsConfig (new)
+    // ----------------------------------------------------------------
+
+    /// T-36-01b-1: legacy `override_deny` JSON key must deserialize into
+    /// `FilesystemConfig::bypass_protection` via the serde alias (D-36-B3).
+    #[test]
+    fn filesystem_legacy_override_deny_alias_to_bypass_protection() {
+        let json = r#"{"override_deny":["/var/log"]}"#;
+        let cfg: FilesystemConfig =
+            serde_json::from_str(json).expect("legacy alias must deserialize");
+        assert_eq!(
+            cfg.bypass_protection,
+            vec!["/var/log".to_string()],
+            "override_deny must populate bypass_protection via serde alias"
+        );
+    }
+
+    /// T-36-01b-2: canonical JSON with both new fields must deserialize cleanly.
+    #[test]
+    fn filesystem_canonical_deny_and_bypass_protection_deserializes() {
+        let json = r#"{"deny":["/etc"],"bypass_protection":["/var/log"]}"#;
+        let cfg: FilesystemConfig =
+            serde_json::from_str(json).expect("canonical fields must deserialize");
+        assert_eq!(cfg.deny, vec!["/etc".to_string()]);
+        assert_eq!(cfg.bypass_protection, vec!["/var/log".to_string()]);
+    }
+
+    /// T-36-01b-3: empty filesystem block must default both new fields to vec![].
+    #[test]
+    fn filesystem_empty_block_defaults_new_fields_to_empty() {
+        let json = r#"{}"#;
+        let cfg: FilesystemConfig =
+            serde_json::from_str(json).expect("empty block must deserialize");
+        assert!(cfg.deny.is_empty(), "deny must default to empty vec");
+        assert!(
+            cfg.bypass_protection.is_empty(),
+            "bypass_protection must default to empty vec"
+        );
+    }
+
+    /// T-36-01b-4: CommandsConfig must deserialize both allow and deny fields.
+    #[test]
+    fn commands_config_allow_and_deny_deserializes() {
+        let json = r#"{"allow":["git"],"deny":["rm"]}"#;
+        let cfg: CommandsConfig =
+            serde_json::from_str(json).expect("CommandsConfig must deserialize");
+        assert_eq!(cfg.allow, vec!["git".to_string()]);
+        assert_eq!(cfg.deny, vec!["rm".to_string()]);
+    }
+
+    /// T-36-01b-5: CommandsConfig must reject unknown fields
+    /// (#[serde(deny_unknown_fields)] invariant per D-36-B1 threat model).
+    #[test]
+    fn commands_config_rejects_unknown_fields() {
+        let json = r#"{"unknown_key":[]}"#;
+        let result: std::result::Result<CommandsConfig, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "CommandsConfig must reject unknown fields via deny_unknown_fields"
+        );
+    }
 }
 
 // Re-export InjectMode and OAuth2Config from nono-proxy for use in profiles
@@ -197,6 +261,48 @@ pub struct FilesystemConfig {
     /// Single files with write-only access
     #[serde(default)]
     pub write_file: Vec<String>,
+    /// Directories explicitly denied for the sandboxed child.
+    ///
+    /// Canonical section per upstream f0abd413 (v0.47.0). Paths here
+    /// activate the platform deny mechanism (macOS Seatbelt `(deny
+    /// file-read*)`, Linux Landlock restricted ruleset) even if the
+    /// path would otherwise be accessible by default. Applied AFTER
+    /// `filesystem.allow` grants so that deny takes precedence.
+    #[serde(default)]
+    pub deny: Vec<String>,
+    /// Paths that bypass deny rules when paired with an explicit
+    /// user-intent grant (e.g. `filesystem.allow` or `--allow`).
+    ///
+    /// Canonical key per upstream f0abd413 (v0.47.0 / PR #594).
+    /// The legacy `override_deny` JSON key is accepted indefinitely
+    /// via the serde alias below per D-36-B3 (no hard-deprecation date).
+    /// Callers referencing `policy.override_deny` are the canonical
+    /// runtime consumers; Plan 36-01c will atomically rename those
+    /// callsites to `policy.bypass_protection` — this field is the
+    /// `filesystem`-section counterpart introduced here so the canonical
+    /// JSON shape is accepted end-to-end before the callsite rename lands.
+    #[serde(default, alias = "override_deny")]
+    pub bypass_protection: Vec<String>,
+}
+
+/// Commands configuration in a profile — canonical section per upstream
+/// f0abd413 (v0.47.0).
+///
+/// Mirrors the shape precedent of `CapabilitiesConfig` (lines below):
+/// `#[derive(...)] #[serde(deny_unknown_fields)]` with `#[serde(default)]`
+/// fields. Unknown keys in the JSON `commands` block are rejected at
+/// parse time (fail-closed per CLAUDE.md § Fail Secure).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandsConfig {
+    /// Commands explicitly allowed for the sandboxed child even when a
+    /// deny-group would block them (e.g. `["git", "cargo"]`).
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Commands explicitly denied for the sandboxed child, extending the
+    /// deny-group command list (e.g. `["rm", "mv"]`).
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 
 /// AIPC-01 (Phase 18) per-handle-type access widening.
@@ -2168,6 +2274,11 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             allow_file: dedup_append(&base.filesystem.allow_file, &child.filesystem.allow_file),
             read_file: dedup_append(&base.filesystem.read_file, &child.filesystem.read_file),
             write_file: dedup_append(&base.filesystem.write_file, &child.filesystem.write_file),
+            deny: dedup_append(&base.filesystem.deny, &child.filesystem.deny),
+            bypass_protection: dedup_append(
+                &base.filesystem.bypass_protection,
+                &child.filesystem.bypass_protection,
+            ),
         },
         policy: PolicyPatchConfig {
             exclude_groups: dedup_append(&base.policy.exclude_groups, &child.policy.exclude_groups),
@@ -3749,6 +3860,8 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec!["/base/file.txt".to_string()],
                 write_file: vec![],
+                deny: vec![],
+                bypass_protection: vec![],
             },
             policy: PolicyPatchConfig {
                 exclude_groups: vec!["base_excluded".to_string()],
@@ -3823,6 +3936,8 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec![],
                 write_file: vec![],
+                deny: vec![],
+                bypass_protection: vec![],
             },
             policy: PolicyPatchConfig {
                 exclude_groups: vec!["child_excluded".to_string()],
