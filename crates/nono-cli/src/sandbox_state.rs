@@ -328,20 +328,14 @@ pub fn cleanup_stale_state_files() {
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(e) => {
-                debug!(
-                    "Failed to stat candidate state file {}: {}",
-                    file_name, e
-                );
+                debug!("Failed to stat candidate state file {}: {}", file_name, e);
                 continue;
             }
         };
         let mtime = match metadata.modified() {
             Ok(t) => t,
             Err(e) => {
-                debug!(
-                    "Failed to read mtime for state file {}: {}",
-                    file_name, e
-                );
+                debug!("Failed to read mtime for state file {}: {}", file_name, e);
                 continue;
             }
         };

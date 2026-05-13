@@ -387,8 +387,8 @@ mod tests {
             target: PathBuf::from("profile.yaml"),
             source: PathBuf::from("profile.yaml"),
         };
-        let err = apply_yaml_merge(&directive, profile_dir)
-            .expect_err("self-merge must be rejected");
+        let err =
+            apply_yaml_merge(&directive, profile_dir).expect_err("self-merge must be rejected");
         let msg = format!("{}", err);
         assert!(
             msg.contains("source and target must differ"),
