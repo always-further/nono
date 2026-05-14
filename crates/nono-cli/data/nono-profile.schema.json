@@ -423,7 +423,7 @@
         "open_port": {
           "type": "array",
           "items": { "type": "integer" },
-          "description": "Localhost TCP ports to allow bidirectional IPC (connect + bind)."
+          "description": "Localhost TCP IPC (connect+bind). Port 0: macOS only (localhost:* outbound); Linux needs explicit ports."
         },
         "port_allow": {
           "type": "array",

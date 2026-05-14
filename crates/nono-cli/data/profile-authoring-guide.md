@@ -119,7 +119,7 @@ All path fields support variable expansion (see Section 6).
 | `network_profile`       | string or null                    | inherit  | Name from `network-policy.json` for proxy filtering. Set to `null` to clear inherited value. |
 | `allow_domain`          | array of string                   | `[]`     | Additional domains to allow through the proxy. Aliases: `proxy_allow`, `allow_proxy`. |
 | `credentials`           | array of string                   | `[]`     | Credential services to enable via reverse proxy. Alias: `proxy_credentials`. |
-| `open_port`             | array of integer                  | `[]`     | Localhost TCP ports for bidirectional IPC. Aliases: `port_allow`, `allow_port`. |
+| `open_port`             | array of integer                  | `[]`     | Localhost TCP IPC. Aliases: `port_allow`, `allow_port`. Port **0**: macOS only (`localhost:*` outbound); Linux: explicit ports. |
 | `listen_port`           | array of integer                  | `[]`     | TCP ports the sandboxed child may listen on. |
 | `custom_credentials`    | map of string to credential def   | `{}`     | Custom credential route definitions (see below). |
 | `upstream_proxy`        | string                            | `null`   | Enterprise proxy address (`host:port`). Alias: `external_proxy`. |

@@ -1226,7 +1226,7 @@ impl CapabilitySet {
         self.tcp_bind_ports.push(port);
     }
 
-    /// Add a localhost IPC port (mutable)
+    /// Localhost IPC port; `0` is macOS-only (`localhost:*` TCP outbound).
     pub fn add_localhost_port(&mut self, port: u16) {
         self.localhost_ports.push(port);
     }

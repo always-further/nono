@@ -458,6 +458,24 @@ fn emit_unix_socket_rules(profile: &mut String, caps: &CapabilitySet) -> Result<
     Ok(())
 }
 
+/// Seatbelt rules: one `(remote tcp "localhost:N")` per non-zero port; `0` adds
+/// a single `localhost:*` outbound rule (`localhost:0` is invalid in Seatbelt).
+fn push_localhost_tcp_outbound_seatbelt_rules(profile: &mut String, localhost_ports: &[u16]) {
+    let wildcard = localhost_ports.contains(&0);
+    for &lp in localhost_ports {
+        if lp == 0 {
+            continue;
+        }
+        profile.push_str(&format!(
+            "(allow network-outbound (remote tcp \"localhost:{}\"))\n",
+            lp
+        ));
+    }
+    if wildcard {
+        profile.push_str("(allow network-outbound (remote tcp \"localhost:*\"))\n");
+    }
+}
+
 /// Generate a Seatbelt profile from capabilities
 ///
 /// This is a pure primitive - it generates rules ONLY for paths in the CapabilitySet.
@@ -705,12 +723,7 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
                 profile.push_str(
                     "(allow system-socket (socket-domain AF_INET6) (socket-type SOCK_STREAM))\n",
                 );
-                for lp in localhost_ports {
-                    profile.push_str(&format!(
-                        "(allow network-outbound (remote tcp \"localhost:{}\"))\n",
-                        lp
-                    ));
-                }
+                push_localhost_tcp_outbound_seatbelt_rules(&mut profile, localhost_ports);
                 // Seatbelt cannot filter bind/inbound by port
                 profile.push_str("(allow network-bind)\n");
                 profile.push_str("(allow network-inbound)\n");
@@ -726,12 +739,7 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
                 "(allow network-outbound (remote tcp \"localhost:{}\"))\n",
                 port
             ));
-            for lp in localhost_ports {
-                profile.push_str(&format!(
-                    "(allow network-outbound (remote tcp \"localhost:{}\"))\n",
-                    lp
-                ));
-            }
+            push_localhost_tcp_outbound_seatbelt_rules(&mut profile, localhost_ports);
             // Scope system-socket for TCP (required for connect/bind to proxy).
             profile.push_str(
                 "(allow system-socket (socket-domain AF_INET) (socket-type SOCK_STREAM))\n",
@@ -1776,6 +1784,31 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_profile_blocked_with_localhost_port_zero_wildcard() {
+        let caps = CapabilitySet::new().block_network().allow_localhost_port(0);
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(profile.contains("(deny network*)"));
+        assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:*\"))"));
+        assert!(!profile.contains("(allow network-outbound (remote tcp \"localhost:0\"))"));
+        assert!(profile.contains("(allow network-bind)"));
+        assert!(profile.contains("(allow network-inbound)"));
+    }
+
+    #[test]
+    fn test_generate_profile_blocked_mixed_localhost_zero_and_fixed_port() {
+        let caps = CapabilitySet::new()
+            .block_network()
+            .allow_localhost_port(0)
+            .allow_localhost_port(7654);
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:7654\"))"));
+        assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:*\"))"));
+        assert!(!profile.contains("(allow network-outbound (remote tcp \"localhost:0\"))"));
+    }
+
+    #[test]
     fn test_generate_profile_proxy_with_localhost_ports() {
         let caps = CapabilitySet::new()
             .proxy_only(54321)
@@ -1790,6 +1823,18 @@ mod tests {
         // Bind/inbound enabled because localhost_ports is non-empty
         assert!(profile.contains("(allow network-bind)"));
         assert!(profile.contains("(allow network-inbound)"));
+    }
+
+    #[test]
+    fn test_generate_profile_proxy_with_localhost_port_zero_wildcard() {
+        let caps = CapabilitySet::new()
+            .proxy_only(54321)
+            .allow_localhost_port(0);
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:54321\"))"));
+        assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:*\"))"));
+        assert!(!profile.contains("(allow network-outbound (remote tcp \"localhost:0\"))"));
     }
 
     #[test]

@@ -993,10 +993,7 @@ pub struct NetworkConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub credentials: Option<Vec<String>>,
-    /// Localhost TCP ports to allow bidirectional IPC (connect + bind).
-    /// Equivalent to `--open-port` CLI flag.
-    /// Canonical profile key: `open_port` (legacy `port_allow` and `allow_port`
-    /// are also accepted).
+    /// Localhost TCP IPC (`--open-port`). **`0`**: macOS only, means `localhost:*` outbound.
     /// ALIAS(canonical="open_port", introduced="v0.0.0", remove_by="indefinite", issue="#415")
     #[serde(
         default,

@@ -590,6 +590,14 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
     // When a seccomp fallback is active (BlockAll or ProxyOnly), the ruleset was
     // created without handle_access(AccessNet), so adding NetPort rules would fail.
     if matches!(seccomp_net_fallback, SeccompNetFallback::None) {
+        if !matches!(caps.network_mode(), NetworkMode::AllowAll)
+            && caps.localhost_ports().contains(&0)
+        {
+            return Err(NonoError::SandboxInit(
+                "open_port 0 (localhost TCP wildcard) is macOS-only; on Linux use explicit ports or a network profile."
+                    .to_string(),
+            ));
+        }
         // Add per-port TCP connect rules (ProxyOnly port + explicit tcp_connect_ports)
         if let NetworkMode::ProxyOnly { port, bind_ports } = caps.network_mode() {
             debug!("Adding ProxyOnly TCP connect rule for port {}", port);
@@ -3207,6 +3215,22 @@ mod tests {
             seccomp_network_fallback_mode(&caps),
             SeccompNetFallback::None
         );
+    }
+
+    /// `open_port: [0]` is macOS-only (Landlock cannot express it).
+    #[test]
+    fn test_reject_localhost_port_wildcard_zero_under_landlock_net() {
+        let Ok(detected) = detect_abi() else {
+            return;
+        };
+        if AccessNet::from_all(detected.abi).is_empty() {
+            return;
+        }
+        let mut caps = CapabilitySet::new().block_network();
+        caps.add_localhost_port(0);
+        let err = apply_with_abi(&caps, &detected).expect_err("port 0 wildcard must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("macOS-only"), "unexpected error: {msg}");
     }
 
     #[test]
