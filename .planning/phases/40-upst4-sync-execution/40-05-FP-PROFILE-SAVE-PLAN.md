@@ -116,6 +116,62 @@ Same 6-line shape as other plans (Upstream-commit: / Upstream-tag: v0.52.2 / Ups
 </interfaces>
 </context>
 
+## Disposition resolution (D-40-B1)
+
+Inspection date: 2026-05-14
+Upstream shas inspected: 9b07bf7 (17 files, 791+/84-) + eb6cb09 (1 file, 38+/36-)
+
+Surface-overlap check results (Q1–Q6 against `git show 9b07bf7`):
+
+- Q1 (terminal_approval.rs cfg-windows): **0** (file not touched at all by 9b07bf7)
+- Q2 (profile_save_runtime.rs cfg-windows): **0**
+- Q3 (policy.rs cfg-windows): **0** (file not touched at all by 9b07bf7)
+- Q4 (profile/mod.rs cfg-windows): **0**
+- Q5 (build_prompt_text / HandleKind / per_kind): **0** (upstream does not interact with terminal_approval surface)
+- Q6 (promote / draft / package_status / ProfileDraft): **0** (upstream uses `suppress_save_prompt` / `ignore` aliases — distinct namespace from fork's Phase 36.5 profile-drafts `promote` + `--draft` surface)
+
+Q1–Q6 all return zero — no fork-only-surface intersection on the Phase 18.1 D-04-locked or Phase 36/36.5 vectors.
+
+Trial cherry-pick result: **14 content conflicts + 1 modify/delete conflict** (see `git cherry-pick --no-commit 9b07bf7` output 2026-05-14, then `git reset --hard HEAD`):
+
+- Content conflicts (14): `crates/nono-cli/data/nono-profile.schema.json`, `crates/nono-cli/data/profile-authoring-guide.md`, `crates/nono-cli/src/cli.rs`, `crates/nono-cli/src/exec_strategy.rs`, `crates/nono-cli/src/launch_runtime.rs`, `crates/nono-cli/src/main.rs`, `crates/nono-cli/src/profile/mod.rs`, `crates/nono-cli/src/profile_cmd.rs`, `crates/nono-cli/src/profile_runtime.rs`, `crates/nono-cli/src/profile_save_runtime.rs`, `crates/nono-cli/src/sandbox_prepare.rs`, `docs/cli/features/profile-authoring.mdx`, `docs/cli/features/profiles-groups.mdx`, `docs/cli/usage/flags.mdx`.
+- Modify/delete: `crates/nono-cli/tests/schema_shape.rs` (deleted in fork HEAD, modified in upstream 9b07bf7). Fork removed this test fixture at some prior point; resurrecting it would resurrect dead/fork-divergent surface.
+
+The conflicts are NOT in the Phase 18.1 / Phase 36 / Phase 36.5 fork-only surface — they are the broad surface of `cli.rs`, `exec_strategy.rs`, `main.rs`, `launch_runtime.rs`, `profile_cmd.rs`, `profile_runtime.rs`, `sandbox_prepare.rs`, `command_runtime.rs`, `execution_runtime.rs`, which the upstream feature touches as part of plumbing the new `--suppress-save-prompt` CLI flag through the run lifecycle. Behavioral surprise vs fork: **yes** — upstream introduces a new `ProfileSaveChoice` enum (Grant/Suppress/Skip), a new schema field `suppress_save_prompt`, an `ignore` alias for the existing `filesystem.ignore` shape, and a new CLI flag `--suppress-save-prompt` with re-plumbed `--ignore-denied` alias, plus a complete restructure of the interactive prompt branch in `offer_save_run_profile` (Grant-vs-Suppress-vs-Skip three-way choice replacing the old binary). Plumbing reaches into 17 files including the schema, authoring guide docs, and CLI/docs MDX — at least 9 of those files have substantive fork divergence (Phase 18.1, Phase 27/27.1, Phase 36, Phase 36.5, Windows-specific routing in exec_strategy/launch_runtime/sandbox_prepare).
+
+FINAL DISPOSITION: **D-20 manual replay** (stays at conservative default; D-40-B1 upgrade rule does NOT fire).
+
+Justification:
+- D-40-B1 upgrade rule clause (a) FAILS: trial cherry-pick produced 14 content conflicts + 1 modify/delete (not "zero fork-only-line conflicts").
+- D-40-B1 upgrade rule clause (b) FAILS: upstream's `ProfileSaveChoice` three-way branch + new `--suppress-save-prompt` CLI flag + schema field is a *new* behavior and fork does not already enforce equivalent suppression semantics. Behavioral surprise is non-zero.
+- The 14-file conflict set bleeds into Phase 27/27.1 `command_runtime.rs` / `launch_runtime.rs` / `exec_strategy.rs` (Windows-specific exec routing absorbed during the Phase 31 broker-process scaffolding era) and Phase 36/36.5 `profile/mod.rs` / `profile_cmd.rs` / `profile_runtime.rs` (deprecated_schema + promote + --draft surface).
+- The `schema_shape.rs` modify/delete is a non-trivial decision (fork removed the file; D-19 cherry-pick would have to either resurrect it or skip it — both have downstream consequences).
+
+Replay strategy: replay the **core upstream intent** (suppress save-profile prompts for paths already denied at runtime) as a minimal-scope schema + `profile_save_runtime.rs` change, **without**: (a) the new `ProfileSaveChoice` three-way prompt restructure (which is UX shape, not security gate), (b) the `--suppress-save-prompt` CLI flag (deferred — fork can absorb via a follow-up if/when the schema field gets explicit user uptake), (c) the `--ignore-denied` alias plumbing (deferred for same reason), (d) the docs/MDX absorption (defer to a later docs-rebase phase per Plan 40-01 DEC-3 precedent), (e) the upstream changes to `cli.rs` / `exec_strategy.rs` / `main.rs` / `launch_runtime.rs` / `profile_cmd.rs` / `profile_runtime.rs` / `command_runtime.rs` / `execution_runtime.rs` / `sandbox_prepare.rs` (these are all CLI flag plumbing for the new `--suppress-save-prompt` flag; without that flag, the plumbing is dead).
+
+Minimal-replay scope:
+1. Schema: add `filesystem.suppress_save_prompt` (string array) field to `crates/nono-cli/data/nono-profile.schema.json` — opt-in for users who edit profiles by hand or via a future Phase that wires the CLI flag.
+2. Profile struct: add `suppress_save_prompt: Vec<PathBuf>` field to `Filesystem` in `crates/nono-cli/src/profile/mod.rs` with `#[serde(default)]` + serde alias `ignore` (so existing fork users editing profiles see both names — preserves D-36-B3 serde-alias discipline).
+3. `profile_save_runtime.rs`: in the function that builds the save-profile patch from runtime denials, *filter out* paths that appear in the loaded profile's `filesystem.suppress_save_prompt` (or `ignore` alias) before they reach the prompt. This is the *core security/UX behavior* of upstream's feature: "paths configured for suppression are not offered as grants in the save prompt."
+
+NOT in scope this plan (deferred):
+- `--suppress-save-prompt` / `--ignore-denied` CLI flags (downstream of schema field; can be added later if there's demand).
+- `ProfileSaveChoice` three-way prompt restructure (UX, not security).
+- Docs MDX absorption (defer per Plan 40-01 DEC-3 precedent — fork's docs/cli/features/profile-authoring.mdx and profiles-groups.mdx have divergent shape).
+- `schema_shape.rs` test resurrection (file was removed in fork; replay does not re-introduce it).
+- `crates/nono-cli/src/exec_strategy.rs`, `command_runtime.rs`, `execution_runtime.rs`, `launch_runtime.rs`, `main.rs`, `cli.rs`, `profile_cmd.rs`, `profile_runtime.rs`, `sandbox_prepare.rs`: not touched (upstream's plumbing for the CLI flag — without the flag, the plumbing is dead code).
+
+The eb6cb09 review-fix is also in scope (it only touches `profile_save_runtime.rs` — 38/+36/- the suppression-flow internals). It will be folded into the same replay commit because there is no behavioral distinction once the upstream's `ProfileSaveChoice` restructure is left out — eb6cb09's diff is entirely inside the `prompt_profile_save_choice` function that fork is choosing NOT to replay.
+
+Files actually touched by this plan: 2 (NOT the 4 listed in PLAN.md frontmatter):
+- `crates/nono-cli/data/nono-profile.schema.json` (+10 lines, schema field)
+- `crates/nono-cli/src/profile/mod.rs` (+ struct field, struct accessor)
+- `crates/nono-cli/src/profile_save_runtime.rs` (+ filter step in save-patch construction)
+
+`terminal_approval.rs` and `policy.rs` are NOT touched (upstream 9b07bf7 does not touch them either — Q1/Q3 confirmed 0).
+
+Commit count expected: 1 (single replay commit; eb6cb09 folded since its diff is inside the not-replayed three-way restructure).
+
 <tasks>
 
 <task type="auto">
