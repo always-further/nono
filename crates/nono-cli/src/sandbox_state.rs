@@ -395,6 +395,7 @@ pub fn cleanup_stale_state_files() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
     use crate::test_env::{lock_env, EnvVarGuard};
     use tempfile::tempdir;
 

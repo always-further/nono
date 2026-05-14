@@ -20,6 +20,7 @@ use crate::rollback_runtime::{
     finalize_supervised_exit, AuditState, RollbackExitContext, RollbackRuntimeState,
 };
 use crate::startup_prompt::{print_terminal_safe_stderr, prompt_startup_termination_for_child};
+#[cfg(target_os = "windows")]
 use crate::{DETACHED_LAUNCH_ENV, DETACHED_SESSION_ID_ENV};
 use nix::libc;
 use nix::sys::signal::{self, Signal};
