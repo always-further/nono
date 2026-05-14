@@ -146,18 +146,10 @@ impl CredentialStore {
                     Err(e) => return Err(ProxyError::Credential(e.to_string())),
                 };
 
-                // Format header value based on mode.
-                // When inject_header is not "Authorization" (e.g., "PRIVATE-TOKEN",
-                // "X-API-Key"), the credential is injected as-is unless the user
-                // explicitly set a custom format. The default "Bearer {}" only
-                // makes sense for the Authorization header.
-                let effective_format = if route.inject_header != "Authorization"
-                    && route.credential_format == "Bearer {}"
-                {
-                    "{}".to_string()
-                } else {
-                    route.credential_format.clone()
-                };
+                let effective_format = crate::config::resolved_credential_format(
+                    route.inject_header.as_str(),
+                    route.credential_format.as_deref(),
+                );
 
                 let header_value = match route.inject_mode {
                     InjectMode::Header => Zeroizing::new(effective_format.replace("{}", &secret)),
@@ -544,7 +536,7 @@ mod tests {
             credential_key: None,
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
@@ -623,6 +615,63 @@ mod tests {
         assert!(prefixes.contains("my-api"));
     }
 
+    #[test]
+    fn test_load_non_authorization_header_explicit_bearer_format() {
+        let _lock = ENV_LOCK.lock().expect("env mutex poisoned");
+        let _guard = EnvVarGuard::set_all(&[("NONO_PROXY_TEST_LITELLM_TOKEN", "sk-litellm-test")]);
+        let tls = test_tls_connector();
+        let routes = vec![RouteConfig {
+            prefix: "litellm".to_string(),
+            upstream: "https://litellm".to_string(),
+            credential_key: Some("env://NONO_PROXY_TEST_LITELLM_TOKEN".to_string()),
+            inject_mode: InjectMode::Header,
+            inject_header: "x-litellm-api-key".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+        }];
+        let store = CredentialStore::load(&routes, &tls).expect("credential load");
+        let cred = store.get("litellm").expect("route should be loaded");
+        assert_eq!(cred.header_name, "x-litellm-api-key");
+        assert_eq!(cred.header_value.as_str(), "Bearer sk-litellm-test");
+    }
+
+    #[test]
+    fn test_load_non_authorization_header_omitted_format_injects_bare_secret() {
+        let _lock = ENV_LOCK.lock().expect("env mutex poisoned");
+        let _guard = EnvVarGuard::set_all(&[("NONO_PROXY_TEST_API_KEY", "secret-key")]);
+        let tls = test_tls_connector();
+        let routes = vec![RouteConfig {
+            prefix: "api".to_string(),
+            upstream: "https://api.example.com".to_string(),
+            credential_key: Some("env://NONO_PROXY_TEST_API_KEY".to_string()),
+            inject_mode: InjectMode::Header,
+            inject_header: "x-api-key".to_string(),
+            credential_format: None,
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+        }];
+        let store = CredentialStore::load(&routes, &tls).expect("credential load");
+        let cred = store.get("api").expect("route should be loaded");
+        assert_eq!(cred.header_value.as_str(), "secret-key");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_load_oauth2_unreachable_endpoint_skips_route() {
         use crate::config::OAuth2Config;
@@ -639,7 +688,7 @@ mod tests {
             credential_key: None,
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
-            credential_format: "Bearer {}".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
