@@ -67,8 +67,9 @@ pub struct CredentialDef {
     pub credential_key: Option<String>,
     #[serde(default = "default_inject_header")]
     pub inject_header: String,
-    #[serde(default = "default_credential_format")]
-    pub credential_format: String,
+    /// Same as the proxy route field: if set, used as-is; if omitted, `Bearer {}` for `Authorization` (case-insensitive), else `{}`.
+    #[serde(default)]
+    pub credential_format: Option<String>,
     /// Explicit environment variable name for the phantom token.
     ///
     /// Required when `credential_key` is a URI manager reference (`env://`,
@@ -86,10 +87,6 @@ pub struct CredentialDef {
 
 fn default_inject_header() -> String {
     "Authorization".to_string()
-}
-
-fn default_credential_format() -> String {
-    "Bearer {}".to_string()
 }
 
 // ============================================================================
@@ -487,7 +484,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -527,7 +524,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "X-Custom-Auth".to_string(),
-                credential_format: "Token {}".to_string(),
+                credential_format: Some("Token {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -563,7 +560,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -609,7 +606,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -695,7 +692,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -728,7 +725,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -761,7 +758,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "X-Custom-Auth".to_string(),
-                credential_format: "Token {}".to_string(),
+                credential_format: Some("Token {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -777,7 +774,7 @@ mod tests {
         let routes = resolve_credentials(&policy, &["test".to_string()], &custom).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].inject_header, "X-Custom-Auth");
-        assert_eq!(routes[0].credential_format, "Token {}");
+        assert_eq!(routes[0].credential_format.as_deref(), Some("Token {}"));
     }
 
     #[test]
@@ -799,7 +796,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -856,7 +853,7 @@ mod tests {
             github.credential_key,
             Some("env://GITHUB_TOKEN".to_string())
         );
-        assert_eq!(github.credential_format, "token {}");
+        assert_eq!(github.credential_format.as_deref(), Some("token {}"));
         assert_eq!(
             github.env_var,
             Some("GITHUB_TOKEN".to_string()),
@@ -881,7 +878,7 @@ mod tests {
             gitlab.credential_key,
             Some("env://GITLAB_TOKEN".to_string())
         );
-        assert_eq!(gitlab.credential_format, "Bearer {}");
+        assert_eq!(gitlab.credential_format.as_deref(), Some("Bearer {}"));
         assert_eq!(
             gitlab.env_var,
             Some("GITLAB_TOKEN".to_string()),
@@ -946,7 +943,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -1017,7 +1014,7 @@ mod tests {
                 }),
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -1065,7 +1062,7 @@ mod tests {
                 auth: None,
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
-                credential_format: "Bearer {}".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,

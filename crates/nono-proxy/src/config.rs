@@ -133,11 +133,13 @@ pub struct RouteConfig {
     #[serde(default = "default_inject_header")]
     pub inject_header: String,
 
-    /// Format string for the credential value. `{}` is replaced with the secret.
-    /// Default: "Bearer {}"
-    /// Only used when inject_mode is "header".
-    #[serde(default = "default_credential_format")]
-    pub credential_format: String,
+    /// How the injected header value is built (`{}` is replaced by the secret). Only when `inject_mode` is header.
+    ///
+    /// If you set this field, that whole string is used as-is — `Authorization` or any other header.
+    ///
+    /// If you omit it: an `Authorization` header (any capitalization) defaults to `Bearer {}`; any other header defaults to `{}` (secret only, no prefix).
+    #[serde(default)]
+    pub credential_format: Option<String>,
 
     // --- URL path mode fields ---
     /// Pattern to match in incoming URL path. Use {} as placeholder for phantom token.
@@ -371,8 +373,21 @@ fn default_inject_header() -> String {
     "Authorization".to_string()
 }
 
-fn default_credential_format() -> String {
-    "Bearer {}".to_string()
+/// Template for the header value before `{}` is replaced by the secret.
+///
+/// Set in config → use that string as-is. Omitted → `Bearer {}` for an `Authorization` header (case-insensitive), `{}` for any other header.
+#[must_use]
+pub fn resolved_credential_format(inject_header: &str, credential_format: Option<&str>) -> String {
+    match credential_format {
+        Some(fmt) => fmt.to_string(),
+        None => {
+            if inject_header.eq_ignore_ascii_case("Authorization") {
+                "Bearer {}".to_string()
+            } else {
+                "{}".to_string()
+            }
+        }
+    }
 }
 
 /// Configuration for an external (enterprise) proxy.
@@ -817,5 +832,49 @@ mod tests {
         let route: RouteConfig = serde_json::from_str(json).unwrap();
         assert!(route.oauth2.is_none());
         assert!(route.credential_key.is_some());
+    }
+
+    #[test]
+    fn test_route_config_credential_format_omitted_is_none() {
+        let json = r#"{
+            "prefix": "anthropic",
+            "upstream": "https://api.anthropic.com",
+            "credential_key": "env://ANTHROPIC_API_KEY",
+            "inject_header": "x-api-key"
+        }"#;
+        let route: RouteConfig = serde_json::from_str(json).unwrap();
+        assert!(route.credential_format.is_none());
+        assert_eq!(
+            resolved_credential_format(&route.inject_header, route.credential_format.as_deref()),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn test_route_config_explicit_bearer_on_custom_header_preserved() {
+        let json = r#"{
+            "prefix": "litellm",
+            "upstream": "https://litellm",
+            "credential_key": "env://LITELLM_TOKEN",
+            "inject_header": "x-litellm-api-key",
+            "credential_format": "Bearer {}"
+        }"#;
+        let route: RouteConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(route.credential_format.as_deref(), Some("Bearer {}"));
+        assert_eq!(
+            resolved_credential_format(&route.inject_header, route.credential_format.as_deref()),
+            "Bearer {}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_credential_format_authorization_case_insensitive() {
+        for header in ["authorization", "AUTHORIZATION", "Authorization"] {
+            assert_eq!(
+                resolved_credential_format(header, None),
+                "Bearer {}",
+                "omitted format: Authorization header name is matched case-insensitively for Bearer default"
+            );
+        }
     }
 }
