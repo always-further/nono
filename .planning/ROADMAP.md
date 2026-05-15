@@ -113,7 +113,7 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 - [ ] **Phase 37: v2.3 carry-forward Linux/macOS execution** — REQ-RESL-NIX-01..03 (Plan 25-01 cgroup v2 + setrlimit RESL backends) + REQ-PKGS-01 + REQ-PKGS-04 (Plan 26-02 streaming refactor + auto-pull). Plan + CONTEXT artifacts already committed in v2.3 (`3ed80d38` + `86efcdeb`); execution requires Linux/macOS host. ~2 weeks once host available.
 - [ ] **Phase 38: REQ-AAH-01 native host re-validation (optional)** — REQ-AAHX-HOST-01. Tactical confirmation pass on Linux/macOS host that the Phase 27 transitive closure (via 27.1 + 27.2) holds without a host-native gap. Skip if field-validation surfaces no gap. ~2-3 days.
 - [x] **Phase 39: UPST4 audit** — REQ-UPST4-01. Mirror Phase 33 shape. DIVERGENCE-LEDGER.md inventory of upstream v0.52.0..v0.53.0+ divergence (3 confirmed tags at milestone start: v0.52.1 `21bbb82e`, v0.52.2 `e8bf0148`, v0.53.0 `c4b25b82`; may grow). Per-cluster disposition + parity-strategy review against Phase 33 ADR. ~1 week. (completed 2026-05-13)
-- [ ] **Phase 40: UPST4 sync execution** — REQ-UPST4-02. Mirror Phase 34 shape. Cherry-pick + D-20 manual replay per UPST4 audit dispositions. D-19 trailer convention + Windows-only-files invariant inherited from Phase 22+34. ~2-3 weeks.
+- [x] **Phase 40: UPST4 sync execution** — REQ-UPST4-02. Mirror Phase 34 shape. Cherry-pick + D-20 manual replay per UPST4 audit dispositions. D-19 trailer convention + Windows-only-files invariant inherited from Phase 22+34. ~2-3 weeks. (completed 2026-05-15)
 
 **Out of scope (explicit deferrals to v2.5 or later):**
 - **v2.5-FU-1** (audit-bundle shim removal) + **v2.5-FU-2** (cmd_verify v2 JSON schema) — Phase 27.2 deferrals tracked in `deferred-items.md`.
@@ -230,14 +230,14 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 
 **Requirements:** REQ-UPST4-02. See `.planning/REQUIREMENTS.md`.
 
-**Plans:** 4/6 plans executed
+**Plans:** 6/6 plans complete
 
 - [x] 40-01-PROXY-HARDENING-PLAN.md — REQ-UPST4-02 (Cluster C1: proxy server.rs review fixes + libdbus isolation + Node 26 NODE_USE_ENV_PROXY, 5 D-19 cherry-picks; Wave 1)
 - [x] 40-02-CLI-ALLOW-VALIDATE-PLAN.md — REQ-UPST4-02 (Cluster C2: --allow path validation + SandboxState domain-allowlist + nono why --host proxy-domain awareness, 2 D-19 cherry-picks; Wave 0 foundation)
 - [x] 40-03-SCRUB-MODULE-PLAN.md — REQ-UPST4-02 (Cluster C6: new nono::scrub module + lib.rs re-export + audit event integration, 2 D-19 cherry-picks; Wave 0 foundation)
 - [x] 40-04-RELEASE-RIDE-PLAN.md — REQ-UPST4-02 (Cluster C7: Landlock ABI OnceLock cache + full failure diagnostic + v0.52.1/v0.52.2/v0.53.0 version bumps, 5 D-19 cherry-picks; Wave 1)
-- [ ] 40-05-FP-PROFILE-SAVE-PLAN.md — REQ-UPST4-02 (Cluster C4: profile-save denial suppression; D-40-B1 diff-inspection upgrade authority; D-20 manual replay or D-19 cherry-pick per inspection result; Wave 2)
-- [ ] 40-06-FP-PROXY-TLS-PLAN.md — REQ-UPST4-02 (Cluster C5: proxy TLS trust + multi-route dispatch + credential-match policy; D-20 manual replay per D-40-B2 LOCKED; Wave 2)
+- [x] 40-05-FP-PROFILE-SAVE-PLAN.md — REQ-UPST4-02 (Cluster C4: profile-save denial suppression; D-40-B1 diff-inspection upgrade authority; D-20 manual replay or D-19 cherry-pick per inspection result; Wave 2)
+- [x] 40-06-FP-PROXY-TLS-PLAN.md — REQ-UPST4-02 (Cluster C5: proxy TLS trust + multi-route dispatch + credential-match policy; D-20 manual replay per D-40-B2 LOCKED; Wave 2)
 
 **Estimated effort:** ~2-3 weeks.
 
