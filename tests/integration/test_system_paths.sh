@@ -137,7 +137,7 @@ if is_linux; then
     fi
 
     if [[ -d /sys ]]; then
-        expect_success "can read /sys" \
+        expect_failure "broad /sys read is not granted by default" \
             "$NONO_BIN" run --allow "$TMPDIR" -- ls /sys/ >/dev/null
     fi
 else

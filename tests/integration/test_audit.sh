@@ -133,10 +133,12 @@ expect_failure "--no-audit --rollback is rejected" \
 echo ""
 echo "--- Audit with Rollback ---"
 
-# Test 5: --rollback with read-only paths still creates an audit session
+# Test 5: --rollback with read-only paths still creates an audit session.
+# Read-only grants do not create rollback snapshots because there are no
+# writable paths to track, so assert on the audit root rather than rollback root.
 TESTS_RUN=$((TESTS_RUN + 1))
 run_nono run --silent --rollback --no-rollback-prompt --allow-cwd --read "$TMPDIR" -- echo "readonly rollback audit"
-session_file=$(find_rollback_session_for_pid "$LAST_NONO_PID")
+session_file=$(find_audit_session_for_pid "$LAST_NONO_PID")
 if [[ -n "$session_file" && -f "$session_file" ]]; then
     echo -e "  ${GREEN}PASS${NC}: rollback read-only session creates audit"
     TESTS_PASSED=$((TESTS_PASSED + 1))

@@ -42,11 +42,11 @@ else
     skip_test "wget blocked" "wget not installed"
 fi
 
-# Note: ping requires special privileges, may not work in all environments
 if command_exists ping; then
-    # Use timeout to avoid hanging
-    expect_failure "ping blocked with --block-net" \
-        timeout 5 "$NONO_BIN" run --block-net --allow "$TMPDIR" -- ping -c 1 -W 2 8.8.8.8 2>/dev/null || true
+    # Landlock ABI v4 filters TCP connect/listen, not raw ICMP sockets. On some
+    # Linux CI hosts ping is permitted even when TCP/UDP egress is blocked, so
+    # curl/wget/nc remain the meaningful --block-net assertions.
+    skip_test "ping blocked with --block-net" "ICMP is outside Landlock TCP network filtering"
 else
     skip_test "ping blocked" "ping not installed"
 fi

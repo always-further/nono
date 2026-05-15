@@ -43,19 +43,17 @@ expect_output_empty() {
     return 1
 }
 
-# node-dev is an embedded profile that lists `$HOME/Library/pnpm` —
-# a macOS-only path that's reliably absent on Linux CI runners and
-# gives us a stable "missing-path" warning to assert against under
-# `-v`. The previous version used `claude-code` and asserted on a
-# macOS Keychain path; that profile now ships as a registry pack so
-# the assertion no longer applies in this suite.
-expect_output_empty \
+# node-dev is an embedded profile with optional runtime paths. Missing optional
+# paths should stay hidden by default, while verbose dry-run should still expose
+# capability provenance.
+expect_output_not_contains \
     "node-dev dry-run hides missing profile warnings by default" \
+    "Profile path" \
     "$NONO_BIN" run --profile node-dev --allow-cwd --dry-run -- echo ok
 
 expect_output_contains \
-    "node-dev dry-run shows missing profile warnings with -v" \
-    "Profile path '\$HOME/Library/pnpm' does not exist, skipping" \
+    "node-dev dry-run shows verbose capability provenance with -v" \
+    "[group:system_read_linux_core]" \
     "$NONO_BIN" run -v --profile node-dev --allow-cwd --dry-run -- echo ok
 
 expect_output_empty \

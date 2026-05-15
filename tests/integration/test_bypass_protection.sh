@@ -22,8 +22,14 @@ fi
 TMPDIR=$(setup_test_dir)
 trap 'cleanup_test_dir "$TMPDIR"' EXIT
 
+TEST_HOME="$TMPDIR/home"
+export HOME="$TEST_HOME"
+export XDG_CONFIG_HOME="$TEST_HOME/.config"
+
 PROFILES_DIR="$TMPDIR/profiles"
-mkdir -p "$PROFILES_DIR"
+mkdir -p "$PROFILES_DIR" "$HOME/.docker" "$HOME/.ssh" "$XDG_CONFIG_HOME"
+printf '{}' > "$HOME/.docker/config.json"
+printf 'fixture-key\n' > "$HOME/.ssh/id_ed25519"
 
 # Create a directory that mimics a sensitive path for testing.
 # We use ~/.docker which is in deny_credentials.
@@ -184,10 +190,7 @@ EOF
     cat > "$USER_PROFILES_DIR/nono-test-docker-child.json" <<EOF
 {
     "meta": { "name": "nono-test-docker-child", "version": "1.0.0" },
-    "extends": "nono-test-docker-base",
-    "filesystem": {
-        "read": ["\$HOME/.config"]
-    }
+    "extends": "nono-test-docker-base"
 }
 EOF
 

@@ -33,6 +33,8 @@ trap 'cleanup_test_dir "$TMPDIR"' EXIT
 
 mkdir -p "$TMPDIR/workdir"
 echo "readable content" > "$TMPDIR/workdir/file.txt"
+PROFILE_HOME="$TMPDIR/profile-home"
+mkdir -p "$PROFILE_HOME/.config" "$PROFILE_HOME/.npm"
 
 echo ""
 echo "Test directory: $TMPDIR"
@@ -60,6 +62,7 @@ expect_output_contains "dry-run output shows Capabilities section" "Capabilities
 # ~/.npm, ~/.nvm). Those live inside the collapsed system/group
 # block in the default dry-run output and only show with -v.
 expect_output_contains "node-dev profile lists Node runtime paths in dry-run -v" ".npm" \
+    env HOME="$PROFILE_HOME" XDG_CONFIG_HOME="$PROFILE_HOME/.config" \
     "$NONO_BIN" run -v --profile node-dev --dry-run -- echo "test"
 
 # =============================================================================

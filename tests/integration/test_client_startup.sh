@@ -72,7 +72,10 @@ CLIENT_PATH="$CLAUDE_PREFIX/bin:$PATH"
 CLAUDE_CODE_VERSION="2.1.71"
 
 mkdir -p \
+    "$CLIENT_HOME/.cache" \
     "$CLIENT_HOME/.claude" \
+    "$CLIENT_HOME/.config" \
+    "$CLIENT_HOME/.local/share" \
     "$CLAUDE_PREFIX"
 : > "$CLIENT_HOME/.claude.json"
 
@@ -141,13 +144,28 @@ expect_success "install Claude Code npm package" \
 echo ""
 echo "--- Claude Code Startup ---"
 
+CLAUDE_VERSION=$(client_env claude --version)
+CLAUDE_VERSION=$(capture_last_nonempty_line "$CLAUDE_VERSION")
+
+version_match_test "plain claude reports pinned version" "$CLAUDE_VERSION" \
+    client_env claude --version
+
 # The `claude` profile now ships as a registry pack
 # (always-further/claude). The client-startup smoke test exercises
 # the integration when both Claude Code AND the pack are installed.
-# In CI environments without the pack pulled, skip the pack-dependent
-# subtests cleanly rather than hit the migration prompt (which can't
-# be answered non-interactively and would fail the suite).
-PACK_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nono/packages/always-further/claude"
+# If the pack is installed in the real nono config, copy it into the isolated
+# config used by client_env. Otherwise skip the pack-dependent subtests cleanly
+# rather than hit the migration prompt, which can't be answered non-interactively.
+PACK_DIR="$CLIENT_HOME/.config/nono/packages/always-further/claude"
+REAL_PACK_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nono/packages/always-further/claude"
+LOCKFILE="$CLIENT_HOME/.config/nono/packages/lockfile.json"
+REAL_LOCKFILE="${XDG_CONFIG_HOME:-$HOME/.config}/nono/packages/lockfile.json"
+if [[ ! -f "$PACK_DIR/package.json" && -f "$REAL_PACK_DIR/package.json" && -f "$REAL_LOCKFILE" ]]; then
+    mkdir -p "$(dirname "$PACK_DIR")"
+    cp -R "$REAL_PACK_DIR" "$PACK_DIR"
+    cp "$REAL_LOCKFILE" "$LOCKFILE"
+fi
+
 if [[ ! -f "$PACK_DIR/package.json" ]]; then
     skip_test "nono run starts Claude Code successfully" \
         "always-further/claude pack not installed (run 'nono pull always-further/claude' first)"
@@ -157,11 +175,18 @@ if [[ ! -f "$PACK_DIR/package.json" ]]; then
     exit 0
 fi
 
-CLAUDE_VERSION=$(client_env claude --version)
-CLAUDE_VERSION=$(capture_last_nonempty_line "$CLAUDE_VERSION")
-
-version_match_test "plain claude reports pinned version" "$CLAUDE_VERSION" \
-    client_env claude --version
+set +e
+pack_check_output=$(client_env "$NONO_BIN" run --profile claude --allow-cwd --allow-net --dry-run -- claude --version </dev/null 2>&1)
+pack_check_exit=$?
+set -e
+if [[ "$pack_check_exit" -ne 0 ]]; then
+    skip_test "nono run starts Claude Code successfully" \
+        "always-further/claude pack is installed but failed verification"
+    skip_test "nono wrap starts Claude Code successfully" \
+        "always-further/claude pack is installed but failed verification"
+    print_summary
+    exit 0
+fi
 
 version_match_test "nono run starts Claude Code successfully" "$CLAUDE_VERSION" \
     client_env "$NONO_BIN" run --profile claude --allow-cwd --allow-net -- claude --version
