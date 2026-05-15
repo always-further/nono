@@ -1,5 +1,41 @@
 # Milestones
 
+## v2.4 Complete the Partial Ports + UPST4 (Shipped: 2026-05-15)
+
+**Phases:** 5 shipped on Windows host (35, 36, 36.5, 39, 40); 2 re-anchored to v2.5 (37 + 38 — host-blocked Linux/macOS execution; carry forward to Phase 37 + 38 in v2.5 backlog).
+
+**Plans / Tasks:** 17 plans, 62 tasks.
+
+**Stats:** 148 commits (`24b0f0a3..9b172c0d`), 169 files changed, +35,949 / -2,590 LOC. Timeline: 4 days (2026-05-12 → 2026-05-15).
+
+**Key accomplishments:**
+
+- **Phase 35 — UPST3-closure quick wins (3 plans).** Windows env-filter wiring (`exec_strategy_windows/launch.rs::build_child_env` + 4 cfg-gated tests) closing P34-DEFER-08a-1, Linux Landlock profiles-dir pre-creation eliminating first-run "No such file or directory" UX bug closing P34-DEFER-09-1, Windows test-harness hygiene closing P34-DEFER-01-1 + 10-1. Closed REQ-PORT-CLOSURE-01, -06, -07.
+- **Phase 36 — UPST3 deep closure (6 plans).** Full `deprecated_schema` module port (LegacyPolicyPatch serde rewriter + DeprecationCounter per-key AtomicBool + `--strict` fail-closed mode replacing Phase 34-04b's pragmatic seed), atomic mechanical rename of `override_deny` → `bypass_protection` across 17 fork-side source files with serde+clap alias backwards-compat per D-36-B3 indefinite, `yaml_merge` wiring trio + `wiring.rs` base abstraction + 11 tests, b5f0a3ab deep ExecConfig refactor + escape-quote pipeline rider. Closed REQ-PORT-CLOSURE-02, -04, -05.
+- **Phase 36.5 — Profile drafts absorption (1 plan, optional).** Upstream `829c341a` absorbed as 3-commit D-20 manual replay: `nono profile init --draft` / `--refresh` / `promote` / `validate --draft` with SHA-256 sidecar integrity, refuse-always shadowing safeguards, `NonoError::ActionRequired` typed variant, C FFI mapping, advisory + strict `package_status.rs`. Closed REQ-PORT-CLOSURE-03.
+- **Phase 39 — UPST4 audit (1 plan).** DIVERGENCE-LEDGER inventory of upstream v0.52.0..v0.53.0 with 7 themed clusters across 22 cross-platform commits and per-cluster dispositions (4 will-sync, 2 fork-preserve, 1 won't-sync). `windows-touch` column shows ZERO yes hits in v0.52..v0.53 range; § ADR review confirms Phase 33 Option A `continue` strategy remains Accepted. Empirical correction: 2 known windows-touch candidates (`5d821c12`, `0748cced`) land in `v0.54.0~5^2`, not v0.53.0 — absorbed by UPST5. Closed REQ-UPST4-01.
+- **Phase 40 — UPST4 sync execution (6 plans).** 14 D-19 cherry-picks absorbed onto fork `main`: Cluster C1 (5 commits, v0.52.1 proxy hardening — libdbus isolated from no-keyring builds, NODE_USE_ENV_PROXY for Node 20.6+, accurate keystore warnings), Cluster C2 (2 commits, CLI `--allow` validation + SandboxState domain-allowlist + `nono why --host` proxy-domain awareness), Cluster C6 (2 commits, new `nono::scrub` module + lib.rs re-export + audit integration), Cluster C7 (5 commits, v0.52.1..v0.53.0 release-ride — Landlock ABI cache via OnceLock, full failure diagnostic, 3 release version bumps absorbed CHANGELOG-only per Phase 34 convention). 3 D-20 manual replays: Cluster C4 (FP-PROFILE-SAVE `filesystem.suppress_save_prompt` with `ignore` serde alias + canonical-path filter; D-40-B1 upgrade rule did NOT fire — 14 trial-cherry-pick conflicts + behavioral surprise) and Cluster C5 (FP-PROXY-TLS native CA loading + structural credential-match policy doc — D-40-B2 LOCKED). Cluster 3 (PTY scrollback) won't-sync per D-40-D1. Baseline-aware CI gate verified zero `success → failure` transitions vs baseline `4665ae75` on every Wave 1 + Wave 2 head commit. PR #922 holds all 6 plan contribution sections (umbrella to upstream). D-40-E1 invariant: 1 codified addendum exception (`96886ae9` +4 lines via `ScrubPolicy::secure_default()` factory). Closed REQ-UPST4-02.
+- **Phase 40 process hardening.** Three blocking anti-patterns codified for future UPST sync phases: (1) cross-target clippy gates 3+4 are load-bearing on Windows host (`aws-lc-sys`/`ring` cross-compilers absent — CI substitute mandatory; categorize as `skipped_gates_load_bearing` in SUMMARY frontmatter, NOT `skipped_gates_environmental`); (2) PLAN COMPLETE not declarable until baseline-aware CI gate passes (Task 5 wait-for-CI gate baked into Wave 1+ plan templates from commit `be46f483`); (3) SUMMARY frontmatter must distinguish load-bearing skips from environmental skips so orchestrators can escalate CR-A-class regressions correctly. Memory note + plan templates updated.
+
+**Requirements:** 14 in-milestone (PORT-CLOSURE-01..07, RESL-NIX-01..03, PKGS-04, UPST4-01..02, AAHX-HOST-01) + PKGS-01 retroactively closed via v2.3 Phase 26-02 = 15 total.
+
+**Closed:** 10 (PORT-CLOSURE-01..07 + UPST4-01..02 + PKGS-01 retroactive).
+**Re-anchored to v2.5:** 5 (RESL-NIX-01..03 + PKGS-04 → v2.5 Phase 37; AAHX-HOST-01 → v2.5 Phase 38 — Linux/macOS host availability gate).
+
+**Cross-phase integration verdict:** clean (7/7 wiring claims PASS, 0 BLOCKERS per `.planning/milestones/v2.4-MILESTONE-AUDIT.md`).
+
+**Audit verdict at close:** `gaps_found` (environmental + paperwork) — gaps are categorically host-blocked or audit-open cataloging glitches on completed quick-tasks, not functional regressions. **Acknowledged: proceed close with 5 host-blocked requirements re-anchored to v2.5 backlog (Phase 37 + 38) and 43 open artifact items deferred (see STATE.md § Deferred Items → v2.4 close).**
+
+### Known Gaps
+
+- **REQ-RESL-NIX-01..03** + **REQ-PKGS-04** — Linux/macOS host availability required; carry to v2.5 Phase 37.
+- **REQ-AAHX-HOST-01** (optional) — Linux/macOS host availability required; carry to v2.5 Phase 38; skip if Phase 37 surfaces no Phase-27-related gap.
+- **Phase 35 + 36 human-verify** — 11 UAT items + 7 verification items remain `human_needed`; mostly Linux/macOS or interactive Windows console gated. 3 of these (env_filter_tests, profile_cli debug-syntax, docs MDX bypass_protection inspection) were exercised at v2.4 close and passed.
+- **4 v24 code-review todos** (broker FFI not-found mapping, broker null-handle validation, broker empty-handle-list path, job-object test skip policy) — small Windows-host follow-ups; carry to v2.5.
+- **Phase 41 backlog** (Linux/macOS clippy + test pre-existing failures, Windows build/integration/packaging/regression/security) — out-of-scope baseline-aware reds; documented in Phase 40 SUMMARYs.
+
+---
+
 ## v2.3 — Linux POC Unblock + Deferreds Closure
 
 **Status:** ✅ SHIPPED 2026-05-12 with documented carry-forwards
@@ -14,6 +50,7 @@
 **Requirements:** 20 — RESL-NIX-01..03, AIPC-NIX-01, PKGS-01..04, AAH-01, NTH-01..03, AAHX-01..03, AUDC-01..03, WRU-01..02. Closed: 15 substantively (12 direct + 3 transitive via 27.1+27.2). Host-blocked carry-forward to v2.4: 5 (REQ-RESL-NIX-01..03 + REQ-PKGS-01 + REQ-PKGS-04).
 
 **Stats:**
+
 - 422 commits since `v2.2` tag (~13 days, 2026-04-29 → 2026-05-12).
 - 369 files changed; +91,624 / −5,506 LOC across code + docs + planning artifacts.
 - 2 new ADRs (`audit-bundle-target.md`, `upstream-parity-strategy.md`) + 1 new crate (`crates/nono-shell-broker/`).
@@ -53,11 +90,13 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md` + `.planning/milestones/v2.
 **Requirements:** 21 — PROF-01..04, POLY-01..03, PKG-01..04, OAUTH-01..03, AUD-01..05, DRIFT-01..02. Closed: 19 fully + 2 complete-partial (PKG-01 has 2 streaming cherry-picks deferred; AUD-03 has Authenticode chain-walker subject extraction deferred).
 
 **Stats:**
+
 - 146 commits since `v2.1` tag (29 `feat(...)` commits across phases 22/23/24).
 - 154 files changed; +33,153 / −835 LOC across code + docs + planning artifacts.
 - ~+8.4k LOC of Rust code (53 source files in `crates/`).
 
 **Key accomplishments:**
+
 - **Profile struct alignment (PROF-01..04)** — `unsafe_macos_seatbelt_rules`, `packs`, `command_args`, `custom_credentials.oauth2` deserialize on Windows; `claude-no-keychain` builtin profile shipped (Phase 22 Plan 22-01, 12 commits, `d7fc4ed8`).
 - **Policy tightening (POLY-01..03)** — orphan `override_deny` fails closed at profile load; `--rollback`/`--no-audit` clap-level mutex with CL-01-M `--no-audit-integrity` carve-out preserved; `.claude.lock` moved to `allow_file` for both `claude-code` and `claude-no-kc` (Phase 22 Plan 22-02, 7 commits, `490a8a5c`).
 - **Package manager (PKG-01..04, partial)** — `nono pull/remove/update/search/list` flat-shape subcommand tree with Windows `%LOCALAPPDATA%\nono\packages\<name>` storage, Claude-Code hook registration via fork's `hooks.rs`, signed-artifact verification at install time (Phase 22 Plan 22-03; 6/8 cherry-picks landed, 2 deferred to v2.3 backlog).
@@ -68,12 +107,14 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md` + `.planning/milestones/v2.
 - **Parity-drift prevention (DRIFT-01, DRIFT-02)** — `make check-upstream-drift` twin scripts with `$(OS)==Windows_NT` Makefile dispatch + 6-category path-prefix lookup + 3 frozen golden JSON fixtures; GSD upstream-sync template at `.planning/templates/upstream-sync-quick.md` with byte-exact 6-line D-19 trailer; Mintlify long-form runbook at `docs/cli/development/upstream-drift.mdx`; PROJECT.md `## Upstream Parity Process` cross-link (Phase 24, 2026-04-27).
 
 **Plan splits & deviations:**
+
 - **Plan 22-05 → 22-05a + 22-05b** at CONTEXT STOP trigger #3 on upstream cherry-pick `4f9552ec`. T-22-05-04 ABSOLUTE STOP guard required CLEAN-04 invariants byte-identical AFTER every source-code commit; the split honored that gate and installed a permanent regression test as a future-regression guard.
 - **Phase 23 layer-2 deviation** authorized by plan Step 7 — `aipc_handle_brokering_integration` cannot reach `pub(super)` `handle_windows_supervisor_message`; layer-1 multi-kind E2E in `capability_handler_tests` (`audit_integrity_records_5_handle_kinds_in_ledger`) provides the substitute coverage per the plan's authorized fallback clause.
 
 **Known deferred items at close:** 20 (6 UAT bookkeeping gaps, 4 verification human_needed flags, 10 stale or pending quick-task index pointers including the 260428-rsu re-deferral pending PR-583 maintainer response). See STATE.md `## Deferred Items` for the full table. None block release.
 
 **Deferred to v2.3 backlog:**
+
 - PKG streaming follow-up (`58b5a24e` + `9ebad89a` + `115b5cfa` + `ArtifactType::Plugin` + `bundle_json` field).
 - Audit-attestation hardening sweep (sigstore-rs `KeyPair::from_pkcs8` re-enablement; 2 `#[ignore]`'d fixture-driven tests).
 - Authenticode chain-walker subject extraction (`Win32_Security_Cryptography_Catalog` + `Win32_Security_Cryptography_Sip` features).
@@ -84,6 +125,7 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md` + `.planning/milestones/v2.
 **Deferred to v3.0:** WR-02 EDR HUMAN-UAT item.
 
 **Archive files:**
+
 - `.planning/milestones/v2.2-ROADMAP.md`
 - `.planning/milestones/v2.2-REQUIREMENTS.md`
 
@@ -105,6 +147,7 @@ Git tag: `v2.2`.
 **Requirements:** 13 — RESL-01..04, AIPC-01, ATCH-01, CLEAN-01..04, UPST-01..04, WSFG-01..03.
 
 **Key accomplishments:**
+
 - Job Object resource limits — CPU/memory/timeout/process-count caps with kernel enforcement (Phase 16).
 - `nono attach` on detached Windows sessions now streams child stdout live via anonymous-pipe stdio; friendly multi-attach error (Phase 17).
 - AIPC handle brokering for Socket / Pipe / Job Object / Event / Mutex over the Phase 11 capability pipe + `capabilities.aipc` profile-widening schema + containment-Job runtime guard (Phases 18 + 18.1).
@@ -118,6 +161,7 @@ Git tag: `v2.2`.
 **Known deferred items at close:** 17 (5 UAT bookkeeping gaps, 3 verification human_needed flags, 9 stale quick-task index pointers to already-removed directories). See STATE.md `## Deferred Items` for the full table. None block release.
 
 **Archive files:**
+
 - `.planning/milestones/v2.1-ROADMAP.md`
 - `.planning/milestones/v2.1-REQUIREMENTS.md`
 
@@ -138,6 +182,7 @@ Git tag: `v2.1`.
 **Plans shipped:** 28 firm plans. Plan 14-01 escalated to Phase 15.
 
 **Key accomplishments:**
+
 - WFP promoted to primary enforced network backend with SID-based filtering (Phase 06).
 - `nono wrap` on Windows with Direct strategy + help-text correction (Phases 07, 14-02).
 - Interactive `nono shell` via ConPTY on Windows 10 build 17763+ (Phase 08).
@@ -147,11 +192,13 @@ Git tag: `v2.1`.
 - Human Verification UAT resolved with terminal verdicts on all 10 items (Phase 13).
 
 **Known deferred items at close:**
+
 - Detached-supervisor + ConPTY + restricted-token `0xC0000142 STATUS_DLL_INIT_FAILED` on sandboxed console grandchildren. Carried forward to Phase 15 per explicit user shipping decision.
 - Affected UAT legs waived as `v2.0-known-issue`: P05-HV-1, P07-HV-3, P11-HV-1, P11-HV-3.
 - P09-HV-1 live end-to-end waived as `no-test-fixture` (no built-in network-profile-with-credentials ships out of the box).
 
 **Archive files:**
+
 - `.planning/milestones/v2.0-ROADMAP.md`
 - `.planning/milestones/v2.0-REQUIREMENTS.md`
 - `.planning/milestones/v2.0-MILESTONE-AUDIT.md`
@@ -168,6 +215,7 @@ Git tag: `v2.0` (see `git show v2.0` for tagger signature).
 **Delivered:** Windows is a first-class nono release target with signed artifacts, WFP service packaging, and no preview language anywhere.
 
 **Key accomplishments:**
+
 - Authenticode signing pipeline (sign-windows-artifacts.ps1 + release.yml gate).
 - WFP service packaging via WiX 4 ServiceInstall/ServiceControl in machine MSI.
 - All preview language removed from runtime, docs, CI, and README.

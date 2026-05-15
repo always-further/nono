@@ -8,7 +8,8 @@ This roadmap tracks the path to full Windows/Unix parity and ongoing quality-of-
 - ✅ **v2.0 Windows Gap Closure** — Phases 5–15 (shipped 2026-04-18; tag `v2.0`)
 - ✅ **v2.1 Resource Limits, Extended IPC, Attach-Streaming & Cleanup** — Phases 16–21 + 18.1 (shipped 2026-04-21; tag `v2.1`)
 - ✅ **v2.2 Windows/macOS Parity Sweep** — Phases 22–24 (shipped 2026-04-29; tag `v2.2`)
-- 🏗️ **v2.3 Linux POC Unblock + Deferreds Closure** — Phases 25–32 + 27.1 (started 2026-04-29)
+- ✅ **v2.3 Linux POC Unblock + Deferreds Closure** — Phases 25–34, incl. 27.1, 27.2 (shipped 2026-05-12)
+- ✅ **v2.4 Complete the Partial Ports + UPST4** — Phases 35–40, incl. optional 36.5; Phases 37 + 38 re-anchored to v2.5 (shipped 2026-05-15; tag `v2.4`)
 
 ## Phases
 
@@ -96,103 +97,44 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 </details>
 
 
-### 🏗️ v2.4 Complete the Partial Ports + UPST4 (Phases 35–40, incl. optional 36.5 + 38) — IN PROGRESS
+<details>
+<summary>✅ v2.4 Complete the Partial Ports + UPST4 (Phases 35–40, incl. optional 36.5; Phases 37 + 38 re-anchored to v2.5) — SHIPPED 2026-05-15</summary>
 
-**Goal:** Absorb the 10 Phase 34 NEEDS-FOLLOW-UP-PLAN deferrals (partial upstream ports + Windows test-hygiene), execute the v2.3 host-blocked carry-forwards (Plan 25-01 RESL Unix backends + Plan 26-02 PKGS streaming/auto-pull) on Linux/macOS host, and absorb upstream v0.52.1 / v0.52.2 / v0.53.0 via UPST4 per Phase 33 ADR's "lazily-evaluated cadence" rule.
+- [x] Phase 35: UPST3-closure quick wins (3/3 plans, REQ-PORT-CLOSURE-01 + -06 + -07) — completed 2026-05-12
+- [x] Phase 36: UPST3 deep closure (6/6 plans, REQ-PORT-CLOSURE-02 + -04 + -05) — completed 2026-05-13
+- [x] Phase 36.5: Profile drafts absorption (optional) (1/1 plan, REQ-PORT-CLOSURE-03) — completed 2026-05-13
+- ⤴ Phase 37: v2.3 carry-forward Linux/macOS execution — re-anchored to v2.5 (host-blocked; REQ-RESL-NIX-01..03 + REQ-PKGS-04)
+- ⤴ Phase 38: REQ-AAH-01 native host re-validation (optional) — re-anchored to v2.5 (host-blocked; REQ-AAHX-HOST-01)
+- [x] Phase 39: UPST4 audit (1/1 plan, REQ-UPST4-01) — completed 2026-05-13
+- [x] Phase 40: UPST4 sync execution (6/6 plans, REQ-UPST4-02; 14 D-19 cherry-picks + 3 D-20 manual replays; PR #922 umbrella to upstream) — completed 2026-05-15
 
-**Trigger:** Phase 34 VERIFICATION.md strategic recommendation surfaced 10 NEEDS-FOLLOW-UP-PLAN deferrals. v2.3 audit had 5 host-blocked requirements (REQ-RESL-NIX-01..03 + REQ-PKGS-01 + REQ-PKGS-04). Upstream cadence rule fires for v0.52.1+ (3 new tags landed post-Phase-33-audit cutoff).
+**Audit verdict at close:** `gaps_found` (environmental + paperwork) — gaps are categorically host-blocked (5 reqs re-anchored to v2.5) or audit-open cataloging glitches on completed quick-tasks. Cross-phase integration **clean** (7/7 wiring claims PASS, 0 BLOCKERS per `.planning/milestones/v2.4-MILESTONE-AUDIT.md`). Acknowledged at close; carry-forwards captured in `.planning/MILESTONES.md` § v2.4 Known Gaps.
 
-**Requirement coverage:** 14 requirements across 5 categories (PORT-CLOSURE-01..07, RESL-NIX-01..03, PKGS-01 + PKGS-04, UPST4-01..02, AAHX-HOST-01). All mapped; zero orphans.
+Full details: `.planning/milestones/v2.4-ROADMAP.md`.
 
-**Estimated effort:** ~14-18 weeks. Phase numbering continues from Phase 34.
+</details>
 
-- [x] **Phase 35: UPST3-closure quick wins** — REQ-PORT-CLOSURE-01 (Windows env-filter wiring; P34-DEFER-08a-1) + REQ-PORT-CLOSURE-06 (Linux Landlock profiles-dir; P34-DEFER-09-1) + REQ-PORT-CLOSURE-07 (Windows test-harness hygiene; P34-DEFER-01-1 + 10-1) + half of REQ-PORT-CLOSURE-05 (escape-quote pipeline; P34-DEFER-08b-2 depends on 08b-1 ordering). ~2 weeks. Quick wins to keep deferral count down while Phase 36 absorbs the heavy items.
- (completed 2026-05-12)
-- [x] **Phase 36: UPST3 deep closure** — REQ-PORT-CLOSURE-02 (full deprecated_schema module port; P34-DEFER-04b-1) + REQ-PORT-CLOSURE-04 (yaml_merge wiring trio + wiring.rs base; P34-DEFER-06-1 + 09-2) + remainder of REQ-PORT-CLOSURE-05 (b5f0a3ab deep ExecConfig refactor; P34-DEFER-08b-1). ~4-6 weeks. (completed 2026-05-13)
-- [x] **Phase 36.5: Profile drafts feature absorption (optional)** — REQ-PORT-CLOSURE-03 (upstream 829c341a `nono profile promote` + `--draft` + package_status.rs + profile-drafts directory infrastructure). ~1 week. Planner-discretion split from Phase 36 to keep the deep-closure plan from getting unwieldy. (completed 2026-05-13)
-- [ ] **Phase 37: v2.3 carry-forward Linux/macOS execution** — REQ-RESL-NIX-01..03 (Plan 25-01 cgroup v2 + setrlimit RESL backends) + REQ-PKGS-01 + REQ-PKGS-04 (Plan 26-02 streaming refactor + auto-pull). Plan + CONTEXT artifacts already committed in v2.3 (`3ed80d38` + `86efcdeb`); execution requires Linux/macOS host. ~2 weeks once host available.
-- [ ] **Phase 38: REQ-AAH-01 native host re-validation (optional)** — REQ-AAHX-HOST-01. Tactical confirmation pass on Linux/macOS host that the Phase 27 transitive closure (via 27.1 + 27.2) holds without a host-native gap. Skip if field-validation surfaces no gap. ~2-3 days.
-- [x] **Phase 39: UPST4 audit** — REQ-UPST4-01. Mirror Phase 33 shape. DIVERGENCE-LEDGER.md inventory of upstream v0.52.0..v0.53.0+ divergence (3 confirmed tags at milestone start: v0.52.1 `21bbb82e`, v0.52.2 `e8bf0148`, v0.53.0 `c4b25b82`; may grow). Per-cluster disposition + parity-strategy review against Phase 33 ADR. ~1 week. (completed 2026-05-13)
-- [x] **Phase 40: UPST4 sync execution** — REQ-UPST4-02. Mirror Phase 34 shape. Cherry-pick + D-20 manual replay per UPST4 audit dispositions. D-19 trailer convention + Windows-only-files invariant inherited from Phase 22+34. ~2-3 weeks. (completed 2026-05-15)
+## v2.5 backlog
 
-**Out of scope (explicit deferrals to v2.5 or later):**
-- **v2.5-FU-1** (audit-bundle shim removal) + **v2.5-FU-2** (cmd_verify v2 JSON schema) — Phase 27.2 deferrals tracked in `deferred-items.md`.
-- **AIPC G-04 wire-protocol compile-time tightening** — cascades into 23 pre-existing tests + child SDK demultiplexer; v3.0 or later.
-- **WR-02 EDR HUMAN-UAT** — v3.0-deferred pending EDR-instrumented runner.
-- **P32-DEFER-005** (sigstore-verify 0.6.5 → 0.6.6 upgrade) — candidate v2.4 stretch item if a phase has space; otherwise v2.5.
+These entries are queued under v2.5 — a mix of (a) Phase 33 ADR `### Future audit cadence` rule entries ("per upstream release, lazily-evaluated") and (b) v2.4 host-blocked carry-forwards re-anchored from v2.4 at milestone close 2026-05-15 (Phases 37 + 38). They activate when v2.5 scope locks; until then they live here as forward-cadence anchors.
 
-**Reference:** `.planning/REQUIREMENTS.md`, `.planning/milestones/v2.4-MILESTONE-CONTEXT.md` (scope-themes provenance), `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/deferred-items.md` (effort-estimate provenance for Theme 1 REQs).
+### Phase 37: v2.3 carry-forward Linux/macOS execution (re-anchored from v2.4)
 
-## Phase Details (v2.4)
-
-### Phase 35: UPST3-closure quick wins
-
-**Goal:** Land three discrete P34-DEFER quick wins: Windows execution-path env-filter wiring (REQ-PORT-CLOSURE-01 / P34-DEFER-08a-1), Linux Landlock profiles-dir pre-creation (REQ-PORT-CLOSURE-06 / P34-DEFER-09-1), and Windows test-harness hygiene (REQ-PORT-CLOSURE-07 / P34-DEFER-01-1 + 10-1). Keeps the deferral count down while Phase 36 absorbs the heavy ports.
-
-**Depends on:** Phase 34 (UPST3) — COMPLETED 2026-05-12.
-
-**Requirements:** REQ-PORT-CLOSURE-01, REQ-PORT-CLOSURE-06, REQ-PORT-CLOSURE-07. See `.planning/REQUIREMENTS.md`. **Scope note:** the v2.4 summary line mentions "half of REQ-PORT-CLOSURE-05 (escape-quote pipeline)" — that piece (P34-DEFER-08b-2) is **moved to Phase 36** because it depends on the 08b-1 ExecConfig refactor; Phase 35 ships 01 + 06 + 07 only.
-
-**Plans:** 3/3 plans complete
-
-- [x] 35-01-WIN-ENV-FILTER-PLAN.md — REQ-PORT-CLOSURE-01 (Windows execution-path env-filter wiring; closes P34-DEFER-08a-1)
-- [x] 35-02-LINUX-LANDLOCK-PROFILES-PLAN.md — REQ-PORT-CLOSURE-06 (Linux Landlock profiles-dir pre-creation; cherry-picks upstream bdf183e9; closes P34-DEFER-09-1)
-- [x] 35-03-WIN-TEST-HYGIENE-PLAN.md — REQ-PORT-CLOSURE-07 (UNC strip in suggested_flag + full format!("{:?}") JSON-emission audit + Phase 35 closure ledger append; closes P34-DEFER-01-1, 09-3, 10-1)
-
-**Estimated effort:** ~2 weeks.
-
-**Reference:** `.planning/REQUIREMENTS.md` § REQ-PORT-CLOSURE-01/06/07, `.planning/milestones/v2.4-MILESTONE-CONTEXT.md` (Theme 1 scope provenance), `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/deferred-items.md` (P34-DEFER-08a-1, 09-1, 01-1, 10-1).
-
-### Phase 36: UPST3 deep closure
-
-**Goal:** Absorb the heavy P34 deferrals: full `deprecated_schema` module port (REQ-PORT-CLOSURE-02 / P34-DEFER-04b-1), `yaml_merge` wiring trio plus `wiring.rs` base abstraction (REQ-PORT-CLOSURE-04 / P34-DEFER-06-1 + 09-2), and the `b5f0a3ab` deep ExecConfig refactor with the escape-quote pipeline rider (REQ-PORT-CLOSURE-05 / P34-DEFER-08b-1 + 08b-2).
-
-**Depends on:** Phase 35 (UPST3-closure quick wins).
-
-**Requirements:** REQ-PORT-CLOSURE-02, REQ-PORT-CLOSURE-04, REQ-PORT-CLOSURE-05. See `.planning/REQUIREMENTS.md`.
-
-**Plans:** 6/6 plans complete
-
-- [x] 36-01a-DEPRECATED-SCHEMA-MODULE-PLAN.md — REQ-PORT-CLOSURE-02 foundation (LegacyPolicyPatch + DeprecationCounter + --strict mode; Wave 1)
-- [x] 36-01b-CANONICAL-PROFILE-SECTIONS-PLAN.md — REQ-PORT-CLOSURE-02 (canonical Profile struct sections: commands, filesystem.deny/bypass_protection; Wave 2; depends_on 36-01a)
-- [x] 36-01c-OVERRIDE-DENY-RENAME-PLAN.md — REQ-PORT-CLOSURE-02 (atomic 17-file rename override_deny → bypass_protection, 183 callsites, single commit per D-36-B4; Wave 2; depends_on 36-01b)
-- [x] 36-01d-PROFILE-DATA-DOCS-TOOLING-PLAN.md — REQ-PORT-CLOSURE-02 closure (built-in profile data + JSON schema + scripts/test-list-aliases.sh + scripts/lint-docs.sh + docs migration + Phase 34 deferred-items closure ledger; Wave 2; depends_on 36-01c)
-- [x] 36-02-WIRING-YAML-MERGE-PLAN.md — REQ-PORT-CLOSURE-04 (stripped-down wiring.rs: yaml_merge directive + serde_yaml_ng 0.10.0 pin + reversal failure test; acceptance #1 scope-trimmed to v2.5-FU-3 per D-36-C1; Wave 1; depends_on [])
-- [x] 36-03-EXECCFG-SURGICAL-PORT-PLAN.md — REQ-PORT-CLOSURE-05 (b5f0a3ab surgical helpers + bbdf7b85 escape-quote tail; 3 sequenced commits; Commit 3 is the ONLY D-19 cherry-pick in Phase 36 per D-36-D2; fork ExecConfig 17-field shape preserved per D-36-D1; Wave 1; depends_on [])
-
-**Estimated effort:** ~4-6 weeks.
-
-**Reference:** `.planning/REQUIREMENTS.md` § REQ-PORT-CLOSURE-02/04/05, `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/deferred-items.md` (P34-DEFER-04b-1, 06-1, 08b-1, 08b-2, 09-2), `.planning/phases/36-upst3-deep-closure/36-CONTEXT.md` (locked decisions D-36-A1..E2), `.planning/phases/36-upst3-deep-closure/36-RESEARCH.md` (drift findings + per-plan implementation approach), `.planning/phases/36-upst3-deep-closure/36-PATTERNS.md` (analog file maps), `.planning/phases/36-upst3-deep-closure/36-VALIDATION.md` (per-task verification map).
-
-### Phase 36.5: Profile drafts feature absorption (optional)
-
-**Goal:** Absorb upstream `829c341a` profile-drafts surface: `nono profile promote` subcommand, `--draft` flag plumbing, `package_status.rs` module, and `profile-drafts/` directory infrastructure (REQ-PORT-CLOSURE-03 / P34-DEFER-04b-2). Planner-discretion split from Phase 36 to keep the deep-closure plan tractable.
-
-**Depends on:** Phase 36 (UPST3 deep closure).
-
-**Requirements:** REQ-PORT-CLOSURE-03. See `.planning/REQUIREMENTS.md`.
-
-**Plans:** 1/1 plans complete
-
-**Estimated effort:** ~1 week.
-
-**Reference:** `.planning/REQUIREMENTS.md` § REQ-PORT-CLOSURE-03, `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/deferred-items.md` (P34-DEFER-04b-2).
-
-### Phase 37: v2.3 carry-forward Linux/macOS execution
-
-**Goal:** Execute the two v2.3 host-blocked carry-forwards on Linux/macOS host — Plan 25-01 cgroup v2 + `setrlimit` RESL backends (REQ-RESL-NIX-01..03) and Plan 26-02 streaming refactor + auto-pull (REQ-PKGS-01 + REQ-PKGS-04). Plan + CONTEXT artifacts already committed in v2.3 (`3ed80d38` + `86efcdeb`); this phase is execution-only.
+**Goal:** Execute the two v2.3 host-blocked carry-forwards on Linux/macOS host — Plan 25-01 cgroup v2 + `setrlimit` RESL backends (REQ-RESL-NIX-02, REQ-RESL-NIX-03) and Plan 26-02 streaming refactor + auto-pull e2e (REQ-PKGS-04). Plan + CONTEXT artifacts already committed in v2.3 (`3ed80d38` + `86efcdeb`); this phase is execution-only.
 
 **Depends on:** Linux/macOS host availability (not a phase dependency).
 
-**Requirements:** REQ-RESL-NIX-01, REQ-RESL-NIX-02, REQ-RESL-NIX-03, REQ-PKGS-01, REQ-PKGS-04. See `.planning/REQUIREMENTS.md`.
+**Requirements:** REQ-RESL-NIX-01, REQ-RESL-NIX-02, REQ-RESL-NIX-03, REQ-PKGS-04. See `.planning/REQUIREMENTS.md`. (REQ-PKGS-01 closed via v2.3 Phase 26-02 production code; only the e2e test gate remains, captured by REQ-PKGS-04.)
 
 **Plans:** 0 plans — to be populated during `/gsd-plan-phase 37`. Plan 25-01 and Plan 26-02 will be lifted from v2.3 phase directories and re-anchored here.
 
 **Estimated effort:** ~2 weeks once host available.
 
-**Reference:** `.planning/REQUIREMENTS.md` § REQ-RESL-NIX-01..03 + REQ-PKGS-01 + REQ-PKGS-04, `.planning/phases/25-cross-platform-resl-aipc-unix-design/25-01-RESL-NIX-PLAN.md`, `.planning/phases/26-pkg-streaming-followup/26-02-PKGS-STREAM-AUTOPULL-PLAN.md` (if present in v2.3 phase dir).
+**Re-anchor history:** Originally scoped to v2.4 alongside the UPST3-closure phases (Phases 35, 36, 36.5) and UPST4 phases (39, 40); remained `no_directory` at v2.4 close because Linux/macOS host did not become available during the milestone. See `.planning/v2.4-MILESTONE-AUDIT.md` § Recommended Routing (Path A — tighten scope) for the disposition.
 
-### Phase 38: REQ-AAH-01 native host re-validation (optional)
+**Reference:** `.planning/REQUIREMENTS.md` § REQ-RESL-NIX-01..03 + REQ-PKGS-04, `.planning/phases/25-cross-platform-resl-aipc-unix-design/25-01-RESL-NIX-PLAN.md`, `.planning/phases/26-pkg-streaming-followup/26-02-PKGS-STREAM-AUTOPULL-PLAN.md` (if present in v2.3 phase dir).
+
+### Phase 38: REQ-AAH-01 native host re-validation (optional, re-anchored from v2.4)
 
 **Goal:** Tactical confirmation pass on Linux/macOS host that the Phase 27 transitive closure (via Phase 27.1 `NONO_TEST_HOME` seam + Phase 27.2 audit-loader/bundle-target ADR) holds without a host-native gap (REQ-AAHX-HOST-01). Skip if field-validation during Phase 37 surfaces no Phase-27-related gap.
 
@@ -204,48 +146,9 @@ Full details: `.planning/milestones/v2.3-ROADMAP.md`.
 
 **Estimated effort:** ~2-3 days.
 
+**Re-anchor history:** Originally scoped to v2.4 as the optional Theme 2 closure confirmation; remained `no_directory` at v2.4 close because (a) Phase 37 did not run and (b) the requirement is optional. Carries forward to v2.5 alongside Phase 37.
+
 **Reference:** `.planning/REQUIREMENTS.md` § REQ-AAHX-HOST-01, `.planning/phases/27-audit-attestation-hardening/`, `.planning/phases/27.1-nono-test-home-seam/`, `.planning/phases/27.2-audit-attestation-test-re-enablement/`.
-
-### Phase 39: UPST4 audit
-
-**Goal:** Mirror Phase 33 shape — produce a DIVERGENCE-LEDGER.md inventory of upstream divergence from v0.52.0 to v0.53.0+ (3 confirmed tags at milestone start: v0.52.1 `21bbb82e`, v0.52.2 `e8bf0148`, v0.53.0 `c4b25b82`; may grow). Per-cluster disposition + parity-strategy review against the Phase 33 ADR `continue` decision (REQ-UPST4-01).
-
-**Depends on:** Phase 34 (UPST3 execution baseline). Independent of Phases 35–38.
-
-**Requirements:** REQ-UPST4-01. See `.planning/REQUIREMENTS.md`.
-
-**Plans:** 1 / 1 plans complete
-
-- [x] 39-01-DIVERGENCE-AUDIT-PLAN.md — REQ-UPST4-01 (DIVERGENCE-LEDGER.md curated for v0.52.0..v0.53.0 with `windows-touch` column + `## ADR review` section; UPST5 stub queued under v2.5 backlog; Phase 33 ADR remains Accepted)
-
-**Estimated effort:** ~1 week.
-
-**Reference:** `.planning/REQUIREMENTS.md` § REQ-UPST4-01, `.planning/phases/33-audit-upstream-v0-40-1-v0-52-0-parity-strategy/` (Phase 33 audit-shape template), `docs/architecture/upstream-parity-strategy.md` (Phase 33 ADR with `continue` decision + future audit cadence rule).
-
-### Phase 40: UPST4 sync execution
-
-**Goal:** Mirror Phase 34 shape — execute cherry-picks and D-20 manual replays per the UPST4 audit dispositions from Phase 39 (REQ-UPST4-02). D-19 trailer convention + Windows-only-files invariant inherited from Phases 22 + 34.
-
-**Depends on:** Phase 39 (UPST4 audit) — disposition ledger is the input.
-
-**Requirements:** REQ-UPST4-02. See `.planning/REQUIREMENTS.md`.
-
-**Plans:** 6/6 plans complete
-
-- [x] 40-01-PROXY-HARDENING-PLAN.md — REQ-UPST4-02 (Cluster C1: proxy server.rs review fixes + libdbus isolation + Node 26 NODE_USE_ENV_PROXY, 5 D-19 cherry-picks; Wave 1)
-- [x] 40-02-CLI-ALLOW-VALIDATE-PLAN.md — REQ-UPST4-02 (Cluster C2: --allow path validation + SandboxState domain-allowlist + nono why --host proxy-domain awareness, 2 D-19 cherry-picks; Wave 0 foundation)
-- [x] 40-03-SCRUB-MODULE-PLAN.md — REQ-UPST4-02 (Cluster C6: new nono::scrub module + lib.rs re-export + audit event integration, 2 D-19 cherry-picks; Wave 0 foundation)
-- [x] 40-04-RELEASE-RIDE-PLAN.md — REQ-UPST4-02 (Cluster C7: Landlock ABI OnceLock cache + full failure diagnostic + v0.52.1/v0.52.2/v0.53.0 version bumps, 5 D-19 cherry-picks; Wave 1)
-- [x] 40-05-FP-PROFILE-SAVE-PLAN.md — REQ-UPST4-02 (Cluster C4: profile-save denial suppression; D-40-B1 diff-inspection upgrade authority; D-20 manual replay or D-19 cherry-pick per inspection result; Wave 2)
-- [x] 40-06-FP-PROXY-TLS-PLAN.md — REQ-UPST4-02 (Cluster C5: proxy TLS trust + multi-route dispatch + credential-match policy; D-20 manual replay per D-40-B2 LOCKED; Wave 2)
-
-**Estimated effort:** ~2-3 weeks.
-
-**Reference:** `.planning/REQUIREMENTS.md` § REQ-UPST4-02, `.planning/phases/34-upst3-upstream-v0-41-v0-52-sync-execution/` (Phase 34 execution-shape template), `.planning/templates/upstream-sync-quick.md` (Option A continue base case).
-
-## v2.5 backlog
-
-These entries are queued under v2.5 per the Phase 33 ADR `### Future audit cadence` rule — "per upstream release, lazily-evaluated". They activate when v2.5 scope locks; until then they live here as forward-cadence anchors.
 
 ### Phase TBD-NN: UPST5 — Upstream v0.53.0…+ sync audit
 
