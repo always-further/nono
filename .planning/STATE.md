@@ -140,7 +140,8 @@ Last activity: 2026-05-15 -- Phase 40 marked complete
 
 ()
 
-- Phase 27.2-04 human-verify failed: tracing-subscriber default writer is io::stdout(); warn_once_test_home WARN line contaminates audit-verify --json output. Tests un-ignore'd structurally but run-time blocked. Fix needed in cli_bootstrap.rs::init_tracing() to reroute to stderr; recommend follow-up plan 27.2-05.
+<!-- Cleared 2026-05-14: Phase 27.2-04 tracing-stdout blocker resolved by commit 2b7425e7 (2026-05-09) — `cli_bootstrap.rs::init_tracing()` now routes to stderr in both default-writer and log-file-fallback paths. `cargo test -p nono-cli --test audit_attestation` returns 4 passed; 0 failed; 0 ignored on Windows host. Phase 27.1 HUMAN-UAT Test 1 (REQ-AAHX-03 acceptance #4) can be re-run; recommend `/gsd-verify-work 27.1` to flip Test 1 from blocked → passed. -->
+
 
 ### Quick Tasks Completed
 
