@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.4
-milestone_name: Complete the Partial Ports + UPST4
-status: completed
-last_updated: "2026-05-15T11:42:34.008Z"
+milestone: v2.5
+milestone_name: Backlog Drain + UPST5
+status: planning
+last_updated: "2026-05-15T19:39:23.741Z"
 last_activity: 2026-05-15
 progress:
-  total_phases: 5
-  completed_phases: 5
-  total_plans: 17
-  completed_plans: 17
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State: nono — v2.4 Complete the Partial Ports + UPST4
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-05-12 at v2.4 milestone start; v2.3 ship
 
 ## Current Position
 
-Phase: Milestone v2.4 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-05-15 — Milestone v2.4 completed and archived
+Status: Defining requirements
+Last activity: 2026-05-15 — Milestone v2.5 started
 
 ## Accumulated Context
 
