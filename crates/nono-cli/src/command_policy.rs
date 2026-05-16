@@ -901,6 +901,15 @@ fn validate_network(
         );
     }
 
+    if !network.allow_domain.is_empty() {
+        report.error(
+            "unsupported_domain_network_policy",
+            format!(
+                "command '{command_name}' from.{caller} uses network.allow_domain, but ETI child sandboxes are not proxy-routed and cannot enforce hostname filtering"
+            ),
+        );
+    }
+
     if !network.tcp_connect_ports.is_empty() || !network.tcp_bind_ports.is_empty() {
         report.warning(
             "raw_tcp_ports",
@@ -1538,6 +1547,63 @@ mod tests {
                 .errors
                 .iter()
                 .any(|finding| finding.code == "conflicting_network_policy")
+        );
+    }
+
+    #[test]
+    fn top_level_network_rejects_allow_domain() {
+        let mut config = active_git_config();
+        if let Some(git) = config.commands.get_mut("git") {
+            git.sandbox = Some(CommandSandboxConfig {
+                network: Some(CommandNetworkConfig {
+                    allow_domain: vec!["api.openai.com".to_string()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.code == "unsupported_domain_network_policy")
+        );
+    }
+
+    #[test]
+    fn chained_network_rejects_allow_domain() {
+        let mut config = active_git_config();
+        config
+            .commands
+            .insert("curl".to_string(), CommandPolicyConfig::default());
+        if let Some(git) = config.commands.get_mut("git") {
+            git.can_use = vec!["curl".to_string()];
+        }
+        if let Some(curl) = config.commands.get_mut("curl") {
+            curl.from.insert(
+                "git".to_string(),
+                CommandFromConfig::Policy(Box::new(CommandSandboxConfig {
+                    network: Some(CommandNetworkConfig {
+                        allow_domain: vec!["api.openai.com".to_string()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            );
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.code == "unsupported_domain_network_policy")
         );
     }
 

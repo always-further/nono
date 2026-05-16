@@ -1858,7 +1858,7 @@ mod linux {
         add_executable_shape_baseline(&mut caps, state, binary)?;
         add_chaining_control_caps(&mut caps, state)?;
         add_policy_fs(&mut caps, policy, &state.policy_root)?;
-        add_policy_network(&mut caps, policy);
+        add_policy_network(&mut caps, policy)?;
         add_policy_credentials(&mut caps, state, policy)?;
         Ok(caps)
     }
@@ -1948,13 +1948,20 @@ mod linux {
         }
     }
 
-    fn add_policy_network(caps: &mut CapabilitySet, policy: &CommandSandboxConfig) {
+    fn add_policy_network(caps: &mut CapabilitySet, policy: &CommandSandboxConfig) -> Result<()> {
         let Some(network) = &policy.network else {
-            return;
+            return Ok(());
         };
+        if !network.allow_domain.is_empty() {
+            return Err(NonoError::NetworkFilterUnsupported {
+                platform: "Linux".to_string(),
+                reason: "ETI child sandboxes are not proxy-routed and cannot enforce allow_domain hostname filtering"
+                    .to_string(),
+            });
+        }
         if network.allow_all {
             caps.set_network_mode_mut(NetworkMode::AllowAll);
-            return;
+            return Ok(());
         }
         for port in &network.tcp_connect_ports {
             caps.add_tcp_connect_port(*port);
@@ -1962,6 +1969,7 @@ mod linux {
         for port in &network.tcp_bind_ports {
             caps.add_tcp_bind_port(*port);
         }
+        Ok(())
     }
 
     fn add_policy_credentials(
@@ -5728,6 +5736,13 @@ mod macos {
         let Some(network) = &policy.network else {
             return Ok(());
         };
+        if !network.allow_domain.is_empty() {
+            return Err(NonoError::NetworkFilterUnsupported {
+                platform: "macOS".to_string(),
+                reason: "ETI child sandboxes are not proxy-routed and cannot enforce allow_domain hostname filtering"
+                    .to_string(),
+            });
+        }
         if network.allow_all {
             caps.set_network_mode_mut(NetworkMode::AllowAll);
             return Ok(());
