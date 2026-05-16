@@ -106,6 +106,14 @@ getrandom = "0.4"
 toml = "1.0"
 serde = { version = "1", features = ["derive"] }
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+# Phase 41 D-14 (CR-04): nono-shell-broker is needed at integration-test time by
+# broker_launch_assigns_child_to_job_object (exec_strategy_windows/launch.rs).
+# Declaring it as a dev-dependency makes cargo build the broker artifact
+# before running nono-cli tests — eliminating the manual `cargo build -p nono-shell-broker`
+# step and the silent-SKIP failure mode (resolved by CR-04 / D-13).
+nono-shell-broker = { path = "../nono-shell-broker", version = "0.53.0" }
+
 [dev-dependencies]
 httpmock = "0.7"
 jsonschema = "0.46"
