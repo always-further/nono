@@ -252,17 +252,26 @@ pub(crate) fn prepare_profile(
         // `None` (no filtering). Profiles that set env_credentials but omit
         // allow_vars would otherwise silently inherit every parent env var.
         //
-        // Validation logic is duplicated here from
-        // `exec_strategy::env_sanitization::validate_env_var_patterns`
-        // to avoid crossing the `exec_strategy_windows` module boundary
-        // (D-34-E1 invariant: `exec_strategy_windows/` files must remain
-        // untouched in this plan). Kept in lock-step with the canonical
-        // helper via tests in `exec_strategy/env_sanitization.rs`.
+        // Phase 41 Plan 09 (REQ-CI-01 SC#4 gap closure + WR-06 close-out):
+        // Delegates to the canonical
+        // `crate::exec_strategy::validate_env_var_patterns` re-export
+        // (declared at `exec_strategy.rs:50`). The previously local copy
+        // was retained on the (incorrect) assumption that calling into
+        // `exec_strategy::*` would reach across the
+        // `exec_strategy_windows/` module boundary — but
+        // `exec_strategy/env_sanitization.rs` lives in `exec_strategy/`
+        // (platform-agnostic), not `exec_strategy_windows/` (Windows-only),
+        // so D-34-E1 is not implicated. CI run 25972316892 surfaced the
+        // local copy as the canonical fn's only-on-Windows live caller,
+        // making the canonical fn dead-code on Linux/macOS. Folding the
+        // duplicate into a delegate call (a) clears the dead-code lint and
+        // (b) closes WR-06 (drift risk from byte-identical local copy).
         allowed_env_vars: loaded_profile.as_ref().and_then(|profile| {
             profile.environment.as_ref().map(|env_config| {
-                if let Some(err) =
-                    validate_env_var_patterns_local(&env_config.allow_vars, "allow_vars")
-                {
+                if let Some(err) = crate::exec_strategy::validate_env_var_patterns(
+                    &env_config.allow_vars,
+                    "allow_vars",
+                ) {
                     eprintln!("Warning: {}", err);
                 }
                 env_config.allow_vars.clone()
@@ -273,9 +282,10 @@ pub(crate) fn prepare_profile(
                 if env_config.deny_vars.is_empty() {
                     return None;
                 }
-                if let Some(err) =
-                    validate_env_var_patterns_local(&env_config.deny_vars, "deny_vars")
-                {
+                if let Some(err) = crate::exec_strategy::validate_env_var_patterns(
+                    &env_config.deny_vars,
+                    "deny_vars",
+                ) {
                     eprintln!("Warning: {}", err);
                 }
                 Some(env_config.deny_vars.clone())
@@ -283,26 +293,6 @@ pub(crate) fn prepare_profile(
         }),
         loaded_profile,
     })
-}
-
-/// Local copy of `validate_env_var_patterns` to avoid crossing the
-/// `exec_strategy_windows` module boundary (D-34-E1).
-fn validate_env_var_patterns_local(patterns: &[String], field_name: &str) -> Option<String> {
-    for pattern in patterns {
-        if pattern.contains('*') && !pattern.ends_with('*') {
-            return Some(format!(
-                "Invalid {} pattern '{}': '*' is only valid as a trailing suffix",
-                field_name, pattern
-            ));
-        }
-        if pattern.starts_with('*') && pattern.len() > 1 {
-            return Some(format!(
-                "Invalid {} pattern '{}': use a bare '*' to match all variables, or a specific prefix like 'AWS_*'",
-                field_name, pattern
-            ));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

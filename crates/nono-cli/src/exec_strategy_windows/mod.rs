@@ -73,7 +73,7 @@ use windows_sys::Win32::System::Threading::{
     STARTUPINFOW,
 };
 
-pub(crate) use env_sanitization::is_dangerous_env_var;
+pub(crate) use env_sanitization::{is_dangerous_env_var, validate_env_var_patterns};
 use env_sanitization::{is_env_var_allowed, is_env_var_denied, should_skip_env_var};
 
 pub(crate) fn to_u16_null_terminated(s: &str) -> Vec<u16> {
