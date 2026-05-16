@@ -141,6 +141,7 @@ mod linux {
         shims_by_path: BTreeMap<PathBuf, String>,
         credential_handles: BTreeMap<String, ResolvedCredential>,
         allowed_outer_exec_files: Vec<PathBuf>,
+        landlock_abi: nono::DetectedAbi,
         baseline_cache: BaselineCache,
         active_children: Mutex<HashMap<u32, ActiveChild>>,
         active_count: AtomicUsize,
@@ -353,6 +354,7 @@ mod linux {
             }
 
             let start_plan = std::time::Instant::now();
+            let landlock_abi = detect_supported_exec_gate_abi()?;
             let plan =
                 ResolvedEtiPlan::build(config, allowed_commands, blocked_commands, outer_caps)?;
             eti_profile_log!(
@@ -428,6 +430,7 @@ mod linux {
                     shims_by_path,
                     credential_handles,
                     allowed_outer_exec_files,
+                    landlock_abi,
                     baseline_cache,
                     active_children: Mutex::new(HashMap::new()),
                     active_count: AtomicUsize::new(0),
@@ -510,7 +513,14 @@ mod linux {
         }
 
         pub(crate) fn apply_outer_exec_gate(&self) -> Result<()> {
-            apply_outer_exec_gate(&self.inner.allowed_outer_exec_files)
+            apply_outer_exec_gate(
+                &self.inner.allowed_outer_exec_files,
+                self.inner.landlock_abi,
+            )
+        }
+
+        pub(crate) fn landlock_abi_version(&self) -> &'static str {
+            self.inner.landlock_abi.version_string()
         }
 
         pub(crate) fn shim_for_initial_command(&self, program: &str) -> Option<&Path> {
@@ -3417,15 +3427,26 @@ mod linux {
         Ok(())
     }
 
-    fn apply_outer_exec_gate(allowed_exec_files: &[PathBuf]) -> Result<()> {
+    fn detect_supported_exec_gate_abi() -> Result<nono::DetectedAbi> {
+        let abi = nono::detect_abi()?;
+        if !abi.has_execute() {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI command_policies require Landlock ABI V3+ for execute enforcement; detected {}",
+                abi.version_string()
+            )));
+        }
+        Ok(abi)
+    }
+
+    fn apply_outer_exec_gate(allowed_exec_files: &[PathBuf], abi: nono::DetectedAbi) -> Result<()> {
         let start_total = std::time::Instant::now();
-        let abi = nono::detect_abi()?.abi;
         let handled: BitFlags<AccessFs> =
-            BitFlags::from_flag(AccessFs::Execute) & AccessFs::from_all(abi);
+            BitFlags::from_flag(AccessFs::Execute) & AccessFs::from_all(abi.abi);
         if handled.is_empty() {
-            return Err(NonoError::SandboxInit(
-                "Landlock execute right unavailable for ETI".to_string(),
-            ));
+            return Err(NonoError::SandboxInit(format!(
+                "Landlock execute right unavailable for ETI on {}",
+                abi.version_string()
+            )));
         }
         let mut ruleset = Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
@@ -3464,16 +3485,19 @@ mod linux {
             start_restrict.elapsed()
         );
         eti_profile_log!("apply_outer_exec_gate:total: {:?}", start_total.elapsed());
-        if !matches!(
-            status.ruleset,
-            landlock::RulesetStatus::FullyEnforced | landlock::RulesetStatus::PartiallyEnforced
-        ) {
-            return Err(NonoError::SandboxInit(format!(
-                "ETI exec gate was not enforced: {:?}",
-                status.ruleset
-            )));
+        ensure_outer_exec_gate_fully_enforced(status.ruleset)
+    }
+
+    fn ensure_outer_exec_gate_fully_enforced(status: landlock::RulesetStatus) -> Result<()> {
+        match status {
+            landlock::RulesetStatus::FullyEnforced => Ok(()),
+            landlock::RulesetStatus::PartiallyEnforced => Err(NonoError::SandboxInit(
+                "ETI exec gate was only partially enforced".to_string(),
+            )),
+            landlock::RulesetStatus::NotEnforced => Err(NonoError::SandboxInit(
+                "ETI exec gate was not enforced".to_string(),
+            )),
         }
-        Ok(())
     }
 
     fn verify_binary_identity(binary: &ResolvedCommandBinary) -> Result<()> {
@@ -4053,6 +4077,13 @@ mod linux {
                 path: PathBuf::from("/usr/bin/cmd"),
                 id: FileId { dev, ino },
             }
+        }
+
+        #[test]
+        fn outer_exec_gate_rejects_partial_enforcement() {
+            let result =
+                ensure_outer_exec_gate_fully_enforced(landlock::RulesetStatus::PartiallyEnforced);
+            assert!(matches!(result, Err(err) if err.to_string().contains("partially enforced")));
         }
 
         // ── check_exec_gate: bypass ordering ──────────────────────────────────

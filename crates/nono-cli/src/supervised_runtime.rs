@@ -221,6 +221,18 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
             .lock()
             .map_err(|_| nono::NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
         recorder.record_session_started(started.clone(), command.to_vec())?;
+        #[cfg(target_os = "linux")]
+        if let Some(eti_runtime) = config.eti_runtime {
+            recorder.record_sandbox_runtime_event(
+                crate::audit_integrity::SandboxRuntimeAuditEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    platform: "linux".to_string(),
+                    landlock_abi: Some(eti_runtime.landlock_abi_version().to_string()),
+                    landlock_execute_enforced: Some(true),
+                    eti_active: true,
+                },
+            )?;
+        }
     }
 
     let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;

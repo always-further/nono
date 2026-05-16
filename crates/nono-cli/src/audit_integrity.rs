@@ -38,9 +38,23 @@ pub(crate) enum AuditEventPayload {
     Network {
         event: NetworkAuditEvent,
     },
+    SandboxRuntime {
+        event: SandboxRuntimeAuditEvent,
+    },
     CommandPolicy {
         event: Box<CommandPolicyAuditEvent>,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SandboxRuntimeAuditEvent {
+    pub(crate) timestamp: String,
+    pub(crate) platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) landlock_abi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) landlock_execute_enforced: Option<bool>,
+    pub(crate) eti_active: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -173,6 +187,14 @@ impl AuditRecorder {
 
     pub(crate) fn record_network_event(&mut self, event: NetworkAuditEvent) -> Result<()> {
         self.append_event(AuditEventPayload::Network { event })
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn record_sandbox_runtime_event(
+        &mut self,
+        event: SandboxRuntimeAuditEvent,
+    ) -> Result<()> {
+        self.append_event(AuditEventPayload::SandboxRuntime { event })
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -589,6 +611,15 @@ mod tests {
             })
             .unwrap();
         recorder
+            .record_sandbox_runtime_event(SandboxRuntimeAuditEvent {
+                timestamp: "2026-04-21T00:00:00Z".to_string(),
+                platform: "linux".to_string(),
+                landlock_abi: Some("V4".to_string()),
+                landlock_execute_enforced: Some(true),
+                eti_active: true,
+            })
+            .unwrap();
+        recorder
             .record_command_policy_event(CommandPolicyAuditEvent {
                 timestamp: "2026-04-21T00:00:00Z".to_string(),
                 session_id: Some("sess-1".to_string()),
@@ -617,7 +648,7 @@ mod tests {
 
         let summary = recorder.finalize().unwrap();
         let verified = verify_audit_log(dir.path(), Some(&summary)).unwrap();
-        assert_eq!(verified.event_count, 6);
+        assert_eq!(verified.event_count, 7);
         assert_eq!(verified.merkle_scheme, "alpha");
         assert!(verified.records_verified);
     }

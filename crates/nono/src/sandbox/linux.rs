@@ -57,6 +57,12 @@ impl DetectedAbi {
         AccessFs::from_all(self.abi).contains(AccessFs::Truncate)
     }
 
+    /// Whether execute access control is supported strongly enough for ETI.
+    #[must_use]
+    pub fn has_execute(&self) -> bool {
+        matches!(self.abi, ABI::V3 | ABI::V4 | ABI::V5 | ABI::V6)
+    }
+
     /// Whether TCP network filtering is supported (V4+).
     #[must_use]
     pub fn has_network(&self) -> bool {
@@ -782,6 +788,14 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
 /// Call this after `apply()` / `apply_with_abi()` to lock down which binaries
 /// an already-sandboxed process can exec.
 pub fn restrict_execute(paths: &[impl AsRef<Path>]) -> Result<()> {
+    let abi = detect_abi()?;
+    if !abi.has_execute() {
+        return Err(NonoError::SandboxInit(format!(
+            "ETI execute restriction requires Landlock ABI V3+; detected {}",
+            abi.version_string()
+        )));
+    }
+
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::Execute)
@@ -822,13 +836,21 @@ pub fn restrict_execute(paths: &[impl AsRef<Path>]) -> Result<()> {
         ))
     })?;
 
-    if matches!(status.ruleset, landlock::RulesetStatus::NotEnforced) {
-        return Err(NonoError::SandboxInit(
-            "ETI execute restriction: Landlock was not enforced".to_string(),
-        ));
-    }
+    ensure_execute_restriction_fully_enforced(status.ruleset)?;
 
     Ok(())
+}
+
+fn ensure_execute_restriction_fully_enforced(status: landlock::RulesetStatus) -> Result<()> {
+    match status {
+        landlock::RulesetStatus::FullyEnforced => Ok(()),
+        landlock::RulesetStatus::PartiallyEnforced => Err(NonoError::SandboxInit(
+            "ETI execute restriction: Landlock was only partially enforced".to_string(),
+        )),
+        landlock::RulesetStatus::NotEnforced => Err(NonoError::SandboxInit(
+            "ETI execute restriction: Landlock was not enforced".to_string(),
+        )),
+    }
 }
 
 // ==========================================================================
@@ -2426,6 +2448,7 @@ mod tests {
     fn test_detected_abi_feature_methods() {
         let v1 = DetectedAbi::new(ABI::V1);
         assert!(!v1.has_refer());
+        assert!(!v1.has_execute());
         assert!(!v1.has_truncate());
         assert!(!v1.has_network());
         assert!(!v1.has_ioctl_dev());
@@ -2433,9 +2456,11 @@ mod tests {
 
         let v2 = DetectedAbi::new(ABI::V2);
         assert!(v2.has_refer());
+        assert!(!v2.has_execute());
         assert!(!v2.has_truncate());
 
         let v3 = DetectedAbi::new(ABI::V3);
+        assert!(v3.has_execute());
         assert!(v3.has_refer());
         assert!(v3.has_truncate());
         assert!(!v3.has_network());
@@ -2999,6 +3024,25 @@ mod tests {
             names
                 .iter()
                 .any(|n| n == "Signal and abstract UNIX socket scoping")
+        );
+    }
+
+    #[test]
+    fn restrict_execute_rejects_partial_enforcement() {
+        let result =
+            ensure_execute_restriction_fully_enforced(landlock::RulesetStatus::PartiallyEnforced);
+        assert!(matches!(result, Err(err) if err.to_string().contains("partially enforced")));
+    }
+
+    #[test]
+    fn restrict_execute_accepts_only_full_enforcement() {
+        assert!(
+            ensure_execute_restriction_fully_enforced(landlock::RulesetStatus::FullyEnforced)
+                .is_ok()
+        );
+        assert!(
+            ensure_execute_restriction_fully_enforced(landlock::RulesetStatus::NotEnforced)
+                .is_err()
         );
     }
 
