@@ -129,13 +129,13 @@ pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
         nono::NonoError::NetworkFilterUnsupported { .. } => NonoErrorCode::ErrUnsupportedPlatform,
         nono::NonoError::PartialRestore { .. } => NonoErrorCode::ErrIo,
         nono::NonoError::LabelApplyFailed { .. } => NonoErrorCode::ErrSandboxInit,
-        // Phase 31 D-07: BrokerNotFound is a path-resolution failure (the
-        // broker.exe sibling lookup against std::env::current_exe() parent
-        // returned a path that does not exist on disk). Map to
-        // ErrPathNotFound for FFI consumers — same semantic class as
-        // PathNotFound, just specifically named for the broker discovery
-        // call site.
-        nono::NonoError::BrokerNotFound { .. } => NonoErrorCode::ErrPathNotFound,
+        // Phase 41 D-09 (CR-01): BrokerNotFound is an installation/runtime
+        // defect — the broker.exe sibling is missing from disk where
+        // current_exe().parent() expected it. This is structurally a sandbox-
+        // init failure (the supervisor cannot stand up its enforcement
+        // primitive), NOT a user-input path-resolution failure. Map to
+        // ErrSandboxInit alongside LabelApplyFailed.
+        nono::NonoError::BrokerNotFound { .. } => NonoErrorCode::ErrSandboxInit,
         // Phase 25-01: platform-specific feature rejection (e.g., --cpu-percent on macOS).
         // Maps to ErrUnsupportedPlatform so FFI consumers see the same code as
         // UnsupportedPlatform but with a structured feature field in the message.
@@ -268,6 +268,22 @@ mod tests {
         assert!(
             matches!(code, types::NonoErrorCode::ErrConfigParse),
             "ActionRequired must map to ErrConfigParse; got {code:?}"
+        );
+    }
+
+    /// Phase 41 D-09 (CR-01): BrokerNotFound maps to ErrSandboxInit (-6),
+    /// NOT ErrPathNotFound (-1). The broker-discovery failure is an
+    /// installation/runtime defect (sandbox cannot init), not a user-input
+    /// path-resolution failure. Locks the D-09 mapping against regression.
+    #[test]
+    fn broker_not_found_maps_to_err_sandbox_init() {
+        let err = nono::NonoError::BrokerNotFound {
+            path: std::path::PathBuf::from(r"C:\fake\nono-shell-broker.exe"),
+        };
+        let code = map_error(&err);
+        assert!(
+            matches!(code, types::NonoErrorCode::ErrSandboxInit),
+            "BrokerNotFound must map to ErrSandboxInit; got {code:?}"
         );
     }
 

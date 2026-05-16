@@ -74,6 +74,11 @@ typedef enum NonoErrorCode {
     NONO_ERROR_CODE_ERR_NO_CAPABILITIES = -5,
     /**
      * Sandbox initialization failed.
+     *
+     * Covers: Landlock/Seatbelt apply failure, Windows label-apply failure,
+     * and broker-discovery failure (Phase 41 D-09 CR-01: `BrokerNotFound` maps
+     * here — the missing broker.exe is an installation defect, not a user path
+     * error).
      */
     NONO_ERROR_CODE_ERR_SANDBOX_INIT = -6,
     /**

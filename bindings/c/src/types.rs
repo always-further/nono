@@ -165,6 +165,11 @@ pub enum NonoErrorCode {
     /// No capabilities specified.
     ErrNoCapabilities = -5,
     /// Sandbox initialization failed.
+    ///
+    /// Covers: Landlock/Seatbelt apply failure, Windows label-apply failure,
+    /// and broker-discovery failure (Phase 41 D-09 CR-01: `BrokerNotFound` maps
+    /// here — the missing broker.exe is an installation defect, not a user path
+    /// error).
     ErrSandboxInit = -6,
     /// Platform not supported.
     ErrUnsupportedPlatform = -7,
