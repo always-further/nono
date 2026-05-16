@@ -5670,7 +5670,10 @@ mod macos {
             "/usr/share",
             "/System/Library",
             "/System/Cryptexes",
-            "/System/Volumes",
+            // Do not grant /System/Volumes recursively: modern macOS exposes
+            // user data under /System/Volumes/Data.
+            "/System/Cryptexes/App",
+            "/System/Cryptexes/OS",
             "/private/var/db/dyld",
             "/var/db/dyld",
             "/private/var/select",
@@ -7258,6 +7261,62 @@ mod macos {
                     .iter()
                     .any(|rule| rule.as_str() == "(deny process-exec*)")
             );
+            Ok(())
+        }
+
+        #[test]
+        fn macos_runtime_baseline_does_not_grant_system_volumes_data() -> Result<()> {
+            let mut caps = CapabilitySet::new();
+            add_macos_runtime_baseline(&mut caps)?;
+
+            let system_volumes = Path::new("/System/Volumes");
+            let system_volumes_data = Path::new("/System/Volumes/Data");
+            for cap in caps.fs_capabilities() {
+                assert_ne!(
+                    cap.original, system_volumes,
+                    "runtime baseline must not grant recursive read of /System/Volumes"
+                );
+                assert_ne!(
+                    cap.resolved, system_volumes,
+                    "runtime baseline must not grant recursive read of /System/Volumes"
+                );
+                assert!(
+                    !cap.original.starts_with(system_volumes_data),
+                    "runtime baseline must not grant paths under /System/Volumes/Data: {}",
+                    cap.original.display()
+                );
+                assert!(
+                    !cap.resolved.starts_with(system_volumes_data),
+                    "runtime baseline must not grant paths under /System/Volumes/Data: {}",
+                    cap.resolved.display()
+                );
+                assert!(
+                    cap.is_file
+                        || (!system_volumes_data.starts_with(&cap.original)
+                            && !system_volumes_data.starts_with(&cap.resolved)),
+                    "runtime baseline directory grant covers /System/Volumes/Data: original={}, resolved={}",
+                    cap.original.display(),
+                    cap.resolved.display()
+                );
+            }
+
+            if Path::new("/System/Cryptexes/OS").is_dir() {
+                let cryptex_os =
+                    Path::new("/System/Cryptexes/OS")
+                        .canonicalize()
+                        .map_err(|source| NonoError::PathCanonicalization {
+                            path: PathBuf::from("/System/Cryptexes/OS"),
+                            source,
+                        })?;
+                assert!(
+                    caps.fs_capabilities().iter().any(|cap| {
+                        cap.original == Path::new("/System/Cryptexes/OS")
+                            && cap.resolved == cryptex_os
+                    }),
+                    "runtime baseline should grant the explicit OS cryptex path instead of /System/Volumes"
+                );
+            }
+
             Ok(())
         }
 
