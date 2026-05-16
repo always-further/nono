@@ -214,6 +214,7 @@ impl AuditRecorder {
     // the only `record_capability_decision` API surface; the dispatcher
     // always knows the stage at the call site, so a no-arg shortcut would
     // add zero callers but double the API surface.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn record_capability_decision(
         &mut self,
         entry: AuditEntry,

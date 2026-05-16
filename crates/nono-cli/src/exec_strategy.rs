@@ -373,6 +373,7 @@ pub struct SupervisorConfig<'a> {
     /// Whether to allow http://localhost and http://127.0.0.1 URLs.
     pub open_url_allow_localhost: bool,
     /// Optional append-only audit recorder for supervisor events.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub audit_recorder: Option<&'a Mutex<crate::audit_integrity::AuditRecorder>>,
     /// Redaction policy for command context in diagnostics.
     pub redaction_policy: &'a nono::ScrubPolicy,
@@ -1926,8 +1927,6 @@ fn wait_for_child_with_startup_timeout(
             }
         }
     }
-
-    wait_for_child(child)
 }
 
 /// Wait for child process, handling EINTR from signals.

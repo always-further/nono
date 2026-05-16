@@ -824,6 +824,7 @@ pub(crate) fn session_socket_path(session_id: &str) -> Result<PathBuf> {
     Ok(ensure_sessions_dir()?.join(format!("{session_id}.sock")))
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn session_log_path(session_id: &str) -> Result<PathBuf> {
     validate_session_id(session_id)?;
     Ok(ensure_sessions_dir()?.join(format!("{session_id}.log")))
