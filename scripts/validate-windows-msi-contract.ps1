@@ -2,6 +2,12 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$BinaryPath,
 
+    # Phase 41 (REQ-CI-02): -BrokerPath is mandatory because scripts/build-windows-msi.ps1
+    # made it mandatory in Phase 31 Plan 04 (2026-05-09). Without this, the MSI validator
+    # fails with "Cannot process command because of one or more missing mandatory parameters: BrokerPath".
+    [Parameter(Mandatory = $true)]
+    [string]$BrokerPath,
+
     [string]$ServiceBinaryPath = ""
 )
 
@@ -15,6 +21,9 @@ function Get-WixDocumentForScope {
 
         [Parameter(Mandatory = $true)]
         [string]$Binary,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BrokerBinary,
 
         [string]$ServiceBinary = ""
     )
@@ -31,6 +40,7 @@ function Get-WixDocumentForScope {
         $buildArgs = @{
             VersionTag  = "v0.0.0-preview"
             BinaryPath  = $Binary
+            BrokerPath  = $BrokerBinary    # unconditional; BrokerPath is mandatory in build-windows-msi.ps1
             Scope       = $Scope
             OutputDir   = $tempDirName
             EmitOnly    = $true
@@ -104,6 +114,11 @@ function Assert-True {
 
 $binaryFullPath = (Resolve-Path -LiteralPath $BinaryPath).Path
 
+if (-not (Test-Path -LiteralPath $BrokerPath)) {
+    throw "BrokerPath does not exist: $BrokerPath"
+}
+$brokerFullPath = (Resolve-Path -LiteralPath $BrokerPath).Path
+
 $serviceBinaryFullPath = ""
 if ($ServiceBinaryPath -ne "") {
     if (-not (Test-Path -LiteralPath $ServiceBinaryPath)) {
@@ -112,8 +127,8 @@ if ($ServiceBinaryPath -ne "") {
     $serviceBinaryFullPath = (Resolve-Path -LiteralPath $ServiceBinaryPath).Path
 }
 
-$machineDoc = Get-WixDocumentForScope -Scope "machine" -Binary $binaryFullPath -ServiceBinary $serviceBinaryFullPath
-$userDoc = Get-WixDocumentForScope -Scope "user" -Binary $binaryFullPath
+$machineDoc = Get-WixDocumentForScope -Scope "machine" -Binary $binaryFullPath -BrokerBinary $brokerFullPath -ServiceBinary $serviceBinaryFullPath
+$userDoc = Get-WixDocumentForScope -Scope "user" -Binary $binaryFullPath -BrokerBinary $brokerFullPath
 
 $machinePackage = Get-FirstNodeByLocalName -Document $machineDoc -LocalName "Package"
 $userPackage = Get-FirstNodeByLocalName -Document $userDoc -LocalName "Package"

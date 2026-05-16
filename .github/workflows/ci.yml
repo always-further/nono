@@ -333,13 +333,16 @@ jobs:
 
       - name: Build Windows release binaries
         shell: pwsh
-        run: cargo build --release -p nono-cli
+        run: |
+          cargo build --release -p nono-cli
+          cargo build --release -p nono-shell-broker
 
       - name: Validate Windows MSI contract
         shell: pwsh
         run: |
           .\scripts\validate-windows-msi-contract.ps1 `
             -BinaryPath .\target\release\nono.exe `
+            -BrokerPath .\target\release\nono-shell-broker.exe `
             -ServiceBinaryPath .\target\release\nono-wfp-service.exe
 
   fmt:
