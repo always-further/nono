@@ -486,19 +486,50 @@ mod broker {
             );
         }
 
-        /// D-02: an empty inherit-handle list is the most-restrictive (and
-        /// expected) shape — it means the spawned child inherits NO handles.
-        /// Construction MUST succeed with `inherit_handles.is_empty()`.
+        /// Phase 41 D-12 (CR-03): an empty inherit-handle list is REJECTED at the
+        /// broker argv parser. Supersedes Plan 31-02 SUMMARY's "most-restrictive"
+        /// claim — the broker now requires at least one inheritable handle, making
+        /// the empty-list shape correct-by-construction-rejected.
         #[test]
-        fn parse_args_empty_inherit_handle_list_is_ok() {
+        fn parse_args_empty_inherit_handle_list_returns_error() {
             let raw = argv(&["--shell", "foo", "--cwd", r"C:\"]);
-            let parsed = parse_args(&raw).expect("parse must succeed with no --inherit-handle");
+            let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
+                panic!("expected SandboxInit error on empty --inherit-handle list");
+            };
             assert!(
-                parsed.inherit_handles.is_empty(),
-                "no --inherit-handle flags → empty list (most-restrictive shape)"
+                msg.contains("empty"),
+                "error message must indicate empty-list rejection, got: {msg}"
             );
-            assert_eq!(parsed.shell_path, std::path::PathBuf::from("foo"));
-            assert_eq!(parsed.cwd, std::path::PathBuf::from(r"C:\"));
+        }
+
+        /// Phase 41 D-11 (CR-02): a null or INVALID_HANDLE_VALUE handle is REJECTED
+        /// at the broker argv parser. Pseudo-handle confusion at `(HANDLE)0` and
+        /// the `(HANDLE)-1` sentinel are blocked before any UpdateProcThreadAttribute
+        /// call. Locks the CR-02 fix against regression.
+        #[test]
+        fn parse_args_null_inherit_handle_returns_error() {
+            let raw = argv(&["--shell", "foo", "--cwd", r"C:\", "--inherit-handle", "0x0"]);
+            let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
+                panic!("expected SandboxInit error on --inherit-handle 0x0");
+            };
+            assert!(
+                msg.contains("null") || msg.contains("INVALID_HANDLE_VALUE"),
+                "error message must indicate null-handle rejection, got: {msg}"
+            );
+        }
+
+        /// Phase 41 D-11 (CR-02): the INVALID_HANDLE_VALUE sentinel (0xFFFFFFFFFFFFFFFF on
+        /// 64-bit Windows) is also REJECTED. Defense-in-depth alongside the null check.
+        #[test]
+        fn parse_args_invalid_handle_value_inherit_handle_returns_error() {
+            let raw = argv(&["--shell", "foo", "--cwd", r"C:\", "--inherit-handle", "0xFFFFFFFFFFFFFFFF"]);
+            let Err(NonoError::SandboxInit(msg)) = parse_args(&raw) else {
+                panic!("expected SandboxInit error on --inherit-handle 0xFFFFFFFFFFFFFFFF");
+            };
+            assert!(
+                msg.contains("null") || msg.contains("INVALID_HANDLE_VALUE"),
+                "error message must indicate INVALID_HANDLE_VALUE rejection, got: {msg}"
+            );
         }
 
         /// Defensive parse: a flag at the end of argv with no following value

@@ -271,6 +271,22 @@ mod tests {
         );
     }
 
+    /// Phase 41 D-09 (CR-01): BrokerNotFound maps to ErrSandboxInit (-6),
+    /// NOT ErrPathNotFound (-1). The broker-discovery failure is an
+    /// installation/runtime defect (sandbox cannot init), not a user-input
+    /// path-resolution failure. Locks the D-09 mapping against regression.
+    #[test]
+    fn broker_not_found_maps_to_err_sandbox_init() {
+        let err = nono::NonoError::BrokerNotFound {
+            path: std::path::PathBuf::from(r"C:\fake\nono-shell-broker.exe"),
+        };
+        let code = map_error(&err);
+        assert!(
+            matches!(code, types::NonoErrorCode::ErrSandboxInit),
+            "BrokerNotFound must map to ErrSandboxInit; got {code:?}"
+        );
+    }
+
     #[test]
     fn test_last_error_initially_null() {
         nono_clear_error();
