@@ -48,11 +48,11 @@ granularity: standard
 **Plans**: 7 plans
 Plans:
 **Wave 1**
-- [ ] 41-01-PLAN.md — API migration: CapabilityRequest::path -> HandleTarget::FilePath helper (14 sites)
-- [ ] 41-03-PLAN.md — Windows MSI validator: thread mandatory -BrokerPath through validate-windows-msi-contract.ps1
-- [ ] 41-04-PLAN.md — Windows block-net probe triage: confirm cfg(debug_assertions) hypothesis + promote flag
-- [ ] 41-05-PLAN.md — env_vars parallel flake fix via EnvVarGuard::set_all
-- [ ] 41-06-PLAN.md — Broker hygiene CR-01 + CR-02 + CR-03 (FFI remap + null-handle reject + empty-list reject)
+- [x] 41-01-PLAN.md — API migration: CapabilityRequest::path -> HandleTarget::FilePath helper (14 sites)
+- [x] 41-03-PLAN.md — Windows MSI validator: thread mandatory -BrokerPath through validate-windows-msi-contract.ps1
+- [x] 41-04-PLAN.md — Windows block-net probe triage: confirm cfg(debug_assertions) hypothesis + promote flag
+- [x] 41-05-PLAN.md — env_vars parallel flake fix via EnvVarGuard::set_all
+- [x] 41-06-PLAN.md — Broker hygiene CR-01 + CR-02 + CR-03 (FFI remap + null-handle reject + empty-list reject)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 41-02-PLAN.md — Unix simple: dead-code dispositions + disallowed_methods + unreachable expression (3 atomic commits)
@@ -137,7 +137,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 37. Linux RESL + PKGS auto-pull | 0/TBD | Not started | - |
-| 41. CI cleanup + broker CR | 0/TBD | Not started | - |
+| 41. CI cleanup + broker CR | 5/7 | In Progress|  |
 | 42. UPST5 audit | 0/TBD | Not started | - |
 | 43. UPST5 sync execution | 0/TBD | Not started | - |
 
