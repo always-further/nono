@@ -15,7 +15,7 @@ granularity: standard
 ## Phases
 
 - [ ] **Phase 37: Linux RESL backends + PKGS auto-pull** — cgroup v2 `memory.max` / `cpu.max` / `pids.max` + `load_registry_profile` auto-pull; coded on Windows host, verified via GitHub Actions Linux runners.
-- [ ] **Phase 41: CI cleanup + v24 broker code-review closure** — Linux/macOS Clippy + Windows CI jobs back to green; baseline reset; 4 v24 Windows broker code-review todos absorbed.
+- [x] **Phase 41: CI cleanup + v24 broker code-review closure** — Linux/macOS Clippy + Windows CI jobs back to green; baseline reset; 4 v24 Windows broker code-review todos absorbed. (completed 2026-05-16)
 - [ ] **Phase 42: UPST5 audit** — DIVERGENCE-LEDGER.md inventory of upstream `v0.53.0..+`; first audit where the `windows-touch` column actually fires.
 - [ ] **Phase 43: UPST5 sync execution** — Cherry-picks + D-20 manual replays per UPST5 audit dispositions; D-19 trailer convention + Windows-only-files invariant inherited; baseline-aware CI gate vs post-Phase-41 green baseline.
 
@@ -55,8 +55,8 @@ Plans:
 - [x] 41-06-PLAN.md — Broker hygiene CR-01 + CR-02 + CR-03 (FFI remap + null-handle reject + empty-list reject)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 41-02-PLAN.md — Unix simple: dead-code dispositions + disallowed_methods + unreachable expression (3 atomic commits)
-- [ ] 41-07-PLAN.md — Broker CR-04 + baseline reset close gate (SKIP->FAIL + build.rs + baseline SHA + skipped-gates convention + STATE.md cleanup)
+- [x] 41-02-PLAN.md — Unix simple: dead-code dispositions + disallowed_methods + unreachable expression (3 atomic commits)
+- [x] 41-07-PLAN.md — Broker CR-04 + baseline reset close gate (SKIP->FAIL + build.rs + baseline SHA + skipped-gates convention + STATE.md cleanup)
 **UI hint**: no
 
 ### Phase 42: UPST5 audit
@@ -137,7 +137,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 37. Linux RESL + PKGS auto-pull | 0/TBD | Not started | - |
-| 41. CI cleanup + broker CR | 5/7 | In Progress|  |
+| 41. CI cleanup + broker CR | 8/7 | Complete   | 2026-05-16 |
 | 42. UPST5 audit | 0/TBD | Not started | - |
 | 43. UPST5 sync execution | 0/TBD | Not started | - |
 

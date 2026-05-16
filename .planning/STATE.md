@@ -226,12 +226,11 @@ Items acknowledged at v2.4 close (user chose [A] Acknowledge in `/gsd-complete-m
 | requirement | REQ-PKGS-04 | re-anchored to v2.5 (Phase 37) | Linux/macOS host required (auto-pull e2e tests); REQ-PKGS-01 retroactively closed via v2.3 Phase 26-02 |
 | requirement | REQ-AAHX-HOST-01 | re-anchored to v2.5 (Phase 38) | Optional + Linux/macOS host required |
 | quick_task × 20 | 260405..260514 entries | "missing" per audit-open | Tooling cataloging glitch — work is genuinely complete per per-task SUMMARY.md `status: complete`. PLAN-side status fields aligned to `completed` in commit 9b172c0d. Documented in v2.4-MILESTONE-AUDIT.md § Pre-Close Artifact Audit. |
-| todo × 4 | v24-cr-0[1-4]-* | pending | v24 code-review todos (broker FFI not-found mapping, broker null-handle validation, broker empty-handle-list path, job-object test skip policy). Small Windows-host tasks; carry forward to v2.5. |
 | uat_gap × 11 | various | partial / human_needed | Phases 35 + 36 human-verify items: 3 of 11 runnable on Windows; remaining gated on Linux/macOS or interactive Windows console. Phase 35 verifies for REQ-PORT-CLOSURE-01 and REQ-PORT-CLOSURE-07 RAN on 2026-05-15 and PASSED (4/4 env_filter_tests + 2/2 profile_cli debug-syntax). |
 | verification_gap × 7 | various | human_needed | Same items as uat_gap row; verifier waits on Linux/macOS host execution or human review. |
 | context_question × 1 | 25-CONTEXT.md | n/a | Pre-existing single unresolved item; carries to v2.5. |
 
-Known deferred items at v2.4 close: 5 host-blocked requirements (re-anchored to v2.5) + 4 v24 CR todos + ~18 human-verify items (Phase 35/36) + 1 context question + 20 audit-open cataloging glitches. None block release; cross-phase integration confirmed clean.
+Known deferred items at v2.4 close: 5 host-blocked requirements (re-anchored to v2.5) + ~18 human-verify items (Phase 35/36) + 1 context question + 20 audit-open cataloging glitches. None block release; cross-phase integration confirmed clean. v24 CR-A class (4 todos) resolved by Phase 41; cleared 2026-05-16.
 
 ## Session Continuity
 
