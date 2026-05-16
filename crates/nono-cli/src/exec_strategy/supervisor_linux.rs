@@ -1228,6 +1228,7 @@ pub(super) mod cgroup {
         /// Returns `Err(NonoError::SandboxInit(...))` if the write fails. On a
         /// session that has already been cleaned up, this will fail with ENOENT —
         /// callers should treat that as a no-op (the cgroup is already gone).
+        #[cfg(test)]
         pub(crate) fn kill_all(&self) -> Result<()> {
             let kill_path = self.path.join("cgroup.kill");
             std::fs::write(&kill_path, "1\n").map_err(|e| {

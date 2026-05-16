@@ -28,15 +28,12 @@ use std::path::Path;
 pub use crate::exec_identity_windows::AuthenticodeStatus;
 
 /// Cross-platform `AuthenticodeStatus` placeholder for non-Windows hosts.
-/// Construction is impossible (no public constructors); the
+/// Construction is impossible (uninhabited type); the
 /// `platform_authenticode` dispatch on non-Windows returns `None` so
 /// downstream encoders skip the field cleanly.
 #[cfg(not(target_os = "windows"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthenticodeStatus {
-    /// Marker variant — never constructed on non-Windows hosts.
-    NotApplicable,
-}
+pub enum AuthenticodeStatus {}
 
 /// Sibling field on the audit envelope per RESEARCH Contradiction #2.
 /// Does NOT mutate upstream's `ExecutableIdentity { resolved_path, sha256 }`.
