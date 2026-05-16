@@ -6,8 +6,6 @@ mod app_runtime;
 mod audit_attestation;
 mod audit_commands;
 mod audit_integrity;
-#[cfg(unix)]
-mod audit_ledger;
 mod audit_session;
 mod capability_ext;
 mod cli;
