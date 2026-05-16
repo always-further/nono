@@ -167,6 +167,15 @@ pub(crate) struct ExecutionFlags {
     pub(crate) no_diagnostics: bool,
     pub(crate) silent: bool,
     pub(crate) capability_elevation: bool,
+    /// Phase 41 Plan 09 (REQ-CI-01 SC#4 gap closure, Gap 2): the field is
+    /// set in `ExecutionFlags::defaults` on every platform but read only
+    /// inside `#[cfg(target_os = "windows")]` blocks at
+    /// `execution_runtime.rs:411`, `exec_strategy_windows/mod.rs:669,743`,
+    /// `exec_strategy_windows/supervisor.rs:373,434`. Use the inverse of
+    /// the precedent at lines 180 + 185 (which gate on `target_os = "windows"`
+    /// because those fields are Unix-read): this field is Windows-read, so
+    /// the dead-code gate must fire on the inverse target set.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) interactive_shell: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,

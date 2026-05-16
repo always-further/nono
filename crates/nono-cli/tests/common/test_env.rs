@@ -8,6 +8,15 @@
 //!
 //! The source of truth for the guard contract is `crates/nono-cli/src/test_env.rs`.
 //! If that file changes, update this mirror in lockstep.
+//!
+//! Phase 41 Plan 09 (REQ-CI-01 SC#4 gap closure, Gap 5): the sole caller
+//! is `crates/nono-cli/tests/env_vars.rs:1047` inside a
+//! `#[cfg(target_os = "windows")]` test (line 1039). On Linux/macOS the
+//! test compiles out, leaving the entire mirror orphaned and triggering
+//! `clippy::dead_code` under `-Dwarnings`. Gate the whole module to
+//! Windows so the mirror exists only where it is used.
+
+#![cfg(target_os = "windows")]
 
 /// Restores a set of environment variables when dropped.
 ///
