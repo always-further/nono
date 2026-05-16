@@ -356,15 +356,6 @@ impl PtyProxy {
         true
     }
 
-    /// Shut down the attach listener so no new connections can be accepted.
-    ///
-    /// Removes the socket file. This prevents the kernel from accepting new
-    /// connections after the supervisor loop has exited but before the
-    /// `PtyProxy` is dropped — the window that causes "Broken pipe" errors on attach.
-    pub fn shutdown_attach_listener(&mut self) {
-        let _ = std::fs::remove_file(&self.attach_path);
-    }
-
     /// Accept an attach connection.
     ///
     /// Returns true if a client was attached.

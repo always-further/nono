@@ -183,6 +183,7 @@ fn resolve_path(path: &Path) -> PathBuf {
     normalize_for_compare(path)
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn sort_and_dedup_roots(roots: &mut Vec<PathBuf>) {
     roots.sort();
     roots.dedup_by(|left, right| paths_equal(left, right));
@@ -277,6 +278,7 @@ fn paths_equal(left: &Path, right: &Path) -> bool {
     path_starts_with(left, right) && path_starts_with(right, left)
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[cfg(not(target_os = "windows"))]
 fn paths_equal(left: &Path, right: &Path) -> bool {
     left == right
