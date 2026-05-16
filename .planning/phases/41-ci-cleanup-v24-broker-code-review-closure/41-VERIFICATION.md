@@ -1,19 +1,23 @@
 ---
 phase: 41-ci-cleanup-v24-broker-code-review-closure
-verified: 2026-05-16T20:30:00Z
-status: gaps_found
-score: 4/5 must-haves verified
+verified: 2026-05-16T21:48:17Z
+status: human_needed
+score: 5/5 must-haves verified
 overrides_applied: 0
 re_verification:
-  previous_status: human_needed
-  previous_score: 5/5
-  previous_verified: 2026-05-16T19:30:00Z
-  trigger: "CI run 25972316892 (push of b284bc63) surfaced 6 new -Dwarnings dead-code errors on Linux Test + Linux Clippy + macOS Clippy lanes after the HandleTarget import fix landed"
-  gaps_closed: []
-  gaps_remaining:
-    - "REQ-CI-01 SC#1+#3+#4: cross-target Linux/macOS clippy clean — re-opened after CI surfaced 6 dead-code errors"
-  regressions:
-    - "REQ-CI-01 falls back from VERIFIED to PARTIAL: Linux Test, Linux Clippy, and macOS Clippy GH Actions lanes still red on b284bc63 due to escalated dead-code lints"
+  previous_status: gaps_found
+  previous_score: 4/5
+  previous_verified: 2026-05-16T20:30:00Z
+  trigger: "Plan 41-09 landed 5 commits (05065209, 389c0fae, e97b596e, 0699c6f4, 47d55905) closing the 6 cross-target dead-code / clippy::manual_inspect gaps surfaced by CI run 25972316892 (Linux Test, Linux Clippy, macOS Clippy lanes). Codebase-level re-verification required."
+  gaps_closed:
+    - "Gap 1: crates/nono-cli/src/exec_strategy/env_sanitization.rs:127 validate_env_var_patterns orphan — closed by wiring profile_runtime.rs to delegate (commit 05065209). WR-06 closed simultaneously."
+    - "Gap 2: crates/nono-cli/src/launch_runtime.rs interactive_shell field — closed by #[cfg_attr(not(target_os = \"windows\"), allow(dead_code))] (commit e97b596e)."
+    - "Gap 3: crates/nono-cli/src/setup.rs:14-23 5 WFP fields — closed by #[cfg(target_os = \"windows\")] per-field gates (commit 389c0fae)."
+    - "Gap 4: crates/nono-cli/src/setup.rs:748-793 6 phase_index methods — closed by #[cfg(target_os = \"windows\")] per-method gates (commit 389c0fae)."
+    - "Gap 5: crates/nono-cli/tests/common/test_env.rs EnvVarGuard::set_all mirror — closed by module-inner #![cfg(target_os = \"windows\")] gate (commit e97b596e)."
+    - "Gap 6: crates/nono/src/keystore.rs:1074-1078 map_err side-effect-only pattern — closed by replacement with .inspect_err(|_| {...}) (commit 0699c6f4)."
+  gaps_remaining: []
+  regressions: []
 must_haves:
   truths:
     - "REQ-CI-01: cross-target Linux clippy clean; no new raw #[allow(dead_code)]; orphans deleted or cfg-gated"
@@ -21,109 +25,122 @@ must_haves:
     - "REQ-CI-03: baseline-aware CI gate baseline SHA + skipped-gates convention + STATE.md ## Deferred Items cleanup"
     - "REQ-BROKER-CR-01..03: BrokerNotFound FFI remap + broker null/INVALID + empty-list rejects"
     - "REQ-BROKER-CR-04: Job-object test silent-SKIP→FAIL resolved; STATE.md v24 CR-A entries cleared"
-gaps:
-  - truth: "REQ-CI-01: cross-target Linux/macOS clippy clean; no new raw #[allow(dead_code)]; orphans deleted or cfg-gated"
-    status: partial
-    reason: "CI run 25972316892 on commit b284bc63 surfaced 6 new -Dwarnings dead-code errors that the prior verification missed because cross-target Linux/macOS clippy was SKIPPED locally. Three lanes RED (Linux Test, Linux Clippy, macOS Clippy). REQ-CI-01 SC#1 and SC#3 cannot pass until these clear; SC#4 forbids #[allow(dead_code)] so the fix must cfg-gate or wire/delete."
-    artifacts:
-      - path: "crates/nono-cli/src/exec_strategy/env_sanitization.rs"
-        line: 127
-        issue: "`fn validate_env_var_patterns` is `pub(crate)` but never invoked on Linux/macOS. Closely related to WR-06 (profile_runtime.rs:290 declares byte-identical `validate_env_var_patterns_local` — neither calls the canonical fn). Linux Test job error: 'function `validate_env_var_patterns` is never used'."
-      - path: "crates/nono-cli/src/launch_runtime.rs"
-        line: 170
-        issue: "Field `ExecutionFlags.interactive_shell: bool` is read only inside `#[cfg(target_os = \"windows\")]` blocks (execution_runtime.rs:411 → exec_strategy_windows). On Linux/macOS, the field is set (defaults.rs:204) but never read. Linux Test job error: 'field `interactive_shell` is never read'."
-      - path: "crates/nono-cli/src/setup.rs"
-        line: "14-18"
-        issue: "Fields `register_wfp_service, install_wfp_service, install_wfp_driver, start_wfp_service, start_wfp_driver: bool` on `SetupRunner` struct. Read sites at lines 28-32, 52-72, 650-787 are all WFP-specific Windows code paths NOT cfg-gated; on Linux/macOS the field readers compile but the readers themselves should be Windows-only. Linux Test job error: 'fields `register_wfp_service, install_wfp_service, install_wfp_driver, start_wfp_service, start_wfp_driver` are never read'."
-      - path: "crates/nono-cli/src/setup.rs"
-        line: "737-771"
-        issue: "Methods `register_phase_index (737), install_phase_index (741), start_phase_index (745), install_driver_phase_index (752), start_driver_phase_index (756), recheck_wfp_phase_index (771)` on `SetupRunner`. Called only from Windows-only WFP setup flow (lines 152, 172, 192, 212, 232, 277); these callers must be Windows-only too. Linux Test job error: 'methods `register_phase_index, install_phase_index, start_phase_index, install_driver_phase_index, start_driver_phase_index, recheck_wfp_phase_index` are never used'."
-      - path: "crates/nono-cli/tests/common/test_env.rs"
-        line: "23-37"
-        issue: "`EnvVarGuard::set_all` (line 26) is invoked at `crates/nono-cli/tests/env_vars.rs:1047` inside a `#[cfg(target_os = \"windows\")]` test (line 1039). On Linux/macOS the test compiles out, so `set_all` becomes unused. Linux Clippy job error: 'associated function `set_all` is never used'."
-      - path: "crates/nono/src/keystore.rs"
-        line: "1074-1078"
-        issue: "`.map_err(|e| { let _ = child.kill(); let _ = child.wait(); e })?` is the canonical clippy `manual_inspect` pattern (side-effect-only closure returning `e` unchanged). Inside `#[cfg(target_os = \"macos\")] load_from_apple_password`. macOS Clippy job error: 'using `map_err` over `inspect_err`'."
-    missing:
-      - "cfg-gate `fn validate_env_var_patterns` to Windows OR wire profile_runtime.rs:290 to call this canonical fn (closes WR-06 simultaneously per the deferred-backlog cross-reference)"
-      - "cfg-gate `ExecutionFlags.interactive_shell` to Windows on the field declaration (launch_runtime.rs:170) OR add `#[cfg_attr(not(target_os = \"windows\"), allow(dead_code))]` per the existing precedent at launch_runtime.rs:180 for `allowed_env_vars`"
-      - "cfg-gate the 5 WFP-related `SetupRunner` fields (setup.rs:14-18) AND their reader sites (lines 28-32, 52-72, 650-787) to Windows OR migrate to a `#[cfg(target_os = \"windows\")] mod wfp_setup;` extraction"
-      - "cfg-gate the 6 `phase_index` methods (setup.rs:737-771) AND their call sites (lines 152, 172, 192, 212, 232, 277) to Windows"
-      - "cfg-gate the duplicated `EnvVarGuard` in `tests/common/test_env.rs` to Windows OR drop the mirror entirely and lift `tests/env_vars.rs::windows_run_*` into a Windows-only integration test file (e.g. tests/env_vars_windows.rs)"
-      - "Replace `crates/nono/src/keystore.rs:1074-1078` `.map_err(|e| { ...; e })` with `.inspect_err(|_| { let _ = child.kill(); let _ = child.wait(); })` per the existing precedent at keystore.rs:1006 inside `load_from_op` (already uses `.inspect_err(|_e| { ... })`)"
 human_verification:
-  - test: "Verify CI run 25972316892 + successor runs no longer hit -Dwarnings dead-code errors after the gap-closure plan lands"
-    expected: "GH Actions Linux Test, Linux Clippy, macOS Clippy lanes on the SHA carrying the dead-code gap-closure commits all PASS. No occurrence of 'is never used', 'is never read', or 'using `map_err` over `inspect_err`' in the lane logs."
-    why_human: "Live CI signal; not reproducible locally without C cross-compiler for Linux clippy from this Windows dev host. NEW item for this re-verification."
-  - test: "Verify the windows-build CI lane no longer fails at PowerShell parameter binding on the next PR push after Plan 41-08 lands"
-    expected: "ci-logs/windows-build.log contains NO 'Cannot process command because of one or more missing mandatory parameters: BrokerPath' line; the build suite progresses past 'validate windows msi contract' label; cargo build -p nono-shell-broker step appears and succeeds; Test-Path guard passes silently"
-    why_human: "Plan 41-08 closed the gap at the codebase level (verified by grep + PowerShell syntax check), but the decisive live signal — GH Actions windows-build job green on PR head SHA — lives in CI and is not reproducible from this dev host. Carried forward from prior verification."
-  - test: "Verify all 7 GitHub Actions CI lanes green on Phase 41 close SHA (post-gap-closure head)"
-    expected: "Linux Clippy + Linux Test + macOS Clippy + Windows Build + Windows Integration + Windows Regression + Windows Security + Windows Packaging all PASS on the same head SHA"
-    why_human: "Lives in GitHub Actions; not reproducible locally. REQ-CI-01/02 SC require GH Actions green on Phase 41 close SHA. Carried forward from prior verification."
-  - test: "Verify the env_vars parallel flake fix on a real Windows host (cargo test -p nono-cli --test env_vars windows_run_redirects_profile_state_vars_into_writable_allowlist run 10x in parallel)"
-    expected: "0 failures across 10 parallel runs"
-    why_human: "Plan 41-05 used Windows-host-only verification; current dev host could not execute the flake check (10x runs). CI Integration job covers this on Windows-latest. Carried forward from prior verification."
-  - test: "Verify the block-net probe tests pass on a Windows host with NONO_CI_HAS_WFP=true (elevated, WFP service installed)"
-    expected: "windows_run_block_net_blocks_probe_connection + windows_run_block_net_blocks_probe_through_cmd_host both PASS with 'connect failed' or 'exit code 42' markers in stderr"
-    why_human: "Plan 41-04 short-circuits on non-elevated dev hosts; full probe path runs only on elevated CI runner. Carried forward from prior verification."
-  - test: "Verify cross-binding nono-py / nono-ts impact of CR-01 FFI remap"
-    expected: "No integer-mapping of -1 (ErrPathNotFound) as broker-discovery-failure in downstream bindings — or follow-up todo filed for lockstep"
-    why_human: "../nono-py/ and ../nono-ts/ are sibling repositories not present in this working directory; D-10 manual verification was deferred per Plan 41-06 SUMMARY. Carried forward from prior verification."
+  - test: "Verify CI run after pushing 41-09 commits (05065209..47d55905) lands no -Dwarnings dead-code errors on Linux/macOS lanes"
+    expected: "GitHub Actions Linux Test, Linux Clippy, macOS Clippy lanes on the SHA carrying 47d55905 (or its successor) all PASS. No occurrence of 'function `validate_env_var_patterns` is never used', 'field `interactive_shell` is never read', 'fields `register_wfp_service`', 'methods `register_phase_index`', 'associated function `set_all` is never used', or 'using `map_err` over `inspect_err`' in lane logs."
+    why_human: "Live CI signal; not reproducible locally without cross-toolchain for Linux/macOS clippy from this Windows dev host (load-bearing per memory feedback_clippy_cross_target). NEW item for Plan 41-09 closure verification."
+  - test: "Verify windows-build CI lane no longer fails at PowerShell parameter binding on next PR push (Plan 41-08 fix)"
+    expected: "ci-logs/windows-build.log contains NO 'Cannot process command because of one or more missing mandatory parameters: BrokerPath' line; the build suite progresses past 'validate windows msi contract' label; cargo build -p nono-shell-broker step appears and succeeds."
+    why_human: "Plan 41-08 closed the gap at codebase level (verified by grep + PowerShell syntax check), but decisive live signal — GH Actions windows-build job green on PR head SHA — lives in CI. Carried forward."
+  - test: "Verify all 8 GH Actions CI lanes green on Phase 41 close SHA (post-41-09 head)"
+    expected: "Linux Clippy + Linux Test + macOS Clippy + Windows Build + Windows Integration + Windows Regression + Windows Security + Windows Packaging all PASS on the same head commit."
+    why_human: "Lives in GitHub Actions; not reproducible locally. REQ-CI-01 SC#3 + REQ-CI-02 SC#1+2 require GH Actions green on Phase 41 close SHA. Carried forward."
+  - test: "Verify env_vars parallel flake fix (Plan 41-05) on Windows host — 10x parallel runs"
+    expected: "0 failures across 10 parallel runs of `cargo test -p nono-cli --test env_vars windows_run_redirects_profile_state_vars_into_writable_allowlist`."
+    why_human: "Plan 41-05 used Windows-host-only verification; current dev host did not execute the flake check (10x runs). CI Integration job covers this on Windows-latest. Carried forward."
+  - test: "Verify block-net probe tests pass on Windows host with NONO_CI_HAS_WFP=true (elevated, WFP service installed)"
+    expected: "windows_run_block_net_blocks_probe_connection + windows_run_block_net_blocks_probe_through_cmd_host both PASS with 'connect failed' or 'exit code 42' markers in stderr."
+    why_human: "Plan 41-04 short-circuits on non-elevated dev hosts; full probe path runs only on elevated CI runner. Carried forward."
+  - test: "Verify cross-binding nono-py / nono-ts impact of CR-01 FFI remap (D-10 deferred)"
+    expected: "No integer-mapping of -1 (ErrPathNotFound) as broker-discovery-failure in downstream bindings — or follow-up todo filed for lockstep."
+    why_human: "../nono-py/ and ../nono-ts/ are sibling repositories not present in this working directory. Carried forward."
 ---
 
 # Phase 41: CI cleanup + v24 broker code-review closure Verification Report
 
 **Phase Goal:** Reset every CI lane to green and clear the v24 Windows broker code-review backlog so Phases 42 + 43 inherit a clean baseline.
 
-**Verified:** 2026-05-16T20:30:00Z (re-verification triggered by CI run 25972316892)
-**Status:** gaps_found
-**Re-verification:** Yes — supersedes 2026-05-16T19:30:00Z verification
+**Verified:** 2026-05-16T21:48:17Z (re-verification after Plan 41-09 cross-target gap closure)
+**Status:** human_needed
+**Re-verification:** Yes — supersedes 2026-05-16T20:30:00Z verification
 
 ## Re-verification Summary
 
-The prior verification (2026-05-16T19:30:00Z, post-Plan-41-08) returned `status: human_needed` with 5/5 must-haves VERIFIED at the codebase level. The single outstanding REQ-CI-01 risk was explicitly documented as "cross-target Linux clippy from Windows host: SKIPPED — load-bearing per CI Linux native lane" (Behavioral Spot-Checks row, prior 41-VERIFICATION.md line 154).
+The prior verification (2026-05-16T20:30:00Z, post-CI-run 25972316892) returned `status: gaps_found` with 4/5 must-haves VERIFIED at the codebase level. REQ-CI-01 had regressed from VERIFIED to PARTIAL because CI run 25972316892 surfaced 6 `-Dwarnings` dead-code / `clippy::manual_inspect` errors on Linux Test, Linux Clippy, and macOS Clippy lanes — errors that the Windows-host local verification could not catch because cross-target clippy was load-bearing-but-SKIPPED.
 
-After Phase 41 commits pushed to `oscarmackjr-twg:main`:
+Plan 41-09 (commits `05065209`, `389c0fae`, `e97b596e`, `0699c6f4`, `47d55905`) landed 4 task commits + 1 docs commit between `a03f13cf` (prior verification SHA) and HEAD (`47d55905`). All 6 gaps + WR-06 have been closed via cfg-gating, delegate wiring, or one-line combinator swap. Cargo workspace check is clean on the Windows host post-commit.
 
-1. **CI run 25970910911** (initial post-push run) failed Linux Test with `error[E0432]: unresolved import 'nono::HandleTarget'` at the Plan 41-01 `request_path()` helper.
-2. **Quick task 260516-mxw** landed two commits fixing the import path:
-   - `3c1ddc40` — `fix(quick): correct nono::HandleTarget import path`
-   - `b284bc63` — `fix(quick): use nono::supervisor::HandleTarget for request_path helper`
-3. **CI run 25972316892** on commit `b284bc63` cleared the HandleTarget error but **surfaced 6 NEW errors** on Linux/macOS lanes, all escalated to build failures via `-Dwarnings`:
-   - Linux Test job `76346400920`: 4 dead-code errors
-   - Linux Clippy job `76346400927`: 1 additional dead-code error (set_all)
-   - macOS Clippy job `76346400923`: 1 map_err → inspect_err clippy lint
+**REQ-CI-01 flips back from PARTIAL to VERIFIED** at the codebase level. Status transitions: `gaps_found` (4/5) → `human_needed` (5/5).
 
-These 6 errors are real, blocking, and code-level — not pending CI signals. REQ-CI-01 falls back from VERIFIED to **PARTIAL**: the API migration helper + audit_ledger deletion + cfg-gate dispositions remain landed (those parts of SC#1 are achieved), but SC#1's "cross-target Linux/macOS Clippy green from GH Actions" + SC#3 "Linux Clippy + macOS Clippy jobs green on the head of Phase 41" cannot pass with these errors live. SC#4 ("No `#[allow(dead_code)]` added — orphans either deleted or wired") is non-negotiable, so the fix must cfg-gate or wire/delete; bulk `#[allow(dead_code)]` is forbidden.
+The status is `human_needed` (NOT `passed`) because the 6 carried-forward human verification items remain: the same 5 from the prior verification PLUS one NEW item specific to Plan 41-09 (live CI confirmation that Linux Test + Linux Clippy + macOS Clippy lanes flip RED → GREEN on the post-push head SHA). The codebase-level fix is complete; the decisive GH Actions signal is pending the next PR push.
 
-The other 4 must-haves (REQ-CI-02, REQ-CI-03, REQ-BROKER-CR-01..03, REQ-BROKER-CR-04) remain VERIFIED at the codebase level — none of the new CI errors touch their artifacts. Status transitions: `human_needed` (5/5) → `gaps_found` (4/5).
+## Codebase Evidence — Plan 41-09 Gap Closure
 
-## CI Evidence — Run 25972316892
+Verified against HEAD (`47d55905`) on Windows dev host using greppable evidence from the planning trigger's verification block.
 
-**Trigger commit:** `b284bc63` (push of HandleTarget import fix on `oscarmackjr-twg:main`).
-**Run URL pattern:** `https://github.com/{org}/nono/actions/runs/25972316892` (specific job IDs below).
+### Gap 1: `validate_env_var_patterns` orphan (REQ-CI-01 SC#1 + #4, simultaneous WR-06 close)
 
-### Linux Test job 76346400920 (4 errors)
+| Check | Expected | Actual | Result |
+|-------|----------|--------|--------|
+| `grep -c "validate_env_var_patterns_local" crates/nono-cli/src/profile_runtime.rs` | `0` | `0` | PASS |
+| `grep -cE "crate::exec_strategy::validate_env_var_patterns\|exec_strategy::validate_env_var_patterns" crates/nono-cli/src/profile_runtime.rs` | `>= 2` | `3` (1 comment self-mention + 2 callsites; documented as deviation in 41-09-SUMMARY) | PASS |
+| `grep -n "validate_env_var_patterns" crates/nono-cli/src/exec_strategy_windows/mod.rs` | 1 re-export at line 76 | `76:pub(crate) use env_sanitization::{is_dangerous_env_var, validate_env_var_patterns};` | PASS |
+| `grep -n "validate_env_var_patterns" crates/nono-cli/src/exec_strategy.rs` | 1 non-Windows re-export at line 50 (untouched) | `50:pub(crate) use env_sanitization::validate_env_var_patterns;` | PASS |
 
-| # | Error | File | Line | Notes |
-|---|-------|------|------|-------|
-| 1 | `function \`validate_env_var_patterns\` is never used` | `crates/nono-cli/src/exec_strategy/env_sanitization.rs` | 127 | `pub(crate) fn` declared but no Linux/macOS caller. Closely related to WR-06 — `crates/nono-cli/src/profile_runtime.rs:290` declares a byte-identical `validate_env_var_patterns_local` without delegating. The canonical fix simultaneously closes WR-06: wire profile_runtime.rs:290 to call the canonical `env_sanitization::validate_env_var_patterns` AND ensure at least one Linux test (or Linux-reachable runtime path) reaches it. |
-| 2 | `field \`interactive_shell\` is never read` | `crates/nono-cli/src/launch_runtime.rs` | 170 | `ExecutionFlags.interactive_shell: bool`. Read sites all gated to `#[cfg(target_os = "windows")]`: execution_runtime.rs:411 (cfg block 402-416), exec_strategy_windows/mod.rs:669,743, exec_strategy_windows/supervisor.rs:373,434. Fix: add `#[cfg_attr(not(target_os = "windows"), allow(dead_code))]` to the field per the established precedent at launch_runtime.rs:180 (allowed_env_vars) and :185 (denied_env_vars). |
-| 3 | `fields \`register_wfp_service, install_wfp_service, install_wfp_driver, start_wfp_service, start_wfp_driver\` are never read` | `crates/nono-cli/src/setup.rs` | 14-18 | All 5 `SetupRunner` fields are WFP-specific and read by 30+ sites (lines 28-32, 52-72, 650-787, 1219-1223) that are themselves Windows-only WFP setup code. Linux/macOS does not invoke these branches, so neither field nor reader is exercised on non-Windows. Fix: either `#[cfg(target_os = "windows")]` on the field declarations + readers, OR extract the WFP setup into a `#[cfg(target_os = "windows")] mod wfp_setup;` submodule. |
-| 4 | `methods \`register_phase_index, install_phase_index, start_phase_index, install_driver_phase_index, start_driver_phase_index, recheck_wfp_phase_index\` are never used` | `crates/nono-cli/src/setup.rs` | 737, 741, 745, 752, 756, 771 | Methods on `SetupRunner`; called from WFP setup flow at lines 152, 172, 192, 212, 232, 277 — same Windows-only call surface as the fields above. Fix: same scope as #3 (cfg-gate the entire WFP setup surface together). |
+The byte-identical local copy in `profile_runtime.rs` is gone; the canonical fn at `exec_strategy/env_sanitization.rs:127` is reached via `crate::exec_strategy::validate_env_var_patterns` from both call closures (`allowed_env_vars`, `denied_env_vars`). The Windows re-export tuple now mirrors the non-Windows precedent so the canonical fn resolves on all targets. **WR-06 simultaneously closed** — the drift-risk duplication is eliminated by deletion, not by lockstep test.
 
-### Linux Clippy job 76346400927 (1 additional error)
+### Gap 2: `interactive_shell` field never read on Linux/macOS (REQ-CI-01 SC#1 + #4)
 
-| # | Error | File | Line | Notes |
-|---|-------|------|------|-------|
-| 5 | `associated function \`set_all\` is never used` | `crates/nono-cli/tests/common/test_env.rs` | 26 (within `impl EnvVarGuard` at lines 23-37) | This is the integration-test mirror of `crates/nono-cli/src/test_env.rs::EnvVarGuard` introduced by Plan 41-05. Sole caller: `crates/nono-cli/tests/env_vars.rs:1047`, inside a `#[cfg(target_os = "windows")]` test (line 1039: `windows_run_redirects_profile_state_vars_into_writable_allowlist`). On Linux/macOS the test compiles out, leaving `set_all` orphaned. Fix: either (a) cfg-gate the EnvVarGuard mirror behind `#[cfg(target_os = "windows")]` (since it currently has no non-Windows callers), OR (b) lift the entire `windows_run_*` test cluster into a separate `tests/env_vars_windows.rs` file with module-level `#![cfg(target_os = "windows")]` so the common helper is only compiled when reachable. Option (a) is the minimal-touch fix. |
+| Check | Expected | Actual | Result |
+|-------|----------|--------|--------|
+| `grep -B 1 'pub(crate) interactive_shell' crates/nono-cli/src/launch_runtime.rs \| grep -c 'cfg_attr(not(target_os = "windows"), allow(dead_code))'` | `1` | `1` | PASS |
 
-### macOS Clippy job 76346400923 (1 different error)
+Field at `launch_runtime.rs:179` (line shifted from prior :170 due to added doc comment block at lines 175-178 explaining the inverse direction). Cfg-attr applied per Plan 41-09 Task 3 — the inverse direction (`not(target_os = "windows")`) is required because the field is read by Windows-only code paths (`execution_runtime.rs:411`, `exec_strategy_windows/mod.rs:669,743`, `exec_strategy_windows/supervisor.rs:373,434`) and set on every platform in `ExecutionFlags::defaults`. The `cfg_attr` conditional gate is explicitly permitted per REQ-CI-01 SC#4 (which forbids unconditional bulk `#[allow(dead_code)]`, not conditional `cfg_attr`).
 
-| # | Error | File | Line | Notes |
-|---|-------|------|------|-------|
-| 6 | `using \`map_err\` over \`inspect_err\`` (clippy::manual_inspect) | `crates/nono/src/keystore.rs` | 1074-1078 | `.map_err(\|e\| { let _ = child.kill(); let _ = child.wait(); e })?` is the canonical clippy::manual_inspect pattern — side-effect-only closure that returns the input error unchanged. Inside `#[cfg(target_os = "macos")] load_from_apple_password`. ubuntu-latest clippy did not lift this lint to error level in CI run 25972316892's Linux lane (different toolchain channel or different `-W → -D` escalation list), but macOS Clippy did. Fix (one-line): replace with `.inspect_err(\|_\| { let _ = child.kill(); let _ = child.wait(); })?` — established precedent already in this same file at line 1006 inside `load_from_op` for an identical kill+wait child-cleanup pattern. |
+### Gap 3: 5 WFP `SetupRunner` fields never read on Linux/macOS (REQ-CI-01 SC#1 + #4)
+
+| Check | Expected | Actual | Result |
+|-------|----------|--------|--------|
+| `crates/nono-cli/src/setup.rs:14-23` 5 WFP field declarations all carry `#[cfg(target_os = "windows")]` | 5 | 5 (`register_wfp_service` line 15, `install_wfp_service` line 17, `install_wfp_driver` line 19, `start_wfp_service` line 21, `start_wfp_driver` line 23 — each prefixed with cfg gate on the line above) | PASS |
+| Constructor initializers at lines 33-42 all carry `#[cfg(target_os = "windows")]` on the prefix | 5 | 5 (verified by inspection) | PASS |
+| Test fixture struct-literal entries at lines 1219-1223 carry matching cfg gates | 5 | 5 (verified by `cargo check -p nono-cli --tests` succeeding) | PASS |
+
+Reader sites at lines 62-82, 660-680 are themselves already inside `#[cfg(target_os = "windows")]` blocks (verified by inspection of the surrounding `if !self.check_only { ... }` blocks in `run()` — see SUMMARY Task 2 note). On Linux/macOS the 5 fields no longer exist on the struct, so the dead-code lint cannot fire.
+
+### Gap 4: 6 `phase_index` methods never used on Linux/macOS (REQ-CI-01 SC#1 + #4)
+
+| Check | Expected | Actual | Result |
+|-------|----------|--------|--------|
+| Phase_index method declarations cfg-gated | 6 | 6 (`register_phase_index:748`, `install_phase_index:753`, `start_phase_index:758`, `install_driver_phase_index:766`, `start_driver_phase_index:771`, `recheck_wfp_phase_index:787` — each prefixed with `#[cfg(target_os = "windows")]`) | PASS |
+| `any_windows_wfp_action_requested` (the 7th method in cluster) cfg gate preserved untouched | 1 | 1 (line 777-784, already cfg-gated before Plan 41-09) | PASS |
+
+All 6 methods compile out on Linux/macOS, so the call sites at lines 152, 172, 192, 212, 232, 277 (themselves inside Windows-only WFP flows) reference symbols that no longer exist on non-Windows targets.
+
+### Gap 5: `EnvVarGuard::set_all` mirror never used on Linux/macOS (REQ-CI-01 SC#1 + #4)
+
+| Check | Expected | Actual | Result |
+|-------|----------|--------|--------|
+| `grep -cE '^#!\[cfg\(target_os = "windows"\)\]' crates/nono-cli/tests/common/test_env.rs` | `1` | `1` (at line 19, after the doc-comment block) | PASS |
+
+Module-inner attribute gates the entire compilation unit. On Linux/macOS the `tests/common/test_env.rs` module compiles out, taking `EnvVarGuard::set_all` (and all sibling helpers) with it. The sole caller (`tests/env_vars.rs:1047` inside `windows_run_redirects_profile_state_vars_into_writable_allowlist` at line 1039) is already `#[cfg(target_os = "windows")]`, so the gate is reachability-correct.
+
+### Gap 6: `map_err` clippy::manual_inspect lint on macOS (REQ-CI-01 SC#1)
+
+| Check | Expected | Actual | Result |
+|-------|----------|--------|--------|
+| `sed -n '1068,1080p' crates/nono/src/keystore.rs \| grep -c 'map_err'` | `0` | `0` | PASS |
+| `sed -n '1068,1080p' crates/nono/src/keystore.rs \| grep -c 'inspect_err'` | `1` | `1` | PASS |
+
+The Gap-6 line range now contains `.inspect_err(|_| { let _ = child.kill(); let _ = child.wait(); })?;` (lines 1074-1078). The remaining `map_err` at line 1085 is the legitimate `String::from_utf8(output.stdout).map_err(|_| { NonoError::KeystoreAccess(...) })` — a true transformation that returns a NEW error, NOT a side-effect-only closure returning the input. That `map_err` is correctly out of scope for `clippy::manual_inspect`.
+
+### REQ-CI-01 SC#4 Compliance Audit
+
+| Check | Expected | Actual | Result |
+|-------|----------|--------|--------|
+| `git diff a03f13cf..HEAD -- 'crates/**/*.rs' \| grep -cE '^\+.*#\[allow\(dead_code\)\]'` (raw, unconditional) | `0` | `0` | PASS |
+| `git diff a03f13cf..HEAD -- 'crates/**/*.rs' \| grep -cE '^\+.*cfg_attr.*allow\(dead_code\)'` (conditional, allowed) | `1` (Gap 2 interactive_shell) | `1` | PASS |
+
+REQ-CI-01 SC#4 ("No `#[allow(dead_code)]` added — orphans either deleted or wired") is honored. The one conditional `cfg_attr(not(target_os = "windows"), allow(dead_code))` on the `interactive_shell` field is the explicitly-permitted form (per the established precedent at `launch_runtime.rs:189` + `:194` which use the inverse-direction `cfg_attr(target_os = "windows", allow(dead_code))` for Unix-read-only fields). The SC#4 spirit — no bulk silencing of dead-code — is preserved.
+
+### Local Cargo Verification (Windows Host)
+
+| Command | Expected | Actual | Result |
+|---------|----------|--------|--------|
+| `cargo check --workspace` | clean | `Finished dev profile [unoptimized + debuginfo] target(s) in 10.14s` | PASS |
+| `cargo test -p nono-cli --bin nono profile_runtime` (per Plan 41-09 SUMMARY) | 2/2 passed | 2/2 passed (per SUMMARY) | PASS |
+| `cargo test -p nono --lib keystore` (per Plan 41-09 SUMMARY) | 126/126 passed | 126/126 passed (per SUMMARY) | PASS |
+
+The Windows-host cargo signal is clean, but the decisive cross-target Linux/macOS clippy signal lives in GH Actions and is captured in human verification item #1.
 
 ## Goal Achievement
 
@@ -131,84 +148,107 @@ The other 4 must-haves (REQ-CI-02, REQ-CI-03, REQ-BROKER-CR-01..03, REQ-BROKER-C
 
 | # | Truth (Success Criterion) | Status | Evidence |
 |---|---------------------------|--------|----------|
-| 1 | REQ-CI-01 SC: cross-target Linux clippy clean from Windows host + GH Actions Linux/macOS Clippy green; no `#[allow(dead_code)]` added — every orphan deleted or wired | **PARTIAL** (regressed from VERIFIED via CI run 25972316892) | API migration helper + audit_ledger deletion + cfg-gate dispositions REMAIN landed (those parts of SC#1 hold). However, CI surfaced 6 new dead-code findings on Linux Test, Linux Clippy, macOS Clippy lanes. See § CI Evidence above. SC#1 cannot pass until all 6 close; SC#3 ("GH Actions Linux Clippy + macOS Clippy green on Phase 41 head") is RED. SC#4 forbids bulk `#[allow(dead_code)]`; fix must cfg-gate or wire/delete each item. |
-| 2 | REQ-CI-02 SC: All 5 Windows CI jobs green; MSI validator -BrokerPath mismatch resolved; no [ignored] markers | VERIFIED (code-level; CI green = human-verify) | Unchanged from prior verification. Plan 41-08's `scripts/windows-test-harness.ps1:151-170` fix landed. Live CI confirmation pending next PR push. |
-| 3 | REQ-CI-03 SC: Baseline SHA in upstream-sync-quick.md updated to Phase 41 close SHA; SUMMARY frontmatter convention documented; STATE.md ## Deferred Items cleared of v24 CR-A | VERIFIED | Unchanged. `.planning/templates/upstream-sync-quick.md` baseline SHA `13cc0628`; `.planning/phases/41-.../41-SUMMARY.md` `skipped_gates_convention` frontmatter present; `.planning/STATE.md` v24 CR-A row removed and resolution clause appended. |
-| 4 | REQ-BROKER-CR-01..03 SC: BrokerNotFound→ErrSandboxInit FFI remap; broker argv rejects null/INVALID/empty handle inputs | VERIFIED | Unchanged. `bindings/c/src/lib.rs:138` mapping; `crates/nono-shell-broker/src/main.rs:103-107` (CR-02) + `:132-136` (CR-03); 4 tests. |
-| 5 | REQ-BROKER-CR-04 SC: Job-object test silent-SKIP→FAIL resolved with explicit decision; STATE.md ## Deferred Items cleared of v24 CR-A | VERIFIED | Unchanged. `crates/nono-cli/src/exec_strategy_windows/launch.rs:2450-2458` panic!; `crates/nono-cli/Cargo.toml:109-115` cfg-windows dev-dep; STATE.md updated. |
+| 1 | REQ-CI-01 SC: cross-target Linux clippy clean from Windows host + GH Actions Linux/macOS Clippy green; no `#[allow(dead_code)]` added — every orphan deleted or wired | **VERIFIED** (codebase level; CI green = human-verify #1) | All 6 cross-target gaps from prior verification are closed (see § Codebase Evidence). SC#4 audit clean (0 raw `#[allow(dead_code)]` in diff). The API migration, audit_ledger deletion, and Phase 41-02 cfg-gates from prior plans remain intact. Live CI signal is the decisive confirmation — pending next push. |
+| 2 | REQ-CI-02 SC: All 5 Windows CI jobs green; MSI validator -BrokerPath mismatch resolved; no [ignored] markers | VERIFIED (code-level; CI green = human-verify #2) | Unchanged from prior verification. Plan 41-08's `scripts/windows-test-harness.ps1:158-170` fix landed and intact (`-BrokerPath $brokerPath` argument present). Live CI confirmation pending. |
+| 3 | REQ-CI-03 SC: Baseline SHA in upstream-sync-quick.md updated to Phase 41 close SHA; SUMMARY frontmatter convention documented; STATE.md ## Deferred Items cleared of v24 CR-A | VERIFIED | Unchanged. `.planning/templates/upstream-sync-quick.md` baseline SHA `13cc0628` (line 102); `41-SUMMARY.md` `skipped_gates_convention` frontmatter present (line 4); STATE.md v24 CR-A row cleared. |
+| 4 | REQ-BROKER-CR-01..03 SC: BrokerNotFound→ErrSandboxInit FFI remap; broker argv rejects null/INVALID/empty handle inputs | VERIFIED | Unchanged. `bindings/c/src/lib.rs:138` BrokerNotFound→ErrSandboxInit mapping intact; `crates/nono-shell-broker/src/main.rs:127-134` empty-handle reject; CR-02 null-handle guard at :103-107 intact (verified by Plan 41-06 SUMMARY + spot-check). |
+| 5 | REQ-BROKER-CR-04 SC: Job-object test silent-SKIP→FAIL resolved with explicit decision; STATE.md ## Deferred Items cleared of v24 CR-A | VERIFIED | Unchanged. `crates/nono-cli/src/exec_strategy_windows/launch.rs:2450-2458` panic! intact (Plan 41-07); Cargo.toml cfg-windows dev-dep intact; STATE.md updated. |
 
-**Score:** 4/5 truths verified (was 5/5; REQ-CI-01 regressed to PARTIAL via CI evidence).
+**Score:** 5/5 truths verified at codebase level (was 4/5; REQ-CI-01 promoted from PARTIAL to VERIFIED via Plan 41-09 gap closure).
 
 ### Required Artifacts
 
-Carried forward from prior verification — artifact-existence rows unchanged. Net-new artifact concerns introduced by CI run 25972316892:
+All previously failed artifact rows from the prior verification are now resolved by Plan 41-09 (see § Codebase Evidence above). The previously-verified artifacts from Plans 41-01..41-08 remain unchanged:
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `crates/nono-cli/src/exec_strategy/env_sanitization.rs` | `validate_env_var_patterns` callable from Linux + macOS code paths OR cfg-gated to Windows | FAILED | Line 127: `pub(crate) fn validate_env_var_patterns` has no caller on Linux/macOS (CI 25972316892 Linux Test). Crosscuts WR-06 (profile_runtime.rs:290 byte-identical local copy). |
-| `crates/nono-cli/src/launch_runtime.rs` | `ExecutionFlags.interactive_shell` read on Linux/macOS OR cfg-gated | FAILED | Line 170: reader sites all `#[cfg(target_os = "windows")]`. Fix should follow the precedent at line 180 (`#[cfg_attr(not(target_os = "windows"), allow(dead_code))]`). |
-| `crates/nono-cli/src/setup.rs` | WFP setup surface (5 fields + 6 methods + 6 readers) reachable on Linux/macOS OR cfg-gated to Windows | FAILED | Lines 14-18 (fields); 28-32, 52-72 (constructor + run-time reads); 152, 172, 192, 212, 232, 277 (phase-index call sites); 650-787 (counter expressions); 737-771 (phase_index methods); 1219-1223 (test fixture). All WFP-specific; Linux/macOS path never exercises them. |
-| `crates/nono-cli/tests/common/test_env.rs` | `EnvVarGuard::set_all` reachable on Linux/macOS test runs OR cfg-gated | FAILED | Line 23 (`impl EnvVarGuard`) declares `set_all` at line 26. Sole caller (tests/env_vars.rs:1047) is inside `#[cfg(target_os = "windows")]` test. On Linux/macOS, helper is orphaned. |
-| `crates/nono/src/keystore.rs` | Idiomatic `inspect_err` for side-effect-only error handling | FAILED | Lines 1074-1078: `.map_err(\|e\| { let _ = child.kill(); let _ = child.wait(); e })` triggers `clippy::manual_inspect` on macOS Clippy lane. Existing precedent at line 1006 inside `load_from_op` already uses `.inspect_err(\|_e\| { ... })` — apply same shape. |
-
-All other artifact rows from the prior verification remain VERIFIED (`request_path()` helper, audit_ledger deletion, EnvGuard disallowed_methods fences, dangerous_force_wfp_ready wiring, validate-windows-msi-contract.ps1, scripts/windows-test-harness.ps1, bindings/c/src/lib.rs::map_error, crates/nono-shell-broker/src/main.rs argv guards, launch.rs panic!, Cargo.toml dev-dep, upstream-sync-quick.md baseline, 41-SUMMARY.md frontmatter, STATE.md edits). Those rows are not re-listed here for brevity — see `41-VERIFICATION.md` post-41-08 superseded section in git history (commit prior to this re-verification).
+| `crates/nono-cli/src/profile_runtime.rs` | Delegates to canonical `exec_strategy::validate_env_var_patterns`; no local copy | VERIFIED | Plan 41-09 Task 1 — 2 delegate call-sites, 0 local-copy references |
+| `crates/nono-cli/src/exec_strategy_windows/mod.rs` | Re-exports `validate_env_var_patterns` alongside `is_dangerous_env_var` | VERIFIED | Plan 41-09 Task 1 — line 76 |
+| `crates/nono-cli/src/launch_runtime.rs` | `interactive_shell` field cfg-attr-gated | VERIFIED | Plan 41-09 Task 3 — line 178-179 |
+| `crates/nono-cli/src/setup.rs` | 5 WFP fields + 6 phase_index methods cfg-gated to Windows | VERIFIED | Plan 41-09 Task 2 — lines 14-23, 33-42, 748-793, 1219-1223 |
+| `crates/nono-cli/tests/common/test_env.rs` | Module-inner `#![cfg(target_os = "windows")]` gate | VERIFIED | Plan 41-09 Task 3 — line 19 |
+| `crates/nono/src/keystore.rs` | `inspect_err` for side-effect-only error cleanup in Apple Passwords path | VERIFIED | Plan 41-09 Task 4 — lines 1074-1078 |
+| `crates/nono-cli/src/exec_strategy.rs` | `request_path()` helper + `HandleTarget` import path | VERIFIED | Plan 41-01 + Quick 260516-mxw — line 2633, `use nono::supervisor::HandleTarget` |
+| `scripts/windows-test-harness.ps1` | `-BrokerPath $brokerPath` argument on validator invocation | VERIFIED | Plan 41-08 — lines 158-170 |
+| `bindings/c/src/lib.rs` | `BrokerNotFound`→`ErrSandboxInit` FFI mapping | VERIFIED | Plan 41-06 — line 138 |
+| `crates/nono-shell-broker/src/main.rs` | Empty-handle-list reject + null/INVALID guards | VERIFIED | Plan 41-06 — lines 127-134, 103-107 |
+| `crates/nono-cli/src/exec_strategy_windows/launch.rs` | Job-object test panic! on SKIP path | VERIFIED | Plan 41-07 — lines 2450-2458 |
+| `.planning/templates/upstream-sync-quick.md` | Baseline SHA reset to `13cc0628` | VERIFIED | Plan 41-07 — line 102 |
+| `.planning/phases/41-.../41-SUMMARY.md` | `skipped_gates_convention` frontmatter | VERIFIED | Plan 41-07 — line 4 |
 
 ### Key Link Verification
 
-Carried forward unchanged from prior verification — no key links broken by the CI run 25972316892 findings. The 6 new gaps are all dead-code / lint findings, not link breakages.
+| From | To | Via | Status | Details |
+|------|-----|-----|--------|---------|
+| `profile_runtime.rs` (allowed_env_vars, denied_env_vars closures) | `exec_strategy/env_sanitization.rs:127` (`validate_env_var_patterns`) | `crate::exec_strategy::validate_env_var_patterns` re-export | WIRED | Plan 41-09 Task 1 |
+| `exec_strategy.rs:50` (non-Windows re-export) | `env_sanitization::validate_env_var_patterns` | direct `pub(crate) use` | WIRED | Pre-existing, untouched |
+| `exec_strategy_windows/mod.rs:76` (Windows re-export) | `env_sanitization::validate_env_var_patterns` | direct `pub(crate) use` (mirror tuple) | WIRED | Plan 41-09 Task 1 added |
+| `setup.rs::SetupRunner::new` (Windows constructor branch) | 5 WFP boolean fields on struct | cfg-matched field initializers | WIRED on Windows only | Plan 41-09 Task 2 |
+| `setup.rs::run` (Windows WFP flow) | 6 phase_index methods | cfg-matched method dispatch | WIRED on Windows only | Plan 41-09 Task 2 |
+
+No key links broken by the gap closure. The deletion of `validate_env_var_patterns_local` shortened the call chain by one hop without breaking the wiring contract.
 
 ### Data-Flow Trace (Level 4)
 
-Carried forward unchanged from prior verification.
+Not applicable for this re-verification — Plan 41-09 is a dead-code cleanup + idiom swap pass. No artifacts render dynamic data; the changes are purely structural. Plan 41-09 Task 4 (`map_err` → `inspect_err`) preserves the cleanup-on-error data flow verbatim (best-effort `child.kill()` + `child.wait()` still runs when `wait_with_timeout` errs; original error still propagates via `?`).
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| All Plan 41-08 grep checks | (see prior 41-VERIFICATION.md) | unchanged | PASS |
-| Cross-target Linux clippy from Windows host | Documented blocked locally; CI Linux Test + Linux Clippy lanes are decisive | CI 25972316892 RED on Linux Test, Linux Clippy, macOS Clippy | **FAIL** (was SKIP — now confirmed FAIL via CI evidence; load-bearing per phase convention) |
-| `fn validate_env_var_patterns` location confirmed | `grep -n "fn validate_env_var_patterns" crates/nono-cli/src/exec_strategy/env_sanitization.rs` | matches line 127 | PASS (location confirmed) |
-| `interactive_shell` field location confirmed | `grep -n "interactive_shell" crates/nono-cli/src/launch_runtime.rs` | matches line 170 (field), 204, 320 (defaults) | PASS (location confirmed) |
-| WFP-service field locations confirmed | `grep -n "register_wfp_service\|install_wfp_service" crates/nono-cli/src/setup.rs` | matches lines 14-18 (fields), readers at 28-32, 52-72, 650-787 | PASS (location confirmed) |
-| `phase_index` method locations confirmed | `grep -n "fn register_phase_index\|fn install_phase_index" crates/nono-cli/src/setup.rs` | matches lines 737, 741, 745, 752, 756, 771; call sites at 152, 172, 192, 212, 232, 277 | PASS (location confirmed) |
-| `set_all` mirror location confirmed | `grep -n "fn set_all\|impl EnvVarGuard" crates/nono-cli/tests/common/test_env.rs` | matches lines 23, 26 | PASS (location confirmed) |
-| macOS `map_err` candidate location confirmed | `grep -nB2 -A5 "let _ = child.kill" crates/nono/src/keystore.rs` | matches lines 1074-1078 inside `#[cfg(target_os = "macos")] load_from_apple_password` | PASS (location confirmed) |
+| Workspace cargo check clean on Windows host | `cargo check --workspace` | `Finished dev profile target(s) in 10.14s` | PASS |
+| Gap 1 local-copy removed | `grep -c "validate_env_var_patterns_local" crates/nono-cli/src/profile_runtime.rs` | `0` | PASS |
+| Gap 1 Windows re-export | `grep -nE "validate_env_var_patterns" crates/nono-cli/src/exec_strategy_windows/mod.rs` | `76:pub(crate) use env_sanitization::{is_dangerous_env_var, validate_env_var_patterns};` | PASS |
+| Gap 2 interactive_shell cfg-attr | `grep -B 1 'pub(crate) interactive_shell' crates/nono-cli/src/launch_runtime.rs` | shows `cfg_attr(not(target_os = "windows"), allow(dead_code))` at line 178 | PASS |
+| Gap 3 WFP fields cfg-gated | `grep -nE 'register_wfp_service\|install_wfp_service\|install_wfp_driver\|start_wfp_service\|start_wfp_driver' crates/nono-cli/src/setup.rs` | shows 5 field decls + 5 initializers + 10 reader sites (all in Windows-only WFP branches) | PASS |
+| Gap 4 phase_index cfg-gated | `grep -nE 'fn register_phase_index\|fn install_phase_index\|fn start_phase_index\|fn install_driver_phase_index\|fn start_driver_phase_index\|fn recheck_wfp_phase_index' crates/nono-cli/src/setup.rs` | 6 method decls each preceded by `#[cfg(target_os = "windows")]` | PASS |
+| Gap 5 test_env module gate | `grep -nE '^#!\[cfg\(target_os = "windows"\)\]' crates/nono-cli/tests/common/test_env.rs` | `19:#![cfg(target_os = "windows")]` | PASS |
+| Gap 6 keystore map_err absent | `sed -n '1068,1080p' crates/nono/src/keystore.rs \| grep -c 'map_err'` | `0` | PASS |
+| Gap 6 keystore inspect_err present | `sed -n '1068,1080p' crates/nono/src/keystore.rs \| grep -c 'inspect_err'` | `1` | PASS |
+| REQ-CI-01 SC#4 raw allow(dead_code) audit | `git diff a03f13cf..HEAD -- 'crates/**/*.rs' \| grep -cE '^\+.*#\[allow\(dead_code\)\]'` | `0` | PASS |
+| REQ-CI-01 SC#4 conditional cfg_attr audit | `git diff a03f13cf..HEAD -- 'crates/**/*.rs' \| grep -cE '^\+.*cfg_attr.*allow\(dead_code\)'` | `1` (Gap 2 only, permitted) | PASS |
+| Cross-target Linux/macOS clippy from Windows host | NOT runnable without cross-toolchain (load-bearing per memory `feedback_clippy_cross_target`) | SKIPPED — escalated to human verification item #1 | SKIP (decisive signal in CI) |
+| Plan 41-01 request_path helper intact | `grep -nE 'request_path\|HandleTarget' crates/nono-cli/src/exec_strategy.rs` | line 2633 `fn request_path`, line 2634 `use nono::supervisor::HandleTarget`, plus 7 callsites | PASS |
+| Plan 41-08 BrokerPath fix intact | `grep -nE 'BrokerPath' scripts/windows-test-harness.ps1` | lines 158-170 contain the parameter binding + comment block | PASS |
+| Plan 41-06 BrokerNotFound→ErrSandboxInit intact | `grep -nE 'BrokerNotFound\|ErrSandboxInit' bindings/c/src/lib.rs` | line 138 mapping + lines 274-286 test | PASS |
+| Plan 41-06 broker null + empty-list guards intact | `grep -nE 'INVALID_HANDLE\|inherit-handle list is empty' crates/nono-shell-broker/src/main.rs` | lines 127-134 empty-list reject; CR-02 null guard at :103-107 | PASS |
+| Plan 41-07 baseline SHA + skipped_gates_convention intact | `grep -nE 'baseline_sha\|13cc0628\|skipped_gates_convention' .planning/templates/upstream-sync-quick.md .planning/phases/41-ci-cleanup-v24-broker-code-review-closure/41-SUMMARY.md` | upstream-sync-quick.md:102 `13cc0628`; 41-SUMMARY.md:4 `skipped_gates_convention:` | PASS |
 
 ### Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|-------------|-------------|--------|----------|
-| REQ-CI-01 | 41-01, 41-02 | Linux/macOS Clippy lints resolved | **PARTIAL** (regression) | API migration + cfg dispositions landed; 6 NEW dead-code/clippy errors discovered via CI 25972316892. SC#1 + SC#3 RED; SC#4 forbids `#[allow(dead_code)]` so fix must cfg-gate or wire/delete. |
-| REQ-CI-02 | 41-03, 41-04, 41-05, 41-08 | Windows CI jobs green (5 jobs) | SATISFIED (code-level); CI green is human-verify | Plan 41-08 closure landed; pending live CI signal |
-| REQ-CI-03 | 41-07 | Baseline-aware gate reset + skipped-gates convention + STATE.md cleanup | SATISFIED | Three D-16 commits landed |
-| REQ-BROKER-CR-01 | 41-06 | BrokerNotFound FFI not-found mapping | SATISFIED | bindings/c/src/lib.rs:138 |
-| REQ-BROKER-CR-02 | 41-06 | Broker null-handle validation | SATISFIED | crates/nono-shell-broker/src/main.rs:103-107 + 2 tests |
-| REQ-BROKER-CR-03 | 41-06 | Broker empty-handle-list path | SATISFIED | crates/nono-shell-broker/src/main.rs:132-136 + flipped test |
-| REQ-BROKER-CR-04 | 41-07 | Job-object test skip policy | SATISFIED | launch.rs:2450-2458 panic! + Cargo.toml dev-dep (WR-07 deferred) |
+| REQ-CI-01 | 41-01, 41-02, 41-09 | Linux/macOS Clippy lints resolved | SATISFIED (codebase-level); GH Actions green = human-verify #1 | API migration + audit_ledger deletion + cfg-gates from prior plans intact; Plan 41-09 closed the 6 cross-target gaps from prior verification. SC#4 audit clean. |
+| REQ-CI-02 | 41-03, 41-04, 41-05, 41-08 | Windows CI jobs green (5 jobs) | SATISFIED (code-level); GH Actions green = human-verify #2 | Plan 41-08's PowerShell BrokerPath fix landed and intact (lines 158-170). |
+| REQ-CI-03 | 41-07 | Baseline-aware gate reset + skipped-gates convention + STATE.md cleanup | SATISFIED | Three D-16 commits intact. |
+| REQ-BROKER-CR-01 | 41-06 | BrokerNotFound FFI not-found mapping | SATISFIED | `bindings/c/src/lib.rs:138` |
+| REQ-BROKER-CR-02 | 41-06 | Broker null-handle validation | SATISFIED | `crates/nono-shell-broker/src/main.rs:103-107` + 2 tests |
+| REQ-BROKER-CR-03 | 41-06 | Broker empty-handle-list path | SATISFIED | `crates/nono-shell-broker/src/main.rs:127-134` + flipped test |
+| REQ-BROKER-CR-04 | 41-07 | Job-object test skip policy | SATISFIED | `launch.rs:2450-2458` panic! + Cargo.toml dev-dep |
 
 ### Anti-Patterns Found
 
-Re-classifying the table to reflect the 6 new CI-surfaced findings (BLOCKER class) and carry forward the 7 deferred WARNINGS unchanged.
+The 6 BLOCKER-class CI-surfaced findings from the prior verification are now resolved by Plan 41-09 (rows 1-5 in the prior table, plus the macOS keystore::map_err row). The 7 deferred WARNINGS minus WR-06 (which Plan 41-09 Task 1 closed) remain in the backlog.
 
 | File | Line | Pattern | Severity | Status |
 |------|------|---------|----------|--------|
-| `crates/nono-cli/src/exec_strategy/env_sanitization.rs` | 127 | `pub(crate) fn` never used on Linux/macOS; orphan public-to-crate API | 🛑 BLOCKER (CI-surfaced) | OPEN — requires gap-closure plan |
-| `crates/nono-cli/src/launch_runtime.rs` | 170 | Struct field set but never read on Linux/macOS (reader sites all `#[cfg(target_os = "windows")]`) | 🛑 BLOCKER (CI-surfaced) | OPEN — requires gap-closure plan |
-| `crates/nono-cli/src/setup.rs` | 14-18 (fields) + 737-771 (methods) | WFP setup surface (5 fields + 6 methods + 6 call sites + 30+ counter expressions) never exercised on Linux/macOS | 🛑 BLOCKER (CI-surfaced) | OPEN — requires gap-closure plan; recommend extracting to `#[cfg(target_os = "windows")] mod wfp_setup;` to cluster the change |
-| `crates/nono-cli/tests/common/test_env.rs` | 23-37 (impl + set_all) | Helper used only by `#[cfg(target_os = "windows")]` integration test; orphan on Linux/macOS | 🛑 BLOCKER (CI-surfaced) | OPEN — requires gap-closure plan |
-| `crates/nono/src/keystore.rs` | 1074-1078 | `map_err(\|e\| { side-effect; e })` returning input unchanged → clippy::manual_inspect lint | 🛑 BLOCKER (CI-surfaced; macOS Clippy) | OPEN — one-line fix to `.inspect_err(\|_\| { ... })`, precedent at keystore.rs:1006 |
-| `crates/nono-cli/Cargo.toml` | 109-115 | Dev-dep builds DEBUG but test only checks RELEASE paths | ⚠️ WARNING (WR-07) | DEFERRED (backlog) — unchanged |
-| `crates/nono-cli/tests/common/test_env.rs` | 5-10 | Doc-comment claims "verbatim mirror" but omits `lock_env()` and `EnvVarGuard::remove()` | ⚠️ WARNING (WR-08) | DEFERRED (backlog) — unchanged |
-| `crates/nono-cli/src/command_runtime.rs` | 26-29 | `--dangerous-force-wfp-ready` silently dropped on `nono shell`/`nono wrap` | ⚠️ WARNING (WR-01) | DEFERRED (backlog) — unchanged |
-| `crates/nono-shell-broker/src/main.rs` | 103-107 | INVALID_HANDLE_VALUE guard misses 32-bit `0xFFFFFFFF` sentinel | ⚠️ WARNING (WR-03) | DEFERRED (backlog) — unchanged |
-| `crates/nono-shell-broker/src/main.rs` | 150-167 | `build_command_line` does not reject argv values with interior NUL bytes | ⚠️ WARNING (WR-02) | DEFERRED (backlog) — unchanged |
-| `bindings/c/src/lib.rs` | 80-82 | `NoCapabilities \| NoCommand => ErrNoCapabilities` conflates distinct semantics | ⚠️ WARNING (WR-04) | DEFERRED (backlog) — unchanged |
-| `bindings/c/src/lib.rs` | 116-119 | `HashMismatch` → `ErrIo` (should be `ErrTrustVerification`); `SessionNotFound` → `ErrIo` (should be `ErrPathNotFound`) | ⚠️ WARNING (WR-05) | DEFERRED (backlog) — unchanged |
-| `crates/nono-cli/src/profile_runtime.rs` | 289-306 (now :290) | `validate_env_var_patterns_local` byte-identical to canonical; no lockstep test | ⚠️ WARNING (WR-06) | DEFERRED (backlog) — **CROSS-REFERENCE: see CI-surfaced BLOCKER row 1 above. The gap-closure planner SHOULD consider closing WR-06 simultaneously: wiring profile_runtime.rs:290 to delegate to env_sanitization.rs:127 simultaneously eliminates the orphan AND the duplication.** |
+| `crates/nono-cli/src/profile_runtime.rs` | (former :290 line) | `validate_env_var_patterns_local` byte-identical duplicate | (was WR-06 WARNING + CI-surfaced BLOCKER row 1) | **CLOSED** by Plan 41-09 Task 1 (deletion + delegation) |
+| `crates/nono-cli/src/exec_strategy/env_sanitization.rs` | 127 | `pub(crate) fn` never used on Linux/macOS | (was 🛑 BLOCKER) | **CLOSED** by Plan 41-09 Task 1 (wired via delegate from profile_runtime.rs) |
+| `crates/nono-cli/src/launch_runtime.rs` | 179 | `ExecutionFlags.interactive_shell` field never read on Linux/macOS | (was 🛑 BLOCKER) | **CLOSED** by Plan 41-09 Task 3 (`cfg_attr(not(target_os = "windows"), allow(dead_code))`) |
+| `crates/nono-cli/src/setup.rs` | 14-23, 748-793 | WFP setup surface never exercised on Linux/macOS | (was 🛑 BLOCKER) | **CLOSED** by Plan 41-09 Task 2 (per-item `#[cfg(target_os = "windows")]` gates on 5 fields + 6 methods + initializers + fixtures) |
+| `crates/nono-cli/tests/common/test_env.rs` | 23-37 | `EnvVarGuard::set_all` mirror orphan on Linux/macOS | (was 🛑 BLOCKER) | **CLOSED** by Plan 41-09 Task 3 (module-inner `#![cfg(target_os = "windows")]`) |
+| `crates/nono/src/keystore.rs` | 1074-1078 | `map_err(\|e\| {...; e})` clippy::manual_inspect on macOS | (was 🛑 BLOCKER) | **CLOSED** by Plan 41-09 Task 4 (one-line swap to `.inspect_err(\|_\| {...})`) |
+| `crates/nono-cli/Cargo.toml` | 109-115 | Dev-dep builds DEBUG but test only checks RELEASE | ⚠️ WARNING (WR-07) | DEFERRED — backlog |
+| `crates/nono-cli/tests/common/test_env.rs` | 5-10 | Doc-comment claims "verbatim mirror" but omits `lock_env()` and `EnvVarGuard::remove()` | ⚠️ WARNING (WR-08) | DEFERRED — backlog |
+| `crates/nono-cli/src/command_runtime.rs` | 26-29 | `--dangerous-force-wfp-ready` silently dropped on `nono shell`/`nono wrap` | ⚠️ WARNING (WR-01) | DEFERRED — backlog |
+| `crates/nono-shell-broker/src/main.rs` | 103-107 | INVALID_HANDLE_VALUE guard misses 32-bit `0xFFFFFFFF` sentinel | ⚠️ WARNING (WR-03) | DEFERRED — backlog |
+| `crates/nono-shell-broker/src/main.rs` | 150-167 | `build_command_line` does not reject argv values with interior NUL bytes | ⚠️ WARNING (WR-02) | DEFERRED — backlog |
+| `bindings/c/src/lib.rs` | 80-82 | `NoCapabilities \| NoCommand => ErrNoCapabilities` conflates distinct semantics | ⚠️ WARNING (WR-04) | DEFERRED — backlog |
+| `bindings/c/src/lib.rs` | 116-119 | `HashMismatch` → `ErrIo` (should be `ErrTrustVerification`); `SessionNotFound` → `ErrIo` (should be `ErrPathNotFound`) | ⚠️ WARNING (WR-05) | DEFERRED — backlog |
 
 ## Deferred (Backlog)
 
-The 7 WARNINGS (WR-01..WR-08) deferred per the prior verification remain deferred. **Important cross-reference:** WR-06 (`validate_env_var_patterns_local` byte-identical to canonical, profile_runtime.rs:290) is closely related to BLOCKER row 1 above (`validate_env_var_patterns` never used, env_sanitization.rs:127). A single edit at profile_runtime.rs:290 — replacing the local copy with a delegation to `env_sanitization::validate_env_var_patterns(patterns, field_name)` — closes WR-06 AND wires the canonical function so the dead-code finding clears without needing a cfg-gate. **The gap-closure planner should consider closing both together** (one PR, one diff).
+The 7 WARNINGS deferred per the prior verification minus WR-06 (which Plan 41-09 Task 1 closed) remain in the backlog. Per user "Blocker only" scope discipline across Plan 41-08 + 41-09. **v2.5 milestone or future hardening phase candidate.**
 
 | Item | File | Brief | Disposition |
 |------|------|-------|-------------|
@@ -217,29 +257,35 @@ The 7 WARNINGS (WR-01..WR-08) deferred per the prior verification remain deferre
 | WR-03 | crates/nono-shell-broker/src/main.rs:103-107 | INVALID_HANDLE_VALUE guard misses 32-bit sentinel `0xFFFFFFFF` | Backlog — defense-in-depth |
 | WR-04 | bindings/c/src/lib.rs:80-82 | `NoCapabilities \| NoCommand` conflates distinct semantics | Backlog — FFI error precision |
 | WR-05 | bindings/c/src/lib.rs:116-119 | `HashMismatch`/`SessionNotFound` routed to `ErrIo` instead of precise codes | Backlog — FFI error routing |
-| WR-06 | crates/nono-cli/src/profile_runtime.rs:290 | byte-identical local copy of `validate_env_var_patterns`; no lockstep test | **Backlog with cross-reference** — closing this WR simultaneously closes CI-surfaced BLOCKER row 1; planner should fold together |
+| ~~WR-06~~ | ~~crates/nono-cli/src/profile_runtime.rs~~ | ~~byte-identical local copy of `validate_env_var_patterns`~~ | **CLOSED** by Plan 41-09 Task 1 (deletion + delegate) |
 | WR-07 | crates/nono-cli/Cargo.toml:109-115 | Dev-dep builds DEBUG but test only checks RELEASE | Backlog — dev-loop UX |
 | WR-08 | crates/nono-cli/tests/common/test_env.rs:5-10 | Mirror omits `lock_env()`/`EnvVarGuard::remove()` | Backlog — doc freshness |
 
 ## Human Verification Required
 
-#### 1. CI run 25972316892 + successor runs no longer hit -Dwarnings dead-code errors after the gap-closure plan lands (NEW)
+#### 1. NEW: Verify CI run after pushing 41-09 commits (`05065209..47d55905`) lands no `-Dwarnings` dead-code errors on Linux/macOS lanes
 
-**Test:** After the next gap-closure plan lands the 6 fixes documented in § CI Evidence, observe the next push's GH Actions runs.
-**Expected:** Linux Test, Linux Clippy, macOS Clippy lanes all PASS. No occurrence of any of the following in lane logs: `function \`validate_env_var_patterns\` is never used`, `field \`interactive_shell\` is never read`, `fields \`register_wfp_service`, `methods \`register_phase_index`, `associated function \`set_all\` is never used`, `using \`map_err\` over \`inspect_err\``.
-**Why human:** Live CI signal; not reproducible locally without C cross-compiler for Linux clippy from this Windows dev host. NEW for this re-verification.
+**Test:** After Phase 41 commits push (or after the next gap-closure commit if any), inspect GH Actions runs for Linux Test, Linux Clippy, and macOS Clippy lanes on the head SHA carrying `47d55905`.
+**Expected:** All three lanes PASS. None of the following strings appear in lane logs:
+- `function \`validate_env_var_patterns\` is never used`
+- `field \`interactive_shell\` is never read`
+- `fields \`register_wfp_service\``
+- `methods \`register_phase_index\``
+- `associated function \`set_all\` is never used`
+- `using \`map_err\` over \`inspect_err\``
+**Why human:** Live CI signal; not reproducible locally without cross-toolchain for Linux/macOS clippy from this Windows dev host (load-bearing per memory `feedback_clippy_cross_target`). NEW for this Plan 41-09 closure re-verification.
 
 #### 2. windows-build CI lane no longer fails at PowerShell parameter binding after Plan 41-08 lands
 
-**Test:** On the next push to the Phase 41 PR branch carrying commit `c0a89227` (the Plan 41-08 fix), inspect the GH Actions `windows-build` job's `Run Windows build harness` step output (`ci-logs/windows-build.log`).
+**Test:** On the next push to the Phase 41 PR branch, inspect the GH Actions `windows-build` job's `Run Windows build harness` step output.
 **Expected:** NO line matching `Cannot process command because of one or more missing mandatory parameters: BrokerPath`; the new `==> build nono-shell-broker` label appears followed by a successful `cargo build -p nono-shell-broker`; the `==> validate windows msi contract` label is followed by NO Test-Path failure.
 **Why human:** Decisive live signal lives in GH Actions; not reproducible locally. Carried forward from prior verification.
 
-#### 3. All 7 (now 8 with Linux Test) GH Actions CI lanes green on Phase 41 close SHA
+#### 3. All 8 GH Actions CI lanes green on Phase 41 close SHA
 
-**Test:** Open / refresh the Phase 41 PR and inspect CI status for all lanes (Linux Clippy, Linux Test, macOS Clippy, Windows Build, Windows Integration, Windows Regression, Windows Security, Windows Packaging) on the head SHA after the gap-closure plan lands.
+**Test:** Open / refresh the Phase 41 PR and inspect CI status for all lanes (Linux Clippy, Linux Test, macOS Clippy, Windows Build, Windows Integration, Windows Regression, Windows Security, Windows Packaging) on the head SHA after Plan 41-09 lands.
 **Expected:** All lanes PASS on the same head commit.
-**Why human:** REQ-CI-01 SC#3 + REQ-CI-02 SC#1 require GH Actions green on Phase 41 close SHA; not reproducible locally. Carried forward.
+**Why human:** REQ-CI-01 SC#3 + REQ-CI-02 SC#1+2 require GH Actions green on Phase 41 close SHA; not reproducible locally. Carried forward.
 
 #### 4. env_vars parallel flake fix (Plan 41-05) on Windows host
 
@@ -259,23 +305,34 @@ The 7 WARNINGS (WR-01..WR-08) deferred per the prior verification remain deferre
 **Expected:** No integer-mapping of `-1` (ErrPathNotFound) as broker-discovery-failure semantics.
 **Why human:** Sibling repos not present in this working directory. Carried forward.
 
+## Lesson Reinforced
+
+**Cross-target clippy is load-bearing for the close-gate verifier.** Phase 41 required TWO rounds of gap closure (41-08 BlockerPath + 41-09 cross-target) because the original Phase 41 close-gate verifier accepted Windows-host grep evidence alone for REQ-CI-01 SC#1 + SC#3. The prior verifier honestly documented cross-target Linux clippy as SKIPPED with the load-bearing risk noted — but still flipped REQ-CI-01 to VERIFIED at the codebase level on Windows-host signal. CI run 25972316892 then surfaced 6 dead-code errors that were structurally invisible to Windows-host verification.
+
+**Future close-gate verifiers MUST:** for any plan that touches cfg-gated Unix code paths (i.e. files containing `#[cfg(target_os = "linux"|"macos")]` blocks or files re-exported via Unix-side modules), either (a) run `cargo clippy --workspace --target x86_64-unknown-linux-gnu -- -D warnings` from the dev host (requires `x86_64-unknown-linux-gnu` toolchain installed via `rustup target add`), or (b) wait for GH Actions Linux Test + Linux Clippy + macOS Clippy lanes to PASS on the head SHA before flipping the related SC to VERIFIED. The Windows-host `cargo check` signal is necessary but not sufficient.
+
+This re-verification respects that lesson: REQ-CI-01 is flipped to VERIFIED only at the **codebase level**, with the live CI signal explicitly preserved as human verification item #1. Status is `human_needed`, not `passed`, because the CI signal is the decisive gate per REQ-CI-01 SC#3.
+
+This lesson generalizes beyond Phase 41 to every future plan touching platform-conditional symbols. It complements memory `feedback_clippy_cross_target` (Phase 25 CR-A regression lesson) by extending the rule from PLAN-time verification to CLOSE-GATE verification.
+
 ## Gaps Summary
 
-CI run 25972316892 surfaced 6 BLOCKER-class findings on Linux Test, Linux Clippy, and macOS Clippy lanes after the HandleTarget import fix landed. All 6 are -Dwarnings escalated dead-code or `clippy::manual_inspect` lints that the prior local verification could not catch because cross-target clippy from Windows host was SKIPPED (the documented load-bearing risk). The 6 findings are concentrated in 4 files:
+**No gaps remaining at the codebase level.** Plan 41-09 closed all 6 cross-target findings from CI run 25972316892:
 
-1. `crates/nono-cli/src/exec_strategy/env_sanitization.rs:127` — `validate_env_var_patterns` orphan (closely related to WR-06)
-2. `crates/nono-cli/src/launch_runtime.rs:170` — `interactive_shell` field orphan on non-Windows
-3. `crates/nono-cli/src/setup.rs:14-18, 737-771` — WFP setup surface orphan on non-Windows (largest single fix; group with field readers at 28-32, 52-72, 650-787, call sites at 152-277, fixture at 1219-1223)
-4. `crates/nono-cli/tests/common/test_env.rs:23-37` — `EnvVarGuard::set_all` mirror orphan on non-Windows
-5. `crates/nono/src/keystore.rs:1074-1078` — `map_err` → `inspect_err` macOS-only clippy lint (one-line fix, precedent at line 1006)
+1. `validate_env_var_patterns` orphan + WR-06 — closed by delegate wiring (`profile_runtime.rs` → `exec_strategy::validate_env_var_patterns`)
+2. `interactive_shell` field — closed by `cfg_attr(not(target_os = "windows"), allow(dead_code))`
+3. 5 `SetupRunner` WFP fields — closed by per-field `#[cfg(target_os = "windows")]`
+4. 6 `phase_index` methods — closed by per-method `#[cfg(target_os = "windows")]`
+5. `EnvVarGuard::set_all` mirror — closed by module-inner `#![cfg(target_os = "windows")]`
+6. `keystore.rs` Apple Passwords `map_err` — closed by one-line swap to `.inspect_err(|_| {...})`
 
-REQ-CI-01 falls back from VERIFIED to **PARTIAL**; status transitions from `human_needed` (5/5) to `gaps_found` (4/5). The other 4 must-haves (REQ-CI-02, REQ-CI-03, REQ-BROKER-CR-01..03, REQ-BROKER-CR-04) remain VERIFIED at the codebase level.
+REQ-CI-01 flips from PARTIAL back to VERIFIED at the codebase level. Score: 5/5 truths verified.
 
-Recommendation for the next gap-closure plan: fold the env_sanitization fix together with WR-06 (one diff: wire `profile_runtime.rs:290` to delegate to `env_sanitization.rs:127`) so the orphan clears and WR-06 closes simultaneously. The setup.rs WFP-surface fix is the largest single change; extracting to `#[cfg(target_os = "windows")] mod wfp_setup;` may be cleaner than line-by-line cfg-gating. The keystore.rs macOS fix is one-line. Bulk `#[allow(dead_code)]` is NOT acceptable per REQ-CI-01 SC#4.
+Status is `human_needed` (NOT `passed`) because the 6 carried-forward human verification items remain pending live CI signal (the prior 5 + 1 NEW for this plan's specific Linux Test + Linux Clippy + macOS Clippy lane green confirmation). The codebase-level fix is complete; the GH Actions signal is the decisive gate.
 
 ---
 
-_Verified: 2026-05-16T20:30:00Z_
+_Verified: 2026-05-16T21:48:17Z_
 _Verifier: Claude (gsd-verifier)_
-_Re-verification supersedes: 2026-05-16T19:30:00Z (post-Plan-41-08 verification, status: human_needed)_
-_CI trigger: run 25972316892 on commit b284bc63 surfaced 6 -Dwarnings dead-code errors on Linux Test (job 76346400920), Linux Clippy (job 76346400927), and macOS Clippy (job 76346400923)_
+_Re-verification supersedes: 2026-05-16T20:30:00Z (post-CI-run-25972316892 verification, status: gaps_found, score 4/5)_
+_Closure trigger: Plan 41-09 commits 05065209, 389c0fae, e97b596e, 0699c6f4, 47d55905 — 5 commits closing 6 cross-target gaps + WR-06_
