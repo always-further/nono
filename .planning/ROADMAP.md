@@ -45,7 +45,7 @@ granularity: standard
   3. The baseline-aware CI gate baseline SHA in `.planning/templates/upstream-sync-quick.md` is updated to the Phase 41 close SHA, and the SUMMARY frontmatter convention (`skipped_gates_load_bearing` vs `_environmental`) is documented at the top of Phase 41's SUMMARY for Phase 43's inheritance.
   4. `NonoError::BrokerNotFound` maps to a semantically correct C-FFI error code (per `.planning/todos/pending/v24-cr-01-broker-not-found-ffi-mapping.md`), broker-side FFI handle arguments are validated non-null before crossing the boundary (CR-02), and the empty-handle-list path is handled explicitly in the broker dispatch (CR-03).
   5. The Job-object test skip policy for `broker_launch_assigns_child_to_job_object` is resolved with an explicit decision (a/b/c per `.planning/todos/pending/v24-cr-04-job-object-test-skip-policy.md`), and STATE.md `## Deferred Items` is cleared of the v24 CR-A class entries that were waiting on a clean baseline.
-**Plans**: 7 plans
+**Plans**: 8 plans (7 original + 1 gap-closure)
 Plans:
 **Wave 1**
 - [x] 41-01-PLAN.md — API migration: CapabilityRequest::path -> HandleTarget::FilePath helper (14 sites)
@@ -57,6 +57,9 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 41-02-PLAN.md — Unix simple: dead-code dispositions + disallowed_methods + unreachable expression (3 atomic commits)
 - [x] 41-07-PLAN.md — Broker CR-04 + baseline reset close gate (SKIP->FAIL + build.rs + baseline SHA + skipped-gates convention + STATE.md cleanup)
+
+**Wave 3** *(gap closure — extends Plan 41-03 to the second validator caller)*
+- [ ] 41-08-PLAN.md — REQ-CI-02 gap closure: thread mandatory -BrokerPath into windows-test-harness.ps1 build suite + regression guard
 **UI hint**: no
 
 ### Phase 42: UPST5 audit
