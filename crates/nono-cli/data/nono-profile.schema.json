@@ -792,7 +792,7 @@
         },
         "allow_writable_executable": {
           "type": "boolean",
-          "description": "Explicit per-command trust downgrade for a pinned executable in a user/group/world-writable location. Valid only when executable is set to an absolute file path; it does not trust the containing directory or other PATH entries."
+          "description": "Explicit per-command trust downgrade for a pinned executable in a supervisor-user/group/world-writable location. Valid only when executable is set to an absolute file path. On macOS this remains path-racy and is not suitable for high-assurance policies."
         },
         "can_use": {
           "type": "array",
@@ -1008,7 +1008,7 @@
         },
         "allow_writable_executable": {
           "type": "boolean",
-          "description": "Explicit per-command trust downgrade for a pinned executable in a user/group/world-writable location. Valid only when executable is set to an absolute file path; it does not trust the containing directory or other PATH entries."
+          "description": "Explicit per-command trust downgrade for a pinned executable in a supervisor-user/group/world-writable location. Valid only when executable is set to an absolute file path. On macOS this remains path-racy and is not suitable for high-assurance policies."
         },
         "can_use": {
           "type": "array",

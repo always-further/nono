@@ -79,7 +79,7 @@ Controls startup-time command gating. These checks run only at launch time and a
 
 ### command_policies
 
-Ephemeral Tool Isolation policies live under `command_policies`. Use `commands.<name>.executable` to bind a command name to one exact executable file instead of the first PATH match. If that pinned executable lives in a writable location, `commands.<name>.allow_writable_executable` is available as a per-command trust downgrade. It is valid only with an absolute `executable` path; relative paths and bare command names fail validation. The agent still invokes the command name through the ETI shim, and the override does not trust the containing directory or any other executable in it.
+Ephemeral Tool Isolation policies live under `command_policies`. Use `commands.<name>.executable` to bind a command name to one exact executable file instead of the first PATH match. By default, ETI rejects pinned executables and direct parent directories that are writable by the supervisor user, group, or world. If that pinned executable lives in a writable location, `commands.<name>.allow_writable_executable` is available as a per-command trust downgrade. It is valid only with an absolute `executable` path; relative paths and bare command names fail validation. The agent still invokes the command name through the ETI shim. On macOS, ETI verifies the file before sandboxing but must still exec by path, so writable pinned executables are not suitable for high-assurance policies.
 
 ```json
 {

@@ -640,7 +640,7 @@ fn validate_command(
                 report.warning(
                     "writable_executable_trust_downgrade",
                     format!(
-                        "command '{command_name}' allows a writable executable path; ETI will only apply this downgrade to the exact executable '{}'",
+                        "command '{command_name}' allows a writable pinned executable path; this is a trust downgrade for '{}'",
                         executable
                     ),
                 );

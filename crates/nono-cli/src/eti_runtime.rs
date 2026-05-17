@@ -5031,6 +5031,10 @@ mod macos {
             NonoError::SandboxInit(format!("ETI child chdir failed before sandbox: {err}"))
         })?;
 
+        // macOS lacks fexecve/execveat, so verification can open and hash one
+        // object but the final exec is still path-based. Default immutability
+        // checks reject writable controlled paths; allow_writable_executable is
+        // therefore a deliberate trust downgrade for this remaining race.
         verify_launch_binary(&spec)?;
         let caps = caps_from_spec(&spec.caps)?;
         Sandbox::apply(&caps)?;
@@ -6447,7 +6451,15 @@ mod macos {
 
     fn verify_launch_binary(spec: &EtiChildLaunchSpec) -> Result<()> {
         let path = PathBuf::from(OsString::from_vec(spec.real_binary.clone()));
-        let metadata = fs::metadata(&path).map_err(|source| NonoError::ConfigRead {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|source| NonoError::ConfigRead {
+                path: path.clone(),
+                source,
+            })?;
+        let metadata = file.metadata().map_err(|source| NonoError::ConfigRead {
             path: path.clone(),
             source,
         })?;
@@ -6466,10 +6478,6 @@ mod macos {
             )));
         }
 
-        let mut file = File::open(&path).map_err(|source| NonoError::ConfigRead {
-            path: path.clone(),
-            source,
-        })?;
         let mut hasher = Sha256::new();
         let mut buf = [0_u8; 8192];
         loop {
@@ -6885,7 +6893,7 @@ mod macos {
             source,
         })?;
         if !allow_writable_path {
-            reject_group_or_world_writable_path(path, &metadata, label)?;
+            reject_user_writable_path(path, &metadata, label)?;
         }
         if outer_caps_grant_write(outer_caps, path) {
             return Err(NonoError::SandboxInit(format!(
@@ -6904,7 +6912,7 @@ mod macos {
             source,
         })?;
         if !allow_writable_path {
-            reject_group_or_world_writable_path(
+            reject_user_writable_path(
                 parent,
                 &parent_metadata,
                 &format!("{label} executable parent directory for {}", path.display()),
@@ -6928,6 +6936,22 @@ mod macos {
         if mode & 0o022 != 0 {
             return Err(NonoError::SandboxInit(format!(
                 "ETI {label} is group/world writable: {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn reject_user_writable_path(path: &Path, metadata: &fs::Metadata, label: &str) -> Result<()> {
+        let mode = metadata.permissions().mode();
+        let euid = unsafe { libc::geteuid() };
+        let egid = unsafe { libc::getegid() };
+        let owner_writable_by_supervisor = metadata.uid() == euid && mode & 0o200 != 0;
+        let group_writable_by_supervisor = metadata.gid() == egid && mode & 0o020 != 0;
+        let group_or_world_writable = mode & 0o022 != 0;
+        if owner_writable_by_supervisor || group_writable_by_supervisor || group_or_world_writable {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI {label} is writable by the supervisor user or an untrusted class: {}",
                 path.display()
             )));
         }
@@ -7691,6 +7715,10 @@ mod macos {
             })?;
             create_executable(&non_controlled)?;
             create_executable(&shim)?;
+            set_mode(&non_controlled, 0o500)?;
+            set_mode(&shim, 0o500)?;
+            set_mode(&bin_dir, 0o500)?;
+            set_mode(&runtime_dir, 0o500)?;
 
             let mut state = test_state();
             state.plan.executable_dirs =
@@ -7791,13 +7819,13 @@ mod macos {
         }
 
         #[test]
-        fn writable_policy_command_override_is_exact() -> Result<()> {
+        fn writable_policy_command_override_is_explicit_for_owner_writable_paths() -> Result<()> {
             let temp = test_tempdir()?;
             let bin_dir = temp.path().join("bin");
             create_dir(&bin_dir)?;
             let tool = bin_dir.join("tool");
             create_executable(&tool)?;
-            set_mode(&bin_dir, 0o777)?;
+            set_mode(&bin_dir, 0o500)?;
 
             let mut config = CommandPoliciesConfig::default();
             config.commands.insert(
@@ -7826,13 +7854,31 @@ mod macos {
             .ok_or_else(|| {
                 NonoError::SandboxInit("expected writable executable rejection".to_string())
             })?;
-            assert!(err.to_string().contains("group/world writable"));
+            assert!(err.to_string().contains("writable by the supervisor user"));
+
+            set_mode(&tool, 0o500)?;
+            set_mode(&bin_dir, 0o700)?;
+            let err = validate_controlled_binary_immutability(
+                &config,
+                &resolved,
+                &BTreeMap::new(),
+                &caps,
+            )
+            .err()
+            .ok_or_else(|| {
+                NonoError::SandboxInit("expected writable parent rejection".to_string())
+            })?;
+            assert!(
+                err.to_string()
+                    .contains("policy command executable parent directory")
+            );
 
             let command = config
                 .commands
                 .get_mut("tool")
                 .ok_or_else(|| NonoError::SandboxInit("missing test command policy".to_string()))?;
             command.allow_writable_executable = true;
+            set_mode(&tool, 0o700)?;
 
             validate_controlled_binary_immutability(&config, &resolved, &BTreeMap::new(), &caps)?;
 
@@ -7856,6 +7902,8 @@ mod macos {
                 path: ssh_shim.clone(),
                 source,
             })?;
+            set_mode(&shim_source, 0o500)?;
+            set_mode(&runtime_dir, 0o500)?;
 
             let mut state = test_state();
             state
