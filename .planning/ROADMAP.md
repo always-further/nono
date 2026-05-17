@@ -65,7 +65,7 @@ Plans:
 - [x] 41-09-PLAN.md — REQ-CI-01 gap closure: wire profile_runtime to canonical validate_env_var_patterns + cfg-gate Windows-only SetupRunner WFP surface + interactive_shell field + test_env mirror + map_err→inspect_err keystore swap (closes Gaps 1-6 + WR-06)
 
 **Wave 5** *(gap closure — closes 5 CI failure classes from CI run 25973911653 + verifier-protocol gap)*
-- [ ] 41-10-PLAN.md — REQ-CI-01 + REQ-CI-02 + REQ-CI-03 gap closure: cargo fmt 3 sites (Class A) + supervisor_linux test spawn ?+wait (Class B) + macOS build 3 fixes (Class C) + Linux Integration + Windows Integration/Regression investigation (Class D + E) + cross-target-verify-checklist template + CLAUDE.md cross-target clippy bullet (Class F)
+- [x] 41-10-PLAN.md — REQ-CI-01 + REQ-CI-02 + REQ-CI-03 gap closure: cargo fmt 3 sites (Class A) + supervisor_linux test spawn ?+wait (Class B) + macOS build 3 fixes (Class C) + Linux Integration + Windows Integration/Regression investigation (Class D + E) + cross-target-verify-checklist template + CLAUDE.md cross-target clippy bullet (Class F)
 **UI hint**: no
 
 ### Phase 42: UPST5 audit
@@ -146,7 +146,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 37. Linux RESL + PKGS auto-pull | 0/TBD | Not started | - |
-| 41. CI cleanup + broker CR | 10/9 | Complete   | 2026-05-16 |
+| 41. CI cleanup + broker CR | 11/10 | Complete   | 2026-05-17 |
 | 42. UPST5 audit | 0/TBD | Not started | - |
 | 43. UPST5 sync execution | 0/TBD | Not started | - |
 
