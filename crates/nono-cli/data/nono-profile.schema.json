@@ -790,6 +790,10 @@
           "type": "string",
           "description": "Optional exact executable file for this command. When set, ETI binds the command name to this canonical file instead of resolving the first PATH match."
         },
+        "allow_writable_executable": {
+          "type": "boolean",
+          "description": "Explicit per-command trust downgrade for a pinned executable in a user/group/world-writable location. Valid only when executable is set to an absolute file path; it does not trust the containing directory or other PATH entries."
+        },
         "can_use": {
           "type": "array",
           "items": { "$ref": "#/$defs/CommandPolicyIdentifier" },
@@ -1001,6 +1005,10 @@
         "executable": {
           "type": "string",
           "description": "Optional exact executable file for this command. When set, ETI binds the command name to this canonical file instead of resolving the first PATH match."
+        },
+        "allow_writable_executable": {
+          "type": "boolean",
+          "description": "Explicit per-command trust downgrade for a pinned executable in a user/group/world-writable location. Valid only when executable is set to an absolute file path; it does not trust the containing directory or other PATH entries."
         },
         "can_use": {
           "type": "array",

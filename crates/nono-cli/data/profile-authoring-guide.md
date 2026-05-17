@@ -77,6 +77,24 @@ Controls startup-time command gating. These checks run only at launch time and a
 | `allow` | array of string | `[]`    | Startup-only command allowlist. Deprecated in v0.33.0; retained for existing profiles. |
 | `deny`  | array of string | `[]`    | Startup-only command denylist extension. Deprecated in v0.33.0; prefer `filesystem.deny` and narrower grants instead. |
 
+### command_policies
+
+Ephemeral Tool Isolation policies live under `command_policies`. Use `commands.<name>.executable` to bind a command name to one exact executable file instead of the first PATH match. If that pinned executable lives in a writable location, `commands.<name>.allow_writable_executable` is available as a per-command trust downgrade. It is valid only with an absolute `executable` path; relative paths and bare command names fail validation. The agent still invokes the command name through the ETI shim, and the override does not trust the containing directory or any other executable in it.
+
+```json
+{
+  "command_policies": {
+    "session_can_use": ["demonator"],
+    "commands": {
+      "demonator": {
+        "executable": "/opt/homebrew/bin/demonator",
+        "allow_writable_executable": true
+      }
+    }
+  }
+}
+```
+
 ### security
 
 | Field                 | Type            | Default      | Description |

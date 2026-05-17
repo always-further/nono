@@ -46,6 +46,21 @@ By default, ETI resolves a command to the first executable found on the original
 
 `executable` is canonicalized at startup and bound by path, inode, and digest. The command name still uses the shim, so `nono run --profile my-profile -- aws ...` reaches the pinned executable.
 
+ETI rejects executables and executable parent directories that are writable by untrusted classes. For a Homebrew-style or otherwise writable installation root that you intentionally trust for one command, pin the command to a full absolute executable path and set `allow_writable_executable: true`:
+
+```json
+{
+  "commands": {
+    "demonator": {
+      "executable": "/opt/homebrew/bin/demonator",
+      "allow_writable_executable": true
+    }
+  }
+}
+```
+
+This is a per-command trust downgrade. It is rejected unless `executable` is set to an absolute file path; a relative path or a bare command name fails validation. It does not trust `/opt/homebrew/bin` as a directory, does not cover other binaries in that directory, and does not change invocation: the agent still calls `demonator ...` through the ETI shim.
+
 Interpreter-packaged tools, such as a Python `aws` entrypoint, are classified as shebang scripts. ETI grants the selected script, its interpreter, and the interpreter's ELF loader closure. Language package directories, virtualenvs, SDK homes, and tool-specific data are not guessed by ETI; grant those explicitly with `fs_read`, `fs_read_file`, `fs_write`, or `fs_write_file`.
 
 ## Built-In Profile

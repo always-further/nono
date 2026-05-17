@@ -323,8 +323,13 @@ mod linux {
             // controlled command identities by path/inode.
             let search_dirs = command_search_dirs(config, path_env)?;
             validate_trusted_executable_dirs(&search_dirs)?;
-            let deny_only = resolve_deny_only_commands(config, blocked_commands, allowed_commands)?;
-            validate_controlled_binary_immutability(&resolved, &deny_only, outer_caps)?;
+            let deny_only = resolve_deny_only_commands(
+                config,
+                blocked_commands,
+                allowed_commands,
+                &search_dirs,
+            )?;
+            validate_controlled_binary_immutability(config, &resolved, &deny_only, outer_caps)?;
             let governance_denies = resolve_governance_denies(config)?;
             let allowed_direct_bypasses =
                 resolve_allowed_direct_bypasses(config, &resolved, &deny_only, &governance_denies)?;
@@ -3046,6 +3051,7 @@ mod linux {
                 }
                 if let Ok(canonical) = dir.canonicalize()
                     && canonical.is_dir()
+                    && implicit_executable_dir_is_trusted(&canonical)
                 {
                     dirs.insert(canonical);
                 }
@@ -3061,9 +3067,36 @@ mod linux {
             if !canonical.is_dir() {
                 return Err(NonoError::ExpectedDirectory(canonical));
             }
+            let metadata = fs::metadata(&canonical).map_err(|source| NonoError::ConfigRead {
+                path: canonical.clone(),
+                source,
+            })?;
+            reject_group_or_world_writable_path(&canonical, &metadata, "ETI executable directory")?;
             dirs.insert(canonical);
         }
         Ok(dirs.into_iter().collect())
+    }
+
+    fn implicit_executable_dir_is_trusted(dir: &Path) -> bool {
+        let Ok(metadata) = fs::metadata(dir) else {
+            return false;
+        };
+        metadata.permissions().mode() & 0o022 == 0
+    }
+
+    fn reject_group_or_world_writable_path(
+        path: &Path,
+        metadata: &fs::Metadata,
+        label: &str,
+    ) -> Result<()> {
+        let mode = metadata.permissions().mode();
+        if mode & 0o022 != 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "ETI {label} is group/world writable: {}",
+                path.display()
+            )));
+        }
+        Ok(())
     }
 
     /// PATH directories used by the deny-only resolver must not be writable by
@@ -3081,13 +3114,7 @@ mod linux {
                 path: dir.clone(),
                 source,
             })?;
-            let mode = metadata.permissions().mode();
-            if mode & 0o022 != 0 {
-                return Err(NonoError::SandboxInit(format!(
-                    "ETI executable directory is group/world writable: {}",
-                    dir.display()
-                )));
-            }
+            reject_group_or_world_writable_path(dir, &metadata, "ETI executable directory")?;
         }
         Ok(())
     }
@@ -3096,9 +3123,9 @@ mod linux {
         config: &CommandPoliciesConfig,
         blocked_commands: &[String],
         allowed_commands: &[String],
+        dirs: &[PathBuf],
     ) -> Result<BTreeMap<String, ResolvedDenyOnlyCommand>> {
         let allowed: HashSet<&String> = allowed_commands.iter().collect();
-        let dirs = command_search_dirs(config, std::env::var_os("PATH"))?;
         let mut deny_only = BTreeMap::new();
         for name in blocked_commands {
             if allowed.contains(name) || config.commands.contains_key(name) {
@@ -3122,29 +3149,52 @@ mod linux {
     }
 
     fn validate_controlled_binary_immutability(
+        config: &CommandPoliciesConfig,
         resolved: &ResolvedCommandBinaries,
         deny_only: &BTreeMap<String, ResolvedDenyOnlyCommand>,
         outer_caps: &CapabilitySet,
     ) -> Result<()> {
-        for binary in resolved.commands.values() {
-            validate_controlled_file(&binary.canonical_path, outer_caps, "policy command")?;
+        for (command_name, binary) in &resolved.commands {
+            let allow_writable_path = config
+                .commands
+                .get(command_name)
+                .is_some_and(command_allows_writable_executable);
+            validate_controlled_file(
+                &binary.canonical_path,
+                outer_caps,
+                "policy command",
+                allow_writable_path,
+            )?;
         }
         for entry in deny_only.values() {
-            validate_controlled_file(&entry.path, outer_caps, "deny-only command")?;
+            validate_controlled_file(&entry.path, outer_caps, "deny-only command", false)?;
         }
         Ok(())
+    }
+
+    fn command_allows_writable_executable(
+        command: &crate::command_policy::CommandPolicyConfig,
+    ) -> bool {
+        command.allow_writable_executable
+            && command
+                .executable
+                .as_ref()
+                .is_some_and(|executable| Path::new(executable).is_absolute())
     }
 
     fn validate_controlled_file(
         path: &Path,
         outer_caps: &CapabilitySet,
         label: &str,
+        allow_writable_path: bool,
     ) -> Result<()> {
         let metadata = fs::metadata(path).map_err(|source| NonoError::ConfigRead {
             path: path.to_path_buf(),
             source,
         })?;
-        reject_user_writable_path(path, &metadata, label)?;
+        if !allow_writable_path {
+            reject_user_writable_path(path, &metadata, label)?;
+        }
         if outer_caps_grant_write(outer_caps, path) {
             return Err(NonoError::SandboxInit(format!(
                 "ETI {label} binary is writable by the outer session capability set: {}",
@@ -3161,7 +3211,9 @@ mod linux {
             path: parent.to_path_buf(),
             source,
         })?;
-        reject_user_writable_path(parent, &parent_metadata, "ETI executable parent directory")?;
+        if !allow_writable_path {
+            reject_user_writable_path(parent, &parent_metadata, "ETI executable parent directory")?;
+        }
         if outer_caps_grant_write(outer_caps, parent) {
             return Err(NonoError::SandboxInit(format!(
                 "ETI {label} binary is replaceable through writable parent directory: {}",
@@ -4596,7 +4648,7 @@ mod macos {
             let path_env = std::env::var_os("PATH");
             let resolved =
                 crate::command_policy::resolve_policy_command_binaries(config, path_env.clone())?;
-            let search_dirs = command_search_dirs(config, path_env)?;
+            let search_dirs = command_search_dirs(config, path_env, outer_caps)?;
             validate_trusted_executable_dirs(&search_dirs, outer_caps)?;
             let deny_only = resolve_deny_only_commands(
                 config,
@@ -4604,7 +4656,7 @@ mod macos {
                 allowed_commands,
                 &search_dirs,
             )?;
-            validate_controlled_binary_immutability(&resolved, &deny_only, outer_caps)?;
+            validate_controlled_binary_immutability(config, &resolved, &deny_only, outer_caps)?;
             let governance_denies = resolve_governance_denies(config)?;
             let allowed_direct_bypasses =
                 resolve_allowed_direct_bypasses(config, &resolved, &deny_only, &governance_denies)?;
@@ -5729,7 +5781,7 @@ mod macos {
                 if controlled_ids.contains(&file_id(&metadata)) {
                     continue;
                 }
-                validate_controlled_file(&canonical, caps, "outer executable")?;
+                validate_controlled_file(&canonical, caps, "outer executable", false)?;
                 allowed.insert(canonical);
             }
         }
@@ -5754,7 +5806,7 @@ mod macos {
         if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
             return Err(NonoError::ExpectedFile(canonical));
         }
-        validate_controlled_file(&canonical, caps, "outer executable")?;
+        validate_controlled_file(&canonical, caps, "outer executable", false)?;
         allowed.insert(canonical);
         Ok(())
     }
@@ -6673,6 +6725,7 @@ mod macos {
     fn command_search_dirs(
         config: &CommandPoliciesConfig,
         path_env: Option<OsString>,
+        outer_caps: &CapabilitySet,
     ) -> Result<Vec<PathBuf>> {
         let mut dirs = BTreeSet::new();
         if let Some(path_env) = path_env {
@@ -6682,6 +6735,7 @@ mod macos {
                 }
                 if let Ok(canonical) = dir.canonicalize()
                     && canonical.is_dir()
+                    && implicit_executable_dir_is_trusted(&canonical, outer_caps)
                 {
                     dirs.insert(canonical);
                 }
@@ -6697,9 +6751,27 @@ mod macos {
             if !canonical.is_dir() {
                 return Err(NonoError::ExpectedDirectory(canonical));
             }
+            let metadata = fs::metadata(&canonical).map_err(|source| NonoError::ConfigRead {
+                path: canonical.clone(),
+                source,
+            })?;
+            reject_group_or_world_writable_path(&canonical, &metadata, "ETI executable directory")?;
+            if outer_caps_grant_write(outer_caps, &canonical) {
+                return Err(NonoError::SandboxInit(format!(
+                    "ETI executable directory is writable by the outer session capability set: {}",
+                    canonical.display()
+                )));
+            }
             dirs.insert(canonical);
         }
         Ok(dirs.into_iter().collect())
+    }
+
+    fn implicit_executable_dir_is_trusted(dir: &Path, outer_caps: &CapabilitySet) -> bool {
+        let Ok(metadata) = fs::metadata(dir) else {
+            return false;
+        };
+        metadata.permissions().mode() & 0o022 == 0 && !outer_caps_grant_write(outer_caps, dir)
     }
 
     fn validate_trusted_executable_dirs(
@@ -6752,29 +6824,52 @@ mod macos {
     }
 
     fn validate_controlled_binary_immutability(
+        config: &CommandPoliciesConfig,
         resolved: &ResolvedCommandBinaries,
         deny_only: &BTreeMap<String, ResolvedDenyOnlyCommand>,
         outer_caps: &CapabilitySet,
     ) -> Result<()> {
-        for binary in resolved.commands.values() {
-            validate_controlled_file(&binary.canonical_path, outer_caps, "policy command")?;
+        for (command_name, binary) in &resolved.commands {
+            let allow_writable_path = config
+                .commands
+                .get(command_name)
+                .is_some_and(command_allows_writable_executable);
+            validate_controlled_file(
+                &binary.canonical_path,
+                outer_caps,
+                "policy command",
+                allow_writable_path,
+            )?;
         }
         for entry in deny_only.values() {
-            validate_controlled_file(&entry.path, outer_caps, "deny-only command")?;
+            validate_controlled_file(&entry.path, outer_caps, "deny-only command", false)?;
         }
         Ok(())
+    }
+
+    fn command_allows_writable_executable(
+        command: &crate::command_policy::CommandPolicyConfig,
+    ) -> bool {
+        command.allow_writable_executable
+            && command
+                .executable
+                .as_ref()
+                .is_some_and(|executable| Path::new(executable).is_absolute())
     }
 
     fn validate_controlled_file(
         path: &Path,
         outer_caps: &CapabilitySet,
         label: &str,
+        allow_writable_path: bool,
     ) -> Result<()> {
         let metadata = fs::metadata(path).map_err(|source| NonoError::ConfigRead {
             path: path.to_path_buf(),
             source,
         })?;
-        reject_group_or_world_writable_path(path, &metadata, label)?;
+        if !allow_writable_path {
+            reject_group_or_world_writable_path(path, &metadata, label)?;
+        }
         if outer_caps_grant_write(outer_caps, path) {
             return Err(NonoError::SandboxInit(format!(
                 "ETI {label} binary is writable by the outer session capability set: {}",
@@ -6791,11 +6886,13 @@ mod macos {
             path: parent.to_path_buf(),
             source,
         })?;
-        reject_group_or_world_writable_path(
-            parent,
-            &parent_metadata,
-            &format!("{label} executable parent directory for {}", path.display()),
-        )?;
+        if !allow_writable_path {
+            reject_group_or_world_writable_path(
+                parent,
+                &parent_metadata,
+                &format!("{label} executable parent directory for {}", path.display()),
+            )?;
+        }
         if outer_caps_grant_write(outer_caps, parent) {
             return Err(NonoError::SandboxInit(format!(
                 "ETI {label} binary is replaceable through writable parent directory: {}",
@@ -7333,7 +7430,8 @@ mod macos {
     mod tests {
         use super::*;
         use crate::command_policy::{
-            CommandEnvironmentConfig, ResolvedExecutableKind, ResolvedExecutableShape,
+            CommandEnvironmentConfig, CommandPolicyConfig, ResolvedExecutableKind,
+            ResolvedExecutableShape,
         };
 
         fn test_binary(name: &str, path: &Path) -> Result<ResolvedCommandBinary> {
@@ -7446,7 +7544,11 @@ mod macos {
                 path: path.to_path_buf(),
                 source,
             })?;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            set_mode(path, 0o700)
+        }
+
+        fn set_mode(path: &Path, mode: u32) -> Result<()> {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|source| {
                 NonoError::ConfigWrite {
                     path: path.to_path_buf(),
                     source,
@@ -7611,6 +7713,84 @@ mod macos {
                     .iter()
                     .any(|rule| rule.contains("deny file-read-data") && rule.contains("/git"))
             );
+            Ok(())
+        }
+
+        #[test]
+        fn command_search_dirs_skip_unsafe_implicit_path_dirs() -> Result<()> {
+            let temp = test_tempdir()?;
+            let bin_dir = temp.path().join("bin");
+            create_dir(&bin_dir)?;
+            set_mode(&bin_dir, 0o777)?;
+
+            let caps = CapabilitySet::new();
+            let implicit_dirs = command_search_dirs(
+                &CommandPoliciesConfig::default(),
+                Some(bin_dir.as_os_str().to_os_string()),
+                &caps,
+            )?;
+            assert!(implicit_dirs.is_empty());
+
+            let config = CommandPoliciesConfig {
+                executable_dirs: vec![bin_dir.to_string_lossy().into_owned()],
+                ..Default::default()
+            };
+            let err = command_search_dirs(&config, None, &caps)
+                .err()
+                .ok_or_else(|| {
+                    NonoError::SandboxInit("expected explicit executable_dir rejection".to_string())
+                })?;
+            assert!(err.to_string().contains("group/world writable"));
+
+            Ok(())
+        }
+
+        #[test]
+        fn writable_policy_command_override_is_exact() -> Result<()> {
+            let temp = test_tempdir()?;
+            let bin_dir = temp.path().join("bin");
+            create_dir(&bin_dir)?;
+            let tool = bin_dir.join("tool");
+            create_executable(&tool)?;
+            set_mode(&bin_dir, 0o777)?;
+
+            let mut config = CommandPoliciesConfig::default();
+            config.commands.insert(
+                "tool".to_string(),
+                CommandPolicyConfig {
+                    executable: Some(tool.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            );
+            let mut resolved = ResolvedCommandBinaries {
+                commands: BTreeMap::new(),
+                warnings: Vec::new(),
+            };
+            resolved
+                .commands
+                .insert("tool".to_string(), test_binary("tool", &tool)?);
+            let caps = CapabilitySet::new();
+
+            let err = validate_controlled_binary_immutability(
+                &config,
+                &resolved,
+                &BTreeMap::new(),
+                &caps,
+            )
+            .err()
+            .ok_or_else(|| {
+                NonoError::SandboxInit("expected writable executable rejection".to_string())
+            })?;
+            assert!(err.to_string().contains("group/world writable"));
+
+            let command = config
+                .commands
+                .get_mut("tool")
+                .ok_or_else(|| NonoError::SandboxInit("missing test command policy".to_string()))?;
+            command.allow_writable_executable = true;
+
+            validate_controlled_binary_immutability(&config, &resolved, &BTreeMap::new(), &caps)?;
+
             Ok(())
         }
 

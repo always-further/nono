@@ -265,6 +265,8 @@ pub struct CommandPolicyConfig {
     #[serde(default)]
     pub executable: Option<String>,
     #[serde(default)]
+    pub allow_writable_executable: bool,
+    #[serde(default)]
     pub can_use: Vec<String>,
     #[serde(default)]
     pub sandbox: Option<CommandSandboxConfig>,
@@ -291,6 +293,8 @@ impl CommandPolicyConfig {
 
         Self {
             executable: self.executable.clone().or_else(|| child.executable.clone()),
+            allow_writable_executable: self.allow_writable_executable
+                || child.allow_writable_executable,
             can_use: dedup_append(&self.can_use, &child.can_use),
             sandbox: merge_optional_sandbox(&self.sandbox, &child.sandbox),
             from,
@@ -628,6 +632,36 @@ fn validate_command(
             std::slice::from_ref(executable),
             report,
         );
+    }
+
+    if command.allow_writable_executable {
+        match &command.executable {
+            Some(executable) if Path::new(executable).is_absolute() => {
+                report.warning(
+                    "writable_executable_trust_downgrade",
+                    format!(
+                        "command '{command_name}' allows a writable executable path; ETI will only apply this downgrade to the exact executable '{}'",
+                        executable
+                    ),
+                );
+            }
+            Some(executable) => {
+                report.error(
+                    "writable_executable_requires_absolute_executable",
+                    format!(
+                        "command '{command_name}' uses allow_writable_executable, so executable must be an absolute file path; got '{executable}'"
+                    ),
+                );
+            }
+            None => {
+                report.error(
+                    "writable_executable_requires_absolute_executable",
+                    format!(
+                        "command '{command_name}' uses allow_writable_executable, so executable must be set to an absolute file path"
+                    ),
+                );
+            }
+        }
     }
 
     if let Some(session_policy) = command.from.get("session") {
@@ -2082,6 +2116,77 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn writable_executable_override_requires_absolute_executable() {
+        let mut config = active_git_config();
+        if let Some(git) = config.commands.get_mut("git") {
+            git.allow_writable_executable = true;
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            report.errors.iter().any(|finding| {
+                finding.code == "writable_executable_requires_absolute_executable"
+            })
+        );
+
+        if let Some(git) = config.commands.get_mut("git") {
+            git.executable = Some("usr/bin/git".to_string());
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            report.errors.iter().any(|finding| {
+                finding.code == "writable_executable_requires_absolute_executable"
+            })
+        );
+    }
+
+    #[test]
+    fn writable_executable_override_accepts_absolute_executable_with_warning() {
+        let mut config = active_git_config();
+        if let Some(git) = config.commands.get_mut("git") {
+            git.executable = Some("/usr/bin/git".to_string());
+            git.allow_writable_executable = true;
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            !report.errors.iter().any(|finding| {
+                finding.code == "writable_executable_requires_absolute_executable"
+            })
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|finding| { finding.code == "writable_executable_trust_downgrade" })
+        );
+    }
+
+    #[test]
+    fn writable_executable_override_merges_monotonically() {
+        let parent = CommandPolicyConfig {
+            executable: Some("/usr/bin/git".to_string()),
+            ..Default::default()
+        };
+        let child = CommandPolicyConfig {
+            allow_writable_executable: true,
+            ..Default::default()
+        };
+
+        let merged = parent.merge_child(&child);
+
+        assert_eq!(merged.executable, Some("/usr/bin/git".to_string()));
+        assert!(merged.allow_writable_executable);
     }
 
     #[test]
