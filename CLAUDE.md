@@ -129,6 +129,7 @@ make fmt             # Auto-format
 - **Environment variables in tests**: Tests that modify `HOME`, `TMPDIR`, `XDG_CONFIG_HOME`, or other env vars must save and restore the original value. Rust runs unit tests in parallel within the same process, so an unrestored env var causes flaky failures in unrelated tests (e.g. `config::check_sensitive_path` fails when another test temporarily sets `HOME` to a fake path). Always use save/restore pattern and keep the modified window as short as possible.
 - **Attributes**: Apply `#[must_use]` to functions returning critical Results.
 - **Lazy use of dead code**: Avoid `#[allow(dead_code)]`. If code is unused, either remove it or write tests that use it.
+- **Cross-target clippy verification**: Any commit touching cfg-gated Unix code (files containing `#[cfg(target_os = "linux")]`, `#[cfg(target_os = "macos")]`, or `#[cfg(any(target_os = "linux", target_os = "macos"))]` blocks; files under `exec_strategy/`; files under `bindings/c/src/`) MUST be verified via `cargo clippy --workspace --target x86_64-unknown-linux-gnu -- -D warnings -D clippy::unwrap_used` AND `--target x86_64-apple-darwin` from the dev host. If the cross-toolchain is not installed, the related verification REQ MUST be marked PARTIAL and deferred to live CI per `.planning/templates/cross-target-verify-checklist.md`. Windows-host `cargo check` is NOT a substitute — it does not run clippy and does not exercise Unix cfg branches.
 - **Commits**: All commits must include a DCO sign-off line (`Signed-off-by: Name <email>`).
 
 ## Key Design Decisions
