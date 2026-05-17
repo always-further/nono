@@ -78,7 +78,9 @@ Plans:
   3. The `## ADR review` section is present (grep-confirmable) and either confirms or amends the Phase 33 Option A `continue` strategy with explicit per-cell L/M/H verdicts.
   4. Empirical cross-check: spot-check at least 3 fork-shared files for any upstream path the drift tool missed (Phase 39 empirical-cross-check pattern).
   5. The audit ships zero `crates/` / `bindings/` / `scripts/` source-tree edits (D-39-E5 Windows-only-files invariant trivially honored for audit-only output).
-**Plans**: TBD (Phase 33 / 39 plan shape carries forward)
+**Plans**: 1 plans
+Plans:
+- [ ] 42-01-PLAN.md — DIVERGENCE-AUDIT: drift run + ledger curation (v0.53.0..v0.54.0, ~20 commits, 5-7 clusters) with `windows-touch` column firing for 5d821c12 + 0748cced, `## ADR review` per-cell L/M/H verdicts (5 dimensions), `## Empirical cross-check` (3 Phase-41-touched files), UPST6 stub queued per D-42-B4, STATE.md close
 **UI hint**: no
 
 ### Phase 43: UPST5 sync execution
