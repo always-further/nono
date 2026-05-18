@@ -153,7 +153,7 @@ fn refresh_in_background(stale: Vec<(String, String)>, state: Arc<Mutex<PackHint
             let latest = client
                 .fetch_package_status(&pkg_ref, Some(&installed))
                 .ok()
-                .and_then(|s| s.latest);
+                .and_then(|s| s.latest_version);
 
             if let Ok(mut guard) = state.lock() {
                 guard.entries.insert(
