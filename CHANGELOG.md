@@ -2,7 +2,58 @@
 
 ## [0.53.0] - 2026-05-14
 
+### Bug Fixes (absorbed from upstream v0.54.0 - 2026-05-13)
+
+- *(pack-update-hint)* Treat unparsable installed as older in update check — absorbed via Plan 43-03-PACK-MGMT
+
+- Macos lint — won't-sync per Phase 42 ledger Cluster 6 / D-43-D1 (fork's clippy ruleset diverges; selective absorption deferred)
+
+- Macos lint — won't-sync per Phase 42 ledger Cluster 6 / D-43-D1
+
+- Macos lint — won't-sync per Phase 42 ledger Cluster 6 / D-43-D1
+
+- *(snapshot)* Validate restore targets against symlinks — absorbed via Plan 43-02-SNAPSHOT-SYMLINK-FIX
+
+- *(platform)* Correctly parse windows registry dword values — to be handled via Plan 43-06-PLATFORM-DETECTION-WINDOWS
+
+
+### Dependencies (absorbed from upstream v0.54.0 - 2026-05-13)
+
+- *(deps)* Bump nix from 0.31.2 to 0.31.3 — absorbed via this Plan 43-04; effective via Plan 43-01b workspace-deps centralization (nix promoted to `[workspace.dependencies]` at 0.31.3)
+
+- *(deps)* Bump sigstore/cosign-installer from 4.1.1 to 4.1.2 — out-of-scope CI-only dep; not absorbed
+
+- *(deps)* Bump tokio from 1.52.2 to 1.52.3 — post-v0.54.0 upstream; deferred to UPST6 per D-42-A4
+
+
+### Features (absorbed from upstream v0.54.0 - 2026-05-13)
+
+- *(pack-hints)* Document inline pack update hints — absorbed via Plan 43-03-PACK-MGMT
+
+- *(pack_update_hint)* Refresh hints synchronously on first run — absorbed via Plan 43-03-PACK-MGMT
+
+- *(packs)* Add pinning, outdated, and clarify publishing versioning — absorbed via Plan 43-03-PACK-MGMT
+
+- *(cli)* Implement `nono update` command — absorbed via Plan 43-03-PACK-MGMT
+
+- *(package)* Add package pinning and outdated commands — absorbed via Plan 43-03-PACK-MGMT
+
+- Upgrade to Rust edition 2024, centralize workspace dependencies — split-disposition: absorbed via Plan 43-01b (workspace edits) + deferred source migration to v2.6 / UPST6 (#[unsafe(no_mangle)] rewrites in bindings/c)
+
+- *(platform)* Implement robust windows platform detection — to be handled via Plan 43-06-PLATFORM-DETECTION-WINDOWS
+
+- *(profile)* Add platform-conditional profile fields — to be handled via Plan 43-05-PLATFORM-DETECTION-FOUNDATION
+
+
+### Style (absorbed from upstream v0.54.0 - 2026-05-13)
+
+- *(cli)* Adjust line breaks and module order — absorbed via Plan 43-03-PACK-MGMT
+
+- *(cli)* Improve formatting and simplify error handling — absorbed via Plan 43-03-PACK-MGMT
+
+
 ### Changed
+
 - Bump fork workspace version 0.37.1 → 0.53.0. Reflects milestone v2.1/v2.2/v2.3 progress and signals fork has reached upstream v0.52 parity (v0.52.0 CHANGELOG absorbed in Phase 34-08b; v0.53.0 divergence ledger written in Phase 39-01). Fork continues to track its own version separately from upstream per Phase 34 convention.
 
 ### Bug Fixes (absorbed from upstream v0.53.0 - 2026-05-11)
