@@ -169,7 +169,7 @@ fn refresh_in_background(stale: Vec<(String, String)>, state: Arc<Mutex<PackHint
 
         if changed {
             if let Ok(guard) = state.lock() {
-                save_state(&*guard);
+                save_state(&guard);
             }
         }
     });
