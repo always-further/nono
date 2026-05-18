@@ -298,6 +298,7 @@ fn is_newer(installed: &str, latest: &str) -> bool {
     };
     match (parse(installed), parse(latest)) {
         (Some(i), Some(l)) => l > i,
+        (None, Some(_)) => true, // legacy non-semver installed, new semver release available
         _ => false,
     }
 }
