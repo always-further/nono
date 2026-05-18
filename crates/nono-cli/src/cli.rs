@@ -263,6 +263,9 @@ const ROOT_HELP_TEMPLATE: &str = "\
   pull       Install a signed package from the registry
   remove     Remove an installed package
   update     Update installed packages
+  outdated   Show which installed packs have newer versions available
+  pin        Pin a pack to its current version
+  unpin      Unpin a pack to re-include it in updates
   search     Search the registry for packages
   list       List installed packages
 
