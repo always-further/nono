@@ -1028,9 +1028,9 @@ nono run --skip-dir vendor-cache --skip-dir generated --allow-cwd -- my-agent
 
 #### `--startup-timeout`
 
-Set a startup timeout in seconds for the sandboxed process. If the process does not enter interactive (alt-screen) mode within the given time, nono prints a warning and terminates it. Set to `0` to disable entirely.
+Set a startup timeout in seconds for the sandboxed process. If the process does not enter alt-screen mode within the given time, nono prints a warning and terminates it. Startup banners or log lines printed before the TUI initialises do not count as interactive — only entering alt-screen (the escape sequence used by full-screen TUIs) satisfies the check. Set to `0` to disable entirely.
 
-Applies to `nono run`, `nono shell`, and `nono wrap`.
+Applies to `nono run` and `nono shell`. Not available on `nono wrap` (which uses direct exec with no supervisor).
 
 | Environment Variable | `NONO_STARTUP_TIMEOUT` |
 |---------------------|------------------------|
