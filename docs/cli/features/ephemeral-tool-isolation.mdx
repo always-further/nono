@@ -1,0 +1,459 @@
+---
+title: Ephemeral Tool Isolation
+description: Run selected commands in narrow per-tool sandboxes with brokered chaining
+---
+
+Ephemeral Tool Isolation (ETI) lets a profile turn specific command names into brokered tools. The outer session gets shims on `PATH`; when a shim is invoked, the supervisor launches the real command in a fresh child sandbox built only from the selected command policy.
+
+<Note>
+  ETI runtime enforcement is available on Linux and macOS. Linux uses
+  Landlock, including a second execute-only layer for child commands. macOS
+  uses Seatbelt in supervisor-spawned child processes. Raw per-port TCP rules
+  remain Linux-only; macOS ETI rejects policies that require them because
+  Seatbelt cannot enforce those filters.
+</Note>
+
+## Mental Model
+
+An ETI profile answers three questions:
+
+| Question | Field |
+|---|---|
+| What may the outer session run directly? | `command_policies.session_can_use` |
+| What may one ETI command run next? | `commands.<caller>.can_use` plus `commands.<callee>.from.<caller>` |
+| What does the selected child command receive? | `sandbox` or `from.<caller>` grants |
+
+Each child command starts from a minimal runtime baseline. It does not inherit outer `--allow`, CWD access, broad profile groups, raw credential paths, or outer network access.
+
+When ETI is active, the outer process can execute the initial program and the ETI shims. Further tool launches should be modeled as command-policy hops. This keeps direct executable-path bypasses blocked without building a host-wide allow-list of every executable on `PATH`.
+
+## Resolution And Executables
+
+By default, ETI resolves a command to the first executable found on the original `PATH`, before the shim directory is prepended. Pin a command to an exact executable when PATH order should not decide the security boundary:
+
+```json
+{
+  "commands": {
+    "aws": {
+      "executable": "/usr/sbin/aws",
+      "sandbox": {
+        "fs_read_file": ["$HOME/.aws/credentials"]
+      }
+    }
+  }
+}
+```
+
+`executable` is canonicalized at startup and bound by path, inode, and digest. The command name still uses the shim, so `nono run --profile my-profile -- aws ...` reaches the pinned executable.
+
+ETI rejects executables and executable parent directories that are writable by the supervisor user, group, or world. For a Homebrew-style or otherwise writable installation root that you intentionally trust for one command, pin the command to a full absolute executable path and set `allow_writable_executable: true`:
+
+```json
+{
+  "commands": {
+    "demonator": {
+      "executable": "/opt/homebrew/bin/demonator",
+      "allow_writable_executable": true
+    }
+  }
+}
+```
+
+This is a per-command trust downgrade. It is rejected unless `executable` is set to an absolute file path; a relative path or a bare command name fails validation. It does not cover other binaries in that directory and does not change invocation: the agent still calls `demonator ...` through the ETI shim.
+
+For local demos or other low-assurance profiles that intentionally run from user-writable toolchains, a profile can disable the writable-executable trust check across ETI:
+
+```json
+{
+  "command_policies": {
+    "allow_writable_executables": true,
+    "commands": {
+      "npm": {
+        "executable": "/Users/alice/.nvm/versions/node/v24.13.0/bin/npm"
+      }
+    }
+  }
+}
+```
+
+This is broader than `commands.<name>.allow_writable_executable`: it also covers deny-only commands and the outer executable allow-list used by ETI, including paths writable through the sandbox's own outer capability set.
+
+Linux launches the verified executable object by file descriptor. macOS verifies the pinned file before sandboxing but must still call `execve()` by path, so a writable executable or parent directory remains replaceable before launch. Avoid `allow_writable_executable` for high-assurance macOS policies.
+
+Interpreter-packaged tools, such as a Python `aws` entrypoint, are classified as shebang scripts. ETI grants the selected script, its interpreter, and the interpreter's ELF loader closure. Language package directories, virtualenvs, SDK homes, and tool-specific data are not guessed by ETI; grant those explicitly with `fs_read`, `fs_read_file`, `fs_write`, or `fs_write_file`.
+
+## Built-In Profile
+
+The first built-in ETI profile is:
+
+```bash
+nono run --profile linux-eti-git-ssh -- git --version
+```
+
+`linux-eti-git-ssh` allows direct `git`, lets `git` call `ssh`, and gives `ssh.from.git` only:
+
+- ssh-agent socket access through `SSH_AUTH_SOCK`;
+- known-hosts reads;
+- raw TCP connect on port 22;
+- no raw private-key file grants.
+
+Useful checks:
+
+```bash
+nono run --profile linux-eti-git-ssh -- git config --show-origin --get-all core.sshCommand
+nono run --profile linux-eti-git-ssh -- ssh -V
+SSH_REAL="$(command -p -v ssh)"
+nono run --profile linux-eti-git-ssh -- "$SSH_REAL" -V
+```
+
+Expected:
+
+- `git config ... core.sshCommand` prints `command line: ssh`;
+- `ssh -V` through `PATH` is denied because `ssh` is not in `session_can_use`;
+- direct `/usr/bin/ssh` is denied as a direct-exec bypass of a policy-controlled command.
+
+## Minimal Direct Tool
+
+This profile lets the session invoke `jq` directly. The `jq` child can read the project directory and has no network access.
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-jq-readonly",
+    "description": "Run jq with read-only access to this project"
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "command_policies": {
+    "session_can_use": ["jq"],
+    "commands": {
+      "jq": {
+        "sandbox": {
+          "fs_read": ["."],
+          "environment": {
+            "allow_vars": ["PATH", "LANG", "LC_*"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Run:
+
+```bash
+nono profile validate ~/.config/nono/profiles/eti-jq-readonly.json
+nono run --profile eti-jq-readonly -- jq '.name' package.json
+```
+
+## Direct Network Tool
+
+On Linux, this profile lets the session invoke `curl` and allows raw TCP connect on port 443. Hostname filtering is not implied by port rules. macOS ETI rejects raw TCP port rules because Seatbelt cannot enforce per-port filters for these child sandboxes.
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-curl-https",
+    "description": "Run curl with raw TCP/443 egress"
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "command_policies": {
+    "session_can_use": ["curl"],
+    "commands": {
+      "curl": {
+        "sandbox": {
+          "fs_write": ["."],
+          "fs_read_file": [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt"
+          ],
+          "network": {
+            "tcp_connect_ports": [443]
+          },
+          "environment": {
+            "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "SSL_CERT_FILE", "SSL_CERT_DIR"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Run:
+
+```bash
+nono run --profile eti-curl-https -- curl -I https://example.com
+```
+
+If you need hostname enforcement, use an enforceable nono proxy/helper policy. `allowed_hosts` without such a helper is rejected.
+
+For tools that must use raw network directly on macOS, make the broader grant
+explicit with `network.allow_all: true`. This allows unrestricted child network
+for that selected command and cannot be combined with narrower host or port
+rules.
+
+## Chained Tools
+
+This profile lets the session run `git`, and lets the `git` child invoke `ssh`.
+Direct session `ssh` remains denied. A shell wrapper is not part of the authority
+chain; `sh -c 'git ls-remote ...'` still reaches the same `git` policy through
+the shim-prefixed `PATH`.
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-git-ssh",
+    "description": "Allow git to call ssh without direct session ssh"
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "command_policies": {
+    "session_can_use": ["git"],
+    "commands": {
+      "git": {
+        "can_use": ["ssh"],
+        "sandbox": {
+          "fs_read": ["."],
+          "fs_write": ["."],
+          "environment": {
+            "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*"]
+          }
+        }
+      },
+      "ssh": {
+        "from": {
+          "git": {
+            "fs_read": ["."],
+            "environment": {
+              "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*"]
+            }
+          },
+          "session": "deny"
+        }
+      }
+    }
+  }
+}
+```
+
+Run:
+
+```bash
+nono run --profile eti-git-ssh -- git ls-remote git@github.com:owner/repo.git
+nono run --profile eti-git-ssh -- ssh -T git@github.com
+```
+
+Expected:
+
+- `git` calling `ssh` succeeds;
+- direct session `ssh` is denied.
+
+## Build Tool Chains
+
+Build tools often execute helper programs. Model each helper explicitly.
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-make-cc",
+    "description": "Allow make to call cc and pkg-config"
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "command_policies": {
+    "session_can_use": ["make"],
+    "commands": {
+      "make": {
+        "can_use": ["cc", "pkg-config"],
+        "sandbox": {
+          "fs_read": ["."],
+          "fs_write": ["."],
+          "environment": {
+            "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "LC_*", "MAKEFLAGS", "CC", "CFLAGS", "LDFLAGS", "PKG_CONFIG_*"]
+          }
+        }
+      },
+      "cc": {
+        "from": {
+          "make": {
+            "fs_read": ["."],
+            "fs_write": ["."],
+            "environment": {
+              "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "TMPDIR", "CFLAGS", "LDFLAGS"]
+            }
+          },
+          "session": "deny"
+        }
+      },
+      "pkg-config": {
+        "from": {
+          "make": {
+            "fs_read": ["."],
+            "environment": {
+              "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "PKG_CONFIG_*"]
+            }
+          },
+          "session": "deny"
+        }
+      }
+    }
+  }
+}
+```
+
+Compilers may invoke additional helpers such as assemblers, linkers, or language-specific drivers. When a build fails with an ETI denial for a helper command, add that helper as another policy-controlled command and caller edge.
+
+## Environment Controls
+
+By default, ETI preserves a small safe environment set. Override it with `environment.allow_vars`:
+
+```json
+{
+  "environment": {
+    "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "AWS_*"]
+  }
+}
+```
+
+Pattern syntax is intentionally small:
+
+- exact names: `PATH`;
+- trailing prefix wildcards: `AWS_*`;
+- bare wildcard: `*`.
+
+`environment.set_vars` injects static values after filtering and after `PATH` has been shim-prefixed:
+
+```json
+{
+  "environment": {
+    "allow_vars": ["PATH", "LANG", "LC_*"],
+    "set_vars": {
+      "PAGER": "",
+      "GIT_PAGER": ""
+    }
+  }
+}
+```
+
+`PATH` and `NONO_*` are reserved and cannot be set with `set_vars`.
+
+## Mandatory Arguments
+
+Use `argv_prepend` when a selected child policy needs mandatory mode flags. The arguments are inserted after the synthesized `argv[0]` and before caller-provided arguments.
+
+```json
+{
+  "ssh": {
+    "from": {
+      "git": {
+        "argv_prepend": ["-o", "IdentityFile=none"],
+        "use_credentials": ["ssh-agent"]
+      }
+    }
+  }
+}
+```
+
+This is useful for mode selection. It is not a substitute for sandbox grants; filesystem, network, and credential access are still controlled by the selected policy.
+
+## Credentials
+
+ETI supports two credential types:
+
+| Type | Typical use |
+|---|---|
+| `ssh-agent` | Grant one selected child access to the session ssh-agent socket |
+| `raw-file` | Grant direct-session tools exact read access to a file credential |
+
+The built-in Git profile uses ssh-agent. Its raw TCP/22 rule currently requires
+Linux Landlock; use a proxy-backed policy for hostname/network enforcement on
+macOS:
+
+```json
+{
+  "credentials": {
+    "ssh-agent": {
+      "type": "ssh-agent",
+      "socket": "$SSH_AUTH_SOCK"
+    }
+  }
+}
+```
+
+If `SSH_AUTH_SOCK` is unset, a command that selects this credential fails before launch with an ETI error. Raw private-key files are not granted by the built-in profile.
+
+## Direct Exec Bypass
+
+Policy-controlled commands are meant to be reached through shims. A direct path like `/usr/bin/ssh` is denied unless explicitly configured:
+
+```json
+{
+  "commands": {
+    "tool": {
+      "allow_direct_exec_bypass": ["/usr/bin/tool"]
+    }
+  }
+}
+```
+
+Direct bypass is a compatibility escape hatch:
+
+- `tool` through `PATH` still uses ETI;
+- `/usr/bin/tool` runs with outer session capabilities, not the child ETI sandbox;
+- deny-only blocked commands are never eligible;
+- credential-using commands require `allow_direct_exec_bypass_with_credentials: true`.
+
+## Validation Checklist
+
+Use these commands while developing a profile:
+
+```bash
+nono profile validate ~/.config/nono/profiles/my-eti-profile.json
+nono profile show my-eti-profile --json
+nono run --profile my-eti-profile --dry-run -- my-command --version
+```
+
+The repository also includes a Linux witness harness for the current ETI examples:
+
+```bash
+BIN=./target/debug/nono bash scripts/eti-witness.sh
+```
+
+For command-control behavior:
+
+```bash
+# Direct command should be allowed
+nono run --profile my-eti-profile -- allowed-command --version
+
+# A denied direct command should hit the shim and exit 126
+nono run --profile my-eti-profile -- denied-command --version
+
+# Direct canonical path should be denied unless explicitly bypassed
+REAL="$(command -p -v denied-command)"
+nono run --profile my-eti-profile -- "$REAL" --version
+```
+
+## Troubleshooting
+
+| Symptom | Meaning |
+|---|---|
+| `nono: ETI denied <cmd>: session_can_use missing` | The outer session invoked a policy command that is not direct-session allowed. |
+| `nono: ETI denied <cmd>: missing_from` | A caller was allowed to invoke a callee name, but the callee has no `from.<caller>` policy. |
+| `ETI credential '<name>' is unavailable: SSH_AUTH_SOCK is unset` | The selected policy references an ssh-agent credential, but no agent socket was available at session startup. |
+| `Permission denied (publickey)` | SSH reached the remote server; authentication failed outside nono. |
+| `Host key verification failed` | SSH could not verify the host from the known-hosts files the policy grants. |
+| `ETI exec failed for script ... using interpreter ...` | The command resolved to a shebang script. Grant the required interpreter, package, and runtime data paths explicitly. |
+| `ETI direct exec bypass denied` | A policy-controlled command was invoked by absolute path instead of through its shim. |
+| `Seatbelt cannot enforce raw per-port TCP rules for ETI children` | The selected ETI policy uses raw TCP port filters on macOS. Use a Linux host or a proxy-backed policy instead. |
+| `legacy_blocked_command` | A deprecated blocked-command entry was folded into ETI as deny-only command control. |

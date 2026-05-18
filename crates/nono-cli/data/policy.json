@@ -656,6 +656,91 @@
       "workdir": { "access": "none" },
       "interactive": false
     },
+    "linux-eti-git-ssh": {
+      "extends": "default",
+      "meta": {
+        "name": "linux-eti-git-ssh",
+        "version": "1.0.0",
+        "description": "Linux-only ETI profile for git with ssh-agent mediated ssh",
+        "author": "nono-project"
+      },
+      "security": {
+        "signal_mode": "isolated"
+      },
+      "filesystem": {},
+      "network": { "block": false },
+      "workdir": { "access": "none" },
+      "interactive": false,
+      "command_policies": {
+        "session_can_use": ["git"],
+        "credentials": {
+          "ssh-agent": {
+            "type": "ssh-agent",
+            "socket": "$SSH_AUTH_SOCK"
+          }
+        },
+        "commands": {
+          "git": {
+            "can_use": ["ssh"],
+            "sandbox": {
+              "fs_read": ["."],
+              "fs_write": ["."],
+              "environment": {
+                "allow_vars": [
+                  "PATH",
+                  "HOME",
+                  "USER",
+                  "LOGNAME",
+                  "TERM",
+                  "LANG",
+                  "LC_*"
+                ],
+                "set_vars": {
+                  "GIT_CONFIG_COUNT": "2",
+                  "GIT_CONFIG_KEY_0": "core.sshCommand",
+                  "GIT_CONFIG_VALUE_0": "ssh",
+                  "GIT_CONFIG_KEY_1": "core.pager",
+                  "GIT_CONFIG_VALUE_1": "",
+                  "GIT_PAGER": "",
+                  "GIT_SSH": "ssh",
+                  "GIT_SSH_VARIANT": "ssh"
+                }
+              }
+            }
+          },
+          "ssh": {
+            "from": {
+              "git": {
+                "use_credentials": ["ssh-agent"],
+                "argv_prepend": ["-o", "IdentityFile=none"],
+                "fs_read_file": [
+                  "$HOME/.ssh/known_hosts",
+                  "$HOME/.ssh/known_hosts2",
+                  "/etc/ssh/ssh_known_hosts",
+                  "/etc/ssh/ssh_known_hosts2"
+                ],
+                "network": {
+                  "tcp_connect_ports": [22]
+                },
+                "environment": {
+                  "allow_vars": [
+                    "PATH",
+                    "HOME",
+                    "USER",
+                    "LOGNAME",
+                    "TERM",
+                    "LANG",
+                    "LC_*",
+                    "GIT_PROTOCOL"
+                  ]
+                }
+              },
+              "session": "deny"
+            }
+          }
+        }
+      }
+    },
     "openclaw": {
       "extends": "default",
       "meta": {

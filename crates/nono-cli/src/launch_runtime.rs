@@ -91,6 +91,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) strategy: exec_strategy::ExecStrategy,
     pub(crate) workdir: PathBuf,
     pub(crate) no_diagnostics: bool,
+    pub(crate) diagnostic_verbosity: u8,
     pub(crate) silent: bool,
     pub(crate) capability_elevation: bool,
     #[cfg(target_os = "linux")]
@@ -106,6 +107,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) redaction_policy: nono::ScrubPolicy,
     pub(crate) allowed_env_vars: Option<Vec<String>>,
     pub(crate) denied_env_vars: Option<Vec<String>>,
+    pub(crate) command_policies: Option<crate::command_policy::CommandPoliciesConfig>,
 }
 
 impl ExecutionFlags {
@@ -115,6 +117,7 @@ impl ExecutionFlags {
             workdir: std::env::current_dir()
                 .map_err(|e| NonoError::SandboxInit(format!("Failed to get cwd: {e}")))?,
             no_diagnostics: false,
+            diagnostic_verbosity: 0,
             silent,
             capability_elevation: false,
             #[cfg(target_os = "linux")]
@@ -134,6 +137,7 @@ impl ExecutionFlags {
             redaction_policy: nono::ScrubPolicy::secure_default(),
             allowed_env_vars: None,
             denied_env_vars: None,
+            command_policies: None,
         })
     }
 }
@@ -154,6 +158,15 @@ pub(crate) fn prepare_run_launch_plan(
     let no_audit_integrity = run_args.no_audit_integrity;
     let audit_sign_key = run_args.audit_sign_key.clone();
     let trust_override = run_args.trust_override;
+
+    if no_audit && !silent {
+        eprintln!("  [nono] Warning: --no-audit disables session and command-policy audit events.");
+    }
+    if no_audit_integrity && !silent {
+        eprintln!(
+            "  [nono] Warning: --no-audit-integrity disables Merkle audit integrity; audit events are written without an integrity summary."
+        );
+    }
 
     if audit_sign_key
         .as_deref()
@@ -237,6 +250,7 @@ pub(crate) fn prepare_run_launch_plan(
             strategy,
             workdir: resolve_requested_workdir(args.workdir.as_ref()),
             no_diagnostics,
+            diagnostic_verbosity: args.verbose,
             silent,
             capability_elevation: prepared.capability_elevation,
             #[cfg(target_os = "linux")]
@@ -267,6 +281,7 @@ pub(crate) fn prepare_run_launch_plan(
             redaction_policy,
             allowed_env_vars: prepared.allowed_env_vars,
             denied_env_vars: prepared.denied_env_vars,
+            command_policies: prepared.command_policies,
         },
     })
 }

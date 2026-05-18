@@ -3,6 +3,7 @@
 //! Handles `nono audit list|show` for viewing the audit trail of sandboxed sessions.
 
 use crate::audit_attestation::verify_audit_attestation;
+use crate::audit_event_reader::command_policy_events_json;
 use crate::audit_integrity::verify_audit_log;
 use crate::audit_ledger::verify_session_in_ledger;
 use crate::audit_session::{
@@ -380,6 +381,42 @@ fn cmd_show(args: AuditShowArgs) -> Result<()> {
         }
     }
 
+    let command_policy_events = command_policy_events_json(&session.dir)?;
+    if !command_policy_events.is_empty() {
+        eprintln!();
+        eprintln!("  Command Policy Events: {}", command_policy_events.len());
+        for event in &command_policy_events {
+            let decision = match event.get("decision").and_then(serde_json::Value::as_str) {
+                Some("allowed") => "allowed".green(),
+                Some("denied") => "denied".red(),
+                Some(other) => sanitize_for_terminal(other).normal(),
+                None => "-".normal(),
+            };
+            let command = event
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(sanitize_for_terminal)
+                .unwrap_or_else(|| "-".to_string());
+            let caller = event
+                .get("caller")
+                .and_then(serde_json::Value::as_str)
+                .map(sanitize_for_terminal)
+                .unwrap_or_else(|| "-".to_string());
+            let reason = event
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(sanitize_for_terminal);
+            if let Some(reason) = reason {
+                eprintln!(
+                    "    {} {} caller={} reason={}",
+                    decision, command, caller, reason
+                );
+            } else {
+                eprintln!("    {} {} caller={}", decision, command, caller);
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -626,6 +663,7 @@ fn cmd_cleanup(args: AuditCleanupArgs) -> Result<()> {
 }
 
 fn print_show_json(session: &SessionInfo) -> Result<()> {
+    let command_policy_events = command_policy_events_json(&session.dir)?;
     let mut snapshots = Vec::new();
     for i in 0..session.metadata.snapshot_count {
         let manifest = match SnapshotManager::load_manifest_from(&session.dir, i) {
@@ -662,6 +700,7 @@ fn print_show_json(session: &SessionInfo) -> Result<()> {
         "exit_code": session.metadata.exit_code,
         "merkle_roots": session.metadata.merkle_roots.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
         "network_events": &session.metadata.network_events,
+        "command_policy_events": command_policy_events,
         "audit_event_count": session.metadata.audit_event_count,
         "audit_integrity": session.metadata.audit_integrity.as_ref().map(|summary| serde_json::json!({
             "hash_algorithm": summary.hash_algorithm,
@@ -755,6 +794,7 @@ fn network_mode_label(mode: &nono::undo::NetworkAuditMode) -> &'static str {
 #[cfg(test)]
 mod list_tests {
     use super::*;
+    use crate::audit_integrity::{AuditRecorder, CommandPolicyAuditEvent};
     use nono::undo::SessionMetadata;
 
     #[test]
@@ -803,6 +843,48 @@ mod list_tests {
         assert_eq!(parts[1], timestamp);
         assert_eq!(parts[2], status);
         assert_eq!(parts[3], cmd);
+    }
+
+    #[test]
+    fn command_policy_events_json_includes_caller_context() -> nono::Result<()> {
+        let dir = tempfile::tempdir().map_err(|e| nono::NonoError::Snapshot(e.to_string()))?;
+        let mut recorder = AuditRecorder::new(dir.path().to_path_buf())?;
+        recorder.record_command_policy_event(CommandPolicyAuditEvent {
+            timestamp: "2026-05-03T16:30:30Z".to_string(),
+            session_id: Some("sess-eti".to_string()),
+            command: "ssh".to_string(),
+            caller: "git".to_string(),
+            caller_kind: Some("command".to_string()),
+            caller_command: Some("git".to_string()),
+            caller_pid: Some(100),
+            shim_pid: Some(101),
+            session_root_pid: Some(99),
+            decision: "denied".to_string(),
+            reason: Some("missing from.git".to_string()),
+            stdio_mode: "direct_fds".to_string(),
+            argv_hash: "argv-hash".to_string(),
+            env_name_hash: "env-hash".to_string(),
+            cwd_hash: "cwd-hash".to_string(),
+            argv_display: vec!["ssh".to_string(), "-V".to_string()],
+            env_names_display: vec!["PATH".to_string()],
+            cwd_display: "/work".to_string(),
+            exit_code: None,
+        })?;
+
+        let events = command_policy_events_json(dir.path())?;
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event["event_type"], "command_policy");
+        assert_eq!(event["sequence"], 0);
+        assert_eq!(event["session_id"], "sess-eti");
+        assert_eq!(event["decision"], "denied");
+        assert_eq!(event["caller"], "git");
+        assert_eq!(event["caller_kind"], "command");
+        assert_eq!(event["caller_command"], "git");
+        assert_eq!(event["caller_pid"], 100);
+        assert_eq!(event["shim_pid"], 101);
+        assert_eq!(event["session_root_pid"], 99);
+        Ok(())
     }
 }
 

@@ -127,6 +127,8 @@ pub struct ProfileDef {
     #[serde(default, alias = "secrets")]
     pub env_credentials: profile::SecretsConfig,
     #[serde(default)]
+    pub command_policies: Option<crate::command_policy::CommandPoliciesConfig>,
+    #[serde(default)]
     pub workdir: profile::WorkdirConfig,
     #[serde(default)]
     pub hooks: profile::HooksConfig,
@@ -166,6 +168,7 @@ impl ProfileDef {
             linux: profile::LinuxConfig::default(),
             env_credentials: self.env_credentials.clone(),
             environment: None,
+            command_policies: self.command_policies.clone(),
             workdir: self.workdir.clone(),
             hooks: self.hooks.clone(),
             rollback: self.rollback.clone(),

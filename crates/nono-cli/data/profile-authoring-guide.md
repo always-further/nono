@@ -77,6 +77,24 @@ Controls startup-time command gating. These checks run only at launch time and a
 | `allow` | array of string | `[]`    | Startup-only command allowlist. Deprecated in v0.33.0; retained for existing profiles. |
 | `deny`  | array of string | `[]`    | Startup-only command denylist extension. Deprecated in v0.33.0; prefer `filesystem.deny` and narrower grants instead. |
 
+### command_policies
+
+Ephemeral Tool Isolation policies live under `command_policies`. Use `commands.<name>.executable` to bind a command name to one exact executable file instead of the first PATH match. By default, ETI rejects pinned executables and direct parent directories that are writable by the supervisor user, group, or world. If that pinned executable lives in a writable location, `commands.<name>.allow_writable_executable` is available as a per-command trust downgrade. It is valid only with an absolute `executable` path; relative paths and bare command names fail validation. For local demos or low-assurance user-writable toolchains, `command_policies.allow_writable_executables` disables the writable executable and parent-directory trust check across policy, deny-only, and outer executable allow-list paths, including outer capability-set writability. The agent still invokes the command name through the ETI shim. On macOS, ETI verifies the file before sandboxing but must still exec by path, so writable pinned executables are not suitable for high-assurance policies.
+
+```json
+{
+  "command_policies": {
+    "session_can_use": ["demonator"],
+    "commands": {
+      "demonator": {
+        "executable": "/opt/homebrew/bin/demonator",
+        "allow_writable_executable": true
+      }
+    }
+  }
+}
+```
+
 ### security
 
 | Field                 | Type            | Default      | Description |

@@ -5,6 +5,7 @@
 mod app_runtime;
 mod audit_attestation;
 mod audit_commands;
+mod audit_event_reader;
 mod audit_integrity;
 mod audit_ledger;
 mod audit_session;
@@ -13,6 +14,7 @@ mod cli;
 mod cli_bootstrap;
 mod command_blocking_deprecation;
 mod command_display;
+mod command_policy;
 mod command_runtime;
 mod completions;
 mod config;
@@ -20,6 +22,9 @@ mod credential_runtime;
 mod deprecated_policy;
 mod deprecated_schema;
 mod deprecation_warnings;
+mod eti_runtime;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod eti_token_broker;
 mod exec_strategy;
 mod execution_runtime;
 mod instruction_deny;
@@ -94,6 +99,11 @@ pub(crate) use launch_runtime::rollback_base_exclusions;
 pub(crate) use proxy_runtime::merge_dedup_ports;
 
 fn main() {
+    if eti_runtime::maybe_run_internal_eti_entrypoint() {
+        return;
+    }
+    eti_runtime::record_main_start();
+
     let legacy_network_warnings = collect_legacy_network_warnings();
     normalize_legacy_flag_env_vars();
     // Emit one deprecation warning per distinct legacy long flag before clap
@@ -108,7 +118,9 @@ fn main() {
     let command_blocking_warnings = collect_cli_warnings(&cli);
     print_deprecation_warnings(&command_blocking_warnings, cli.silent);
 
-    if let Err(e) = run_cli(cli) {
+    let cli_result = run_cli(cli);
+    eti_runtime::log_main_total();
+    if let Err(e) = cli_result {
         if let nono::NonoError::ActionRequired(message) = &e {
             eprintln!("{message}");
             std::process::exit(1);
@@ -255,6 +267,7 @@ mod tests {
         let prepared = PreparedSandbox {
             caps: CapabilitySet::new(),
             secrets: Vec::new(),
+            command_policies: None,
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
@@ -302,6 +315,7 @@ mod tests {
         let prepared = PreparedSandbox {
             caps: CapabilitySet::new(),
             secrets: Vec::new(),
+            command_policies: None,
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),

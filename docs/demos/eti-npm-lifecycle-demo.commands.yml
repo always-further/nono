@@ -1,0 +1,43 @@
+speed: 50
+delay: 0
+pause: 0
+clear: true
+
+setup:
+  - "rm -rf node_package"
+
+steps:
+  - text: |
+      cat ~/.config/nono/profiles/demo-npm-supply-chain.json | jq .
+    wait_after: true
+  - text: |
+      curl -fsS https://registry.npmjs.org/nono-eti-lifecycle-demo/latest | jq '{name, version, scripts, tarball: .dist.tarball}'
+    wait_after: true
+  - text: |
+      curl -fsS https://registry.npmjs.org/nono-eti-lifecycle-demo/latest | jq '.scripts'
+  - text: |
+      tarball="$(curl -fsS https://registry.npmjs.org/nono-eti-lifecycle-demo/latest | jq -r '.dist.tarball')"
+      curl -fsSL "$tarball" | tar -tzf -
+  - text: |
+      curl -fsSL "$tarball" \
+      | tar -xOzf - package/package.json \
+      | jq '{name, version, scripts}'
+  - text: |
+      curl -fsSL "$tarball" \
+      | tar -xOzf - package/postinstall.js
+  - text: |
+      mkdir node_package
+      cd node_package
+      printf '%s\n' '{"private":true,"dependencies":{"nono-eti-lifecycle-demo":"0.1.0"}}' > package.json
+  - text: |
+      cat package.json | jq .
+    wait_after: true
+  - text: |
+      nono run --no-diagnostics --profile demo-npm-supply-chain -- npm install --ignore-scripts
+    wait_after: true
+  - text: |
+      nono run --no-diagnostics --profile demo-npm-supply-chain -- npm ls nono-eti-lifecycle-demo --depth=0
+  - text: |
+      rm -rf node_modules package-lock.json
+      nono run --no-diagnostics --profile demo-npm-supply-chain -- npm install --foreground-scripts
+    wait_after: true

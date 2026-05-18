@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) struct PreparedProfile {
     pub(crate) loaded_profile: Option<profile::Profile>,
+    pub(crate) command_policies: Option<crate::command_policy::CommandPoliciesConfig>,
     pub(crate) capability_elevation: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: profile::Wsl2ProxyPolicy,
@@ -447,12 +448,14 @@ fn prepare_profile_with_options(
             Some(profile_name),
             options.hook_output_silent,
         )?;
+        validate_command_policy_runtime_support(&profile)?;
         // If the profile was addressed by pack ref (e.g. --profile always-further/hermes),
         // ensure that pack is verified even if the profile JSON doesn't list it in `packs`.
         // Pack refs are injected into profile.packs at load time for every
         // pack-store resolution — both direct registry refs and name/alias
         // paths — so no post-hoc lookup is needed here.
         let mut packs_to_verify = profile.packs.clone();
+        validate_command_policy_runtime_support(&profile)?;
 
         // For direct registry refs the pack key may not yet be in packs if
         // load_registry_profile found the pack installed but the profile JSON
@@ -593,7 +596,110 @@ fn prepare_profile_with_options(
                 Some(env_config.deny_vars.clone())
             })
         }),
+        command_policies: loaded_profile
+            .as_ref()
+            .and_then(|profile| profile.command_policies.clone()),
         loaded_profile,
+    })
+}
+
+fn validate_command_policy_runtime_support(profile: &profile::Profile) -> crate::Result<()> {
+    let Some(command_policies) = profile.command_policies.as_ref() else {
+        return Ok(());
+    };
+    if !command_policies.is_active() {
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(nono::NonoError::UnsupportedPlatform(
+            "ETI command_policies are only supported on Linux and macOS".to_string(),
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        validate_linux_command_policy_runtime_support(profile)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        validate_macos_command_policy_runtime_support(profile)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_linux_command_policy_runtime_support(profile: &profile::Profile) -> crate::Result<()> {
+    if let Some(command_policies) = profile.command_policies.as_ref() {
+        let _resolved = crate::command_policy::resolve_policy_command_binaries(
+            command_policies,
+            std::env::var_os("PATH"),
+        )?;
+    }
+
+    if !command_policies_use_tcp_port_rules(profile) {
+        return Ok(());
+    }
+
+    let abi = nono::detect_abi().map_err(|err| {
+        nono::NonoError::UnsupportedPlatform(format!(
+            "ETI profile uses TCP port network rules but Landlock enforcement is unavailable: {err}"
+        ))
+    })?;
+    if !abi.has_network() {
+        return Err(nono::NonoError::UnsupportedPlatform(format!(
+            "ETI profile uses TCP port network rules but {} lacks Landlock TCP support (requires ABI V4+)",
+            abi
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_command_policy_runtime_support(profile: &profile::Profile) -> crate::Result<()> {
+    if let Some(command_policies) = profile.command_policies.as_ref() {
+        let _resolved = crate::command_policy::resolve_policy_command_binaries(
+            command_policies,
+            std::env::var_os("PATH"),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn command_policies_use_tcp_port_rules(profile: &profile::Profile) -> bool {
+    let Some(command_policies) = profile.command_policies.as_ref() else {
+        return false;
+    };
+
+    for command in command_policies.commands.values() {
+        if command
+            .sandbox
+            .as_ref()
+            .is_some_and(command_sandbox_uses_tcp_port_rules)
+        {
+            return true;
+        }
+
+        for from_policy in command.from.values() {
+            if let crate::command_policy::CommandFromConfig::Policy(sandbox) = from_policy {
+                if command_sandbox_uses_tcp_port_rules(sandbox) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn command_sandbox_uses_tcp_port_rules(
+    sandbox: &crate::command_policy::CommandSandboxConfig,
+) -> bool {
+    sandbox.network.as_ref().is_some_and(|network| {
+        !network.tcp_connect_ports.is_empty() || !network.tcp_bind_ports.is_empty()
     })
 }
 
@@ -629,8 +735,47 @@ pub(crate) fn prepare_profile_for_preflight(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    use crate::command_policy::{CommandPoliciesConfig, CommandPolicyConfig, CommandSandboxConfig};
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    use std::collections::BTreeMap;
     use std::fs;
     use tempfile::tempdir;
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn active_command_policy_profile() -> profile::Profile {
+        profile::Profile {
+            command_policies: Some(CommandPoliciesConfig {
+                session_can_use: vec!["git".to_string()],
+                commands: BTreeMap::from([(
+                    "git".to_string(),
+                    CommandPolicyConfig {
+                        sandbox: Some(CommandSandboxConfig::default()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inactive_command_policy_runtime_support_is_ok() {
+        assert!(validate_command_policy_runtime_support(&profile::Profile::default()).is_ok());
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn active_command_policy_runtime_support_rejects_unsupported_platform() {
+        let err = validate_command_policy_runtime_support(&active_command_policy_profile())
+            .expect_err("active ETI runtime must fail on unsupported platforms");
+
+        assert!(
+            err.to_string().contains("Linux and macOS"),
+            "error should describe supported platforms: {err}"
+        );
+    }
 
     #[test]
     fn prepare_profile_for_preflight_matches_runtime_resolution() {

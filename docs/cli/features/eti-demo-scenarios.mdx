@@ -1,0 +1,240 @@
+---
+title: ETI demo policies
+description: Manual demo policies for package installs, environment filtering, and gated staging or production access.
+---
+
+# ETI demo policies
+
+These profiles are intended for manual demos and regression checks. They show how ETI composes command allowlists, child command rules, environment filtering, credential file scoping, and approval prompts.
+
+The environment-gating examples assume real staging and production separation is enforced by the downstream platform:
+
+- Kubernetes should use separate kubeconfigs, contexts, service accounts, and RBAC bindings.
+- AWS should use separate profiles, roles, permission sets, and short-lived credentials.
+- nono should strip inherited credentials, grant only the selected credential files, and prompt or deny high-risk command shapes.
+- Hostname-level network policy requires an enforcing proxy/helper. Raw `tcp_connect_ports` rules constrain ports, not destination hostnames.
+
+## Install profiles
+
+Copy the demo profiles into the local profile directory:
+
+```bash
+mkdir -p ~/.config/nono/profiles
+install -m 0644 local-profiles/demo-*.json ~/.config/nono/profiles/
+```
+
+Validate the profiles after installing any tools used by the demos:
+
+```bash
+nono profile validate demo-env-deny-precedence
+nono profile validate demo-npm-supply-chain
+nono profile validate demo-k8s-staging
+nono profile validate demo-k8s-prod-read
+nono profile validate demo-k8s-prod-admin-approve
+nono profile validate demo-aws-staging
+nono profile validate demo-aws-prod-read
+nono profile validate demo-aws-prod-admin-approve
+```
+
+The Kubernetes and AWS profiles use Linux TCP port mediation. On macOS, run the networked parts inside the Linux development VM or adapt the demo to an explicit proxy policy. The npm lifecycle demo is offline and does not require per-port network mediation.
+
+## Environment deny precedence
+
+Policy: `local-profiles/demo-env-deny-precedence.json`
+
+Purpose: verify that a specific deny beats a broad allow. `GITHUB_*` is allowed, but `GITHUB_TOKEN` is denied.
+
+Manual steps:
+
+```bash
+GITHUB_TOKEN=secret GITHUB_SAFE=visible nono run --no-diagnostics --profile demo-env-deny-precedence -- printenv GITHUB_SAFE
+```
+
+Expected: prints `visible`.
+
+```bash
+GITHUB_TOKEN=secret GITHUB_SAFE=visible nono run --no-diagnostics --profile demo-env-deny-precedence -- printenv GITHUB_TOKEN
+```
+
+Expected: no secret is printed. `printenv` may exit non-zero because the variable is absent.
+
+On macOS, simple tools may still touch `~/.CFUserTextEncoding`, `/dev/dtracehelper`, or syslog after the command exits. The profile suppresses save prompts for `~/.CFUserTextEncoding` only; it does not grant access. Use `--no-diagnostics` for this demo so the signal is limited to child output.
+
+## npm supply-chain lifecycle denial
+
+Policy: `local-profiles/demo-npm-supply-chain.json`
+
+Purpose: allow `npm` and the `node` process npm needs internally while denying shell-backed lifecycle scripts. The profile strips common package registry and GitHub tokens from the inherited environment. The primary demo uses a real package; the offline fixture is available when registry access is not desired.
+
+`npm` is commonly a Node script, not a standalone binary. The demo grants read-only access to `$HOME/.nvm/versions/node` so npm can load itself without granting broader home-directory access. The profile grants the selected workdir read/write because npm must read `package.json` and write `node_modules` and `package-lock.json`. If your npm comes from Homebrew, asdf, mise, or a system package, replace the Node toolchain grant with the actual existing Node/npm installation root from `which npm` and `npm root -g`.
+
+The npm cache is pinned to `/tmp/nono-demo/npm-cache` by the profile and granted to both `npm` and the `node` process npm launches. The `npm` ETI child and the `node` process launched by npm get explicit network access because ETI children do not inherit the outer session network grant. If npm reports a cache ownership error with `EPERM`, treat it as a sandbox denial first; do not run `sudo chown` unless the same command fails outside nono.
+
+### Harmless real package
+
+`nono-eti-lifecycle-demo@0.1.0` is a tiny package built for this demo. It has a real npm `postinstall` lifecycle hook, but that hook only prints a message and exits. It has no dependencies, performs no network access, does not write files, and does not inspect environment variables.
+
+Create a clean project:
+
+```bash
+mkdir -p /tmp/nono-demo/npm-cache
+tmp="$(mktemp -d)"
+cd "$tmp"
+printf '%s\n' '{"private":true,"dependencies":{"nono-eti-lifecycle-demo":"0.1.0"}}' > package.json
+```
+
+The simple demo uses the published registry package directly. If you want to avoid network during the sandboxed run, fetch the tarball outside nono and point `package.json` at the local file instead:
+
+```bash
+npm pack nono-eti-lifecycle-demo@0.1.0
+printf '%s\n' '{"private":true,"dependencies":{"nono-eti-lifecycle-demo":"file:./nono-eti-lifecycle-demo-0.1.0.tgz"}}' > package.json
+```
+
+When using the local tarball variant, keep the `.tgz` in the same directory as `package.json`. If you move to another directory, regenerate `package.json` or use the registry dependency form above.
+
+Check that dependency resolution and extraction can happen without lifecycle execution:
+
+```bash
+nono run --no-diagnostics --profile demo-npm-supply-chain -- npm install --ignore-scripts
+nono run --no-diagnostics --profile demo-npm-supply-chain -- npm ls nono-eti-lifecycle-demo --depth=0
+```
+
+Expected: install completes and npm shows `nono-eti-lifecycle-demo` installed in the project tree. This demonstrates that tarball extraction and package metadata can work while lifecycle execution is disabled.
+
+Check that lifecycle execution is denied. `--foreground-scripts` makes npm print the lifecycle command it is trying to run, which makes the denial easier to explain live:
+
+```bash
+rm -rf node_modules package-lock.json
+nono run --no-diagnostics --profile demo-npm-supply-chain -- npm install --foreground-scripts
+```
+
+Expected: npm prints the package lifecycle step, then install fails or reports a denied child execution when npm tries to execute that lifecycle command through `sh`. The package's `postinstall.js` message should not appear because ETI blocks before the hook runs.
+
+### Offline fallback fixture
+
+Create an offline package fixture:
+
+```bash
+mkdir -p /tmp/nono-demo/npm-cache
+tmp="$(mktemp -d)"
+cd "$tmp"
+mkdir dep
+printf '%s\n' '{"scripts":{"postinstall":"sh -c \"echo should-not-run > lifecycle-ran\""},"dependencies":{"dep":"file:./dep"}}' > package.json
+printf '%s\n' '{"name":"dep","version":"1.0.0","scripts":{"postinstall":"sh -c \"echo should-not-run > ../lifecycle-ran\""}}' > dep/package.json
+```
+
+Check that safe metadata-only installation works:
+
+```bash
+nono run --no-diagnostics --profile demo-npm-supply-chain -- npm install --ignore-scripts
+test ! -e lifecycle-ran
+```
+
+Expected: install completes, and `lifecycle-ran` is absent.
+
+Check that lifecycle shell execution is denied:
+
+```bash
+rm -rf node_modules package-lock.json lifecycle-ran
+nono run --no-diagnostics --profile demo-npm-supply-chain -- npm install
+test ! -e lifecycle-ran
+```
+
+Expected: install fails or reports a denied child execution when npm tries to run `sh`; `lifecycle-ran` is absent.
+
+Check direct shell behavior:
+
+```bash
+nono run --no-diagnostics --profile demo-npm-supply-chain -- sh -c 'echo should-not-run'
+```
+
+Expected: `sh` is denied.
+
+## Kubernetes staging and production gates
+
+Policies:
+
+- `local-profiles/demo-k8s-staging.json`
+- `local-profiles/demo-k8s-prod-read.json`
+- `local-profiles/demo-k8s-prod-admin-approve.json`
+
+Purpose: model common Kubernetes access tiers with distinct kubeconfigs. Staging and production are separated by credential file selection. Production read access should use a read-only service account or user. Production admin access adds approval prompts for mutating operations.
+
+Prepare demo kubeconfig paths:
+
+```bash
+mkdir -p /tmp/nono-demo/kube
+install -m 0600 ~/.kube/staging-config /tmp/nono-demo/kube/staging-kubeconfig
+install -m 0600 ~/.kube/prod-readonly-config /tmp/nono-demo/kube/prod-readonly-kubeconfig
+install -m 0600 ~/.kube/prod-admin-config /tmp/nono-demo/kube/prod-admin-kubeconfig
+```
+
+Run a staging read:
+
+```bash
+nono run --profile demo-k8s-staging -- kubectl get namespaces
+```
+
+Expected: command uses `/tmp/nono-demo/kube/staging-kubeconfig`.
+
+Run a production read:
+
+```bash
+nono run --profile demo-k8s-prod-read -- kubectl get namespaces
+```
+
+Expected: command uses `/tmp/nono-demo/kube/prod-readonly-kubeconfig`. Mutating access should be denied by Kubernetes RBAC for that credential.
+
+Check production admin approval:
+
+```bash
+nono run --profile demo-k8s-prod-admin-approve -- kubectl delete namespace nono-demo-do-not-exist
+```
+
+Expected: nono prompts for approval before `kubectl delete` executes. Declining the prompt prevents the command from running.
+
+## AWS staging and production gates
+
+Policies:
+
+- `local-profiles/demo-aws-staging.json`
+- `local-profiles/demo-aws-prod-read.json`
+- `local-profiles/demo-aws-prod-admin-approve.json`
+
+Purpose: model common AWS access tiers with selected AWS profiles. Inherited AWS credential environment variables are stripped. The profile then injects controlled `AWS_PROFILE`, `AWS_CONFIG_FILE`, and `AWS_SHARED_CREDENTIALS_FILE` values.
+
+Prepare demo AWS config paths:
+
+```bash
+mkdir -p /tmp/nono-demo/aws
+install -m 0600 ~/.aws/credentials /tmp/nono-demo/aws/credentials
+install -m 0600 ~/.aws/config /tmp/nono-demo/aws/config
+```
+
+The files must contain profiles named `staging`, `prod-readonly`, and `prod-admin`.
+
+Run a staging identity check:
+
+```bash
+AWS_ACCESS_KEY_ID=leaked AWS_SECRET_ACCESS_KEY=leaked nono run --profile demo-aws-staging -- aws sts get-caller-identity
+```
+
+Expected: the inherited `leaked` variables are stripped and the command uses the `staging` profile from `/tmp/nono-demo/aws`.
+
+Run a production read:
+
+```bash
+nono run --profile demo-aws-prod-read -- aws sts get-caller-identity
+```
+
+Expected: command uses the `prod-readonly` profile. Write attempts should be denied by AWS IAM for that role or permission set.
+
+Check production admin approval:
+
+```bash
+nono run --profile demo-aws-prod-admin-approve -- aws ec2 terminate-instances --instance-ids i-00000000000000000 --dry-run
+```
+
+Expected: nono prompts for approval before the high-risk command shape executes. Declining the prompt prevents the command from running.
+
+If the local `aws` executable is Python-packaged, additional read grants for the AWS CLI package directory may be required. See `local-profiles/eti-aws-credentials-no-curl.json` for a platform-specific example.

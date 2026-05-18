@@ -38,6 +38,52 @@ pub(crate) enum AuditEventPayload {
     Network {
         event: NetworkAuditEvent,
     },
+    SandboxRuntime {
+        event: SandboxRuntimeAuditEvent,
+    },
+    CommandPolicy {
+        event: Box<CommandPolicyAuditEvent>,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SandboxRuntimeAuditEvent {
+    pub(crate) timestamp: String,
+    pub(crate) platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) landlock_abi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) landlock_execute_enforced: Option<bool>,
+    pub(crate) eti_active: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct CommandPolicyAuditEvent {
+    pub(crate) timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session_id: Option<String>,
+    pub(crate) command: String,
+    pub(crate) caller: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) caller_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) caller_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) caller_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shim_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session_root_pid: Option<u32>,
+    pub(crate) decision: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) stdio_mode: String,
+    pub(crate) argv_hash: String,
+    pub(crate) env_name_hash: String,
+    pub(crate) cwd_hash: String,
+    pub(crate) argv_display: Vec<String>,
+    pub(crate) env_names_display: Vec<String>,
+    pub(crate) cwd_display: String,
+    pub(crate) exit_code: Option<i32>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -141,6 +187,24 @@ impl AuditRecorder {
 
     pub(crate) fn record_network_event(&mut self, event: NetworkAuditEvent) -> Result<()> {
         self.append_event(AuditEventPayload::Network { event })
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn record_sandbox_runtime_event(
+        &mut self,
+        event: SandboxRuntimeAuditEvent,
+    ) -> Result<()> {
+        self.append_event(AuditEventPayload::SandboxRuntime { event })
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn record_command_policy_event(
+        &mut self,
+        event: CommandPolicyAuditEvent,
+    ) -> Result<()> {
+        self.append_event(AuditEventPayload::CommandPolicy {
+            event: Box::new(event),
+        })
     }
 
     pub(crate) fn event_count(&self) -> u64 {
@@ -400,7 +464,7 @@ pub(crate) fn verify_audit_log(
 mod tests {
     use super::*;
     use nono::AccessMode;
-    use nono::supervisor::{ApprovalDecision, AuditEntry, CapabilityRequest, UrlOpenRequest};
+    use nono::supervisor::{ApprovalDecision, ApprovalRequest, AuditEntry, UrlOpenRequest};
     use nono::undo::{NetworkAuditDecision, NetworkAuditEvent, NetworkAuditMode};
     use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
@@ -500,7 +564,7 @@ mod tests {
         recorder
             .record_capability_decision(AuditEntry {
                 timestamp: UNIX_EPOCH + Duration::from_secs(5),
-                request: CapabilityRequest {
+                request: ApprovalRequest::Capability {
                     request_id: "req-1".to_string(),
                     path: PathBuf::from("/tmp/example"),
                     access: AccessMode::ReadWrite,
@@ -547,12 +611,44 @@ mod tests {
             })
             .unwrap();
         recorder
+            .record_sandbox_runtime_event(SandboxRuntimeAuditEvent {
+                timestamp: "2026-04-21T00:00:00Z".to_string(),
+                platform: "linux".to_string(),
+                landlock_abi: Some("V4".to_string()),
+                landlock_execute_enforced: Some(true),
+                eti_active: true,
+            })
+            .unwrap();
+        recorder
+            .record_command_policy_event(CommandPolicyAuditEvent {
+                timestamp: "2026-04-21T00:00:00Z".to_string(),
+                session_id: Some("sess-1".to_string()),
+                command: "curl".to_string(),
+                caller: "session".to_string(),
+                caller_kind: Some("session".to_string()),
+                caller_command: None,
+                caller_pid: Some(41),
+                shim_pid: Some(42),
+                session_root_pid: Some(41),
+                decision: "denied".to_string(),
+                reason: Some("session_can_use missing".to_string()),
+                stdio_mode: "pty".to_string(),
+                argv_hash: "argv-hash".to_string(),
+                env_name_hash: "env-hash".to_string(),
+                cwd_hash: "cwd-hash".to_string(),
+                argv_display: vec!["curl".to_string(), "--version".to_string()],
+                env_names_display: vec!["PATH".to_string()],
+                cwd_display: "/work".to_string(),
+                exit_code: None,
+            })
+            .unwrap();
+        recorder
             .record_session_ended("2026-04-21T00:00:01Z".to_string(), 7)
             .unwrap();
 
         let summary = recorder.finalize().unwrap();
         let verified = verify_audit_log(dir.path(), Some(&summary)).unwrap();
-        assert_eq!(verified.event_count, 5);
+        assert_eq!(verified.event_count, 7);
         assert_eq!(verified.merkle_scheme, "alpha");
         assert!(verified.records_verified);
     }
