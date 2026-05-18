@@ -150,7 +150,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | 37. Linux RESL + PKGS auto-pull | 0/TBD | Not started | - |
 | 41. CI cleanup + broker CR | 11/10 | Complete   | 2026-05-17 |
 | 42. UPST5 audit | 1/1 | Complete    | 2026-05-17 |
-| 43. UPST5 sync execution | 0/TBD | Not started | - |
+| 43. UPST5 sync execution | 5/7 | In Progress|  |
 
 ## References
 
