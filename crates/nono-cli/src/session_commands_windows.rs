@@ -534,27 +534,48 @@ pub fn run_inspect(args: &InspectArgs) -> Result<()> {
         println!("Rollback:   {}", rollback);
     }
     if let Some(limits) = record.limits.as_ref() {
-        if !limits.is_empty() {
-            println!("\nLimits:");
-            if let Some(pct) = limits.cpu_percent {
-                println!("  cpu:     {pct}% (hard cap)");
-            }
-            if let Some(bytes) = limits.memory_bytes {
-                println!("  memory:  {} (job-wide)", format_bytes_human(bytes));
-            }
-            if let Some(secs) = limits.timeout_seconds {
-                println!(
-                    "  timeout: {}",
-                    format_duration_human(std::time::Duration::from_secs(secs))
-                );
-            }
-            if let Some(procs) = limits.max_processes {
-                println!("  procs:   {procs} (active)");
-            }
-        }
+        // Phase 37 D-17: Windows mirror of the cfg-gated helper. Preserves
+        // the legacy v2.1 Phase 16 Job Object emission shape — Linux uses
+        // its own LOCKED cgroup-v2 strings via the Unix file.
+        print!("{}", format_limits_block(limits));
     }
 
     Ok(())
+}
+
+/// Phase 37 D-17 (Windows mirror): format the `nono inspect` Limits block.
+///
+/// Windows retains the legacy v2.1 Phase 16 Windows Job Object emission
+/// (`cpu: 25% (hard cap)`, `memory: 100 MiB (job-wide)`, `procs: 5 (active)`)
+/// — the LOCKED ROADMAP Phase 37 cgroup-v2 strings are Linux-only and live
+/// in the Unix mirror (`session_commands.rs`).
+///
+/// Pure formatter so the legacy shape is unit-testable without capturing
+/// stdout.
+fn format_limits_block(limits: &crate::session::ResourceLimitsRecord) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if limits.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out, "\nLimits:");
+    if let Some(pct) = limits.cpu_percent {
+        let _ = writeln!(out, "  cpu:     {pct}% (hard cap)");
+    }
+    if let Some(bytes) = limits.memory_bytes {
+        let _ = writeln!(out, "  memory:  {} (job-wide)", format_bytes_human(bytes));
+    }
+    if let Some(secs) = limits.timeout_seconds {
+        let _ = writeln!(
+            out,
+            "  timeout: {}",
+            format_duration_human(std::time::Duration::from_secs(secs))
+        );
+    }
+    if let Some(procs) = limits.max_processes {
+        let _ = writeln!(out, "  procs:   {procs} (active)");
+    }
+    out
 }
 
 /// Render bytes using binary (1024-based) units. Picks the largest unit that
@@ -576,6 +597,35 @@ fn format_bytes_human(bytes: u64) -> String {
         format!("{} KiB", bytes / K)
     } else {
         format!("{bytes} bytes")
+    }
+}
+
+/// Phase 37 D-17 (Windows mirror): short-form binary-prefix bytes formatter.
+///
+/// Mirrors the Unix helper in `session_commands.rs`. Not used by the legacy
+/// Windows Limits emission (which keeps the `100 MiB` shape), but kept here
+/// for test parity (the limits_block_format_tests module asserts round-trip
+/// values on both Unix and Windows).
+///
+/// `#[cfg(test)]`-gated to avoid a `dead_code` warning in the non-test build
+/// — production Windows code does not currently call this helper.
+#[cfg(test)]
+fn format_bytes_short(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const TIB: u64 = 1024 * 1024 * 1024 * 1024;
+
+    if bytes >= TIB && bytes.is_multiple_of(TIB) {
+        format!("{}T", bytes / TIB)
+    } else if bytes >= GIB && bytes.is_multiple_of(GIB) {
+        format!("{}G", bytes / GIB)
+    } else if bytes >= MIB && bytes.is_multiple_of(MIB) {
+        format!("{}M", bytes / MIB)
+    } else if bytes >= KIB && bytes.is_multiple_of(KIB) {
+        format!("{}K", bytes / KIB)
+    } else {
+        format!("{bytes}")
     }
 }
 
@@ -898,6 +948,81 @@ mod inspect_formatting_tests {
     fn duration_90s_not_clean_minute() {
         // 90s is not a clean minute → falls back to seconds.
         assert_eq!(format_duration_human(Duration::from_secs(90)), "90 seconds");
+    }
+}
+
+// Phase 37 D-17: tests for the Windows arm of format_limits_block. Windows
+// retains the legacy v2.1-Phase-16 Job Object emission shape; the Linux-only
+// LOCKED cgroup-v2 strings are exercised by tests in session_commands.rs.
+#[cfg(all(test, target_os = "windows"))]
+#[allow(clippy::unwrap_used)]
+mod limits_block_format_tests {
+    use super::{format_bytes_short, format_limits_block};
+    use crate::session::ResourceLimitsRecord;
+
+    fn limits(cpu: Option<u16>, mem: Option<u64>, procs: Option<u32>) -> ResourceLimitsRecord {
+        ResourceLimitsRecord {
+            cpu_percent: cpu,
+            memory_bytes: mem,
+            timeout_seconds: None,
+            max_processes: procs,
+        }
+    }
+
+    #[test]
+    fn format_bytes_short_100_mebibytes_is_100m() {
+        assert_eq!(format_bytes_short(100 * 1024 * 1024), "100M");
+    }
+
+    #[test]
+    fn format_bytes_short_1_gibibyte_is_1g() {
+        assert_eq!(format_bytes_short(1024 * 1024 * 1024), "1G");
+    }
+
+    #[test]
+    fn format_bytes_short_1024_bytes_is_1k() {
+        assert_eq!(format_bytes_short(1024), "1K");
+    }
+
+    #[test]
+    fn format_bytes_short_non_round_value_falls_back_to_bytes() {
+        assert_eq!(format_bytes_short(1500), "1500");
+    }
+
+    #[test]
+    fn limits_block_format_windows_retains_legacy_cpu_string() {
+        let out = format_limits_block(&limits(Some(25), None, None));
+        assert!(
+            out.contains("cpu:     25% (hard cap)"),
+            "Windows legacy emission must be preserved; got: {out}"
+        );
+    }
+
+    #[test]
+    fn limits_block_format_windows_retains_legacy_memory_string() {
+        let out = format_limits_block(&limits(None, Some(100 * 1024 * 1024), None));
+        assert!(
+            out.contains("memory:  100 MiB (job-wide)"),
+            "Windows legacy memory emission must be preserved; got: {out}"
+        );
+    }
+
+    #[test]
+    fn limits_block_format_windows_retains_legacy_procs_string() {
+        let out = format_limits_block(&limits(None, None, Some(5)));
+        assert!(
+            out.contains("procs:   5 (active)"),
+            "Windows legacy procs emission must be preserved; got: {out}"
+        );
+    }
+
+    #[test]
+    fn limits_block_empty_returns_empty_string() {
+        let out = format_limits_block(&limits(None, None, None));
+        assert!(
+            out.is_empty(),
+            "empty limits must emit nothing; got: {out:?}"
+        );
     }
 }
 

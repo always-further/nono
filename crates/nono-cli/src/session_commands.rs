@@ -544,27 +544,119 @@ pub fn run_inspect(args: &InspectArgs) -> Result<()> {
         println!("Rollback:   {}", rollback);
     }
     if let Some(limits) = record.limits.as_ref() {
-        if !limits.is_empty() {
-            println!("\nLimits:");
-            if let Some(pct) = limits.cpu_percent {
-                println!("  cpu:     {pct}% (hard cap)");
-            }
-            if let Some(bytes) = limits.memory_bytes {
-                println!("  memory:  {} (job-wide)", format_bytes_human(bytes));
-            }
-            if let Some(secs) = limits.timeout_seconds {
-                println!(
-                    "  timeout: {}",
-                    format_duration_human(std::time::Duration::from_secs(secs))
-                );
-            }
-            if let Some(procs) = limits.max_processes {
-                println!("  procs:   {procs} (active)");
-            }
-        }
+        // Phase 37 D-17: delegate emission to a pure formatter so the LOCKED
+        // ROADMAP Phase 37 success-criteria strings are unit-testable without
+        // capturing stdout. `print!` (not `println!`) preserves trailing-
+        // newline semantics — `format_limits_block` leads with `\nLimits:\n`
+        // and uses `writeln!` for every line.
+        print!("{}", format_limits_block(limits));
     }
 
     Ok(())
+}
+
+/// Phase 37 D-17: format the `nono inspect` Limits block per platform-specific
+/// semantics.
+///
+/// Linux emits the LOCKED ROADMAP Phase 37 success-criteria strings (per
+/// REQ-RESL-NIX-01/02/03 acceptance #2) so Plan 37-04's CI workflow can
+/// grep-assert the runner output:
+/// - `memory: 100M (cgroup v2 memory.max)`
+/// - `cpu_percent: 25 (cgroup v2 cpu.max 25000 100000)`
+/// - `max_processes: 5 (cgroup v2 pids.max)`
+///
+/// Windows retains the legacy `cpu: 25% (hard cap)` shape inherited from the
+/// v2.1 Phase 16 Windows Job Object backend (compiled only via the Windows
+/// mirror file `session_commands_windows.rs`; this arm is unreachable here but
+/// kept defensively for symmetry with the Windows file).
+///
+/// macOS emits a `(n/a - macOS deprioritized v2.5)` marker per
+/// 37-CONTEXT.md "macOS deprioritized this milestone".
+///
+/// Per CLAUDE.md "Explicit Over Implicit" + PATTERNS.md Pattern F + D-17:
+/// uses `#[cfg(target_os = ...)]` compile-time gates (NOT runtime `cfg!()`)
+/// so each platform arm is verified by the compiler.
+fn format_limits_block(limits: &crate::session::ResourceLimitsRecord) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if limits.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out, "\nLimits:");
+
+    if let Some(pct) = limits.cpu_percent {
+        #[cfg(target_os = "linux")]
+        {
+            // D-17 + REQ-RESL-NIX-02 acceptance #2: LOCKED string.
+            // quota_us = pct * 1000 (25% -> 25000μs of the 100000μs period).
+            // `u32` is wide enough for the 1..=100 range checked at clap parse.
+            let quota: u32 = u32::from(pct) * 1000;
+            let _ = writeln!(
+                out,
+                "  cpu_percent: {pct} (cgroup v2 cpu.max {quota} 100000)"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = writeln!(out, "  cpu:     {pct}% (n/a - macOS deprioritized v2.5)");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = writeln!(out, "  cpu:     {pct}% (hard cap)");
+        }
+    }
+
+    if let Some(bytes) = limits.memory_bytes {
+        #[cfg(target_os = "linux")]
+        {
+            // D-17 + REQ-RESL-NIX-01 acceptance #2: LOCKED string with
+            // short-form bytes ("100M" not "100 MiB").
+            let _ = writeln!(
+                out,
+                "  memory: {} (cgroup v2 memory.max)",
+                format_bytes_short(bytes)
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = writeln!(
+                out,
+                "  memory:  {} (n/a - macOS deprioritized v2.5)",
+                format_bytes_human(bytes)
+            );
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = writeln!(out, "  memory:  {} (job-wide)", format_bytes_human(bytes));
+        }
+    }
+
+    if let Some(secs) = limits.timeout_seconds {
+        // Timeout shape unchanged across platforms (not a cgroup-backend concern).
+        let _ = writeln!(
+            out,
+            "  timeout: {}",
+            format_duration_human(std::time::Duration::from_secs(secs))
+        );
+    }
+
+    if let Some(procs) = limits.max_processes {
+        #[cfg(target_os = "linux")]
+        {
+            // D-17 + REQ-RESL-NIX-03 acceptance #2: LOCKED string.
+            let _ = writeln!(out, "  max_processes: {procs} (cgroup v2 pids.max)");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = writeln!(out, "  procs:   {procs} (n/a - macOS deprioritized v2.5)");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = writeln!(out, "  procs:   {procs} (active)");
+        }
+    }
+
+    out
 }
 
 /// Render bytes using binary (1024-based) units. Picks the largest unit that
@@ -586,6 +678,38 @@ fn format_bytes_human(bytes: u64) -> String {
         format!("{} KiB", bytes / K)
     } else {
         format!("{bytes} bytes")
+    }
+}
+
+/// Phase 37 D-17: short-form binary-prefix bytes formatter (round-trip parity
+/// with `crate::cli::parse_byte_size`).
+///
+/// Examples:
+/// - `100 * 1024 * 1024` -> `"100M"`
+/// - `1024 * 1024 * 1024` -> `"1G"`
+/// - `1024` -> `"1K"`
+/// - `1500` -> `"1500"` (non-round fall-through, no suffix)
+///
+/// Used by `format_limits_block` to emit the LOCKED REQ-RESL-NIX-01
+/// acceptance #2 string `memory: 100M (cgroup v2 memory.max)`. The short
+/// form (no space, no `"iB"` suffix) matches the way `--memory 100M` is
+/// accepted on the command line, giving round-trip-readable output.
+fn format_bytes_short(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const TIB: u64 = 1024 * 1024 * 1024 * 1024;
+
+    if bytes >= TIB && bytes % TIB == 0 {
+        format!("{}T", bytes / TIB)
+    } else if bytes >= GIB && bytes % GIB == 0 {
+        format!("{}G", bytes / GIB)
+    } else if bytes >= MIB && bytes % MIB == 0 {
+        format!("{}M", bytes / MIB)
+    } else if bytes >= KIB && bytes % KIB == 0 {
+        format!("{}K", bytes / KIB)
+    } else {
+        format!("{bytes}")
     }
 }
 
@@ -937,5 +1061,100 @@ mod inspect_formatting_tests {
     fn duration_90s_not_clean_minute() {
         // 90s is not a clean minute → falls back to seconds.
         assert_eq!(format_duration_human(Duration::from_secs(90)), "90 seconds");
+    }
+}
+
+// Phase 37 D-17: tests for the LOCKED Linux Limits-block strings and the
+// short-form bytes formatter. The format_limits_block function is platform-
+// aware via compile-time #[cfg] gates (Pattern F + D-17), so platform-gated
+// tests use the same #[cfg(target_os = "...")] convention.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod limits_block_format_tests {
+    use super::{format_bytes_short, format_limits_block};
+    use crate::session::ResourceLimitsRecord;
+
+    fn limits(cpu: Option<u16>, mem: Option<u64>, procs: Option<u32>) -> ResourceLimitsRecord {
+        ResourceLimitsRecord {
+            cpu_percent: cpu,
+            memory_bytes: mem,
+            timeout_seconds: None,
+            max_processes: procs,
+        }
+    }
+
+    #[test]
+    fn format_bytes_short_100_mebibytes_is_100m() {
+        assert_eq!(format_bytes_short(100 * 1024 * 1024), "100M");
+    }
+
+    #[test]
+    fn format_bytes_short_1_gibibyte_is_1g() {
+        assert_eq!(format_bytes_short(1024 * 1024 * 1024), "1G");
+    }
+
+    #[test]
+    fn format_bytes_short_1024_bytes_is_1k() {
+        assert_eq!(format_bytes_short(1024), "1K");
+    }
+
+    #[test]
+    fn format_bytes_short_non_round_value_falls_back_to_bytes() {
+        // 1500 is not a clean multiple of 1024 -> rendered as raw bytes.
+        assert_eq!(format_bytes_short(1500), "1500");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn limits_block_format_linux_memory_locked_string() {
+        // ROADMAP Phase 37 success #1 + REQ-RESL-NIX-01 acceptance #2.
+        let out = format_limits_block(&limits(None, Some(100 * 1024 * 1024), None));
+        assert!(
+            out.contains("memory: 100M (cgroup v2 memory.max)"),
+            "ROADMAP Phase 37 success #1 LOCKED string missing; got: {out}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn limits_block_format_linux_cpu_percent_locked_string() {
+        // ROADMAP Phase 37 success #2 + REQ-RESL-NIX-02 acceptance #2.
+        let out = format_limits_block(&limits(Some(25), None, None));
+        assert!(
+            out.contains("cpu_percent: 25 (cgroup v2 cpu.max 25000 100000)"),
+            "ROADMAP Phase 37 success #2 LOCKED string missing; got: {out}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn limits_block_format_linux_max_processes_locked_string() {
+        // ROADMAP Phase 37 success #3 + REQ-RESL-NIX-03 acceptance #2.
+        let out = format_limits_block(&limits(None, None, Some(5)));
+        assert!(
+            out.contains("max_processes: 5 (cgroup v2 pids.max)"),
+            "ROADMAP Phase 37 success #3 LOCKED string missing; got: {out}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn limits_block_format_macos_emits_deprioritized_marker() {
+        // macOS deprioritized in v2.5 per 37-CONTEXT.md; legacy + marker preserved.
+        let out = format_limits_block(&limits(Some(25), None, None));
+        assert!(
+            out.contains("(n/a - macOS deprioritized v2.5)"),
+            "macOS deprioritized stub string missing; got: {out}"
+        );
+    }
+
+    #[test]
+    fn limits_block_empty_returns_empty_string() {
+        // is_empty() short-circuit: an all-None record must produce no output.
+        let out = format_limits_block(&limits(None, None, None));
+        assert!(
+            out.is_empty(),
+            "empty limits must emit nothing; got: {out:?}"
+        );
     }
 }
