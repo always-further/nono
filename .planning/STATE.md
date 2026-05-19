@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v2.5
 milestone_name: Backlog Drain + UPST5
 status: completed
-last_updated: "2026-05-19T12:33:58.474Z"
+last_updated: "2026-05-19T14:02:06.908Z"
 last_activity: 2026-05-19
 progress:
   total_phases: 5
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-12 at v2.4 milestone start; v2.3 ship
 Phase: 43
 Plan: Not started
 Status: Executing Phase 43
-Resume file: .planning/phases/43-upst5-sync-execution/43-CONTEXT.md
+Resume file: .planning/phases/37-linux-resl-backends-pkgs-auto-pull/37-CONTEXT.md
 Last activity: 2026-05-18 -- Phase 43 execution started
 
 ### v2.5 phase queue
