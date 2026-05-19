@@ -171,15 +171,131 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-phase37-pkgs-
 
-      # Plan 37-05 will populate this job with the sigstore-sign keyless step
-      # + the auto_pull_e2e_linux test invocation. The job structure (runs-on,
-      # permissions, checkout, toolchain, cache) is established here so Plan
-      # 37-05 can incrementally add steps without re-touching the workflow
-      # skeleton.
-      - name: Plan 37-05 placeholder
+      # Plan 37-05: build the workspace + the sigstore-sign example. The
+      # `sigstore-sign` crate is a dev/CI helper (sigstore-rs upstream's
+      # example binary `sign_blob`) used here at CI time to mint a fresh
+      # keyless-signed bundle for the auto-pull e2e test fixture (D-13).
+      - name: Build workspace and sigstore-sign example
         run: |
-          echo "Plan 37-05 will populate this job with sigstore-sign keyless + auto_pull_e2e_linux test"
-          # Ensure the job is not vacuously green: build the workspace so a
-          # broken workspace still red-fails this job between now and Plan
-          # 37-05 landing.
           cargo build --workspace --release --verbose
+          # Compile the upstream sigstore-rs example used to mint the
+          # ephemeral Sigstore bundle for the auto-pull e2e fixture
+          # (see 37-RESEARCH.md citations for the upstream pattern).
+          cargo build --release -p sigstore-sign --example sign_blob
+
+      # Plan 37-05 Task 4: manufacture a fixture pack on the runner using the
+      # ACTUAL PackageManifest schema from crates/nono-cli/src/package.rs:58-128.
+      # Wire-form details: pack_type uses serde rename_all="snake_case" →
+      # "policy"/"agent"; artifacts[].type is the renamed wire-key.
+      # The non-policy variant manifest-non-policy.json drives test #5
+      # (researcher Open Q3 — non-Policy pack rejection).
+      - name: Prepare fixture pack content (actual PackageManifest schema)
+        run: |
+          mkdir -p target/fixture-pack
+          cd target/fixture-pack
+
+          # Manufacture a minimal artifact tarball. Contents are arbitrary;
+          # what matters is that auto-pull verifies the SHA-256 + sigstore
+          # bundle against this exact bytestring.
+          mkdir -p artifact-src/profiles
+          echo "Phase 37 auto-pull e2e fixture pack" > artifact-src/README.txt
+          # Embed a minimal valid profile so load_registry_profile's
+          # ArtifactType::Profile resolution can find it under
+          # <install_dir>/profiles/<install_as or path>.json.
+          cat > artifact-src/profiles/mock-pack.json <<'EOF'
+          {
+            "name": "mock-pack",
+            "description": "Phase 37 e2e fixture profile (no-op)",
+            "groups": [],
+            "allow": [],
+            "deny": []
+          }
+          EOF
+          tar -czf artifact.tar.gz -C artifact-src .
+
+          # Manifest using the ACTUAL PackageManifest schema from
+          # crates/nono-cli/src/package.rs:58-128.
+          cat > manifest.json <<'EOF'
+          {
+            "schema_version": 1,
+            "name": "mock-pack",
+            "pack_type": "policy",
+            "version": "0.0.1",
+            "description": "Phase 37 auto-pull e2e fixture (Policy pack)",
+            "license": "MIT",
+            "platforms": ["linux"],
+            "artifacts": [
+              {
+                "type": "profile",
+                "path": "mock-pack"
+              }
+            ]
+          }
+          EOF
+
+          # Bundle index served by the mock TCP server — minimal one-entry
+          # form pointing at mock-ns/mock-pack.
+          cat > bundle.json <<'EOF'
+          {
+            "packs": [
+              {
+                "namespace": "mock-ns",
+                "name": "mock-pack",
+                "manifest_url": "/mock-ns/mock-pack/manifest.json"
+              }
+            ]
+          }
+          EOF
+
+          # ALSO produce manifest-non-policy.json for test #5 (non-Policy
+          # pack rejection). PackType has only two variants per
+          # package.rs:80-83: Agent | Policy. Non-Policy → "agent" (snake_case
+          # rename via serde rename_all).
+          cp manifest.json manifest-non-policy.json
+          sed -i 's/"pack_type": "policy"/"pack_type": "agent"/' manifest-non-policy.json
+
+          ls -la
+
+      # D-13: CI-time keyless sigstore signing via GitHub Actions OIDC.
+      # The job-level OIDC permission (declared at job-permissions block
+      # above) lets the runner mint an OIDC token at this step;
+      # `SIGSTORE_ID_TOKEN_AUDIENCE=sigstore` is the conventional audience
+      # for the Sigstore keyless flow. Output filename convention:
+      # <input>.sigstore.json (consumed by the auto_pull_e2e_linux tests).
+      - name: Sign fixture artifact with sigstore-sign (keyless via GH Actions OIDC)
+        env:
+          SIGSTORE_ID_TOKEN_AUDIENCE: sigstore
+        run: |
+          cd target/fixture-pack
+          cargo run --release -p sigstore-sign --example sign_blob -- \
+            artifact.tar.gz \
+            -o artifact.tar.gz.sigstore.json
+          ls -la artifact.tar.gz.sigstore.json
+
+      # Run the auto_pull_e2e_linux tests (5 acceptance tests covering
+      # REQ-PKGS-04 #1, #2, #3, #4 + researcher Open Q3 #5). The
+      # NONO_FIXTURE_PACK_DIR points at the dir we just signed; the
+      # NONO_TRUST_OIDC_ISSUER env var pins the OIDC issuer to GitHub
+      # Actions per D-15 clause 2 — when the production verifier code
+      # learns to read this env var (see SUMMARY for follow-up), the pin
+      # takes effect; otherwise the auto-pull tests still exercise D-15
+      # clause 1 (production trust root) and the follow-up tightens
+      # clause 2 to fail-closed on issuer mismatch.
+      # --test-threads=1 is belt-and-suspenders against parallel-test
+      # env-var contamination (the EnvGuard RAII already mitigates it,
+      # but EnvGuard saves/restores at struct level; concurrent tests
+      # mutating the SAME var still race within the save/restore window).
+      - name: Run auto-pull e2e integration test (D-15 both clauses)
+        env:
+          NONO_FIXTURE_PACK_DIR: ${{ github.workspace }}/target/fixture-pack
+          # D-15 clause 2: LOCKED GitHub Actions OIDC issuer pin
+          # (the canonical value is mirrored as
+          # `nono::trust::signing::GITHUB_ACTIONS_OIDC_ISSUER`).
+          NONO_TRUST_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          cargo test -p nono-cli --test auto_pull_e2e_linux --release -- --nocapture --test-threads=1
+
+      # Cross-target clippy gate (Linux-from-Linux sanity). The companion
+      # Windows/macOS clippy gates run in the umbrella ci.yml.
+      - name: Cross-target clippy gate (Linux from Linux)
+        run: cargo clippy --workspace --release --tests -- -D warnings -D clippy::unwrap_used
