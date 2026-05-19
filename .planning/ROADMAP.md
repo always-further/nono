@@ -17,7 +17,7 @@ granularity: standard
 - [ ] **Phase 37: Linux RESL backends + PKGS auto-pull** — cgroup v2 `memory.max` / `cpu.max` / `pids.max` + `load_registry_profile` auto-pull; coded on Windows host, verified via GitHub Actions Linux runners.
 - [x] **Phase 41: CI cleanup + v24 broker code-review closure** — Linux/macOS Clippy + Windows CI jobs back to green; baseline reset; 4 v24 Windows broker code-review todos absorbed. (completed 2026-05-16)
 - [x] **Phase 42: UPST5 audit** — DIVERGENCE-LEDGER.md inventory of upstream `v0.53.0..+`; first audit where the `windows-touch` column actually fires. (completed 2026-05-17)
-- [ ] **Phase 43: UPST5 sync execution** — Cherry-picks + D-20 manual replays per UPST5 audit dispositions; D-19 trailer convention + Windows-only-files invariant inherited; baseline-aware CI gate vs post-Phase-41 green baseline.
+- [x] **Phase 43: UPST5 sync execution** — Cherry-picks + D-20 manual replays per UPST5 audit dispositions; D-19 trailer convention + Windows-only-files invariant inherited; baseline-aware CI gate vs post-Phase-41 green baseline. (completed 2026-05-19)
 
 ## Phase Details
 
@@ -150,7 +150,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | 37. Linux RESL + PKGS auto-pull | 0/TBD | Not started | - |
 | 41. CI cleanup + broker CR | 11/10 | Complete   | 2026-05-17 |
 | 42. UPST5 audit | 1/1 | Complete    | 2026-05-17 |
-| 43. UPST5 sync execution | 5/7 | In Progress|  |
+| 43. UPST5 sync execution | 7/7 | Complete   | 2026-05-19 |
 
 ## References
 
