@@ -828,8 +828,11 @@ mod tests {
 /// # Fail-Fast Guarantee
 ///
 /// On cgroup v1 hosts or systems without systemd delegation, `CgroupSession::new`
-/// returns `Err(NonoError::UnsupportedPlatform(...))` BEFORE any child is spawned.
-/// This is intentional per REQ-RESL-NIX-01 criterion 5.
+/// returns `Err(NonoError::UnsupportedKernelFeature { feature: "cgroup_v2", hint })`
+/// BEFORE any child is spawned (Phase 37 D-05; the hint points the user at the
+/// `cgroup_no_v1=all` boot flag). This is intentional per REQ-RESL-NIX-01 criterion 5.
+/// The path-traversal guard in `detect_from_str` is the lone exception that still
+/// returns `NonoError::UnsupportedPlatform(...)` (Phase 37 D-07).
 pub(super) mod cgroup {
     use crate::launch_runtime::ResourceLimits;
     use nono::{NonoError, Result};
@@ -869,35 +872,43 @@ pub(super) mod cgroup {
         ///
         /// # Errors
         ///
-        /// Returns `Err(NonoError::UnsupportedPlatform(...))` if:
+        /// Returns `Err(NonoError::UnsupportedKernelFeature { .. })` (with the
+        /// LOCKED `cgroup_no_v1=all` boot-flag hint per Phase 37 D-07) when:
         /// - The contents are empty
         /// - There are multiple lines (cgroup v1 or hybrid mode)
         /// - The single line does not start with `0::` (not pure cgroup v2)
-        /// - `/sys/fs/cgroup/<path>` does not exist as a directory
+        ///
+        /// Returns `Err(NonoError::UnsupportedPlatform(...))` only for the
+        /// path-traversal guard below (kernel is fine; /proc content is
+        /// malformed/malicious — the boot-flag hint would mislead the user).
         pub(crate) fn detect_from_str(contents: &str) -> Result<PathBuf> {
             let trimmed = contents.trim();
             if trimmed.is_empty() {
-                return Err(NonoError::UnsupportedPlatform(
-                    "cgroup_v2: /proc/self/cgroup is empty (not running under a cgroup v2 \
-                     delegated hierarchy; is systemd the init system?)"
-                        .into(),
-                ));
+                // Phase 37 D-05 / D-07 site 1: empty /proc/self/cgroup is a
+                // kernel-misconfig signal (cgroup-v1 host or no delegation).
+                return Err(NonoError::UnsupportedKernelFeature {
+                    feature: "cgroup_v2".into(),
+                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                });
             }
             let mut lines = trimmed.lines();
             let first = lines.next().unwrap_or("");
             if lines.next().is_some() {
-                return Err(NonoError::UnsupportedPlatform(
-                    "cgroup_v2: /proc/self/cgroup has multiple lines (cgroup v1 or hybrid mode \
-                     detected; nono requires pure cgroup v2 with systemd delegation)"
-                        .into(),
-                ));
+                // Phase 37 D-05 / D-07 site 2: multi-line content = cgroup v1
+                // or hybrid mode; pure v2 emits exactly one line.
+                return Err(NonoError::UnsupportedKernelFeature {
+                    feature: "cgroup_v2".into(),
+                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                });
             }
             // Pure cgroup v2 has exactly one line starting with "0::"
             let cgroup_rel = first.strip_prefix("0::").ok_or_else(|| {
-                NonoError::UnsupportedPlatform(format!(
-                    "cgroup_v2: /proc/self/cgroup line does not start with '0::' \
-                     (got: {first:?}); this indicates cgroup v1 or hybrid mode"
-                ))
+                // Phase 37 D-05 / D-07 site 3: missing `0::` prefix = cgroup v1
+                // or hybrid mode (still a kernel-misconfig signal).
+                NonoError::UnsupportedKernelFeature {
+                    feature: "cgroup_v2".into(),
+                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                }
             })?;
             let abs_path = PathBuf::from("/sys/fs/cgroup")
                 .join(cgroup_rel.trim_start_matches('/').trim_end_matches('/'));
@@ -920,13 +931,18 @@ pub(super) mod cgroup {
             //      malicious or compromised /proc entry attempting to redirect path
             //      construction outside `/sys/fs/cgroup` (e.g., `0::/../../etc`).
             //
-            // Both checks fail closed with `NonoError::UnsupportedPlatform`.
+            // Both checks fail closed with `NonoError::UnsupportedPlatform`
+            // (Phase 37 D-07: KEEP — this site is /proc-tampering, not kernel misconfig).
             use std::path::Component;
             if !abs_path.starts_with("/sys/fs/cgroup")
                 || abs_path
                     .components()
                     .any(|c| matches!(c, Component::ParentDir))
             {
+                // Phase 37 D-07: KEEP as UnsupportedPlatform — /proc tampering, not kernel misconfig.
+                // The cgroup_no_v1=all boot-flag hint would mislead the user here because the
+                // kernel is fine — /proc/self/cgroup content is malformed/malicious. This is the
+                // 1-of-5 detection site intentionally NOT swapped to UnsupportedKernelFeature.
                 return Err(NonoError::UnsupportedPlatform(format!(
                     "cgroup_v2: constructed cgroup path {abs_path:?} escapes /sys/fs/cgroup \
                      (path traversal detected in /proc/self/cgroup content)"
@@ -943,9 +959,11 @@ pub(super) mod cgroup {
         /// # Fail-fast guarantee
         ///
         /// If the system is not running pure cgroup v2 with systemd delegation,
-        /// returns `Err(NonoError::UnsupportedPlatform("cgroup_v2: ..."))` BEFORE
-        /// any child is spawned. This is the enforcement point for REQ-RESL-NIX-01
-        /// acceptance criterion 5.
+        /// returns `Err(NonoError::UnsupportedKernelFeature { feature: "cgroup_v2", hint })`
+        /// (Phase 37 D-05) BEFORE any child is spawned. This is the enforcement point
+        /// for REQ-RESL-NIX-01 acceptance criterion 5. The path-traversal guard inside
+        /// `detect_from_str` is the one exception that still returns
+        /// `NonoError::UnsupportedPlatform(...)` (Phase 37 D-07).
         ///
         /// # Errors
         ///
@@ -954,21 +972,30 @@ pub(super) mod cgroup {
         /// - The contents indicate cgroup v1 or hybrid mode
         /// - The resolved path does not exist as a directory
         pub(crate) fn detect() -> Result<PathBuf> {
-            let contents = std::fs::read_to_string("/proc/self/cgroup").map_err(|e| {
-                NonoError::UnsupportedPlatform(format!(
-                    "cgroup_v2: failed to read /proc/self/cgroup: {e}"
-                ))
+            // Phase 37 D-05 / D-07 site 5a: failure to read /proc/self/cgroup is
+            // treated as a kernel-misconfig signal (no /proc, no procfs mount,
+            // or v1 host without cgroup-v2 controller).
+            let contents = std::fs::read_to_string("/proc/self/cgroup").map_err(|_e| {
+                NonoError::UnsupportedKernelFeature {
+                    feature: "cgroup_v2".into(),
+                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                }
             })?;
             let delegated = Self::detect_from_str(&contents)?;
-            // Verify the resolved path is an accessible directory
+            // Verify the resolved path is an accessible directory.
+            // Phase 37 D-05 / D-07 sites 5b + 5c: missing/non-directory delegated
+            // cgroup path is treated as kernel-misconfig (v2 unified hierarchy
+            // not mounted or delegation not granted by systemd).
             match std::fs::metadata(&delegated) {
                 Ok(m) if m.is_dir() => Ok(delegated),
-                Ok(_) => Err(NonoError::UnsupportedPlatform(format!(
-                    "cgroup_v2: delegated path {delegated:?} exists but is not a directory"
-                ))),
-                Err(e) => Err(NonoError::UnsupportedPlatform(format!(
-                    "cgroup_v2: delegated path {delegated:?} is not accessible: {e}"
-                ))),
+                Ok(_) => Err(NonoError::UnsupportedKernelFeature {
+                    feature: "cgroup_v2".into(),
+                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                }),
+                Err(_e) => Err(NonoError::UnsupportedKernelFeature {
+                    feature: "cgroup_v2".into(),
+                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                }),
             }
         }
 
@@ -985,7 +1012,10 @@ pub(super) mod cgroup {
         ///
         /// # Errors
         ///
-        /// - `UnsupportedPlatform`: cgroup v2 not available (see `detect()`).
+        /// - `UnsupportedKernelFeature { feature: "cgroup_v2", .. }`: cgroup v2
+        ///   not available (see `detect()`; Phase 37 D-05). The path-traversal
+        ///   guard inside `detect_from_str` still surfaces `UnsupportedPlatform`
+        ///   per Phase 37 D-07.
         /// - `SandboxInit`: controller enablement or directory creation failed.
         pub(crate) fn new(session_id: &str, limits: &ResourceLimits) -> Result<Self> {
             let delegated = Self::detect()?;
@@ -1286,30 +1316,36 @@ pub(super) mod cgroup {
 
         #[test]
         fn detect_from_str_cgroup_v1_rejected() {
+            // Phase 37 D-05 / D-07: missing `0::` prefix on a v1 host now
+            // returns the typed UnsupportedKernelFeature variant.
             let contents = "1:cpu:/foo\n";
             let err = CgroupSession::detect_from_str(contents).unwrap_err();
             assert!(
-                matches!(err, NonoError::UnsupportedPlatform(_)),
-                "expected UnsupportedPlatform, got: {err:?}"
+                matches!(err, NonoError::UnsupportedKernelFeature { .. }),
+                "expected UnsupportedKernelFeature, got: {err:?}"
             );
         }
 
         #[test]
         fn detect_from_str_hybrid_rejected() {
+            // Phase 37 D-05 / D-07: hybrid (multi-line) content now returns
+            // the typed UnsupportedKernelFeature variant.
             let contents = "0::/user.slice/foo\n1:cpu:/foo\n";
             let err = CgroupSession::detect_from_str(contents).unwrap_err();
             assert!(
-                matches!(err, NonoError::UnsupportedPlatform(_)),
-                "expected UnsupportedPlatform, got: {err:?}"
+                matches!(err, NonoError::UnsupportedKernelFeature { .. }),
+                "expected UnsupportedKernelFeature, got: {err:?}"
             );
         }
 
         #[test]
         fn detect_from_str_empty_rejected() {
+            // Phase 37 D-05 / D-07: empty /proc/self/cgroup now returns the
+            // typed UnsupportedKernelFeature variant.
             let err = CgroupSession::detect_from_str("").unwrap_err();
             assert!(
-                matches!(err, NonoError::UnsupportedPlatform(_)),
-                "expected UnsupportedPlatform, got: {err:?}"
+                matches!(err, NonoError::UnsupportedKernelFeature { .. }),
+                "expected UnsupportedKernelFeature, got: {err:?}"
             );
         }
 
@@ -1463,6 +1499,58 @@ pub(super) mod cgroup {
                 "bash should have been killed (non-zero exit)"
             );
             Ok(())
+        }
+    }
+
+    /// Phase 37 D-05 / D-07 swap tests: 4-of-5 cgroup-v2 detection sites now
+    /// emit `NonoError::UnsupportedKernelFeature` with the LOCKED
+    /// `cgroup_no_v1=all` boot-flag hint. Site 4 (path-traversal guard)
+    /// INTENTIONALLY remains `UnsupportedPlatform` per D-07 (kernel is fine;
+    /// /proc content is malformed — boot flag would mislead the user).
+    #[cfg(all(test, target_os = "linux"))]
+    #[allow(clippy::unwrap_used)]
+    mod unsupported_kernel_feature_swap_tests {
+        use super::*;
+
+        const LOCKED_HINT_SUBSTR: &str = "cgroup_no_v1=all";
+
+        #[test]
+        fn detect_from_str_empty_returns_unsupported_kernel_feature() {
+            let err = CgroupSession::detect_from_str("").unwrap_err();
+            match err {
+                NonoError::UnsupportedKernelFeature { feature, hint } => {
+                    assert_eq!(feature, "cgroup_v2");
+                    assert!(
+                        hint.contains(LOCKED_HINT_SUBSTR),
+                        "hint must contain LOCKED substring; got: {hint}"
+                    );
+                }
+                other => panic!("expected UnsupportedKernelFeature; got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn detect_from_str_v1_multiline_returns_unsupported_kernel_feature() {
+            let err = CgroupSession::detect_from_str("11:cpu:/\n10:memory:/\n").unwrap_err();
+            assert!(matches!(err, NonoError::UnsupportedKernelFeature { .. }));
+        }
+
+        #[test]
+        fn detect_from_str_missing_zero_prefix_returns_unsupported_kernel_feature() {
+            let err = CgroupSession::detect_from_str("1::/some/path").unwrap_err();
+            assert!(matches!(err, NonoError::UnsupportedKernelFeature { .. }));
+        }
+
+        #[test]
+        fn detect_from_str_path_traversal_returns_unsupported_platform_not_kernel_feature() {
+            // Phase 37 D-07: site 4 INTENTIONALLY kept as UnsupportedPlatform.
+            // The kernel is fine; /proc/self/cgroup content is malformed
+            // (or malicious), so the cgroup_no_v1=all hint would mislead.
+            let err = CgroupSession::detect_from_str("0::/../../etc").unwrap_err();
+            assert!(
+                matches!(err, NonoError::UnsupportedPlatform(_)),
+                "site 4 (path-traversal guard) must remain UnsupportedPlatform per D-07; got {err:?}"
+            );
         }
     }
 }
