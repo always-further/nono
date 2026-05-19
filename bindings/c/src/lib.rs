@@ -140,6 +140,11 @@ pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
         // Maps to ErrUnsupportedPlatform so FFI consumers see the same code as
         // UnsupportedPlatform but with a structured feature field in the message.
         nono::NonoError::NotSupportedOnPlatform { .. } => NonoErrorCode::ErrUnsupportedPlatform,
+        // Phase 37 D-06: kernel feature missing because the OS is misconfigured
+        // (cgroup v1 instead of v2). Reuses ErrUnsupportedPlatform per D-06; the
+        // FFI consumer reads the typed feature+hint via nono_last_error() Display
+        // string. NO new NonoErrorCode is added (ABI-stable).
+        nono::NonoError::UnsupportedKernelFeature { .. } => NonoErrorCode::ErrUnsupportedPlatform,
     }
 }
 
@@ -284,6 +289,23 @@ mod tests {
         assert!(
             matches!(code, types::NonoErrorCode::ErrSandboxInit),
             "BrokerNotFound must map to ErrSandboxInit; got {code:?}"
+        );
+    }
+
+    /// Phase 37 D-06: `UnsupportedKernelFeature` reuses
+    /// `ErrUnsupportedPlatform` — NO new FFI error code is added (ABI
+    /// stability). FFI consumers read the typed `feature` + `hint` via the
+    /// `nono_last_error()` Display string.
+    #[test]
+    fn map_error_unsupported_kernel_feature_returns_err_unsupported_platform() {
+        let err = nono::NonoError::UnsupportedKernelFeature {
+            feature: "cgroup_v2".into(),
+            hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+        };
+        let code = map_error(&err);
+        assert!(
+            matches!(code, types::NonoErrorCode::ErrUnsupportedPlatform),
+            "Phase 37 D-06: UnsupportedKernelFeature must map to ErrUnsupportedPlatform; got {code:?}"
         );
     }
 
