@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.5
 milestone_name: Backlog Drain + UPST5
-status: milestone_complete
-last_updated: "2026-05-18T12:51:47.495Z"
-last_activity: 2026-05-18
+status: completed
+last_updated: "2026-05-19T12:33:58.474Z"
+last_activity: 2026-05-19
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 18
-  completed_plans: 13
-  percent: 60
+  completed_plans: 19
+  percent: 100
 ---
 
 # Project State: nono — v2.5 Backlog Drain + UPST5
@@ -155,8 +155,6 @@ Last activity: 2026-05-18 -- Phase 43 execution started
 ()
 
 <!-- Cleared 2026-05-14: Phase 27.2-04 tracing-stdout blocker resolved by commit 2b7425e7 (2026-05-09) — `cli_bootstrap.rs::init_tracing()` now routes to stderr in both default-writer and log-file-fallback paths. `cargo test -p nono-cli --test audit_attestation` returns 4 passed; 0 failed; 0 ignored on Windows host. Phase 27.1 HUMAN-UAT Test 1 (REQ-AAHX-03 acceptance #4) can be re-run; recommend `/gsd-verify-work 27.1` to flip Test 1 from blocked → passed. -->
-
-- Phase 43 Plan 43-01 BLOCKED at Rule 4 architectural checkpoint: cherry-pick of upstream 8b888a1c is structurally invalid (re-exports public_key_id_hex/sign_statement_bundle absent from fork signing.rs and not added by commit). User chose Re-scope path: land workspace Cargo.toml edits only; defer source-file edition-2024 migration to a follow-on plan. Re-plan 43-01 required before Wave 1 plans 43-02/03/04 and Wave 2 plans 43-05/06 can proceed.
 
 ### Quick Tasks Completed
 
