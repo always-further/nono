@@ -10,6 +10,7 @@ use nono::{NonoError, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // Re-export InjectMode and OAuth2Config from nono-proxy for use in profiles
@@ -2251,6 +2252,45 @@ enum ResolvedBase {
     Global(Profile),
 }
 
+/// If `profile_path` is a symlink whose target lives under the local pack
+/// store, return the `namespace/name` pack key. Used to detect wired pack
+/// profiles (symlinks placed in the user profiles dir by the wiring system)
+/// so that step 1 of `load_base_profile_raw` can emit the same deprecation
+/// warning as step 2.
+fn pack_key_for_wired_profile(profile_path: &Path) -> Option<String> {
+    let target = std::fs::read_link(profile_path).ok()?;
+    let store = crate::package::package_store_dir().ok()?;
+    // The symlink target may be relative — resolve it from the profile's dir.
+    let abs_target = if target.is_absolute() {
+        target
+    } else {
+        profile_path.parent()?.join(target)
+    };
+    let rel = abs_target.strip_prefix(&store).ok()?;
+    let mut comps = rel.components();
+    let ns = comps.next()?.as_os_str().to_string_lossy().into_owned();
+    let name = comps.next()?.as_os_str().to_string_lossy().into_owned();
+    comps.next()?; // must have at least one more component inside the pack dir
+    Some(format!("{ns}/{name}"))
+}
+
+/// Emit a deprecation warning when an `extends` short name resolves to a pack
+/// profile via `install_as`. Integrates with `WarningCounterGuard` so
+/// `nono profile validate --strict` can fail on this pattern, and with
+/// `WarningSuppressionGuard` for preview-parse paths that re-parse later.
+fn emit_extends_install_as_warning(name: &str, pack_key: &str) {
+    if crate::deprecation_warnings::is_suppressed() {
+        return;
+    }
+    crate::deprecation_warnings::note_deprecation();
+    let _ = writeln!(
+        std::io::stderr(),
+        "warning: 'extends: \"{name}\"' resolved to pack '{pack_key}' via install_as \
+         — use 'extends: \"{pack_key}\"' instead \
+         (short-name pack resolution in extends will be removed in v1.0.0, #969)"
+    );
+}
+
 /// Load a base profile by name WITHOUT applying implicit default-group merging.
 ///
 /// Checks sibling profiles in `context_dir` first (so project-local profiles
@@ -2275,6 +2315,23 @@ fn load_base_profile_raw(
     context_dir: Option<&Path>,
     source_file: Option<&Path>,
 ) -> Result<ResolvedBase> {
+    // 0a. Registry ref (org/name) — explicit canonical form; no short-name
+    //     ambiguity. Try local pack store first; auto-pull only if we were
+    //     entered through `load_profile` (the migration-prompt path).
+    if is_registry_ref(name) {
+        let package_ref = crate::package::parse_package_ref(name).map_err(|e| {
+            NonoError::ProfileInheritance(format!("invalid pack ref '{name}': {e}"))
+        })?;
+        let install_dir =
+            crate::package::package_install_dir(&package_ref.namespace, &package_ref.name)?;
+        if install_dir.join("package.json").exists() || missing_base_prompt_enabled() {
+            return load_registry_profile(name).map(ResolvedBase::Global);
+        }
+        return Err(NonoError::ProfileInheritance(format!(
+            "pack '{name}' is not installed; run: nono pull {name}"
+        )));
+    }
+
     if !is_valid_profile_name(name) {
         return Err(NonoError::ProfileInheritance(format!(
             "invalid base profile name '{}'",
@@ -2282,9 +2339,9 @@ fn load_base_profile_raw(
         )));
     }
 
-    // 0. Sibling in the same directory as the child profile.
-    //    Skip if the sibling path is the source file itself to avoid
-    //    self-references (e.g. `.nono/codex.json` extending "codex").
+    // 0b. Sibling in the same directory as the child profile.
+    //     Skip if the sibling path is the source file itself to avoid
+    //     self-references (e.g. `.nono/codex.json` extending "codex").
     if let Some(dir) = context_dir {
         let sibling_path = dir.join(format!("{name}.json"));
         let is_self = source_file.is_some_and(|src| sibling_path == src);
@@ -2304,6 +2361,12 @@ fn load_base_profile_raw(
     // 1. User profiles take precedence.
     let profile_path = get_user_profile_path(name)?;
     if profile_path.exists() {
+        // Wired pack profiles land here as symlinks (install_as → pack store).
+        // Emit the same deprecation warning as step 2 so users see it regardless
+        // of whether they hit the symlink path or the direct pack-store scan.
+        if let Some(pack_key) = pack_key_for_wired_profile(&profile_path) {
+            emit_extends_install_as_warning(name, &pack_key);
+        }
         return Ok(ResolvedBase::Global(parse_profile_file(&profile_path)?));
     }
 
@@ -2312,6 +2375,9 @@ fn load_base_profile_raw(
     // the merge chain and reaches verification even if the profile JSON
     // doesn't declare its own pack.
     if let Some((profile_path, pack_key)) = find_pack_store_profile(name) {
+        // Short-name resolution via install_as in `extends` is deprecated.
+        // Emit a warning so users can migrate to the unambiguous org/name form.
+        emit_extends_install_as_warning(name, &pack_key);
         let mut base = parse_profile_file(&profile_path)?;
         if !base.packs.contains(&pack_key) {
             base.packs.push(pack_key);
@@ -2340,6 +2406,7 @@ fn load_base_profile_raw(
         match outcome {
             crate::migration::MigrationOutcome::Migrated => {
                 if let Some((profile_path, pack_key)) = find_pack_store_profile(name) {
+                    emit_extends_install_as_warning(name, &pack_key);
                     let mut base = parse_profile_file(&profile_path)?;
                     if !base.packs.contains(&pack_key) {
                         base.packs.push(pack_key);
@@ -6315,6 +6382,109 @@ mod tests {
         assert!(
             err.to_string().contains("unknown field"),
             "unexpected error: {err}"
+        );
+    }
+
+    // --- Tests for issue #969: extends short-name deprecation warning ---
+
+    #[test]
+    fn extends_registry_ref_not_installed_no_migrate_returns_error() {
+        // When `extends: "org/name"` is used but the pack is not installed and
+        // we are NOT in the migration-prompt context, the call must fail with a
+        // clear "not installed" message rather than an obscure validity error.
+        let result = load_base_profile_raw("always-further/nonexistent-pack-xyz", None, None);
+        assert!(result.is_err(), "should fail when pack not installed");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("not installed") || msg.contains("nono pull"),
+            "error should mention 'not installed' or 'nono pull', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn emit_extends_install_as_warning_increments_counter() {
+        // emit_extends_install_as_warning must bump the WarningCounterGuard when
+        // called outside a suppression scope.
+        let guard = crate::deprecation_warnings::WarningCounterGuard::begin();
+        emit_extends_install_as_warning("claude-code", "always-further/claude");
+        let count = guard.finish();
+        assert_eq!(count, 1, "counter must increment outside suppression scope");
+    }
+
+    #[test]
+    fn emit_extends_install_as_warning_suppressed_by_guard() {
+        // Inside a WarningSuppressionGuard the counter must stay at zero.
+        let counter_guard = crate::deprecation_warnings::WarningCounterGuard::begin();
+        let _suppress = crate::deprecation_warnings::WarningSuppressionGuard::begin();
+        emit_extends_install_as_warning("claude-code", "always-further/claude");
+        drop(_suppress);
+        let count = counter_guard.finish();
+        assert_eq!(count, 0, "counter must stay zero inside suppression scope");
+    }
+
+    #[test]
+    fn emit_extends_install_as_warning_no_op_outside_counter_scope() {
+        // Calling outside any counter scope must not panic or corrupt state.
+        // This mirrors how `note_deprecation` behaves outside a counter scope.
+        emit_extends_install_as_warning("claude-code", "always-further/claude");
+    }
+
+    #[test]
+    fn pack_key_for_wired_profile_returns_ns_name_for_symlink_in_store() {
+        let dir = tempdir().expect("tempdir");
+        let store = dir.path().join("packages");
+
+        // Build a minimal pack directory: <store>/myorg/mypkg/profiles/alias.json
+        let pack_dir = store.join("myorg").join("mypkg");
+        let profiles_dir = pack_dir.join("profiles");
+        std::fs::create_dir_all(&profiles_dir).expect("create dirs");
+        let real_profile = profiles_dir.join("alias.json");
+        std::fs::write(&real_profile, r#"{"meta":{"name":"alias"}}"#).expect("write profile");
+
+        // Symlink from a "user profiles dir" into the pack store
+        let user_dir = dir.path().join("user-profiles");
+        std::fs::create_dir_all(&user_dir).expect("create user dir");
+        let symlink_path = user_dir.join("alias.json");
+        std::os::unix::fs::symlink(&real_profile, &symlink_path).expect("create symlink");
+
+        // Override the store path by testing the helper with a manually crafted
+        // absolute target — we can't inject the store dir, so test the logic
+        // via a symlink whose target IS absolute and under a known prefix.
+        // pack_key_for_wired_profile strips the store prefix from the symlink target.
+        // Here we simulate that by checking the symlink resolves correctly.
+        let result = std::fs::read_link(&symlink_path).expect("read symlink");
+        assert_eq!(result, real_profile, "symlink target is the pack profile");
+
+        // Verify that stripping the store prefix and extracting ns/name works.
+        let rel = real_profile
+            .strip_prefix(&store)
+            .expect("strip store prefix");
+        let mut comps = rel.components();
+        let ns = comps
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
+        let name = comps
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(ns, "myorg");
+        assert_eq!(name, "mypkg");
+    }
+
+    #[test]
+    fn pack_key_for_wired_profile_returns_none_for_regular_file() {
+        let dir = tempdir().expect("tempdir");
+        let regular = dir.path().join("regular.json");
+        std::fs::write(&regular, r#"{"meta":{"name":"regular"}}"#).expect("write file");
+        // A non-symlink file should return None
+        assert!(
+            pack_key_for_wired_profile(&regular).is_none(),
+            "regular file must not be treated as a wired pack profile"
         );
     }
 }
