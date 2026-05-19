@@ -120,7 +120,8 @@ pub(crate) struct ProxyLaunchOptions {
 /// - **Linux:** kernel-enforced via cgroup v2 delegated hierarchy (see
 ///   `exec_strategy::apply_resource_limits_unix` → `supervisor_linux::cgroup::CgroupSession`).
 ///   Requires cgroup v2 + systemd delegation; fails fast on cgroup v1 hosts with
-///   `NonoError::UnsupportedPlatform("cgroup_v2: ...")`.
+///   `NonoError::UnsupportedKernelFeature { feature: "cgroup_v2", hint }`
+///   (Phase 37 D-05; hint points the user at the `cgroup_no_v1=all` boot flag).
 /// - **macOS:** kernel-enforced for memory + max_processes via
 ///   `setrlimit(RLIMIT_AS, RLIMIT_NPROC)` in a `pre_exec` hook.
 ///   `--cpu-percent` is rejected at clap parse time (no per-process CPU-quota

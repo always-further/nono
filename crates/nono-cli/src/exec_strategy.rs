@@ -94,8 +94,9 @@ pub(crate) enum UnixResourceLimitGuard {
 ///
 /// # Errors
 ///
-/// - Linux: `NonoError::UnsupportedPlatform("cgroup_v2: ...")` if cgroup v2
-///   is not available. The child is NOT spawned.
+/// - Linux: `NonoError::UnsupportedKernelFeature { feature: "cgroup_v2", hint }`
+///   if cgroup v2 is not available (Phase 37 D-05; the hint points the user at
+///   `cgroup_no_v1=all`). The child is NOT spawned.
 /// - macOS: `NonoError::NotSupportedOnPlatform { feature: "cpu_percent_macos" }`
 ///   if `--cpu-percent` was somehow set (defense-in-depth; clap rejects it first).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
