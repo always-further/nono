@@ -146,10 +146,28 @@ fn query_windows_registry_value(name: &str) -> Option<String> {
 fn parse_windows_registry_value(output: &str, name: &str) -> Option<String> {
     for line in output.lines() {
         let mut parts = line.split_whitespace();
-        if parts.next() != Some(name) {
+        // Phase 44 WR-06 P43 (REQ-REVIEW-FU-01 D-44-A4): Windows registry
+        // value names are case-insensitive. The pre-44 case-sensitive
+        // comparison silently degraded callers that requested "EditionID"
+        // when reg.exe emitted "EditionId", returning None and forcing
+        // a misleading fallback further up the platform-detection chain.
+        //
+        // Empty / whitespace-only lines (e.g. the leading blank line in
+        // `reg query` output) skip via the `None` branch — do NOT
+        // short-circuit the whole function, since the value line we
+        // want may appear later in the same blob.
+        let Some(first) = parts.next() else {
+            continue;
+        };
+        if !first.eq_ignore_ascii_case(name) {
             continue;
         }
         let kind = parts.next()?;
+        // Phase 44 IN-05 P43 (D-44-B5 accept-as-documented): multi-space
+        // collapse is intentional given the tab-aligned `reg query`
+        // output. Cosmetic only — registry values never legitimately
+        // contain runs of internal whitespace that need preservation in
+        // the version comparator that consumes this string.
         let value = parts.collect::<Vec<_>>().join(" ");
         if !value.is_empty() {
             if kind == "REG_DWORD" {
@@ -157,10 +175,16 @@ fn parse_windows_registry_value(output: &str, name: &str) -> Option<String> {
                     .strip_prefix("0x")
                     .or_else(|| value.strip_prefix("0X"))
                 {
-                    if let Ok(number) = u64::from_str_radix(hex, 16) {
-                        return Some(number.to_string());
-                    }
+                    return u64::from_str_radix(hex, 16).ok().map(|n| n.to_string());
                 }
+                // Phase 44 WR-02 P43: REG_DWORD without an `0x` / `0X`
+                // prefix is malformed. Pre-44 fell through to `Some(value)`
+                // which returned the raw garbage string (e.g. "0xZZZ"
+                // or "abc") — downstream `compare_versions` then treated
+                // it as a Less-than-everything non-numeric segment and
+                // silently misordered platform-version comparisons. Bail
+                // fail-closed here per CLAUDE.md § Fail Secure.
+                return None;
             }
             return Some(value);
         }
@@ -586,8 +610,22 @@ fn compare_versions(left: &str, right: &str) -> Ordering {
     for (left_part, right_part) in left_parts.iter().zip(right_parts.iter()) {
         let ordering = match (left_part.parse::<u64>(), right_part.parse::<u64>()) {
             (Ok(left_num), Ok(right_num)) => left_num.cmp(&right_num),
-            _ if left_part == right_part => Ordering::Equal,
-            _ => Ordering::Less,
+            // Phase 44 WR-04 P43 (REQ-REVIEW-FU-01 D-44-A4): both segments
+            // unparseable — fall back to lexicographic ordering. Pre-44
+            // returned `Ordering::Less` unconditionally, which violated
+            // Ord antisymmetry (`compare_versions("a", "b") == Less` AND
+            // `compare_versions("b", "a") == Less` simultaneously) and
+            // produced inconsistent sort/sort-stability behavior in
+            // downstream platform comparators.
+            (Err(_), Err(_)) => left_part.cmp(right_part),
+            // Mixed numeric/non-numeric: the numeric side sorts greater
+            // for fail-closed predicate semantics. CLAUDE.md § Fail
+            // Secure — "alpha" must NOT compare greater than "1" or a
+            // version-pinning predicate could be tricked into accepting
+            // a non-numeric (e.g. "alpha") build as newer than the
+            // released "1.x" baseline.
+            (Ok(_), Err(_)) => Ordering::Greater,
+            (Err(_), Ok(_)) => Ordering::Less,
         };
         if ordering != Ordering::Equal {
             return ordering;
@@ -731,5 +769,65 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion
             parse_windows_registry_value(output, "CurrentMajorVersionNumber").as_deref(),
             Some("10")
         );
+    }
+
+    /// Phase 44 WR-06 P43 regression: registry value names are
+    /// case-insensitive on Windows. Pre-44 case-sensitive comparison
+    /// silently degraded callers asking for "EditionID" when reg.exe
+    /// emitted "EditionId", returning None and routing platform
+    /// detection through a misleading fallback.
+    #[test]
+    fn parse_windows_registry_value_accepts_case_mismatch() {
+        let output = "    EditionId    REG_SZ    Professional\n";
+        assert_eq!(
+            parse_windows_registry_value(output, "EditionID").as_deref(),
+            Some("Professional"),
+            "registry value name must match case-insensitively"
+        );
+        // Symmetric: querying lowercase against an uppercase emit works.
+        let output_upper = "    EDITIONID    REG_SZ    Pro\n";
+        assert_eq!(
+            parse_windows_registry_value(output_upper, "editionid").as_deref(),
+            Some("Pro"),
+        );
+    }
+
+    /// Phase 44 WR-02 P43 regression: malformed REG_DWORD values return
+    /// None rather than the raw garbage string. Pre-44 returned
+    /// `Some("0xZZZ")` which downstream `compare_versions` then treated
+    /// as a non-numeric segment and silently misordered platform
+    /// comparisons.
+    #[test]
+    fn parse_windows_registry_value_rejects_malformed_dword() {
+        // Garbage hex digits.
+        let output = "    UBR    REG_DWORD    0xZZZ\n";
+        assert_eq!(
+            parse_windows_registry_value(output, "UBR"),
+            None,
+            "malformed REG_DWORD must return None, not raw garbage"
+        );
+        // Missing 0x prefix.
+        let output_no_prefix = "    UBR    REG_DWORD    abc\n";
+        assert_eq!(
+            parse_windows_registry_value(output_no_prefix, "UBR"),
+            None,
+        );
+    }
+
+    /// Phase 44 WR-04 P43 regression: Ord antisymmetry must hold on
+    /// non-numeric inputs. Pre-44 returned `Ordering::Less` for ANY
+    /// mixed-case mismatch, so `compare_versions("a", "b") == Less`
+    /// AND `compare_versions("b", "a") == Less` simultaneously — an
+    /// antisymmetry violation that broke `sort_by` stability.
+    #[test]
+    fn compare_versions_is_symmetric_on_non_numeric_segments() {
+        // Lexicographic on both-unparseable.
+        assert_eq!(compare_versions("a", "b"), Ordering::Less);
+        assert_eq!(compare_versions("b", "a"), Ordering::Greater);
+        assert_eq!(compare_versions("alpha", "alpha"), Ordering::Equal);
+        // Mixed numeric/non-numeric: numeric side is Greater for
+        // fail-closed predicate semantics.
+        assert_eq!(compare_versions("1", "a"), Ordering::Greater);
+        assert_eq!(compare_versions("a", "1"), Ordering::Less);
     }
 }

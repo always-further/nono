@@ -833,9 +833,29 @@ mod tests {
 /// `cgroup_no_v1=all` boot flag). This is intentional per REQ-RESL-NIX-01 criterion 5.
 /// The path-traversal guard in `detect_from_str` is the lone exception that still
 /// returns `NonoError::UnsupportedPlatform(...)` (Phase 37 D-07).
+/// Cgroup-v2 detection sites (Phase 44 IN-06 P37, REQ-REVIEW-FU-01 D-44-A4).
+///
+/// All six `NonoError::UnsupportedKernelFeature { feature: "cgroup_v2", ... }`
+/// constructions in this module share the LOCKED hint string from
+/// [`nono::CGROUP_V2_HINT`] (Phase 44 WR-02 P37 promoted it from a
+/// test-mod-local literal). The seventh detection branch
+/// (`detect_from_str` path-traversal guard at ~line 946) intentionally
+/// stays `NonoError::UnsupportedPlatform` because the kernel is fine —
+/// the boot-flag hint would mislead an operator chasing a `/proc`
+/// tampering signal.
+///
+/// Site map:
+///
+/// 1. `detect_from_str` early empty-content guard
+/// 2. `detect_from_str` multi-line guard (cgroup v1/hybrid)
+/// 3. `detect_from_str` missing `0::` prefix guard
+/// 4. (intentionally UnsupportedPlatform — `detect_from_str` traversal guard)
+/// 5a. `detect` failed to read `/proc/self/cgroup`
+/// 5b. `detect` resolved path is not a directory
+/// 5c. `detect` resolved path metadata failed
 pub(super) mod cgroup {
     use crate::launch_runtime::ResourceLimits;
-    use nono::{NonoError, Result};
+    use nono::{NonoError, Result, CGROUP_V2_HINT};
     use std::io;
     use std::path::PathBuf;
     use tracing::warn;
@@ -888,7 +908,7 @@ pub(super) mod cgroup {
                 // kernel-misconfig signal (cgroup-v1 host or no delegation).
                 return Err(NonoError::UnsupportedKernelFeature {
                     feature: "cgroup_v2".into(),
-                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                    hint: CGROUP_V2_HINT.into(),
                 });
             }
             let mut lines = trimmed.lines();
@@ -898,7 +918,7 @@ pub(super) mod cgroup {
                 // or hybrid mode; pure v2 emits exactly one line.
                 return Err(NonoError::UnsupportedKernelFeature {
                     feature: "cgroup_v2".into(),
-                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                    hint: CGROUP_V2_HINT.into(),
                 });
             }
             // Pure cgroup v2 has exactly one line starting with "0::"
@@ -907,7 +927,7 @@ pub(super) mod cgroup {
                 // or hybrid mode (still a kernel-misconfig signal).
                 NonoError::UnsupportedKernelFeature {
                     feature: "cgroup_v2".into(),
-                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                    hint: CGROUP_V2_HINT.into(),
                 }
             })?;
             let abs_path = PathBuf::from("/sys/fs/cgroup")
@@ -978,7 +998,7 @@ pub(super) mod cgroup {
             let contents = std::fs::read_to_string("/proc/self/cgroup").map_err(|_e| {
                 NonoError::UnsupportedKernelFeature {
                     feature: "cgroup_v2".into(),
-                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                    hint: CGROUP_V2_HINT.into(),
                 }
             })?;
             let delegated = Self::detect_from_str(&contents)?;
@@ -990,11 +1010,11 @@ pub(super) mod cgroup {
                 Ok(m) if m.is_dir() => Ok(delegated),
                 Ok(_) => Err(NonoError::UnsupportedKernelFeature {
                     feature: "cgroup_v2".into(),
-                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                    hint: CGROUP_V2_HINT.into(),
                 }),
                 Err(_e) => Err(NonoError::UnsupportedKernelFeature {
                     feature: "cgroup_v2".into(),
-                    hint: "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all".into(),
+                    hint: CGROUP_V2_HINT.into(),
                 }),
             }
         }

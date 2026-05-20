@@ -3,6 +3,23 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// LOCKED hint string for the `cgroup_v2` `UnsupportedKernelFeature` variant.
+///
+/// Keep in sync with all cgroup-v2-detecting call sites in
+/// `crates/nono-cli/src/exec_strategy/supervisor_linux.rs`. The boot-flag
+/// hint MUST remain stable for REQ-RESL-NIX-01 acceptance #5 — FFI
+/// consumers grep this exact substring from `nono_last_error()` Display
+/// output. CLAUDE.md § Coding Standards "lazy use of dead code" forbids
+/// dropping or renaming this const without auditing every grep contract.
+///
+/// Phase 44 WR-02 P37 (REQ-REVIEW-FU-01 D-44-A4): promoted from a
+/// test-mod-local `LOCKED_HINT` to module-level `pub const` after the
+/// duplicated literal accreted across 6 supervisor_linux.rs call sites.
+/// The promotion deduplicates the literal and gives library + CLI a
+/// single source of truth.
+pub const CGROUP_V2_HINT: &str =
+    "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all";
+
 /// Errors that can occur in the nono library
 #[derive(Error, Debug)]
 pub enum NonoError {
@@ -422,8 +439,9 @@ mod broker_not_found_tests {
 mod unsupported_kernel_feature_tests {
     use super::NonoError;
 
-    const LOCKED_HINT: &str =
-        "cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all";
+    // Phase 44 WR-02 P37 (D-44-A4): refer to the now-promoted module-level
+    // CGROUP_V2_HINT instead of duplicating the literal locally.
+    const LOCKED_HINT: &str = super::CGROUP_V2_HINT;
 
     #[test]
     fn unsupported_kernel_feature_display_contains_cgroup_no_v1_hint() {
