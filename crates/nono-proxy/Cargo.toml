@@ -37,7 +37,11 @@ urlencoding = "2"
 globset.workspace = true
 
 # TLS for upstream connections (reverse proxy mode)
-hyper-rustls = { version = "0.27", features = ["http1", "ring", "webpki-tokio"] }
+hyper-rustls = { version = "0.27", features = ["http1", "http2", "ring", "webpki-tokio"] }
+# HTTP/2 framing for CONNECT-intercept h2 forwarding (gRPC support)
+h2 = "0.4"
+bytes = "1"
+http = "1"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "1"

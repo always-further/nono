@@ -19,8 +19,8 @@ use crate::filter::ProxyFilter;
 use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
 use crate::reverse;
 use crate::route::RouteStore;
-use crate::tls_intercept::acceptor;
 use crate::tls_intercept::cert_cache::CertCache;
+use crate::tls_intercept::{acceptor, h2_forward};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -42,6 +42,7 @@ pub struct InterceptCtx<'a> {
     pub session_token: &'a Zeroizing<String>,
     pub cert_cache: Arc<CertCache>,
     pub tls_connector: &'a tokio_rustls::TlsConnector,
+    pub tls_connector_h2: &'a tokio_rustls::TlsConnector,
     pub filter: &'a ProxyFilter,
     pub audit_log: Option<&'a audit::SharedAuditLog>,
 }
@@ -114,11 +115,28 @@ pub async fn handle_intercept_connect(stream: &mut TcpStream, ctx: InterceptCtx<
         "CONNECT",
     );
 
-    if let Err(e) = forward_inner_request(&mut tls_stream, &ctx).await {
-        debug!(
-            "tls_intercept: inner-request handling failed for {}:{}: {}",
-            ctx.host, ctx.port, e
-        );
+    let alpn = tls_stream.get_ref().1.alpn_protocol();
+    match alpn {
+        Some(b"h2") => {
+            debug!(
+                "tls_intercept: h2 negotiated for {}:{}, using h2 forward path",
+                ctx.host, ctx.port
+            );
+            if let Err(e) = h2_forward::forward_h2_connection(tls_stream, &ctx).await {
+                debug!(
+                    "tls_intercept: h2 forwarding failed for {}:{}: {}",
+                    ctx.host, ctx.port, e
+                );
+            }
+        }
+        _ => {
+            if let Err(e) = forward_inner_request(&mut tls_stream, &ctx).await {
+                debug!(
+                    "tls_intercept: inner-request handling failed for {}:{}: {}",
+                    ctx.host, ctx.port, e
+                );
+            }
+        }
     }
     Ok(())
 }
