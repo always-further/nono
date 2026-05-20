@@ -3,7 +3,8 @@ use crate::cli::LearnArgs;
 use crate::command_display::format_command_line;
 use crate::profile_save_runtime::{
     PreparedProfileSave, SaveAction, command_name, confirm, patch_has_policy_overrides,
-    print_patch_preview, print_profile_save, suggested_profile_name, write_profile,
+    print_patch_preview, print_profile_save, suggested_profile_name, would_shadow_existing_profile,
+    write_profile,
 };
 use crate::{learn, profile};
 use colored::Colorize;
@@ -222,14 +223,11 @@ fn offer_save_profile(
         return Ok(());
     }
 
-    if compared_profile
-        .filter(|name| profile::is_valid_profile_name(name) && !profile::is_user_override(name))
-        .is_some_and(|name| name == profile_name)
-    {
+    if would_shadow_existing_profile(profile_name) {
         eprintln!(
             "{}",
             format!(
-                "Cannot save '{}' as a derived user profile because it would shadow the built-in profile it extends. Choose a different name.",
+                "Cannot save '{}' as a user profile because it would shadow an existing built-in or pack profile of the same name. Choose a different name.",
                 profile_name
             )
             .red()

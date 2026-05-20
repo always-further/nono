@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.57.0] - 2026-05-19
+
+### Bug Fixes
+
+- *(profile)* Fix fmt and test assertion after shadow-check refactor
+
+- *(profile)* Handle versioned package refs in fast path
+
+- *(profiles)* Block profile init when name shadows builtin or pack profile
+
+- *(profiles)* Address review points on shadow-check PR
+
+
+### Dependencies
+
+- *(deps)* Bump aws-lc-rs from 1.16.3 to 1.17.0
+
+
+### Features
+
+- *(profile)* Refine profile name resolution and init validation
+
+- *(profiles)* Expand shadowing checks to include pack profiles
+
 ## [0.56.0] - 2026-05-18
 
 ### Bug Fixes

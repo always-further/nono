@@ -174,9 +174,9 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.16.3"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ec6fb3fe69024a75fa7e1bfb48aa6cf59706a101658ea01bfd33b2b248a038f"
+checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -185,9 +185,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.40.0"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f50037ee5e1e41e7b8f9d161680a725bd1626cb6f8c7e901f91f942850852fe7"
+checksum = "1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4"
 dependencies = [
  "cc",
  "cmake",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "nono"
-version = "0.56.0"
+version = "0.57.0"
 dependencies = [
  "der",
  "getrandom 0.4.2",
@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "nono-cli"
-version = "0.56.0"
+version = "0.57.0"
 dependencies = [
  "aws-lc-rs",
  "chrono",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "nono-proxy"
-version = "0.56.0"
+version = "0.57.0"
 dependencies = [
  "base64",
  "getrandom 0.4.2",
