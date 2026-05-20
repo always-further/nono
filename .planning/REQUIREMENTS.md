@@ -79,33 +79,33 @@ Explicitly excluded with reasoning. Documented to prevent scope creep.
 
 ## Traceability
 
-Empty initially; populated by gsd-roadmapper during ROADMAP.md creation.
+Populated 2026-05-20 by gsd-roadmapper during ROADMAP.md creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| REQ-CI-FU-01 | TBD | Pending |
-| REQ-CI-FU-02 | TBD | Pending |
-| REQ-CI-FU-03 | TBD | Pending |
-| REQ-PORT-CLOSURE-08 | TBD | Pending |
-| REQ-RESL-NIX-04 | TBD | Pending |
-| REQ-UAT-BL-01 | TBD | Pending |
-| REQ-UAT-BL-02 | TBD | Pending |
-| REQ-REVIEW-FU-01 | TBD | Pending |
-| REQ-TEST-HYG-01 | TBD | Pending |
-| REQ-TEST-HYG-02 | TBD | Pending |
-| REQ-TEST-HYG-03 | TBD | Pending |
-| REQ-TEST-HYG-04 | TBD | Pending |
-| REQ-MERGE-01 | TBD | Pending |
-| REQ-DRIFT-INGEST-01 | TBD | Pending |
-| REQ-AIPC-G04-01 | TBD | Pending |
-| REQ-UPST6-01 | TBD | Pending |
-| REQ-UPST6-02 | TBD | Pending |
+| REQ-REVIEW-FU-01 | Phase 44 | Pending |
+| REQ-TEST-HYG-01 | Phase 44 | Pending |
+| REQ-TEST-HYG-02 | Phase 44 | Pending |
+| REQ-TEST-HYG-03 | Phase 44 | Pending |
+| REQ-TEST-HYG-04 | Phase 44 | Pending |
+| REQ-PORT-CLOSURE-08 | Phase 45 | Pending |
+| REQ-AIPC-G04-01 | Phase 45 | Pending |
+| REQ-RESL-NIX-04 | Phase 45 | Pending |
+| REQ-MERGE-01 | Phase 46 | Pending |
+| REQ-CI-FU-01 | Phase 46 | Pending |
+| REQ-CI-FU-02 | Phase 46 | Pending |
+| REQ-CI-FU-03 | Phase 46 | Pending |
+| REQ-UAT-BL-01 | Phase 46 | Pending |
+| REQ-UAT-BL-02 | Phase 46 | Pending |
+| REQ-UPST6-01 | Phase 47 | Pending |
+| REQ-DRIFT-INGEST-01 | Phase 47 | Pending |
+| REQ-UPST6-02 | Phase 48 | Pending |
 
 **Coverage:**
 - v1 requirements: 17 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 17 ⚠️ (to be resolved by gsd-roadmapper)
+- Mapped to phases: 17 (100%) ✓
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-05-20*
-*Last updated: 2026-05-20 after initial definition via `/gsd-new-milestone v2.6`*
+*Last updated: 2026-05-20 — traceability populated by gsd-roadmapper after `/gsd-new-milestone v2.6` roadmap creation (5 phases: 44, 45, 46, 47, 48).*

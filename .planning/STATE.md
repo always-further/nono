@@ -2,33 +2,45 @@
 gsd_state_version: 1.0
 milestone: v2.6
 milestone_name: UPST6 + v2.5 Drain
-status: planning
-last_updated: "2026-05-20T14:28:36.923Z"
+status: active
+last_updated: "2026-05-20T15:00:00.000Z"
 last_activity: 2026-05-20
 progress:
-  total_phases: 0
+  total_phases: 5
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
   percent: 0
+  current_phase: 44
+  first_phase: 44
 ---
 
-# Project State: nono — v2.5 Backlog Drain + UPST5
+# Project State: nono — v2.6 UPST6 + v2.5 Drain
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 shipped same day).
+See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 shipped same day). v2.6 ROADMAP.md created 2026-05-20 — 5 phases (44, 45, 46, 47, 48), 17 requirements, 100% coverage.
 
 **Core Value:** Windows security must be as structurally impossible and feature-complete as Unix platforms; every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Planning next milestone (v2.6 — run `/gsd-new-milestone v2.6`).
+**Current Focus:** v2.6 UPST6 + v2.5 Drain — drain 7 v2.5 carry-forwards + 3 long-tail v2.4+ deferrals, then absorb upstream `v0.54.0..v0.55.0+` via UPST6 (mirrors v2.5 drain-then-sync pattern). First phase: 44 (REVIEW polish + test hygiene drain).
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 44 — REVIEW polish + test hygiene drain (not started; ready for `/gsd-plan-phase 44`)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-05-20 — Milestone v2.6 started
+Status: Roadmap created; awaiting phase planning
+Last activity: 2026-05-20 — v2.6 ROADMAP.md created (5 phases: 44, 45, 46, 47, 48); REQUIREMENTS.md traceability table populated (17/17 mapped); next action: `/gsd-plan-phase 44` (or `/gsd-plan-phase 45` if Phase 45 surfaces are preferred first — phases 44 + 45 are parallel-safe per ROADMAP § Sequencing Rationale).
+
+### v2.6 Phase Summary
+
+| Phase | Goal | Requirements | Status |
+|-------|------|--------------|--------|
+| 44 | REVIEW polish + test hygiene drain | REQ-REVIEW-FU-01 + REQ-TEST-HYG-01..04 | Not started |
+| 45 | Source migration + AIPC G-04 + RESL native re-validation | REQ-PORT-CLOSURE-08 + REQ-AIPC-G04-01 + REQ-RESL-NIX-04 | Not started |
+| 46 | windows-squash merge + post-merge CI verifs + UAT backlog | REQ-MERGE-01 + REQ-CI-FU-01..03 + REQ-UAT-BL-01..02 | Not started |
+| 47 | UPST6 audit + v0.41–v0.43 drift ingestion | REQ-UPST6-01 + REQ-DRIFT-INGEST-01 | Not started |
+| 48 | UPST6 sync execution | REQ-UPST6-02 | Not started |
 
 ## Deferred Items
 
