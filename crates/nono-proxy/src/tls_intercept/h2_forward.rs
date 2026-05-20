@@ -11,27 +11,48 @@
 
 use crate::audit;
 use crate::config::InjectMode;
+use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
 use crate::forward::{self, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
 use crate::reverse;
+use crate::route::RouteStore;
 use crate::tls_intercept::handle::InterceptCtx;
 use bytes::Bytes;
 use h2::{RecvStream, SendStream};
 use http::{HeaderMap, HeaderValue, Request, Response};
+use std::future::poll_fn;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, warn};
+
+/// Spawn-safe context for per-stream h2 handlers.
+///
+/// Built from `InterceptCtx` at connection setup. Contains only the fields
+/// needed by `handle_h2_stream`, all behind owned/Arc types so the struct
+/// is `'static + Send`.
+#[derive(Clone)]
+struct SharedH2Ctx {
+    host: String,
+    port: u16,
+    route_store: Arc<RouteStore>,
+    credential_store: Arc<CredentialStore>,
+    audit_log: Option<audit::SharedAuditLog>,
+}
 
 /// Accept an h2 connection from the client, open an h2 connection to the
 /// upstream, and forward request streams with credential injection.
 ///
-/// Streams are processed sequentially on the connection. This is sufficient
-/// for gRPC (one stream per unary RPC, one active stream for streaming RPCs).
+/// Each inbound stream is spawned as an independent task so multiple gRPC
+/// RPCs can be multiplexed concurrently over a single connection.
 pub(crate) async fn forward_h2_connection<S>(io: S, ctx: &InterceptCtx<'_>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut server_conn = h2::server::handshake(io)
+    let mut server_conn = h2::server::Builder::new()
+        .max_send_buffer_size(1024 * 1024)
+        .max_concurrent_streams(128)
+        .handshake(io)
         .await
         .map_err(|e| ProxyError::HttpParse(format!("h2 server handshake failed: {}", e)))?;
 
@@ -46,39 +67,82 @@ where
     // Open upstream TLS with h2 ALPN.
     let upstream_tls = open_upstream_h2(ctx, &check.resolved_addrs).await?;
 
-    let (h2_client, h2_conn) =
-        h2::client::handshake(upstream_tls)
-            .await
-            .map_err(|e| ProxyError::UpstreamConnect {
-                host: ctx.host.to_string(),
-                reason: format!("h2 client handshake failed: {}", e),
-            })?;
+    let (h2_client, h2_conn) = h2::client::Builder::new()
+        .max_send_buffer_size(1024 * 1024)
+        .handshake(upstream_tls)
+        .await
+        .map_err(|e| ProxyError::UpstreamConnect {
+            host: ctx.host.to_string(),
+            reason: format!("h2 client handshake failed: {}", e),
+        })?;
 
     // Spawn a task to continuously drive the upstream h2 connection. It must
     // be polled independently so frame I/O can progress while we handle
-    // streams sequentially below.
-    let upstream_host = ctx.host.to_string();
+    // streams concurrently below.
     let conn_task = tokio::spawn(async move {
         if let Err(e) = h2_conn.await {
             debug!("h2_forward: upstream connection closed: {}", e);
         }
     });
 
-    // Accept inbound h2 streams and handle them sequentially.
-    while let Some(result) = server_conn.accept().await {
-        match result {
-            Ok((request, respond)) => {
-                let mut client_send = h2_client.clone();
-                if let Err(e) = handle_h2_stream(request, respond, &mut client_send, ctx).await {
-                    debug!(
-                        "h2_forward: stream error for {}:{}: {}",
-                        upstream_host, ctx.port, e
-                    );
+    let shared_ctx = SharedH2Ctx {
+        host: ctx.host.to_string(),
+        port: ctx.port,
+        route_store: Arc::clone(&ctx.route_store),
+        credential_store: Arc::clone(&ctx.credential_store),
+        audit_log: ctx.audit_log.cloned(),
+    };
+
+    let mut tasks = tokio::task::JoinSet::new();
+
+    loop {
+        tokio::select! {
+            result = server_conn.accept() => {
+                match result {
+                    Some(Ok((request, respond))) => {
+                        let ctx = shared_ctx.clone();
+                        let mut client_send = h2_client.clone();
+                        tasks.spawn(async move {
+                            if let Err(e) =
+                                handle_h2_stream(request, respond, &mut client_send, &ctx).await
+                            {
+                                debug!(
+                                    "h2_forward: stream error for {}:{}: {}",
+                                    ctx.host, ctx.port, e
+                                );
+                            }
+                        });
+                    }
+                    Some(Err(e)) => {
+                        debug!("h2_forward: server accept error: {}", e);
+                        break;
+                    }
+                    None => break,
                 }
             }
-            Err(e) => {
-                debug!("h2_forward: server accept error: {}", e);
-                break;
+            Some(_) = tasks.join_next() => {
+                // Stream task completed; continue accepting.
+            }
+        }
+    }
+
+    // Drain remaining in-flight streams. Keep driving the server connection
+    // so flow-control frames (WINDOW_UPDATE) are processed for active streams.
+    let mut conn_closed = false;
+    while !tasks.is_empty() {
+        if conn_closed {
+            tasks.join_next().await;
+        } else {
+            tokio::select! {
+                biased;
+                result = tasks.join_next() => {
+                    if result.is_none() {
+                        break;
+                    }
+                }
+                _ = poll_fn(|cx| server_conn.poll_closed(cx)) => {
+                    conn_closed = true;
+                }
             }
         }
     }
@@ -122,7 +186,7 @@ async fn handle_h2_stream(
     request: Request<RecvStream>,
     mut respond: h2::server::SendResponse<Bytes>,
     client_send: &mut h2::client::SendRequest<Bytes>,
-    ctx: &InterceptCtx<'_>,
+    ctx: &SharedH2Ctx,
 ) -> Result<()> {
     let method = request.method().clone();
     let path = request
@@ -168,13 +232,13 @@ async fn handle_h2_stream(
             method_str, path, names
         );
         audit::log_denied(
-            ctx.audit_log,
+            ctx.audit_log.as_ref(),
             audit::ProxyMode::ConnectIntercept,
             &audit::EventContext {
                 denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
                 ..audit::EventContext::default()
             },
-            ctx.host,
+            &ctx.host,
             ctx.port,
             "ambiguous route",
         );
@@ -312,7 +376,7 @@ async fn handle_h2_stream(
 
     // Audit event.
     audit::log_l7_request(
-        ctx.audit_log,
+        ctx.audit_log.as_ref(),
         audit::ProxyMode::ConnectIntercept,
         &audit::EventContext {
             route_id: service,
@@ -333,7 +397,7 @@ async fn handle_h2_stream(
             }),
             denial_category: None,
         },
-        ctx.host,
+        &ctx.host,
         &method_str,
         &path,
         status.as_u16(),
@@ -349,14 +413,17 @@ async fn stream_body_to_upstream(mut recv: RecvStream, send: &mut SendStream<Byt
             Some(Ok(data)) => {
                 let len = data.len();
                 send.send_data(data, false)
-                    .map_err(|e| ProxyError::HttpParse(format!("h2 send_data upstream: {}", e)))?;
+                    .map_err(|e| ProxyError::HttpParse(format!("h2 send_data upstream: {e}")))?;
                 recv.flow_control()
                     .release_capacity(len)
-                    .map_err(|e| ProxyError::HttpParse(format!("h2 flow control: {}", e)))?;
+                    .map_err(|e| ProxyError::HttpParse(format!("h2 flow control: {e}")))?;
             }
             Some(Err(e)) => {
                 debug!("h2_forward: client body read error: {}", e);
-                break;
+                send.send_reset(h2::Reason::INTERNAL_ERROR);
+                return Err(ProxyError::HttpParse(format!(
+                    "h2 client body read failed: {e}"
+                )));
             }
             None => break,
         }
@@ -365,13 +432,13 @@ async fn stream_body_to_upstream(mut recv: RecvStream, send: &mut SendStream<Byt
     if let Some(trailers) = recv
         .trailers()
         .await
-        .map_err(|e| ProxyError::HttpParse(format!("h2 recv trailers: {}", e)))?
+        .map_err(|e| ProxyError::HttpParse(format!("h2 recv trailers: {e}")))?
     {
         send.send_trailers(trailers)
-            .map_err(|e| ProxyError::HttpParse(format!("h2 send_trailers upstream: {}", e)))?;
+            .map_err(|e| ProxyError::HttpParse(format!("h2 send_trailers upstream: {e}")))?;
     } else {
         send.send_data(Bytes::new(), true)
-            .map_err(|e| ProxyError::HttpParse(format!("h2 end stream upstream: {}", e)))?;
+            .map_err(|e| ProxyError::HttpParse(format!("h2 end stream upstream: {e}")))?;
     }
     Ok(())
 }
@@ -383,14 +450,17 @@ async fn stream_body_to_client(mut recv: RecvStream, send: &mut SendStream<Bytes
             Some(Ok(data)) => {
                 let len = data.len();
                 send.send_data(data, false)
-                    .map_err(|e| ProxyError::HttpParse(format!("h2 send_data client: {}", e)))?;
+                    .map_err(|e| ProxyError::HttpParse(format!("h2 send_data client: {e}")))?;
                 recv.flow_control()
                     .release_capacity(len)
-                    .map_err(|e| ProxyError::HttpParse(format!("h2 flow control: {}", e)))?;
+                    .map_err(|e| ProxyError::HttpParse(format!("h2 flow control: {e}")))?;
             }
             Some(Err(e)) => {
                 debug!("h2_forward: upstream body read error: {}", e);
-                break;
+                send.send_reset(h2::Reason::INTERNAL_ERROR);
+                return Err(ProxyError::HttpParse(format!(
+                    "h2 upstream body read failed: {e}"
+                )));
             }
             None => break,
         }
@@ -399,13 +469,13 @@ async fn stream_body_to_client(mut recv: RecvStream, send: &mut SendStream<Bytes
     if let Some(trailers) = recv
         .trailers()
         .await
-        .map_err(|e| ProxyError::HttpParse(format!("h2 recv trailers: {}", e)))?
+        .map_err(|e| ProxyError::HttpParse(format!("h2 recv trailers: {e}")))?
     {
         send.send_trailers(trailers)
-            .map_err(|e| ProxyError::HttpParse(format!("h2 send_trailers client: {}", e)))?;
+            .map_err(|e| ProxyError::HttpParse(format!("h2 send_trailers client: {e}")))?;
     } else {
         send.send_data(Bytes::new(), true)
-            .map_err(|e| ProxyError::HttpParse(format!("h2 end stream client: {}", e)))?;
+            .map_err(|e| ProxyError::HttpParse(format!("h2 end stream client: {e}")))?;
     }
     Ok(())
 }
@@ -649,8 +719,8 @@ mod tests {
             route_id: Some("test-svc"),
             host: "localhost",
             port: upstream_port,
-            route_store: &route_store,
-            credential_store: &credential_store,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
             session_token: &session_token,
             cert_cache,
             tls_connector: &tls_connector,
@@ -732,8 +802,8 @@ mod tests {
             route_id: Some("test-svc"),
             host: "localhost",
             port: upstream_port,
-            route_store: &route_store,
-            credential_store: &credential_store,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
             session_token: &session_token,
             cert_cache,
             tls_connector: &tls_connector,
@@ -832,8 +902,8 @@ mod tests {
             route_id: None,
             host: "localhost",
             port: upstream_port,
-            route_store: &route_store,
-            credential_store: &credential_store,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
             session_token: &session_token,
             cert_cache,
             tls_connector: &tls_connector,
@@ -932,8 +1002,8 @@ mod tests {
             route_id: None,
             host: "localhost",
             port: upstream_port,
-            route_store: &route_store,
-            credential_store: &credential_store,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
             session_token: &session_token,
             cert_cache,
             tls_connector: &tls_connector,
@@ -1000,8 +1070,8 @@ mod tests {
             route_id: Some("test-svc"),
             host: "localhost",
             port: upstream_port,
-            route_store: &route_store,
-            credential_store: &credential_store,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
             session_token: &session_token,
             cert_cache,
             tls_connector: &tls_connector,
