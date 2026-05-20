@@ -619,7 +619,16 @@ fn render_diagnostic_line(idx: usize, line: &str, t: &theme::Theme) -> String {
     }
 
     if line.starts_with("  /") || line.starts_with("  ~/") {
-        return format!("  {}", fg(line.trim_start(), t.text).bold());
+        let content = line.trim_start();
+        return if let Some(idx) = content.find(" (") {
+            format!(
+                "  {} {}",
+                fg(&content[..idx], t.text).bold(),
+                &content[idx + 1..],
+            )
+        } else {
+            format!("  {}", fg(content, t.text).bold())
+        };
     }
 
     if line.starts_with("    + ") {
