@@ -80,6 +80,7 @@ url.workspace = true
 tempfile.workspace = true
 vt100 = "0.16.2"
 shlex = "1"
+jsonc-parser = { version = "0.32", features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true, features = ["process", "signal", "fs", "user", "term"] }

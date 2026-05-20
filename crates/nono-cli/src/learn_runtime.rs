@@ -265,7 +265,7 @@ fn prepare_profile_save(
     profile_name: &str,
     compared_profile: Option<&str>,
 ) -> Result<PreparedProfileSave> {
-    let profile_path = profile::get_user_profile_path(profile_name)?;
+    let profile_path = profile::resolve_user_profile_path(profile_name)?;
 
     if profile_path.exists() {
         let mut existing = profile::load_raw_profile_from_path(&profile_path)?;
@@ -280,6 +280,7 @@ fn prepare_profile_save(
         });
     }
 
+    let profile_path = profile::get_user_profile_path(profile_name)?;
     let extends = compared_profile
         .filter(|name| profile::is_valid_profile_name(name) && *name != profile_name)
         .map(|name| vec![name.to_string()]);

@@ -5,6 +5,29 @@ description: Scaffolding, schema validation, and tooling for creating custom pro
 
 The `nono profile` command provides scaffolding and tooling for creating custom profiles. Instead of reverse-engineering the JSON structure from existing profiles, you can generate skeleton files, get editor autocomplete via JSON Schema, and access an LLM-oriented authoring guide.
 
+## File Format
+
+Profile files use **JSONC** (JSON with Comments): standard JSON plus `//` line comments, `/* */` block comments, and trailing commas. Both `.json` and `.jsonc` file extensions are accepted.
+
+```jsonc
+{
+  // Extend the official Claude Code profile
+  "extends": "claude-code",
+  "meta": {
+    "name": "my-claude",
+    "description": "Custom Claude profile with extra tooling access",
+  },
+  "filesystem": {
+    "allow": ["/opt/my-tools"], // custom tooling directory
+    "read": ["/etc/my-app"],
+  },
+}
+```
+
+<Tip>
+  When both `my-profile.jsonc` and `my-profile.json` exist, the `.jsonc` file takes priority.
+</Tip>
+
 <Tip>
   For an overview of what profiles are and how they compose with groups, see [Profiles & Groups](/cli/features/profiles-groups).
 </Tip>
@@ -167,7 +190,7 @@ In VS Code, you can also configure schema association in `.vscode/settings.json`
 {
   "json.schemas": [
     {
-      "fileMatch": ["**/profiles/*.json"],
+      "fileMatch": ["**/profiles/*.json", "**/profiles/*.jsonc"],
       "url": "./nono-profile.schema.json"
     }
   ]

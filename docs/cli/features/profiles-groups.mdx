@@ -34,7 +34,7 @@ Profiles can come from three sources, in order of precedence:
 | Source | Location | Trust Level |
 |--------|----------|-------------|
 | CLI flags | Command line | Highest - explicit user intent |
-| User profiles | `~/.config/nono/profiles/` | Medium - user-defined |
+| User profiles | `~/.config/nono/profiles/*.json` or `*.jsonc` | Medium - user-defined |
 | Pack / preset profiles | Installed packs or compiled presets | Base - audited defaults |
 
 CLI flags always override profile settings.
