@@ -374,9 +374,9 @@ struct ProxyState {
     filter: ProxyFilter,
     session_token: Zeroizing<String>,
     /// Route-level configuration (upstream, L7 filtering, custom TLS CA) for all routes.
-    route_store: RouteStore,
+    route_store: Arc<RouteStore>,
     /// Credential-specific configuration (inject mode, headers, secrets) for routes with credentials.
-    credential_store: CredentialStore,
+    credential_store: Arc<CredentialStore>,
     config: ProxyConfig,
     /// Shared TLS connector for upstream connections (reverse proxy mode).
     /// Created once at startup to avoid rebuilding the root cert store per request.
@@ -667,8 +667,8 @@ pub async fn start_with_nonce_resolver(
     let state = Arc::new(ProxyState {
         filter,
         session_token: session_token.clone(),
-        route_store,
-        credential_store,
+        route_store: Arc::new(route_store),
+        credential_store: Arc::new(credential_store),
         config,
         tls_connector,
         tls_connector_h2,
@@ -980,8 +980,8 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             route_id,
                             host: &host,
                             port,
-                            route_store: &state.route_store,
-                            credential_store: &state.credential_store,
+                            route_store: Arc::clone(&state.route_store),
+                            credential_store: Arc::clone(&state.credential_store),
                             session_token: &state.session_token,
                             cert_cache: Arc::clone(cache),
                             tls_connector: &state.tls_connector,
