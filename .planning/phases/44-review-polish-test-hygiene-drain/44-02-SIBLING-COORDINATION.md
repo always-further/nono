@@ -56,12 +56,24 @@ Task 2"). No user input required.
 - The Rust C-FFI maps `BrokerNotFound` → `NonoErrorCode::ErrSandboxInit` (integer -6) at `bindings/c/src/lib.rs:285-291`; nono-py's PyO3 wildcard arm produces `PyRuntimeError`, which IS the SandboxInit-equivalent Python class for this binding (no separate class yet)
 - CONTRIBUTING.md requires a feature branch + PR + DCO sign-off + squash-on-merge
 
+## nono-ts test convention discovery
+
+- Layout: `tests/test_*.js` (loose Node-script style)
+- Runner: **plain `node <file>.js`** — `package.json` declares `"test": "node test.js"` but `test.js` does NOT exist in the repo at clone-time (the existing `tests/test_*.js` files are invoked individually). No vitest, jest, mocha, or other framework is wired up.
+- Existing FFI-error-mapping test (closest analog): `tests/test_errors.js` (try/catch + console.log, no assertions) and `tests/test_sandbox_policy.js` lines 35-40 (custom `assert()` helper that calls `process.exit(1)` on fail — the canonical assertion idiom)
+- Exception class names found: **no custom `SandboxInitError`** class. napi-rs mapping in `src/lib.rs::to_napi_err`:
+  - `NonoError::PathNotFound(_) | ExpectedDirectory(_) | ExpectedFile(_)` → `Error::new(Status::InvalidArg, ...)`
+  - all other variants (including `SandboxInit`, `BrokerNotFound`) → `Error::new(Status::GenericFailure, ...)` via wildcard `_` arm
+  - The napi Status appears as the JS `Error.code` property
+- napi.targets: `darwin` + `linux` only — no Windows binary published, so `BrokerNotFound` (Windows-only) cannot be triggered from JS in 0.4.0
+- No CONTRIBUTING.md or explicit DCO requirement — sign-off applied anyway per CLAUDE.md fork-level rule
+
 ## Sibling commit SHAs (populated after Tasks 4 + 5)
 
 | Sibling | Branch                     | Commit SHA                                 | Subject |
 |---------|----------------------------|--------------------------------------------|---------|
 | nono-py | `44-broker-ffi-lockstep`   | `61ee6aa16449fcbdeccb819aec051dd7492c8b0b` | test: broker FFI mapping lockstep with fork (Phase 44) |
-| nono-ts | _pending_                  | _pending_                                  | _pending_ |
+| nono-ts | `44-broker-ffi-lockstep`   | `1df3e16e6ac8ccb676eb6ae7eb7553e715d46303` | test: broker FFI mapping lockstep with fork (Phase 44) |
 
 ## PR coordination (plan-discretion per D-44-D1)
 
@@ -74,7 +86,10 @@ Task 2"). No user input required.
 
 ### nono-ts
 
-_To be populated after Task 5._
+- No CONTRIBUTING.md found; `README.md` + `DEVELOPMENT.md` give no explicit PR/DCO guidance. The fork-level CLAUDE.md DCO rule applies — sign-off included on commit `1df3e16`.
+- Branch `44-broker-ffi-lockstep` created locally at `C:\Users\OMack\nono-ts`.
+- **PR disposition:** local branch committed; remote push + PR coordination deferred to the user (same rationale as nono-py: the maintainer/reviewer handoff is the user's call). Future push command: `git push -u origin 44-broker-ffi-lockstep && gh pr create --base main` from `C:\Users\OMack\nono-ts`.
+- Rationale: the `package.json::scripts.test` declares `node test.js` but `test.js` does not exist in the repo at clone-time. Adding/wiring the test entry point is a separate maintenance concern; the new `tests/test_broker_ffi_mapping.js` can be invoked directly via `node tests/test_broker_ffi_mapping.js`. PR submission should let the maintainer decide whether to wire the test into a runner first.
 
 ## REQ-TEST-HYG-02 Determinism Check
 
