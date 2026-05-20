@@ -46,7 +46,7 @@ getrandom = "0.4"
 
 # Async runtime and HTTP
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync", "time"] }
-hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
 

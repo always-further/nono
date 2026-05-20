@@ -381,6 +381,8 @@ struct ProxyState {
     /// Shared TLS connector for upstream connections (reverse proxy mode).
     /// Created once at startup to avoid rebuilding the root cert store per request.
     tls_connector: tokio_rustls::TlsConnector,
+    /// TLS connector with h2 ALPN for upstream HTTP/2 connections (gRPC).
+    tls_connector_h2: tokio_rustls::TlsConnector,
     /// Active connection count for connection limiting.
     active_connections: AtomicUsize,
     /// Shared network audit log for this proxy session.
@@ -508,7 +510,11 @@ pub async fn start_with_nonce_resolver(
     .map_err(|e| ProxyError::Config(format!("TLS config error: {}", e)))?
     .with_root_certificates(root_store)
     .with_no_client_auth();
-    let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+    let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config.clone()));
+
+    let mut tls_config_h2 = tls_config;
+    tls_config_h2.alpn_protocols = vec![b"h2".to_vec()];
+    let tls_connector_h2 = tokio_rustls::TlsConnector::from(Arc::new(tls_config_h2));
 
     // Load credentials for reverse proxy routes (static keystore + OAuth2)
     let (credential_store, proxy_diagnostics) = if config.routes.is_empty() {
@@ -665,6 +671,7 @@ pub async fn start_with_nonce_resolver(
         credential_store,
         config,
         tls_connector,
+        tls_connector_h2,
         active_connections: AtomicUsize::new(0),
         audit_log: Arc::clone(&audit_log),
         approval_backends,
@@ -978,6 +985,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             session_token: &state.session_token,
                             cert_cache: Arc::clone(cache),
                             tls_connector: &state.tls_connector,
+                            tls_connector_h2: &state.tls_connector_h2,
                             filter: &state.filter,
                             audit_log: Some(&state.audit_log),
                             upstream_proxy,
