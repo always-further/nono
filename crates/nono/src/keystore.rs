@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+#[cfg(feature = "system-keyring")]
 use std::sync::mpsc;
 use std::time::Duration;
 use zeroize::Zeroizing;
