@@ -41,7 +41,7 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
 
 **Phase numbering:** continues from Phase 43 (v2.5 close). Phase 38 number reserved from v2.4 ROADMAP for REQ-AAHX-HOST-01 — folded into Phase 45 as REQ-RESL-NIX-04 native re-validation per scope-lock. v2.6 executes Phases 44, 45, 46, 47, 48.
 
-- [ ] **Phase 44: REVIEW polish + test hygiene drain** — Close 16 REVIEW.md warnings via a single chore plan and resolve the 4 test-hygiene follow-ups (Class D Linux deny-overlap + Class E Windows env_vars flakes + v24 broker CR-01/02 cross-binding lockstep).
+- [x] **Phase 44: REVIEW polish + test hygiene drain** — Close 16 REVIEW.md warnings via a single chore plan and resolve the 4 test-hygiene follow-ups (Class D Linux deny-overlap + Class E Windows env_vars flakes + v24 broker CR-01/02 cross-binding lockstep). (completed 2026-05-20)
 - [ ] **Phase 45: Source migration + AIPC G-04 + RESL native re-validation** — Rule-4 architectural items: 39 `#[unsafe(no_mangle)]` Edition 2024 rewrites in `bindings/c/src/` (Cluster 2 split-disposition closure); AIPC G-04 wire-protocol compile-time tightening (`Approved(ResourceGrant)` inline); Phase 38 REQ-AAHX-HOST-01 native re-validation on Linux/macOS host (folded in as RESL-NIX-04).
 - [ ] **Phase 46: windows-squash merge + post-merge CI verifications + UAT backlog** — Orchestrator-coordinated: `windows-squash` → `main` merge (PR-583 gate moved OR feature-flag-equivalent rollout); Phase 37 workflow live run + Phase 43 umbrella PR + baseline-aware CI lane diff vs `13cc0628`; Phase 35 + 36 human-UAT backlog (11 scenarios + 7 verification items) on native Linux/macOS host.
 - [ ] **Phase 47: UPST6 audit + v0.41–v0.43 drift ingestion** — Mirror Phase 33 / 39 / 42 audit shape for upstream `v0.54.0..v0.55.0+`; first real load of the v2.2 DRIFT-01/02 tooling on the long-deferred `v0.41–v0.43` backfill (treat as cleanup, not parity-sync).
@@ -60,8 +60,8 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
   4. v24 broker CR-01 (`BrokerNotFound` FFI remap) + CR-02 (broker-side FFI handle null/INVALID validation) cross-binding lockstep updates land in `../nono-py/` + `../nono-ts/` siblings; both bindings ship a regression test mirroring the fork-side coverage at `bindings/c/src/lib.rs:285-291` + `nono-shell-broker/src/main.rs:535,562`.
   5. Phase 44 close SHA is recorded as the v2.6 quiet-baseline anchor; STATE.md `## Deferred Items` is cleared of the 5 todos that motivated this phase (`41-10-linux-deny-overlap-regression.md`, `41-10-windows-integration-env-vars-flake.md`, `41-10-windows-regression-temp-vars-flake.md`, `v24-cr-01-broker-not-found-ffi-mapping.md`, `v24-cr-02-broker-null-handle-validation.md`).
 **Plans**: 2 plans
-- [ ] 44-01-review-polish-PLAN.md — REVIEW.md polish drain (REQ-REVIEW-FU-01, 28-row canonical disposition table covering all 16 WARN + 12 INFO findings from Phase 37 + Phase 43)
-- [ ] 44-02-test-hygiene-drain-PLAN.md — test hygiene drain (REQ-TEST-HYG-01..04, Class D Linux deny-overlap + Class E Windows env_vars flakes + v24 broker CR-01/CR-02 cross-binding lockstep in nono-py + nono-ts siblings)
+- [x] 44-01-review-polish-PLAN.md — REVIEW.md polish drain (REQ-REVIEW-FU-01, 28-row canonical disposition table covering all 16 WARN + 12 INFO findings from Phase 37 + Phase 43)
+- [x] 44-02-test-hygiene-drain-PLAN.md — test hygiene drain (REQ-TEST-HYG-01..04, Class D Linux deny-overlap + Class E Windows env_vars flakes + v24 broker CR-01/CR-02 cross-binding lockstep in nono-py + nono-ts siblings)
 **UI hint**: no
 
 ### Phase 45: Source migration + AIPC G-04 + RESL native re-validation
@@ -172,7 +172,7 @@ These invariants are inherited from prior milestones and remain in force across 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 44. REVIEW polish + test hygiene | 0/TBD | Not started | — |
+| 44. REVIEW polish + test hygiene | 2/2 | Complete   | 2026-05-20 |
 | 45. Source migration + AIPC G-04 + RESL native re-validation | 0/TBD | Not started | — |
 | 46. windows-squash merge + post-merge CI + UAT backlog | 0/TBD | Not started | — |
 | 47. UPST6 audit + v0.41–v0.43 drift ingestion | 0/TBD | Not started | — |
