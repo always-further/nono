@@ -760,7 +760,7 @@ The Python + TypeScript regression tests in the sibling repos assert equivalent 
     Part D — PR coordination decision (plan-discretion per D-44-D1):
 
     Inspect ../nono-py/'s CONTRIBUTING + README for upstream PR conventions:
-    - If the sibling has a PR-required workflow → push the branch + open a PR via `gh pr create` against `always-further/nono-py`. Record the PR URL.
+    - If the sibling has a PR-required workflow → push the branch + open a PR via `gh pr create` against `$DERIVED_ORG/nono-py` (where `$DERIVED_ORG` was captured by Task 1 Step 0 — D-44-D2). Record the PR URL.
     - If the sibling allows direct pushes to main → `git checkout main && git merge 44-broker-ffi-lockstep && git push origin main`. Record the merged-SHA.
     - If neither pattern is clear → record "PR coordination deferred; sibling commit lives on a local branch pending upstream review" and create a follow-up todo for the user to manually coordinate.
 
