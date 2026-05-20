@@ -133,6 +133,65 @@ pub const GITLAB_COM_OIDC_ISSUER: &str = "https://gitlab.com";
 /// Sigstore `Fulcio`'s default OIDC issuer list.
 pub const GITHUB_ACTIONS_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
+/// Read the configured OIDC issuer pin, preferring the `NONO_TRUST_OIDC_ISSUER`
+/// env-var over the canonical [`GITHUB_ACTIONS_OIDC_ISSUER`] default. Returns
+/// the pin URL string to use for [`validate_oidc_issuer`] callers.
+///
+/// # Behavior
+///
+/// - **env var set + parseable URL** — returned verbatim. Downstream
+///   [`validate_oidc_issuer`] then enforces URL-component equality against
+///   the token's `iss` claim.
+/// - **env var set + unparseable URL** — returns
+///   [`NonoError::ConfigParse`]. Callers MUST refuse to publish or verify
+///   a signature rather than silently falling back to the default
+///   (CLAUDE.md § Fail Secure).
+/// - **env var unset OR whitespace-only** — returns the canonical
+///   [`GITHUB_ACTIONS_OIDC_ISSUER`] constant string. Whitespace-only
+///   values are treated as unset to avoid the trap where a CI workflow
+///   accidentally exports `NONO_TRUST_OIDC_ISSUER=` with no value.
+///
+/// # Phase 44 WR-09 P37 (REQ-REVIEW-FU-01 D-44-B3)
+///
+/// The Phase 37 CI workflow declared `NONO_TRUST_OIDC_ISSUER` but no
+/// production code ever read the value — the env var was inert and the
+/// REQ-PKGS-04 acceptance #4 coverage claim on the workflow header was
+/// misleading. This reader closes the gap by composing existing primitives:
+/// [`validate_oidc_issuer`] for URL-component equality + the canonical
+/// default const for fallback.
+///
+/// # Errors
+///
+/// Returns [`NonoError::ConfigParse`] when `NONO_TRUST_OIDC_ISSUER` is
+/// set to a non-empty, non-whitespace value that fails `url::Url::parse`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use nono::trust::signing::configured_oidc_issuer;
+///
+/// // Whatever the env var says (after URL validation), or the default.
+/// let pin = configured_oidc_issuer().expect("configured_oidc_issuer");
+/// assert!(pin.starts_with("https://"));
+/// ```
+pub fn configured_oidc_issuer() -> Result<String> {
+    match std::env::var("NONO_TRUST_OIDC_ISSUER") {
+        Ok(v) if !v.trim().is_empty() => {
+            // Eagerly validate that the env-var value is a parseable URL —
+            // fail-closed before any signature operation begins. CLAUDE.md
+            // § Fail Secure: never silently fall back to the default when
+            // the operator explicitly set a value (even if malformed).
+            url::Url::parse(&v).map_err(|e| {
+                NonoError::ConfigParse(format!(
+                    "NONO_TRUST_OIDC_ISSUER='{v}' is not a valid URL: {e}"
+                ))
+            })?;
+            Ok(v)
+        }
+        _ => Ok(GITHUB_ACTIONS_OIDC_ISSUER.to_string()),
+    }
+}
+
 // Re-export sigstore-crypto signing types
 pub use sigstore_verify::crypto::signing::{KeyPair, SigningScheme};
 pub use sigstore_verify::types::{DerPublicKey, PayloadBytes, SignatureBytes};
@@ -1087,5 +1146,105 @@ mod tests {
             validate_oidc_issuer(hostile, GITHUB_ACTIONS_OIDC_ISSUER),
             Err(NonoError::ConfigParse(_))
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // configured_oidc_issuer (Phase 44 WR-09 P37, REQ-REVIEW-FU-01 D-44-B3)
+    // -----------------------------------------------------------------------
+
+    /// Process-global lock for tests that mutate NONO_TRUST_OIDC_ISSUER.
+    /// Rust runs unit tests in parallel within the same process; concurrent
+    /// env-var mutation across sibling tests in this module would race
+    /// against each other. Acquire this lock before mutating the env-var
+    /// at the start of every configured_oidc_issuer_* test.
+    static OIDC_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that sets NONO_TRUST_OIDC_ISSUER (or removes it) for the
+    /// duration of a test and restores the original value on drop.
+    struct OidcEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+
+    impl OidcEnvGuard {
+        #[allow(clippy::disallowed_methods)]
+        fn set(val: &str) -> Self {
+            let _lock = match OIDC_ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let prev = std::env::var("NONO_TRUST_OIDC_ISSUER").ok();
+            std::env::set_var("NONO_TRUST_OIDC_ISSUER", val);
+            Self { _lock, prev }
+        }
+
+        #[allow(clippy::disallowed_methods)]
+        fn remove() -> Self {
+            let _lock = match OIDC_ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let prev = std::env::var("NONO_TRUST_OIDC_ISSUER").ok();
+            std::env::remove_var("NONO_TRUST_OIDC_ISSUER");
+            Self { _lock, prev }
+        }
+    }
+
+    impl Drop for OidcEnvGuard {
+        #[allow(clippy::disallowed_methods)]
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("NONO_TRUST_OIDC_ISSUER", v),
+                None => std::env::remove_var("NONO_TRUST_OIDC_ISSUER"),
+            }
+        }
+    }
+
+    /// Phase 44 WR-09 P37: when the env var is set to a valid URL, the
+    /// reader returns that value verbatim (downstream validate_oidc_issuer
+    /// then enforces equality against the token's iss claim).
+    #[test]
+    fn configured_oidc_issuer_returns_env_when_set() {
+        let _g = OidcEnvGuard::set("https://token.actions.githubusercontent.com");
+        assert_eq!(
+            configured_oidc_issuer().unwrap(),
+            "https://token.actions.githubusercontent.com"
+        );
+    }
+
+    /// Phase 44 WR-09 P37: with the env var unset, fall back to the
+    /// canonical GitHub Actions default const.
+    #[test]
+    fn configured_oidc_issuer_falls_back_to_github_default_when_unset() {
+        let _g = OidcEnvGuard::remove();
+        assert_eq!(
+            configured_oidc_issuer().unwrap(),
+            GITHUB_ACTIONS_OIDC_ISSUER
+        );
+    }
+
+    /// Phase 44 WR-09 P37: a whitespace-only env-var value is treated as
+    /// unset — the "accidentally exported empty value" trap. Falls back
+    /// to the canonical default.
+    #[test]
+    fn configured_oidc_issuer_treats_whitespace_only_as_unset() {
+        let _g = OidcEnvGuard::set("   ");
+        assert_eq!(
+            configured_oidc_issuer().unwrap(),
+            GITHUB_ACTIONS_OIDC_ISSUER
+        );
+    }
+
+    /// Phase 44 WR-09 P37 (CLAUDE.md § Fail Secure): a malformed env-var
+    /// value MUST surface as ConfigParse — the caller refuses to publish
+    /// or verify rather than silently falling back to the default.
+    #[test]
+    fn configured_oidc_issuer_rejects_malformed_env_value() {
+        let _g = OidcEnvGuard::set("not a valid url at all");
+        let err = configured_oidc_issuer().unwrap_err();
+        assert!(
+            matches!(err, NonoError::ConfigParse(_)),
+            "expected ConfigParse on malformed URL, got: {err:?}"
+        );
     }
 }

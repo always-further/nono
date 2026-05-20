@@ -966,12 +966,22 @@ fn verify_multi_subject_file(
             ref workflow,
             git_ref: _,
         } => {
-            // D-32-08 fail-closed: --issuer and --identity must both be provided.
-            let req_issuer = user_issuer.ok_or_else(|| {
-                "keyless bundle requires --issuer <OIDC_URL> \
-                 (exact match against signer's iss claim)"
-                    .to_string()
-            })?;
+            // D-32-08 fail-closed: keyless bundles require an explicit issuer
+            // pin + identity regex. Phase 44 WR-09 P37 (REQ-REVIEW-FU-01
+            // D-44-B3): when --issuer is not provided, fall back to the
+            // configured_oidc_issuer reader so the NONO_TRUST_OIDC_ISSUER
+            // env-var the CI workflow has been setting since Phase 37 is
+            // actually consumed. The fallback returns the canonical
+            // GitHub Actions default when the env-var is unset.
+            let env_issuer: String;
+            let req_issuer: &str = match user_issuer {
+                Some(s) => s,
+                None => {
+                    env_issuer = trust::signing::configured_oidc_issuer()
+                        .map_err(|e| format!("OIDC issuer configuration failed: {e}"))?;
+                    &env_issuer
+                }
+            };
             let req_identity = user_identity_pattern.ok_or_else(|| {
                 "keyless bundle requires --identity <REGEX> \
                  (matched against bundle's Fulcio Build Config URI)"
@@ -1152,12 +1162,22 @@ fn verify_single_file(
             ref workflow,
             git_ref: _,
         } => {
-            // D-32-08 fail-closed: --issuer and --identity must both be provided.
-            let req_issuer = user_issuer.ok_or_else(|| {
-                "keyless bundle requires --issuer <OIDC_URL> \
-                 (exact match against signer's iss claim)"
-                    .to_string()
-            })?;
+            // D-32-08 fail-closed: keyless bundles require an explicit issuer
+            // pin + identity regex. Phase 44 WR-09 P37 (REQ-REVIEW-FU-01
+            // D-44-B3): when --issuer is not provided, fall back to the
+            // configured_oidc_issuer reader so the NONO_TRUST_OIDC_ISSUER
+            // env-var the CI workflow has been setting since Phase 37 is
+            // actually consumed. The fallback returns the canonical
+            // GitHub Actions default when the env-var is unset.
+            let env_issuer: String;
+            let req_issuer: &str = match user_issuer {
+                Some(s) => s,
+                None => {
+                    env_issuer = trust::signing::configured_oidc_issuer()
+                        .map_err(|e| format!("OIDC issuer configuration failed: {e}"))?;
+                    &env_issuer
+                }
+            };
             let req_identity = user_identity_pattern.ok_or_else(|| {
                 "keyless bundle requires --identity <REGEX> \
                  (matched against bundle's Fulcio Build Config URI)"
