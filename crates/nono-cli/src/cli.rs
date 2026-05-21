@@ -3043,7 +3043,16 @@ pub struct TrustVerifyArgs {
     #[arg(long, value_name = "FILE")]
     pub policy: Option<PathBuf>,
 
-    /// OIDC issuer URL (REQUIRED for keyless verify; exact match against signer's iss claim).
+    /// OIDC issuer URL (REQUIRED for keyless verify, unless NONO_TRUST_OIDC_ISSUER
+    /// is explicitly set; exact match against signer's iss claim).
+    ///
+    /// Either this flag OR a non-empty NONO_TRUST_OIDC_ISSUER env-var MUST be
+    /// supplied for keyless verification — there is no implicit default trust
+    /// anchor (CLAUDE.md § Fail Secure + § Explicit Over Implicit). The env-var
+    /// alternative is intended for CI workflows that set the issuer once per
+    /// job rather than per-invocation; explicit flag values always take
+    /// precedence over the env-var.
+    ///
     /// Example: https://token.actions.githubusercontent.com
     #[arg(long, value_name = "URL")]
     pub issuer: Option<String>,
