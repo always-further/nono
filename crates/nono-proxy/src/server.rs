@@ -305,13 +305,15 @@ struct ProxyState {
     filter: ProxyFilter,
     session_token: Zeroizing<String>,
     /// Route-level configuration (upstream, L7 filtering, custom TLS CA) for all routes.
-    route_store: RouteStore,
+    route_store: Arc<RouteStore>,
     /// Credential-specific configuration (inject mode, headers, secrets) for routes with credentials.
-    credential_store: CredentialStore,
+    credential_store: Arc<CredentialStore>,
     config: ProxyConfig,
     /// Shared TLS connector for upstream connections (reverse proxy mode).
     /// Created once at startup to avoid rebuilding the root cert store per request.
     tls_connector: tokio_rustls::TlsConnector,
+    /// TLS connector with h2 ALPN for upstream HTTP/2 connections (gRPC).
+    tls_connector_h2: tokio_rustls::TlsConnector,
     /// Active connection count for connection limiting.
     active_connections: AtomicUsize,
     /// Shared network audit log for this proxy session.
@@ -391,7 +393,11 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     .map_err(|e| ProxyError::Config(format!("TLS config error: {}", e)))?
     .with_root_certificates(root_store)
     .with_no_client_auth();
-    let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+    let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config.clone()));
+
+    let mut tls_config_h2 = tls_config;
+    tls_config_h2.alpn_protocols = vec![b"h2".to_vec()];
+    let tls_connector_h2 = tokio_rustls::TlsConnector::from(Arc::new(tls_config_h2));
 
     // Load credentials for reverse proxy routes (static keystore + OAuth2)
     let credential_store = if config.routes.is_empty() {
@@ -530,10 +536,11 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     let state = Arc::new(ProxyState {
         filter,
         session_token: session_token.clone(),
-        route_store,
-        credential_store,
+        route_store: Arc::new(route_store),
+        credential_store: Arc::new(credential_store),
         config,
         tls_connector,
+        tls_connector_h2,
         active_connections: AtomicUsize::new(0),
         audit_log: Arc::clone(&audit_log),
         bypass_matcher,
@@ -736,11 +743,12 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             route_id,
                             host: &host,
                             port,
-                            route_store: &state.route_store,
-                            credential_store: &state.credential_store,
+                            route_store: Arc::clone(&state.route_store),
+                            credential_store: Arc::clone(&state.credential_store),
                             session_token: &state.session_token,
                             cert_cache: Arc::clone(cache),
                             tls_connector: &state.tls_connector,
+                            tls_connector_h2: &state.tls_connector_h2,
                             filter: &state.filter,
                             audit_log: Some(&state.audit_log),
                         };
