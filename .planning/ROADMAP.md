@@ -90,7 +90,10 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
   3. Phase 38 REQ-AAHX-HOST-01 native re-validation runs on a Linux host (one or both per host availability) and reports either: (a) `audit-attestation` regression coverage matches the Phase 27.2 transitive closure, OR (b) a host-native gap is surfaced with a documented follow-up disposition. Tactical confirmation pass only — does not block phase close if no gap is found.
   4. No Windows-only-files invariant violations (D-34-E1 / D-40-E1) introduced; phase commits do not touch `*_windows.rs` / `exec_strategy_windows/` / `crates/nono-shell-broker/` beyond what is strictly required by Edition 2024 source-syntax migration (codified addendum exceptions allowed only under the Phase 40 4-condition rule).
   5. Workspace builds and tests green on Windows host (`cargo test --workspace`) post-phase close; cross-target Linux/macOS clippy verified per CLAUDE.md MUST/NEVER enforcement bullet.
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 45-01-edition-2024-source-migration-PLAN.md — Edition 2024 #[unsafe(no_mangle)] sweep across bindings/c/src/ (39 sites) + DIVERGENCE-LEDGER Cluster 2 split→closed + cbindgen byte-identical gate (REQ-PORT-CLOSURE-08)
+- [ ] 45-02-aipc-g-04-wire-protocol-tightening-PLAN.md — Inline ApprovalDecision::Approved(ResourceGrant); drop SupervisorResponse::Decision.grant; cascade through aipc_sdk.rs + 22 supervisor.rs sites + 23±2 tests + CHANGELOG BREAKING + ADR amendment; AUD-05 verified-pass (REQ-AIPC-G04-01)
+- [ ] 45-03-resl-native-revalidation-PLAN.md — Author .github/workflows/phase-45-resl-native-host.yml (workflow_dispatch-only) + 45-03-NATIVE-RESL-PROTOCOL.md; STRUCTURALLY-COMPLETE-PENDING-LIVE-RUN; live run deferred to Phase 46 orchestrator (REQ-RESL-NIX-04)
 **UI hint**: no
 
 ### Phase 46: windows-squash merge + post-merge CI verifications + UAT backlog
@@ -189,7 +192,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 44. REVIEW polish + test hygiene | 2/2 | Complete    | 2026-05-20 |
-| 45. Source migration + AIPC G-04 + RESL native re-validation | 0/TBD | Not started | — |
+| 45. Source migration + AIPC G-04 + RESL native re-validation | 0/3 | Not started | — |
 | 46. windows-squash merge + post-merge CI + UAT backlog | 0/TBD | Not started | — |
 | 47. UPST6 audit + v0.41–v0.43 drift ingestion | 0/TBD | Not started | — |
 | 48. UPST6 sync execution | 0/TBD | Not started | — |
