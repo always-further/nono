@@ -1,4 +1,5 @@
 use crate::command_display::format_command_line;
+use crate::theme;
 use crate::{profile, query_ext};
 use colored::Colorize;
 use nono::SandboxViolation;
@@ -559,14 +560,27 @@ pub(crate) fn print_patch_preview(patch: &profile::Profile) {
     }
 
     if has_entries {
-        prompt_println("[nono] Paths to be saved as grants:");
+        let t = theme::current();
+        prompt_println(&format!(
+            "{}",
+            theme::fg("[nono] Paths to be saved as grants:", t.brand).bold()
+        ));
         for (label, paths) in sections {
             for path in *paths {
                 let is_override = patch.filesystem.bypass_protection.contains(path);
                 if is_override {
-                    prompt_println(&format!("  {}  {} ({})", "⚠".red(), path, label));
+                    prompt_println(&format!(
+                        "  {}  {} ({})",
+                        "⚠".red(),
+                        theme::fg(path, t.text).bold(),
+                        label
+                    ));
                 } else {
-                    prompt_println(&format!("  {}  ({})", path, label));
+                    prompt_println(&format!(
+                        "  {}  ({})",
+                        theme::fg(path, t.text).bold(),
+                        label
+                    ));
                 }
             }
         }

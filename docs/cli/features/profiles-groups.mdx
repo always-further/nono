@@ -278,7 +278,8 @@ you do not want nono to keep offering it as a profile addition:
 
 `filesystem.suppress_save_prompt` only suppresses the save-profile suggestion
 for matching denials. The sandbox still denies the path, and the diagnostic
-footer can still show the denial if the run fails.
+footer still shows the denial, annotated with `[save skipped]` so it is clear
+why the path does not appear in the save prompt.
 
 The interactive save prompt applies this to every listed path suggestion when
 you choose `suppress`; it does not create any allow/read/write grants.

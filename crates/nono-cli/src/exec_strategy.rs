@@ -1270,6 +1270,10 @@ pub fn execute_supervised(
                     &default_redaction_policy
                 };
 
+                let canonical_denial_paths: Vec<std::path::PathBuf> = denials
+                    .iter()
+                    .map(|d| nono::try_canonicalize(&d.path))
+                    .collect();
                 let mut formatter = DiagnosticFormatter::new(config.caps)
                     .with_mode(mode)
                     .with_denials(&denials)
@@ -1279,7 +1283,9 @@ pub fn execute_supervised(
                     .with_error_observation(error_observation)
                     .with_current_dir(config.current_dir)
                     .with_session_id(diag_session_id)
-                    .with_policy_explanations(policy_explanations);
+                    .with_policy_explanations(policy_explanations)
+                    .with_suppressed_paths(config.ignored_denial_paths)
+                    .with_canonical_denial_paths(canonical_denial_paths);
                 if let Some(program) = config.command.first() {
                     formatter = formatter.with_command(nono::diagnostic::CommandContext {
                         program: program.clone(),
