@@ -69,9 +69,7 @@ const MAX_CRYPTO_THREADS: usize = 7;
 const MAX_DENIAL_RECORDS: usize = 1000;
 /// Hard cap on request IDs tracked for replay detection.
 const MAX_TRACKED_REQUEST_IDS: usize = 4096;
-/// Quiet period used to drain final PTY output after child exit before parent
-/// diagnostics/prompts take over the terminal.
-const POST_EXIT_PTY_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+use crate::timeouts;
 
 struct ProfileSaveOffer<'a> {
     policy_explanations: &'a [nono::diagnostic::PolicyExplanation],
@@ -1173,7 +1171,7 @@ pub fn execute_supervised(
             // attaching client gets EPIPE ("Broken pipe") when it
             // tries to send the handshake.
             if let Some(ref mut p) = pty_proxy {
-                p.drain_master_output(POST_EXIT_PTY_DRAIN_TIMEOUT);
+                p.drain_master_output(timeouts::pty_drain_timeout());
                 p.shutdown_attach_listener();
                 p.release_terminal_for_prompt();
             }
@@ -1625,7 +1623,7 @@ fn wait_for_child_with_startup_timeout(
                     let _ = signal::kill(child, Signal::SIGKILL);
                     return wait_for_child(child);
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(timeouts::CHILD_POLL_INTERVAL);
             }
             Ok(status) => return Ok(status),
             Err(nix::errno::Errno::EINTR) => continue,

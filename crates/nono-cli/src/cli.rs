@@ -1614,6 +1614,17 @@ pub struct RunArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub detached: bool,
 
+    /// How long (seconds) to wait for a detached session to become attachable.
+    /// Only meaningful with --detached. Env: NONO_DETACH_STARTUP_TIMEOUT.
+    #[arg(
+        long = "detach-timeout",
+        value_name = "SECS",
+        requires = "detached",
+        env = "NONO_DETACH_STARTUP_TIMEOUT",
+        help_heading = "OPTIONS"
+    )]
+    pub detach_timeout_secs: Option<u64>,
+
     // ── Rollback ──────────────────────────────────────────────────────
     /// Enable atomic rollback snapshots for the session
     #[arg(long, conflicts_with = "no_rollback", help_heading = "ROLLBACK")]

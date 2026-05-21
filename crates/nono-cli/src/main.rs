@@ -63,6 +63,7 @@ mod startup_runtime;
 mod supervised_runtime;
 mod terminal_approval;
 mod theme;
+mod timeouts;
 mod trust_cmd;
 mod trust_intercept;
 mod trust_keystore;
