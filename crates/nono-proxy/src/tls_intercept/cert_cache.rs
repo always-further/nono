@@ -26,7 +26,7 @@ use crate::tls_intercept::ca::EphemeralCa;
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256, SanType,
 };
-use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use std::collections::HashMap;
@@ -125,6 +125,11 @@ impl ResolvesServerCert for CertCache {
 }
 
 /// Mint a fresh leaf certificate for `hostname`, signed by `ca`.
+///
+/// The returned `CertifiedKey` contains a two-cert chain: [leaf, CA].
+/// Go's TLS verifier (via `SecTrustEvaluateWithError`) requires the full
+/// chain to be presented by the server even when the CA is in the user
+/// trust store.
 fn mint_leaf(ca: &EphemeralCa, hostname: &str) -> Result<Arc<CertifiedKey>> {
     // Generate a new key pair for this leaf. Distinct from the CA key:
     // we never expose the CA's signing key in any TLS handshake.
@@ -152,12 +157,16 @@ fn mint_leaf(ca: &EphemeralCa, hostname: &str) -> Result<Arc<CertifiedKey>> {
         .signed_by(&leaf_key, ca.ca_cert(), ca.key_pair())
         .map_err(|e| ProxyError::Config(format!("failed to sign leaf certificate: {}", e)))?;
     let leaf_der = cert.der().clone();
+    let ca_der = CertificateDer::from(ca.cert_der().to_vec());
 
     let private_key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key_der));
     let signing_key = rustls::crypto::ring::sign::any_supported_type(&private_key_der)
         .map_err(|e| ProxyError::Config(format!("rustls rejected minted leaf key: {}", e)))?;
 
-    Ok(Arc::new(CertifiedKey::new(vec![leaf_der], signing_key)))
+    Ok(Arc::new(CertifiedKey::new(
+        vec![leaf_der, ca_der],
+        signing_key,
+    )))
 }
 
 /// Build a Subject Alternative Name entry for `hostname`. Reject anything
@@ -211,15 +220,20 @@ mod tests {
     fn mint_returns_well_formed_cert() {
         let cache = fresh_cache();
         let ck = cache.get_or_mint("api.openai.com").unwrap();
-        assert_eq!(ck.cert.len(), 1, "should be a single-cert chain");
+        assert_eq!(ck.cert.len(), 2, "chain should be [leaf, CA]");
         assert!(
             !ck.cert[0].as_ref().is_empty(),
-            "DER body must be non-empty"
+            "leaf DER body must be non-empty"
+        );
+        assert!(
+            !ck.cert[1].as_ref().is_empty(),
+            "CA DER body must be non-empty"
         );
         // The first byte of an X.509 certificate's DER encoding is 0x30
         // (SEQUENCE). A trivial sanity check that we produced something
         // shaped like a certificate.
         assert_eq!(ck.cert[0].as_ref()[0], 0x30);
+        assert_eq!(ck.cert[1].as_ref()[0], 0x30);
     }
 
     #[test]

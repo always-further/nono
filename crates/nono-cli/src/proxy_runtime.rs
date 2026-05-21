@@ -92,6 +92,8 @@ pub(crate) fn prepare_proxy_launch_options(
         open_url_origins: prepared.open_url_origins.clone(),
         open_url_allow_localhost: prepared.open_url_allow_localhost,
         allow_launch_services_active: prepared.allow_launch_services_active,
+        #[cfg(target_os = "macos")]
+        trust_proxy_ca: args.trust_proxy_ca,
     })
 }
 
@@ -201,6 +203,17 @@ pub(crate) fn start_proxy_runtime(
     if let Some(dir) = prepare_intercept_ca_dir()? {
         proxy_config.intercept_ca_dir = Some(dir);
         proxy_config.intercept_parent_ca_pems = read_parent_ssl_cert_file();
+    }
+
+    #[cfg(target_os = "macos")]
+    if proxy.trust_proxy_ca {
+        if proxy_config.intercept_ca_dir.is_some() {
+            proxy_config.preloaded_ca = crate::macos_trust::load_or_generate_proxy_ca();
+        } else {
+            tracing::warn!(
+                "--trust-proxy-ca has no effect without TLS-intercepting credential routes"
+            );
+        }
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()

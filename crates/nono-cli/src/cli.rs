@@ -1231,6 +1231,12 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "PORT", help_heading = "NETWORK")]
     pub proxy_port: Option<u16>,
 
+    /// Add the proxy CA to the macOS user trust store (enables Go CLI tools).
+    /// Shares the CA across sessions via Keychain; regenerates daily.
+    #[cfg(target_os = "macos")]
+    #[arg(long, env = "NONO_TRUST_PROXY_CA", help_heading = "NETWORK")]
+    pub trust_proxy_ca: bool,
+
     // ── Credentials ──────────────────────────────────────────────────────
     /// Inject credentials via reverse proxy for a service (repeatable)
     /// ALIAS(canonical="--credential", introduced="v0.0.0", remove_by="indefinite", issue="#143")
@@ -1586,6 +1592,8 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             external_proxy: None,
             external_proxy_bypass: Vec::new(),
             proxy_port: None,
+            #[cfg(target_os = "macos")]
+            trust_proxy_ca: false,
             proxy_credential: Vec::new(),
             allow_endpoint: Vec::new(),
             env_credential: args.env_credential,
