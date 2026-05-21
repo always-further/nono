@@ -46,7 +46,7 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
 - [ ] **Phase 46: windows-squash merge + post-merge CI verifications + UAT backlog** — Orchestrator-coordinated: `windows-squash` → `main` merge (PR-583 gate moved OR feature-flag-equivalent rollout); Phase 37 workflow live run + Phase 43 umbrella PR + baseline-aware CI lane diff vs `13cc0628`; Phase 35 + 36 human-UAT backlog (11 scenarios + 7 verification items) on native Linux/macOS host.
 - [ ] **Phase 47: UPST6 audit + v0.41–v0.43 drift ingestion** — Mirror Phase 33 / 39 / 42 audit shape for upstream `v0.54.0..v0.55.0+`; first real load of the v2.2 DRIFT-01/02 tooling on the long-deferred `v0.41–v0.43` backfill (treat as cleanup, not parity-sync).
 - [ ] **Phase 48: UPST6 sync execution** — Cherry-picks + D-20 manual replays per UPST6 audit dispositions; D-19 trailer convention + Windows-only-files invariant + baseline-aware CI gate inherited from Phase 22/34/40/43.
-- [ ] **Phase 49: Sigstore trust-root POC resilience** — Structural fix for the recurring stale-embedded-TUF-anchor failure on `nono setup --refresh-trust-root` (hit at 0.6.5 → 0.6.6, again at 0.7.0). Three sub-items: (1) `nono setup --from-file <PATH>` CLI flag that bypasses upstream `TrustedRoot::production()` when the user supplies a known-good `trusted_root.json`; (2) ship `trusted_root.json` as a release asset alongside `nono.exe`/`nono` so POC users don't need a GitHub fetch; (3) maintainer cadence task to refresh `crates/nono/tests/fixtures/trust-root-frozen.json` from upstream on every Sigstore root rotation announcement. Surfaces are disjoint from 44–48 (touches `crates/nono-cli/src/setup.rs` + `crates/nono-cli/src/cli.rs` + CI release-asset packaging + `.planning/templates/`) so parallel-safe.
+- [x] **Phase 49: Sigstore trust-root POC resilience** — Structural fix for the recurring stale-embedded-TUF-anchor failure on `nono setup --refresh-trust-root` (hit at 0.6.5 → 0.6.6, again at 0.7.0). Three sub-items: (1) `nono setup --from-file <PATH>` CLI flag that bypasses upstream `TrustedRoot::production()` when the user supplies a known-good `trusted_root.json`; (2) ship `trusted_root.json` as a release asset alongside `nono.exe`/`nono` so POC users don't need a GitHub fetch; (3) maintainer cadence task to refresh `crates/nono/tests/fixtures/trust-root-frozen.json` from upstream on every Sigstore root rotation announcement. Surfaces are disjoint from 44–48 (touches `crates/nono-cli/src/setup.rs` + `crates/nono-cli/src/cli.rs` + CI release-asset packaging + `.planning/templates/`) so parallel-safe. (completed 2026-05-21)
 
 ## Phase Details
 
@@ -147,9 +147,9 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
   4. The "Known issue: Sigstore TUF root rotation" subsection in `docs/cli/development/windows-poc-handoff.mdx` is rewritten to recommend `--from-file` (pointing at the release-asset URL) as the primary path; the manual `Invoke-WebRequest` workaround is demoted to "if you can't reach the release page" fallback. The stale `(sigstore-verify 0.6.5)` heading and `P32-DEFER-005` reference (deferred-items.md no longer exists at the cited path) are corrected.
   5. POC user can complete the Windows handoff with zero `sigstore-verify`-dep changes — Phase 49's three sub-items are sufficient to break the dep-bump treadmill. Phase 49 close SHA recorded as the v2.6 POC-resilience anchor; future Sigstore rotations require only fixture refresh per the new cadence template, not a Cargo.toml edit + workspace clippy + cross-target verification cycle.
 **Plans**: 3 plans
-- [ ] 49-01-from-file-flag-PLAN.md — `nono setup --from-file <PATH>` CLI flag end-to-end (REQ-POC-TRUST-01) + check_trusted_root_freshness vis-widen + 6 integration tests covering F-01-01..F-01-07
-- [ ] 49-02-release-asset-bundling-PLAN.md — release.yml byte-identity assert + SHA256SUMS extension + files-glob entry (REQ-POC-TRUST-02)
-- [ ] 49-03-fixture-refresh-cadence-PLAN.md — sigstore-rotation-refresh.md template + matched .sh/.ps1 smoke scripts + windows-poc-handoff.mdx rewrite (REQ-POC-TRUST-03)
+- [x] 49-01-from-file-flag-PLAN.md — `nono setup --from-file <PATH>` CLI flag end-to-end (REQ-POC-TRUST-01) + check_trusted_root_freshness vis-widen + 6 integration tests covering F-01-01..F-01-07
+- [x] 49-02-release-asset-bundling-PLAN.md — release.yml byte-identity assert + SHA256SUMS extension + files-glob entry (REQ-POC-TRUST-02)
+- [x] 49-03-fixture-refresh-cadence-PLAN.md — sigstore-rotation-refresh.md template + matched .sh/.ps1 smoke scripts + windows-poc-handoff.mdx rewrite (REQ-POC-TRUST-03)
 **UI hint**: no
 
 ## Sequencing Rationale
@@ -217,7 +217,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | 46. windows-squash merge + post-merge CI + UAT backlog | 0/TBD | Not started | — |
 | 47. UPST6 audit + v0.41–v0.43 drift ingestion | 0/TBD | Not started | — |
 | 48. UPST6 sync execution | 0/TBD | Not started | — |
-| 49. Sigstore trust-root POC resilience | 0/TBD | Not started | — |
+| 49. Sigstore trust-root POC resilience | 3/3 | Complete   | 2026-05-21 |
 
 (Prior milestones rolled up under `milestones/v*-ROADMAP.md`.)
 
