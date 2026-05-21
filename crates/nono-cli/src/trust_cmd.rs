@@ -14,6 +14,7 @@ use nono::trust;
 use nono::Result;
 use std::path::{Path, PathBuf};
 use tracing::debug;
+use url::Url;
 use zeroize::Zeroizing;
 
 /// Keystore service name for signing keys (private key material)
@@ -905,6 +906,59 @@ fn run_verify(args: TrustVerifyArgs) -> Result<()> {
     Ok(())
 }
 
+/// Read the trusted OIDC issuer for a keyless verify operation, returning
+/// an error if neither `--issuer` nor a non-empty `NONO_TRUST_OIDC_ISSUER`
+/// env-var was supplied.
+///
+/// # Phase 44.1 — T-44-01 / CR-01 fail-closed contract (REQ-REVIEW-FU-01)
+///
+/// CLAUDE.md § Fail Secure + § Explicit Over Implicit: the keyless verify
+/// path MUST NOT silently substitute a hard-coded canonical OIDC issuer
+/// (e.g. `https://token.actions.githubusercontent.com`) when both inputs
+/// are absent. Such a substitution would allow an operator who forgot the
+/// `--issuer` flag to succeed against any GitHub-Actions-keyless bundle
+/// they did not explicitly choose to trust. The pre-Phase-44 behavior
+/// was an explicit `ok_or_else(...)?` fail-closed error; this helper
+/// restores that contract while preserving the D-44-B3 opt-in env-var
+/// fallback for CI workflows that explicitly set the env-var.
+///
+/// Whitespace-only env-var values are treated as unset (the "accidentally
+/// exported empty value" trap, e.g. `NONO_TRUST_OIDC_ISSUER=` in a YAML
+/// `env:` block with no value). Malformed (non-URL) env-var values
+/// surface as a structured error rather than silently falling through.
+///
+/// # Errors
+///
+/// Returns `Err(String)` when:
+/// - Both `user_issuer == None` and `NONO_TRUST_OIDC_ISSUER` is unset
+///   (or whitespace-only).
+/// - `NONO_TRUST_OIDC_ISSUER` is set to a non-empty value that fails
+///   `url::Url::parse`.
+fn read_required_oidc_issuer(
+    user_issuer: Option<&str>,
+) -> std::result::Result<String, String> {
+    if let Some(s) = user_issuer {
+        return Ok(s.to_string());
+    }
+    let env_value = std::env::var("NONO_TRUST_OIDC_ISSUER")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            "keyless bundle requires --issuer <OIDC_URL> or NONO_TRUST_OIDC_ISSUER \
+             env-var (exact match against signer's iss claim)"
+                .to_string()
+        })?;
+    // CLAUDE.md § Fail Secure: validate URL shape eagerly so we surface
+    // a clear error before the verify pipeline begins, rather than
+    // letting `validate_oidc_issuer` produce a less specific message
+    // downstream. Mirrors the historical
+    // `configured_oidc_issuer_rejects_malformed_env_value` semantics.
+    Url::parse(&env_value).map_err(|e| {
+        format!("NONO_TRUST_OIDC_ISSUER='{env_value}' is not a valid URL: {e}")
+    })?;
+    Ok(env_value)
+}
+
 /// Verify a `.nono-trust.bundle` multi-subject bundle.
 ///
 /// `user_issuer` and `user_identity_pattern` are REQUIRED for keyless bundles
@@ -967,21 +1021,20 @@ fn verify_multi_subject_file(
             git_ref: _,
         } => {
             // D-32-08 fail-closed: keyless bundles require an explicit issuer
-            // pin + identity regex. Phase 44 WR-09 P37 (REQ-REVIEW-FU-01
-            // D-44-B3): when --issuer is not provided, fall back to the
-            // configured_oidc_issuer reader so the NONO_TRUST_OIDC_ISSUER
-            // env-var the CI workflow has been setting since Phase 37 is
-            // actually consumed. The fallback returns the canonical
-            // GitHub Actions default when the env-var is unset.
-            let env_issuer: String;
-            let req_issuer: &str = match user_issuer {
-                Some(s) => s,
-                None => {
-                    env_issuer = trust::signing::configured_oidc_issuer()
-                        .map_err(|e| format!("OIDC issuer configuration failed: {e}"))?;
-                    &env_issuer
-                }
-            };
+            // pin + identity regex.
+            //
+            // Phase 44.1 (REQ-REVIEW-FU-01 follow-up; T-44-01 / CR-01 BLOCKER
+            // fix): restored the pre-Phase-44 fail-closed contract — when
+            // neither --issuer nor NONO_TRUST_OIDC_ISSUER is supplied, error
+            // explicitly via `read_required_oidc_issuer` rather than silently
+            // substituting the canonical GitHub Actions default. The D-44-B3
+            // opt-in env-var fallback is preserved: an explicitly-set non-empty
+            // NONO_TRUST_OIDC_ISSUER continues to work without --issuer.
+            // CLAUDE.md § Fail Secure + § Explicit Over Implicit + Key Design
+            // Decision #4 ("Library is policy-free" — the policy now lives in
+            // the CLI helper, not in `trust::signing`).
+            let req_issuer_owned = read_required_oidc_issuer(user_issuer)?;
+            let req_issuer: &str = &req_issuer_owned;
             let req_identity = user_identity_pattern.ok_or_else(|| {
                 "keyless bundle requires --identity <REGEX> \
                  (matched against bundle's Fulcio Build Config URI)"
@@ -1163,21 +1216,20 @@ fn verify_single_file(
             git_ref: _,
         } => {
             // D-32-08 fail-closed: keyless bundles require an explicit issuer
-            // pin + identity regex. Phase 44 WR-09 P37 (REQ-REVIEW-FU-01
-            // D-44-B3): when --issuer is not provided, fall back to the
-            // configured_oidc_issuer reader so the NONO_TRUST_OIDC_ISSUER
-            // env-var the CI workflow has been setting since Phase 37 is
-            // actually consumed. The fallback returns the canonical
-            // GitHub Actions default when the env-var is unset.
-            let env_issuer: String;
-            let req_issuer: &str = match user_issuer {
-                Some(s) => s,
-                None => {
-                    env_issuer = trust::signing::configured_oidc_issuer()
-                        .map_err(|e| format!("OIDC issuer configuration failed: {e}"))?;
-                    &env_issuer
-                }
-            };
+            // pin + identity regex.
+            //
+            // Phase 44.1 (REQ-REVIEW-FU-01 follow-up; T-44-01 / CR-01 BLOCKER
+            // fix): restored the pre-Phase-44 fail-closed contract — when
+            // neither --issuer nor NONO_TRUST_OIDC_ISSUER is supplied, error
+            // explicitly via `read_required_oidc_issuer` rather than silently
+            // substituting the canonical GitHub Actions default. The D-44-B3
+            // opt-in env-var fallback is preserved: an explicitly-set non-empty
+            // NONO_TRUST_OIDC_ISSUER continues to work without --issuer.
+            // CLAUDE.md § Fail Secure + § Explicit Over Implicit + Key Design
+            // Decision #4 ("Library is policy-free" — the policy now lives in
+            // the CLI helper, not in `trust::signing`).
+            let req_issuer_owned = read_required_oidc_issuer(user_issuer)?;
+            let req_issuer: &str = &req_issuer_owned;
             let req_identity = user_identity_pattern.ok_or_else(|| {
                 "keyless bundle requires --identity <REGEX> \
                  (matched against bundle's Fulcio Build Config URI)"
@@ -2128,6 +2180,137 @@ mod tests {
         assert!(
             msg.contains("id-token: write"),
             "OIDC_NO_AMBIENT_TOKEN_MSG must name the GitHub Actions OIDC permission claim; got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 44.1 — T-44-01 / CR-01 verify-path fail-closed regression gate
+    // -----------------------------------------------------------------------
+    //
+    // These tests pin the fail-closed contract on `read_required_oidc_issuer`
+    // (the small private helper introduced in Task 2). Phase 44 Plan 44-01's
+    // WR-09 production-wiring of `NONO_TRUST_OIDC_ISSUER` silently substituted
+    // the canonical GitHub Actions OIDC issuer at the verify trust-anchor
+    // boundary when both `--issuer` and the env-var were unset — a Spoofing-
+    // class regression (T-44-01) flagged by `/gsd-secure-phase` and
+    // `/gsd-code-review` (CR-01) that violated CLAUDE.md § Fail Secure and
+    // § Explicit Over Implicit. This module restores the pre-Phase-44
+    // fail-closed contract by reading the env-var without any hard-coded
+    // default fallback at the verify boundary.
+
+    // Phase 44.1 — env-var test isolation. Replicates the OidcEnvGuard
+    // pattern from crates/nono/src/trust/signing.rs:1155-1201 because Rust
+    // unit tests run in parallel within the same process and concurrent
+    // mutation of NONO_TRUST_OIDC_ISSUER across sibling tests would race.
+    // CLAUDE.md § "Environment variables in tests" save/restore pattern.
+    static OIDC_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct OidcEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+
+    impl OidcEnvGuard {
+        #[allow(clippy::disallowed_methods)]
+        fn set(val: &str) -> Self {
+            let _lock = match OIDC_ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let prev = std::env::var("NONO_TRUST_OIDC_ISSUER").ok();
+            std::env::set_var("NONO_TRUST_OIDC_ISSUER", val);
+            Self { _lock, prev }
+        }
+
+        #[allow(clippy::disallowed_methods)]
+        fn remove() -> Self {
+            let _lock = match OIDC_ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let prev = std::env::var("NONO_TRUST_OIDC_ISSUER").ok();
+            std::env::remove_var("NONO_TRUST_OIDC_ISSUER");
+            Self { _lock, prev }
+        }
+    }
+
+    impl Drop for OidcEnvGuard {
+        #[allow(clippy::disallowed_methods)]
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("NONO_TRUST_OIDC_ISSUER", v),
+                None => std::env::remove_var("NONO_TRUST_OIDC_ISSUER"),
+            }
+        }
+    }
+
+    // Phase 44.1 — T-44-01 / CR-01 regression gate. When the operator
+    // passes --issuer explicitly, that value wins; the env-var is not
+    // consulted.
+    #[test]
+    fn read_required_oidc_issuer_returns_user_issuer_when_set() {
+        let _g = OidcEnvGuard::remove();
+        let got = read_required_oidc_issuer(Some("https://gitlab.com"))
+            .expect("explicit --issuer should succeed");
+        assert_eq!(got, "https://gitlab.com");
+    }
+
+    // Phase 44.1 — D-44-B3 opt-in env-var fallback preserved.
+    #[test]
+    fn read_required_oidc_issuer_returns_env_value_when_user_unset_and_env_set() {
+        let _g = OidcEnvGuard::set("https://token.actions.githubusercontent.com");
+        let got = read_required_oidc_issuer(None)
+            .expect("explicitly-set env-var should succeed");
+        assert_eq!(got, "https://token.actions.githubusercontent.com");
+    }
+
+    // Phase 44.1 — T-44-01 / CR-01 PRIMARY REGRESSION GATE.
+    // CLAUDE.md § Fail Secure + § Explicit Over Implicit: when both
+    // --issuer and NONO_TRUST_OIDC_ISSUER are absent the verify path
+    // MUST error, NOT silently substitute a canonical default.
+    #[test]
+    fn read_required_oidc_issuer_fails_closed_when_both_unset() {
+        let _g = OidcEnvGuard::remove();
+        let err = read_required_oidc_issuer(None)
+            .expect_err("both inputs absent should fail closed");
+        assert!(
+            err.contains("keyless bundle requires --issuer"),
+            "error must name --issuer; got: {err}"
+        );
+        assert!(
+            err.contains("NONO_TRUST_OIDC_ISSUER"),
+            "error must name NONO_TRUST_OIDC_ISSUER; got: {err}"
+        );
+    }
+
+    // Phase 44.1 — whitespace-only env-var is the "accidentally exported
+    // empty value" trap; treat as unset, fail closed.
+    #[test]
+    fn read_required_oidc_issuer_fails_closed_when_user_unset_and_env_whitespace_only() {
+        let _g = OidcEnvGuard::set("   ");
+        let err = read_required_oidc_issuer(None)
+            .expect_err("whitespace-only env-var should fail closed");
+        assert!(
+            err.contains("keyless bundle requires --issuer"),
+            "error must name --issuer; got: {err}"
+        );
+    }
+
+    // Phase 44.1 — migrated from
+    // `crates/nono/src/trust/signing.rs::configured_oidc_issuer_rejects_malformed_env_value`.
+    // Preserves CLAUDE.md § Fail Secure coverage on malformed URL values.
+    #[test]
+    fn read_required_oidc_issuer_rejects_malformed_env_url() {
+        let _g = OidcEnvGuard::set("not a valid url at all");
+        let err = read_required_oidc_issuer(None)
+            .expect_err("malformed URL should fail closed");
+        assert!(
+            err.contains("NONO_TRUST_OIDC_ISSUER"),
+            "error must name the env-var; got: {err}"
+        );
+        assert!(
+            err.contains("is not a valid URL"),
+            "error must say 'is not a valid URL'; got: {err}"
         );
     }
 }
