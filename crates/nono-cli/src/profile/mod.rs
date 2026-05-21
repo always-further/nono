@@ -1138,6 +1138,41 @@ pub struct HooksConfig {
     pub hooks: HashMap<String, HookConfig>,
 }
 
+/// A single session lifecycle hook configuration.
+///
+/// Defines a script to execute before or after the sandboxed session.
+/// Scripts run with the user's full host privileges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionHook {
+    /// Absolute path to the hook script.
+    /// Must be an executable regular file. Validated at execution time.
+    pub script: PathBuf,
+
+    /// Optional timeout in seconds.
+    /// If set, the hook is killed after this duration.
+    /// If absent, no timeout is enforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Session lifecycle hooks for a profile.
+///
+/// `before`: executed in the parent process before the sandboxed child is forked.
+///           Has host privileges. Can export env vars via NONO_ENV_FILE.
+///
+/// `after`: executed in the parent process after the sandboxed child exits.
+///          Has host privileges. Cleanup only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<SessionHook>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<SessionHook>,
+}
+
 /// Working directory access level for profiles
 ///
 /// Controls whether and how the current working directory is automatically
@@ -1467,6 +1502,11 @@ pub struct Profile {
     pub workdir: WorkdirConfig,
     #[serde(default)]
     pub hooks: HooksConfig,
+    /// Session lifecycle hooks (before/after sandbox).
+    /// Runs outside the sandbox with host privileges.
+    /// `before` can export env vars via NONO_ENV_FILE.
+    #[serde(default)]
+    pub session_hooks: SessionHooks,
     /// ALIAS(canonical="rollback", introduced="v0.0.0", remove_by="indefinite", issue="#124")
     #[serde(default, alias = "undo")]
     pub rollback: RollbackConfig,
@@ -1555,6 +1595,8 @@ struct ProfileDeserialize {
     workdir: WorkdirConfig,
     #[serde(default)]
     hooks: HooksConfig,
+    #[serde(default)]
+    session_hooks: SessionHooks,
     /// ALIAS(canonical="rollback", introduced="v0.0.0", remove_by="indefinite", issue="#124")
     #[serde(default, alias = "undo")]
     rollback: RollbackConfig,
@@ -1599,6 +1641,7 @@ impl From<ProfileDeserialize> for Profile {
             environment: raw.environment,
             workdir: raw.workdir,
             hooks: raw.hooks,
+            session_hooks: raw.session_hooks,
             rollback: raw.rollback,
             open_urls: raw.open_urls,
             allow_launch_services: raw.allow_launch_services,
@@ -2552,6 +2595,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 merged.extend(child.hooks.hooks);
                 merged
             },
+        },
+        session_hooks: SessionHooks {
+            before: child.session_hooks.before.or(base.session_hooks.before),
+            after: child.session_hooks.after.or(base.session_hooks.after),
         },
         rollback: RollbackConfig {
             exclude_patterns: dedup_append(
@@ -4403,6 +4450,7 @@ mod tests {
             hooks: HooksConfig {
                 hooks: HashMap::new(),
             },
+            session_hooks: SessionHooks::default(),
             rollback: RollbackConfig {
                 exclude_patterns: vec!["node_modules".to_string()],
                 exclude_globs: vec!["*.pyc".to_string()],
@@ -4481,6 +4529,7 @@ mod tests {
             hooks: HooksConfig {
                 hooks: HashMap::new(),
             },
+            session_hooks: SessionHooks::default(),
             rollback: RollbackConfig {
                 exclude_patterns: vec![],
                 exclude_globs: vec![],
@@ -4578,6 +4627,126 @@ mod tests {
         let merged = merge_profiles(base_profile(), child_profile());
         assert_eq!(merged.meta.name, "child");
         assert_eq!(merged.meta.version, "2.0");
+    }
+
+    // ============================================================================
+    // session_hooks: type-level + merge semantics
+    // ============================================================================
+
+    #[test]
+    fn test_session_hook_deserializes() {
+        let json = r#"{
+            "meta": { "name": "p" },
+            "session_hooks": {
+                "before": { "script": "/usr/local/bin/setup.sh", "timeout_secs": 10 },
+                "after":  { "script": "/usr/local/bin/cleanup.sh" }
+            }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse session_hooks profile");
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before is set");
+        assert_eq!(before.script, PathBuf::from("/usr/local/bin/setup.sh"));
+        assert_eq!(before.timeout_secs, Some(10));
+        let after = profile.session_hooks.after.as_ref().expect("after is set");
+        assert_eq!(after.script, PathBuf::from("/usr/local/bin/cleanup.sh"));
+        assert_eq!(after.timeout_secs, None);
+    }
+
+    #[test]
+    fn test_session_hook_optional_timeout_omitted() {
+        let json = r#"{
+            "meta": { "name": "p" },
+            "session_hooks": { "before": { "script": "/x/y.sh" } }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse profile");
+        assert_eq!(profile.session_hooks.before.unwrap().timeout_secs, None);
+    }
+
+    #[test]
+    fn test_session_hook_rejects_unknown_field() {
+        let json = r#"{
+            "meta": { "name": "p" },
+            "session_hooks": {
+                "before": {
+                    "script": "/x/y.sh",
+                    "args": ["--foo"]
+                }
+            }
+        }"#;
+        let result = serde_json::from_str::<Profile>(json);
+        assert!(
+            result.is_err(),
+            "SessionHook should reject unknown fields, got: {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_session_hooks_rejects_unknown_field() {
+        // Catches typos like "befor" or "after_run".
+        let json = r#"{
+            "meta": { "name": "p" },
+            "session_hooks": { "befor": { "script": "/x/y.sh" } }
+        }"#;
+        let result = serde_json::from_str::<Profile>(json);
+        assert!(
+            result.is_err(),
+            "SessionHooks must reject unknown fields, got: {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_merge_profiles_session_hooks_child_overrides_per_field() {
+        let mut base = base_profile();
+        base.session_hooks = SessionHooks {
+            before: Some(SessionHook {
+                script: PathBuf::from("/base/before.sh"),
+                timeout_secs: Some(5),
+            }),
+            after: Some(SessionHook {
+                script: PathBuf::from("/base/after.sh"),
+                timeout_secs: None,
+            }),
+        };
+        let mut child = child_profile();
+        child.session_hooks = SessionHooks {
+            before: Some(SessionHook {
+                script: PathBuf::from("/child/before.sh"),
+                timeout_secs: None,
+            }),
+            after: None,
+        };
+
+        let merged = merge_profiles(base, child);
+        let merged_before = merged.session_hooks.before.expect("before present");
+        assert_eq!(merged_before.script, PathBuf::from("/child/before.sh"));
+        assert_eq!(merged_before.timeout_secs, None);
+        let merged_after = merged
+            .session_hooks
+            .after
+            .expect("after preserved from base");
+        assert_eq!(merged_after.script, PathBuf::from("/base/after.sh"));
+    }
+
+    #[test]
+    fn test_merge_profiles_session_hooks_child_inherits_when_absent() {
+        let mut base = base_profile();
+        base.session_hooks = SessionHooks {
+            before: Some(SessionHook {
+                script: PathBuf::from("/base/before.sh"),
+                timeout_secs: Some(7),
+            }),
+            after: None,
+        };
+        let merged = merge_profiles(base, child_profile());
+        let before = merged.session_hooks.before.expect("inherited from base");
+        assert_eq!(before.script, PathBuf::from("/base/before.sh"));
+        assert_eq!(before.timeout_secs, Some(7));
+        assert!(merged.session_hooks.after.is_none());
     }
 
     #[test]

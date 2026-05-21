@@ -417,6 +417,7 @@ struct PendingCwdAccessRequest {
 pub(crate) struct PreparedSandbox {
     pub(crate) caps: CapabilitySet,
     pub(crate) secrets: Vec<nono::LoadedSecret>,
+    pub(crate) session_hooks: profile::SessionHooks,
     pub(crate) rollback_exclude_patterns: Vec<String>,
     pub(crate) rollback_exclude_globs: Vec<String>,
     pub(crate) network_profile: Option<String>,
@@ -1005,6 +1006,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             PreparedSandbox {
                 caps,
                 secrets: Vec::new(),
+                session_hooks: profile::SessionHooks::default(),
                 rollback_exclude_patterns,
                 rollback_exclude_globs,
                 network_profile: None,
@@ -1061,6 +1063,11 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         allowed_env_vars: profile_allowed_env_vars,
         denied_env_vars: profile_denied_env_vars,
     } = prepared_profile;
+
+    let session_hooks = loaded_profile
+        .as_ref()
+        .map(|p| p.session_hooks.clone())
+        .unwrap_or_default();
 
     if let Some(profile) = loaded_profile.as_ref() {
         let profile_warnings = command_blocking_deprecation::collect_profile_warnings(profile);
@@ -1278,6 +1285,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         PreparedSandbox {
             caps,
             secrets: loaded_secrets,
+            session_hooks,
             rollback_exclude_patterns: profile_rollback_patterns,
             rollback_exclude_globs: profile_rollback_globs,
             network_profile: profile_network_profile,

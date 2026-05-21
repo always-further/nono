@@ -168,6 +168,7 @@ impl ProfileDef {
             environment: None,
             workdir: self.workdir.clone(),
             hooks: self.hooks.clone(),
+            session_hooks: profile::SessionHooks::default(),
             rollback: self.rollback.clone(),
             open_urls: self.open_urls.clone(),
             allow_launch_services: self.allow_launch_services,
@@ -2341,6 +2342,13 @@ mod tests {
         // We filter to Linux-applicable groups (platform: None or "linux")
         // and check directly from parsed policy so this catches regressions
         // on all CI platforms (including macOS).
+        //
+        // We hold ENV_LOCK because expand_path() reads HOME/TMPDIR from the
+        // process env, and other tests in the suite mutate those vars.
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let policy = load_embedded_policy().expect("embedded policy must load");
 
         let is_linux_applicable =
