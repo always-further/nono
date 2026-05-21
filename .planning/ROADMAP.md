@@ -4,6 +4,16 @@ milestone_name: UPST6 + v2.5 Drain
 status: active
 created: 2026-05-20
 granularity: standard
+### Phase 50: Corp-network TUF refresh via OS root store — replace or wrap the sigstore-rs TUF refresh path with an HTTP client that consults the Windows root store, fixing the recurring `nono setup --refresh-trust-root` failure at step [3/5] on TLS-inspecting enterprise networks (reqwest 0.12.28 + webpki-roots cannot see corp CA in Windows root store). Two viable implementation surfaces: (a) nono-local TUF chain-walk using existing `ureq` + `rustls-platform-verifier` deps in nono-cli/Cargo.toml (no upstream PR cycle), or (b) upstream `sigstore-rs` PR adding `TrustedRoot::with_http_client(...)` seam plus nono-side `reqwest::Client::builder().use_native_tls()` wire-through. Phase 49's `--from-file` flag covers the operational gap until this lands. Evidence: .planning/debug/resolved/sigstore-tuf-fetch-transport.md.
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 49
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 50 to break down)
+
 ---
 
 # Roadmap — nono
