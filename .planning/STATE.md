@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.6
 milestone_name: UPST6 + v2.5 Drain
 status: executing
-last_updated: "2026-05-21T18:16:49.730Z"
+last_updated: "2026-05-21T19:11:06.479Z"
 last_activity: 2026-05-21
 progress:
   total_phases: 7
   completed_phases: 2
-  total_plans: 6
+  total_plans: 9
   completed_plans: 3
-  percent: 50
+  percent: 33
 ---
 
 # Project State: nono — v2.6 UPST6 + v2.5 Drain
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 ship
 Phase: 45
 Plan: Not started
 Status: Ready to execute
-Last activity: 2026-05-21 -- Phase 45 planning complete
+Last activity: 2026-05-21 -- Phase 49 planning complete
 
 ### v2.6 Phase Summary
 

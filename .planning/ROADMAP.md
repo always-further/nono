@@ -17,7 +17,7 @@ granularity: standard
 - ✅ **v2.3 Linux POC Unblock + Deferreds Closure** — see [`milestones/v2.3-ROADMAP.md`](milestones/v2.3-ROADMAP.md)
 - ✅ **v2.4 Complete the Partial Ports + UPST4** — Phases 35, 36, 36.5, 39, 40 (shipped 2026-05-15) — see [`milestones/v2.4-ROADMAP.md`](milestones/v2.4-ROADMAP.md)
 - ✅ **v2.5 Backlog Drain + UPST5** — Phases 37, 41, 42, 43 (shipped 2026-05-20) — see [`milestones/v2.5-ROADMAP.md`](milestones/v2.5-ROADMAP.md)
-- 🚧 **v2.6 UPST6 + v2.5 Drain** — Phases 44, 45, 46, 47, 48 (active, started 2026-05-20)
+- 🚧 **v2.6 UPST6 + v2.5 Drain** — Phases 44, 45, 46, 47, 48, 49 (active, started 2026-05-20)
 
 ## Phases
 
@@ -39,13 +39,14 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
 
 **Core Value:** Drain the 7 v2.5 carry-forward items + 3 long-tail v2.4+ deferrals, then absorb upstream `v0.54.0..v0.55.0+` via UPST6 — mirroring the v2.5 drain-then-sync pattern. Leaving the fork in a state where every cross-platform CI lane is green, the `windows-squash` → `main` merge is landed (or rationally deferred with a feature-flag-equivalent rollout), and the next milestone can be a feature milestone instead of another drain.
 
-**Phase numbering:** continues from Phase 43 (v2.5 close). Phase 38 number reserved from v2.4 ROADMAP for REQ-AAHX-HOST-01 — folded into Phase 45 as REQ-RESL-NIX-04 native re-validation per scope-lock. v2.6 executes Phases 44, 45, 46, 47, 48.
+**Phase numbering:** continues from Phase 43 (v2.5 close). Phase 38 number reserved from v2.4 ROADMAP for REQ-AAHX-HOST-01 — folded into Phase 45 as REQ-RESL-NIX-04 native re-validation per scope-lock. v2.6 executes Phases 44, 45, 46, 47, 48, 49. Phase 49 added mid-milestone (2026-05-21) after POC user hit `nono setup --refresh-trust-root` signature-threshold failure for the third time post-`sigstore-verify` upgrade — empirical evidence that the embedded-TUF-anchor staleness class of bug is recurring, not a one-off; structural POC-resilience fix rather than another dep bump.
 
 - [x] **Phase 44: REVIEW polish + test hygiene drain** — Close 16 REVIEW.md warnings via a single chore plan and resolve the 4 test-hygiene follow-ups (Class D Linux deny-overlap + Class E Windows env_vars flakes + v24 broker CR-01/02 cross-binding lockstep). (completed 2026-05-20)
 - [ ] **Phase 45: Source migration + AIPC G-04 + RESL native re-validation** — Rule-4 architectural items: 39 `#[unsafe(no_mangle)]` Edition 2024 rewrites in `bindings/c/src/` (Cluster 2 split-disposition closure); AIPC G-04 wire-protocol compile-time tightening (`Approved(ResourceGrant)` inline); Phase 38 REQ-AAHX-HOST-01 native re-validation on Linux/macOS host (folded in as RESL-NIX-04).
 - [ ] **Phase 46: windows-squash merge + post-merge CI verifications + UAT backlog** — Orchestrator-coordinated: `windows-squash` → `main` merge (PR-583 gate moved OR feature-flag-equivalent rollout); Phase 37 workflow live run + Phase 43 umbrella PR + baseline-aware CI lane diff vs `13cc0628`; Phase 35 + 36 human-UAT backlog (11 scenarios + 7 verification items) on native Linux/macOS host.
 - [ ] **Phase 47: UPST6 audit + v0.41–v0.43 drift ingestion** — Mirror Phase 33 / 39 / 42 audit shape for upstream `v0.54.0..v0.55.0+`; first real load of the v2.2 DRIFT-01/02 tooling on the long-deferred `v0.41–v0.43` backfill (treat as cleanup, not parity-sync).
 - [ ] **Phase 48: UPST6 sync execution** — Cherry-picks + D-20 manual replays per UPST6 audit dispositions; D-19 trailer convention + Windows-only-files invariant + baseline-aware CI gate inherited from Phase 22/34/40/43.
+- [ ] **Phase 49: Sigstore trust-root POC resilience** — Structural fix for the recurring stale-embedded-TUF-anchor failure on `nono setup --refresh-trust-root` (hit at 0.6.5 → 0.6.6, again at 0.7.0). Three sub-items: (1) `nono setup --from-file <PATH>` CLI flag that bypasses upstream `TrustedRoot::production()` when the user supplies a known-good `trusted_root.json`; (2) ship `trusted_root.json` as a release asset alongside `nono.exe`/`nono` so POC users don't need a GitHub fetch; (3) maintainer cadence task to refresh `crates/nono/tests/fixtures/trust-root-frozen.json` from upstream on every Sigstore root rotation announcement. Surfaces are disjoint from 44–48 (touches `crates/nono-cli/src/setup.rs` + `crates/nono-cli/src/cli.rs` + CI release-asset packaging + `.planning/templates/`) so parallel-safe.
 
 ## Phase Details
 
@@ -135,6 +136,22 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
 **Plans**: TBD
 **UI hint**: no
 
+### Phase 49: Sigstore trust-root POC resilience (--from-file flag + release-asset bundling + fixture refresh cadence)
+**Goal**: Structural fix for the recurring `nono setup --refresh-trust-root` failure caused by stale embedded TUF anchors in `sigstore-verify`. Sigstore periodically rotates their root signing keys; any anchor that `sigstore-verify` bundles at release time eventually loses all of its valid keys against the published `root.json`. We've already bumped 0.6.5 → 0.6.6 → 0.7.0 for this exact reason, and the failure has recurred each time. This phase exits the dep-bump treadmill by giving POC users a path that does not depend on the upstream-embedded anchor: a `--from-file` CLI flag, a bundled release asset, and a maintainer cadence to keep the fork's frozen fixture fresh.
+**Depends on**: Nothing structural; surfaces disjoint from 44–48 (touches `crates/nono-cli/src/setup.rs` + `crates/nono-cli/src/cli.rs` + release-asset packaging + the existing `crates/nono/tests/fixtures/trust-root-frozen.json` fixture). Parallel-safe with any v2.6 phase. Inherits Phase 32 D-32-15 verify-is-offline invariant (cached `trusted_root.json` is read via plain JSON deserialization, not TUF re-verification — so a `--from-file` drop unblocks `nono trust verify` without any sigstore-verify changes).
+**Requirements**: REQ-POC-TRUST-01, REQ-POC-TRUST-02, REQ-POC-TRUST-03
+**Success Criteria** (what must be TRUE):
+  1. `nono setup --from-file <PATH>` validates the supplied `trusted_root.json` (schema + tlog `valid_for` expiry gate per D-32-03), copies it to `<nono_home_dir>/.nono/trust-root/trusted_root.json`, and never invokes `sigstore_verify::TrustedRoot::production()`. Mutually exclusive with `--refresh-trust-root` on the same invocation (clap-level conflict). Fail-closed on invalid JSON, schema mismatch, or all-tlog-keys-expired input — never silently degrade to a partial write.
+  2. CI release packaging ships `trusted_root.json` as a sibling asset alongside the `nono` / `nono.exe` artifacts in every GitHub Release. The asset content is byte-identical to `crates/nono/tests/fixtures/trust-root-frozen.json` at the release tag's commit (CI-asserted, not just contractual). POC installers can `--from-file` directly off the release page without a `raw.githubusercontent.com` fetch or commit-sha pin.
+  3. A maintainer-cadence template at `.planning/templates/sigstore-rotation-refresh.md` documents the steps to refresh `crates/nono/tests/fixtures/trust-root-frozen.json` from upstream `sigstore/root-signing@main` whenever Sigstore announces a root rotation. The template references the trigger (e.g. Sigstore mailing list / blog), the capture command, the cross-platform verify-on-cached-bytes smoke test, and the v2.6 close mention in PROJECT.md "Open Long-Term" so future milestones don't lose the rotation cadence.
+  4. The "Known issue: Sigstore TUF root rotation" subsection in `docs/cli/development/windows-poc-handoff.mdx` is rewritten to recommend `--from-file` (pointing at the release-asset URL) as the primary path; the manual `Invoke-WebRequest` workaround is demoted to "if you can't reach the release page" fallback. The stale `(sigstore-verify 0.6.5)` heading and `P32-DEFER-005` reference (deferred-items.md no longer exists at the cited path) are corrected.
+  5. POC user can complete the Windows handoff with zero `sigstore-verify`-dep changes — Phase 49's three sub-items are sufficient to break the dep-bump treadmill. Phase 49 close SHA recorded as the v2.6 POC-resilience anchor; future Sigstore rotations require only fixture refresh per the new cadence template, not a Cargo.toml edit + workspace clippy + cross-target verification cycle.
+**Plans**: 3 plans
+- [ ] 49-01-from-file-flag-PLAN.md — `nono setup --from-file <PATH>` CLI flag end-to-end (REQ-POC-TRUST-01) + check_trusted_root_freshness vis-widen + 6 integration tests covering F-01-01..F-01-07
+- [ ] 49-02-release-asset-bundling-PLAN.md — release.yml byte-identity assert + SHA256SUMS extension + files-glob entry (REQ-POC-TRUST-02)
+- [ ] 49-03-fixture-refresh-cadence-PLAN.md — sigstore-rotation-refresh.md template + matched .sh/.ps1 smoke scripts + windows-poc-handoff.mdx rewrite (REQ-POC-TRUST-03)
+**UI hint**: no
+
 ## Sequencing Rationale
 
 ```
@@ -148,10 +165,11 @@ Phase 45 (source migration + AIPC + RESL) ┴──► Phase 46 (merge + CI veri
 - **Phase 47 sequential after Phase 46** — UPST6 audit benefits from the post-merge baseline so the ADR-review section can reference green CI as evidence for `continue` strategy. v0.41–v0.43 drift ingestion folded in here (rather than as standalone phase) because the DRIFT-01/02 tooling is the same instrument; running both inventories in one phase amortizes the audit-shape overhead.
 - **Phase 48 sequential after Phase 47** — D-19 cherry-pick discipline needs Phase 47's per-cluster dispositions to choose cherry-pick vs D-20 manual-replay. Phase 48 is the milestone-closing phase; v2.6 ships after its close.
 - **Phase 38 number reservation closed** — REQ-AAHX-HOST-01 native re-validation folded into Phase 45 as REQ-RESL-NIX-04 (rescoped at milestone-start to clarify it's a confirmation pass, not a fresh investigation). No Phase 38 will be opened in v2.6.
+- **Phase 49 parallel-safe with 44–48** — surfaces disjoint (`crates/nono-cli/src/setup.rs` + `cli.rs` + CI release packaging + `.planning/templates/`). Added mid-milestone (2026-05-21) reactively after the third recurrence of `sigstore-verify` embedded-anchor staleness; not in the original v2.6 plan. Can execute any time before milestone close; recommended before Phase 46 merge so the release-asset bundling lands with the merge artifact, but not load-bearing for the merge itself.
 
 ## Requirement Coverage
 
-17 in-milestone requirements; every one mapped to exactly one phase; zero unmapped; zero double-mapped.
+17 in-milestone requirements (Phase 44–48) + TBD requirements pending `/gsd-spec-phase 49`. Every Phase 44–48 requirement is mapped to exactly one phase; zero unmapped; zero double-mapped. Phase 49 requirement IDs will be formalized at spec-phase time (anticipated REQ-POC-TRUST-01 / -02 / -03).
 
 | REQ-ID | Phase | Category |
 |---|---|---|
@@ -172,8 +190,11 @@ Phase 45 (source migration + AIPC + RESL) ┴──► Phase 46 (merge + CI veri
 | REQ-UPST6-01 | Phase 47 | UPST6 |
 | REQ-DRIFT-INGEST-01 | Phase 47 | DRIFT |
 | REQ-UPST6-02 | Phase 48 | UPST6 |
+| REQ-POC-TRUST-01 (anticipated) | Phase 49 | POC-TRUST |
+| REQ-POC-TRUST-02 (anticipated) | Phase 49 | POC-TRUST |
+| REQ-POC-TRUST-03 (anticipated) | Phase 49 | POC-TRUST |
 
-**Coverage: 17/17 ✓**
+**Coverage: 17/17 ✓** for original v2.6 scope (Phases 44–48). Phase 49 requirements TBD pending `/gsd-spec-phase 49`; coverage statement will be re-asserted at that time.
 
 ## Cross-Phase Invariants
 
@@ -196,6 +217,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | 46. windows-squash merge + post-merge CI + UAT backlog | 0/TBD | Not started | — |
 | 47. UPST6 audit + v0.41–v0.43 drift ingestion | 0/TBD | Not started | — |
 | 48. UPST6 sync execution | 0/TBD | Not started | — |
+| 49. Sigstore trust-root POC resilience | 0/TBD | Not started | — |
 
 (Prior milestones rolled up under `milestones/v*-ROADMAP.md`.)
 
