@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v2.6
 milestone_name: UPST6 + v2.5 Drain
 status: executing
-last_updated: "2026-05-21T17:38:25.629Z"
+last_updated: "2026-05-21T18:16:49.730Z"
 last_activity: 2026-05-21
 progress:
-  total_phases: 6
+  total_phases: 7
   completed_phases: 2
   total_plans: 6
   completed_plans: 3
@@ -39,6 +39,7 @@ Last activity: 2026-05-21 -- Phase 45 planning complete
 | 46 | windows-squash merge + post-merge CI verifs + UAT backlog | REQ-MERGE-01 + REQ-CI-FU-01..03 + REQ-UAT-BL-01..02 | Not started |
 | 47 | UPST6 audit + v0.41–v0.43 drift ingestion | REQ-UPST6-01 + REQ-DRIFT-INGEST-01 | Not started |
 | 48 | UPST6 sync execution | REQ-UPST6-02 | Not started |
+| 49 | Sigstore trust-root POC resilience (--from-file + release asset + fixture cadence) | TBD (anticipated REQ-POC-TRUST-01..03) | Not started |
 
 ## Deferred Items
 
@@ -197,6 +198,7 @@ Pre-v2.5 task slugs marked `missing` or `unknown` in `.planning/quick/`. Most pr
 - 2026-04-19: Phase 20 (Upstream Parity Sync, UPST) added after Phase 19 completion. Research quick-task `260419-cmp-upstream-036-windows-parity/COMPARISON.md` (commit `7180f23`) established the fork is pinned at crate version `0.30.1` while upstream has shipped 0.31–0.37.1. Phase 20 back-ports missing Unix/macOS functionality (keyring URIs, `--allow-gpu`, GitLab trust tokens, macOS Seatbelt refinements) and, critically, the rustls-webpki RUSTSEC-2026-0098/0099 security upgrade landed upstream in 0.37. Plans TBD during `/gsd-plan-phase 20` — likely grouped by upstream version range + dedicated security-upgrade plan.
 - 2026-04-17: Phase 14 (v1.0 Fix Pass) added after Phase 13 UAT surfaced three blocking gaps — detached console-child STATUS_DLL_INIT_FAILED (blocks 4 UAT items), setup help-text drift (blocks P07-HV-2), P09-HV-1 runbook flag bug. Phase 14 plans: 3 (one per gap; plan 03 also re-runs the blocked UAT items and finishes Phase 13 Task 3 upstream promotion).
 - Phase 44.1 inserted after Phase 44: OIDC fail-closed remediation (REQ-REVIEW-FU-01 / T-44-01 / CR-01) (URGENT)
+- 2026-05-21: Phase 49 (Sigstore trust-root POC resilience) added after Phase 48 — reactive mid-milestone add after POC user hit the `nono setup --refresh-trust-root` "Signature threshold of 3 not met for role root (0 valid signatures)" failure for the third time post-`sigstore-verify` upgrade (0.6.5 → 0.6.6 → 0.7.0, all eventually rotated out). Investigation confirmed: the embedded TUF anchor in `sigstore-verify` is a recurring staleness class of bug (not a one-off), so the right structural fix is to exit the dep-bump treadmill via three sub-items — `nono setup --from-file <PATH>` CLI flag, `trusted_root.json` shipped as a GitHub Release asset, and a maintainer cadence template for refreshing `crates/nono/tests/fixtures/trust-root-frozen.json` on Sigstore rotation announcements. Surfaces disjoint from Phases 44–48 → parallel-safe. Requirements TBD pending `/gsd-spec-phase 49`. ROADMAP.md edit recovered from SDK `phase.add` corruption (the SDK inserted the Phase 49 block into the YAML frontmatter, breaking doc structure — manually fixed).
 
 ### Research Flags (open)
 
