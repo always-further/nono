@@ -19,16 +19,78 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use tracing::warn;
 
+/// Check whether the loaded profile specifies a `binary` field that should be
+/// honoured. Only user-authored profiles (user overrides or file-path based)
+/// are allowed to set the target binary. Pack/registry and built-in profiles
+/// are not trusted to dictate which binary runs.
+fn resolve_profile_binary(
+    profile_name: &str,
+    loaded: &profile::Profile,
+    silent: bool,
+) -> Option<String> {
+    let binary = loaded.binary.as_ref()?;
+
+    let is_user_profile =
+        profile::is_user_override(profile_name) || profile::is_file_path_ref(profile_name);
+
+    if !is_user_profile {
+        if !silent {
+            warn!(
+                "Profile '{profile_name}' specifies binary '{binary}' but is not a user profile; ignoring",
+            );
+        }
+        return None;
+    }
+    Some(binary.clone())
+}
+
+/// Resolve the program to execute: if the profile specifies a `binary` field
+/// (and is a user profile), use it. If the CLI also provides a trailing
+/// command, warn that the profile binary takes precedence.
+fn resolve_program_from_profile_or_cli(
+    cli_command: &[String],
+    loaded_profile: Option<(&str, &profile::Profile)>,
+    silent: bool,
+) -> Result<(OsString, Vec<OsString>)> {
+    let profile_binary =
+        loaded_profile.and_then(|(name, prof)| resolve_profile_binary(name, prof, silent));
+
+    if let Some(binary) = profile_binary {
+        if !cli_command.is_empty() && !silent {
+            crate::output::print_warning(&format!(
+                "Profile specifies binary '{}'; ignoring trailing command '{}'",
+                binary,
+                cli_command.join(" ")
+            ));
+        }
+        let program = OsString::from(&binary);
+        Ok((program, Vec::new()))
+    } else if !cli_command.is_empty() {
+        let mut iter = cli_command.iter();
+        let program = OsString::from(iter.next().ok_or(NonoError::NoCommand)?);
+        let cmd_args: Vec<OsString> = iter.map(OsString::from).collect();
+        Ok((program, cmd_args))
+    } else {
+        Err(NonoError::NoCommand)
+    }
+}
+
 pub(crate) fn run_sandbox(mut run_args: RunArgs, silent: bool) -> Result<()> {
     let command = run_args.command.clone();
 
-    if command.is_empty() {
-        return Err(NonoError::NoCommand);
-    }
+    // Load profile once and reuse for binary resolution and command_args.
+    let loaded_profile = match run_args.sandbox.profile.as_ref() {
+        Some(name) => Some((name.clone(), profile::load_profile(name)?)),
+        None => None,
+    };
 
-    let mut command_iter = command.into_iter();
-    let program = OsString::from(command_iter.next().ok_or(NonoError::NoCommand)?);
-    let mut cmd_args: Vec<OsString> = command_iter.map(OsString::from).collect();
+    // Resolve the program: profile `binary` takes precedence over CLI trailing command.
+    let (program, mut cmd_args) = resolve_program_from_profile_or_cli(
+        &command,
+        loaded_profile.as_ref().map(|(n, p)| (n.as_str(), p)),
+        silent,
+    )?;
+
     if should_auto_enable_claude_launch_services(&run_args.sandbox, &program, &cmd_args) {
         warn!(
             "Auto-enabling --allow-launch-services for Claude Code because no refresh-capable local auth was detected"
@@ -37,29 +99,29 @@ pub(crate) fn run_sandbox(mut run_args: RunArgs, silent: bool) -> Result<()> {
     }
     let args = run_args.sandbox.clone();
 
-    if let Some(ref profile_name) = args.profile {
-        let loaded = profile::load_profile(profile_name)?;
-        if !loaded.command_args.is_empty() {
-            let all_packs_installed = loaded.packs.iter().all(|pack_ref| {
-                let parts: Vec<&str> = pack_ref.splitn(2, '/').collect();
-                if parts.len() != 2 {
-                    return false;
-                }
-                crate::package::package_install_dir(parts[0], parts[1])
-                    .map(|dir| dir.exists())
-                    .unwrap_or(false)
-            });
+    // Append profile command_args if applicable
+    if let Some((_, ref loaded)) = loaded_profile
+        && !loaded.command_args.is_empty()
+    {
+        let all_packs_installed = loaded.packs.iter().all(|pack_ref| {
+            let parts: Vec<&str> = pack_ref.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                return false;
+            }
+            crate::package::package_install_dir(parts[0], parts[1])
+                .map(|dir| dir.exists())
+                .unwrap_or(false)
+        });
 
-            if all_packs_installed || loaded.packs.is_empty() {
-                let workdir = args
-                    .workdir
-                    .clone()
-                    .or_else(|| std::env::current_dir().ok())
-                    .unwrap_or_else(|| PathBuf::from("."));
-                for arg in &loaded.command_args {
-                    let expanded = profile::expand_vars(arg, &workdir)?;
-                    cmd_args.push(OsString::from(expanded));
-                }
+        if all_packs_installed || loaded.packs.is_empty() {
+            let workdir = args
+                .workdir
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            for arg in &loaded.command_args {
+                let expanded = profile::expand_vars(arg, &workdir)?;
+                cmd_args.push(OsString::from(expanded));
             }
         }
     }

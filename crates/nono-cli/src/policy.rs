@@ -176,6 +176,7 @@ impl ProfileDef {
             interactive: self.interactive,
             skipdirs: Vec::new(),
             packs: self.packs.clone(),
+            binary: None,
             command_args: self.command_args.clone(),
             unsafe_macos_seatbelt_rules: self.unsafe_macos_seatbelt_rules.clone(),
         }
