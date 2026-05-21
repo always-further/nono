@@ -24,7 +24,10 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
-    Write-Error "candidate path does not exist or is not a file: $Candidate"
+    # Use [Console]::Error.WriteLine + explicit exit 2 to avoid Write-Error +
+    # $ErrorActionPreference='Stop' terminating with the generic ExitCode 1
+    # before the param-validation early-exit (exit 2) can fire.
+    [Console]::Error.WriteLine("ERROR: candidate path does not exist or is not a file: $Candidate")
     exit 2
 }
 
@@ -57,7 +60,10 @@ try {
     exit 0
 }
 catch {
-    Write-Error $_
+    # Use [Console]::Error.WriteLine to bypass Write-Error +
+    # $ErrorActionPreference='Stop' interaction that otherwise terminates the
+    # script before `exit 1` runs and surfaces as $LASTEXITCODE=0 to the caller.
+    [Console]::Error.WriteLine("ERROR: $_")
     exit 1
 }
 finally {
