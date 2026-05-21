@@ -301,7 +301,7 @@ pub struct CustomCredentialDef {
     ///
     /// When set, the proxy uses this as the SDK API key env var instead of
     /// deriving it from `credential_key.to_uppercase()`. Required when
-    /// `credential_key` is a URI manager reference (`op://`,
+    /// `credential_key` is a URI manager reference (`op://`, `bw://`,
     /// `apple-password://`, or `file://`).
     #[serde(default)]
     pub env_var: Option<String>,
@@ -371,6 +371,7 @@ fn is_http_token_char(c: char) -> bool {
 /// Accepts either:
 /// - A bare keyring account name (alphanumeric + underscores only)
 /// - A 1Password `op://` URI (validated by `nono::keystore::validate_op_uri`)
+/// - A Bitwarden `bw://` URI (validated by `nono::keystore::validate_bw_uri`)
 /// - An Apple Passwords `apple-password://` URI
 /// - A `file://` URI pointing to an absolute path (validated by `nono::keystore::validate_file_uri`)
 /// - An `env://` URI referencing a host environment variable (validated by `nono::keystore::validate_env_uri`)
@@ -387,6 +388,13 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
         nono::keystore::validate_op_uri(key).map_err(|e| {
             NonoError::ProfileParse(format!(
                 "invalid 1Password URI for custom credential '{}': {}",
+                context_name, e
+            ))
+        })
+    } else if nono::keystore::is_bw_uri(key) {
+        nono::keystore::validate_bw_uri(key).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "invalid Bitwarden URI for custom credential '{}': {}",
                 context_name, e
             ))
         })
@@ -416,7 +424,7 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(NonoError::ProfileParse(format!(
                 "credential_key '{}' for custom credential '{}' must contain only \
-                 alphanumeric characters and underscores (or use op:// / apple-password:// / file:// / env:// URI)",
+                 alphanumeric characters and underscores (or use op:// / bw:// / apple-password:// / file:// / env:// URI)",
                 key, context_name
             )));
         }
@@ -428,7 +436,7 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
 ///
 /// Checks:
 /// - `credential_key` must be alphanumeric + underscores only, or a valid
-///   `op://` / `apple-password://` / `file://` / `env://` URI
+///   `op://` / `bw://` / `apple-password://` / `file://` / `env://` URI
 /// - `upstream` must be HTTPS (or HTTP for loopback only)
 /// - Mode-specific validation:
 ///   - `header`: inject_header must be valid HTTP token; effective format (see field doc) must not contain CR/LF
@@ -466,13 +474,14 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
         // uppercased into an env var name, so env_var is required for them.
         // env:// is exempt: the var name is derived from the URI itself.
         if (nono::keystore::is_op_uri(key)
+            || nono::keystore::is_bw_uri(key)
             || nono::keystore::is_apple_password_uri(key)
             || nono::keystore::is_file_uri(key))
             && cred.env_var.is_none()
         {
             return Err(NonoError::ProfileParse(format!(
                 "env_var is required for custom credential '{}' when credential_key is a URI \
-                 manager reference (op://, apple-password://, or file://); \
+                 manager reference (op://, bw://, apple-password://, or file://); \
                  set it to the SDK API key env var name (e.g., \"OPENAI_API_KEY\")",
                 name
             )));
@@ -652,7 +661,7 @@ fn validate_proxy_override(name: &str, cred: &CustomCredentialDef) -> Result<()>
 /// - `token_url` must be HTTPS (or HTTP for loopback addresses)
 /// - `client_id` must not be empty
 /// - `client_secret` must not be empty and must be a credential reference
-///   (env://, file://, op://, apple-password://) or plain value
+///   (env://, file://, op://, bw://, apple-password://) or plain value
 fn validate_oauth2_auth(name: &str, auth: &OAuth2Config) -> Result<()> {
     // Validate token_url — same rules as upstream URL (HTTPS or loopback HTTP)
     validate_upstream_url(&auth.token_url, &format!("{}/auth.token_url", name))?;
@@ -840,8 +849,8 @@ fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
 
 /// Validate env_credentials keys in a profile.
 ///
-/// Keys can be keyring account names, `op://` URIs, `apple-password://` URIs,
-/// `keyring://` URIs, `env://` URIs, or `file://` URIs.
+/// Keys can be keyring account names, `op://` URIs, `bw://` URIs,
+/// `apple-password://` URIs, `keyring://` URIs, `env://` URIs, or `file://` URIs.
 /// Keyring account names are validated at load time by the keyring crate itself,
 /// but URI entries need structural validation upfront.
 fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
@@ -849,6 +858,10 @@ fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
         if nono::keystore::is_op_uri(key) {
             nono::keystore::validate_op_uri(key).map_err(|e| {
                 NonoError::ProfileParse(format!("invalid 1Password URI in env_credentials: {}", e))
+            })?;
+        } else if nono::keystore::is_bw_uri(key) {
+            nono::keystore::validate_bw_uri(key).map_err(|e| {
+                NonoError::ProfileParse(format!("invalid Bitwarden URI in env_credentials: {}", e))
             })?;
         } else if nono::keystore::is_apple_password_uri(key) {
             nono::keystore::validate_apple_password_uri(key).map_err(|e| {
@@ -3385,6 +3398,34 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_env_credentials_accepts_bw_uri() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "bw://my-api-key": "MY_SECRET",
+                "bw://my-item/password": "MY_PASS"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        assert!(validate_env_credential_keys(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_credentials_rejects_invalid_bw_uri() {
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "env_credentials": {
+                "bw://": "MY_SECRET"
+            }
+        }"#;
+
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
+        let err = validate_env_credential_keys(&profile).expect_err("should reject");
+        assert!(err.to_string().contains("Bitwarden URI"));
+    }
+
+    #[test]
     fn test_validate_env_credentials_accepts_keyring_uri() {
         let json_str = r#"{
             "meta": { "name": "test-profile" },
@@ -4086,6 +4127,46 @@ mod tests {
         cred.credential_key = Some("op://Development/OpenAI/credential".to_string());
         cred.env_var = Some("OPENAI_API_KEY".to_string());
         assert!(validate_custom_credential("openai", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_var_with_bw_uri_requires_env_var() {
+        let mut cred = header_cred_builder();
+        cred.credential_key = Some("bw://my-api-key".to_string());
+        cred.env_var = None;
+        let result = validate_custom_credential("openai", &cred);
+        let err = result.expect_err("bw:// URI without env_var should be rejected");
+        assert!(err.to_string().contains("env_var is required"));
+    }
+
+    #[test]
+    fn test_validate_env_var_with_bw_uri_and_env_var_ok() {
+        let mut cred = header_cred_builder();
+        cred.credential_key = Some("bw://my-api-key".to_string());
+        cred.env_var = Some("OPENAI_API_KEY".to_string());
+        assert!(validate_custom_credential("openai", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_env_var_with_bw_uri_field_and_env_var_ok() {
+        let mut cred = header_cred_builder();
+        cred.credential_key = Some("bw://my-item/password".to_string());
+        cred.env_var = Some("OPENAI_API_KEY".to_string());
+        assert!(validate_custom_credential("openai", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_credential_key_rejects_invalid_bw_uri() {
+        let mut cred = header_cred_builder();
+        cred.credential_key = Some("bw://".to_string());
+        cred.env_var = Some("MY_VAR".to_string());
+        let err = validate_custom_credential("openai", &cred)
+            .expect_err("empty bw:// item ID should be rejected");
+        assert!(
+            err.to_string().contains("Bitwarden URI"),
+            "expected Bitwarden-specific error, got: {}",
+            err
+        );
     }
 
     #[test]
