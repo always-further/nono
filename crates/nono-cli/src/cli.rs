@@ -2367,6 +2367,22 @@ pub struct SetupArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub refresh_trust_root: bool,
 
+    /// Populate the cached Sigstore trusted root from a local JSON file (skips network fetch).
+    ///
+    /// Validates the file via the same pipeline `nono trust verify` uses
+    /// (`TrustedRoot::from_file` parse + tlog freshness gate), then writes
+    /// it verbatim to `<nono_home>/.nono/trust-root/trusted_root.json`. Use
+    /// this flag when `--refresh-trust-root` fails (e.g., stale embedded TUF
+    /// anchor after a Sigstore root rotation) — POC users can download
+    /// `trusted_root.json` from a GitHub Release and `--from-file` it.
+    #[arg(
+        long,
+        value_name = "PATH",
+        help_heading = "OPTIONS",
+        conflicts_with = "refresh_trust_root"
+    )]
+    pub from_file: Option<PathBuf>,
+
     /// Generate example user profiles in ~/.config/nono/profiles/
     #[arg(long, help_heading = "OPTIONS")]
     pub profiles: bool,

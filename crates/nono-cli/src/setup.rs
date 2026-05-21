@@ -22,6 +22,7 @@ pub struct SetupRunner {
     #[cfg(target_os = "windows")]
     start_wfp_driver: bool,
     refresh_trust_root: bool,
+    from_file: Option<std::path::PathBuf>,
     generate_profiles: bool,
     show_shell_integration: bool,
 }
@@ -41,6 +42,7 @@ impl SetupRunner {
             #[cfg(target_os = "windows")]
             start_wfp_driver: args.start_wfp_driver,
             refresh_trust_root: args.refresh_trust_root,
+            from_file: args.from_file.clone(),
             generate_profiles: args.profiles,
             show_shell_integration: args.shell_integration,
         }
@@ -90,6 +92,12 @@ impl SetupRunner {
 
         if !self.check_only && self.refresh_trust_root {
             self.refresh_trust_root_step()?;
+        }
+
+        if !self.check_only {
+            if let Some(path) = self.from_file.clone() {
+                self.from_file_step(&path)?;
+            }
         }
 
         // Show what nono protects
@@ -686,7 +694,7 @@ impl SetupRunner {
             count += 1;
         }
 
-        if !self.check_only && self.refresh_trust_root {
+        if !self.check_only && (self.refresh_trust_root || self.from_file.is_some()) {
             count += 1;
         }
 
@@ -716,11 +724,11 @@ impl SetupRunner {
                 index += 1;
             }
 
-            index += usize::from(self.refresh_trust_root);
+            index += usize::from(self.refresh_trust_root || self.from_file.is_some());
             return index;
         }
 
-        3 + usize::from(!self.check_only && self.refresh_trust_root)
+        3 + usize::from(!self.check_only && (self.refresh_trust_root || self.from_file.is_some()))
     }
 
     fn profiles_phase_index(&self) -> usize {
@@ -737,11 +745,11 @@ impl SetupRunner {
                 index += 1;
             }
 
-            index += usize::from(self.refresh_trust_root);
+            index += usize::from(self.refresh_trust_root || self.from_file.is_some());
             return index;
         }
 
-        4 + usize::from(!self.check_only && self.refresh_trust_root)
+        4 + usize::from(!self.check_only && (self.refresh_trust_root || self.from_file.is_some()))
     }
 
     #[cfg(target_os = "windows")]
@@ -855,6 +863,74 @@ impl SetupRunner {
             "  * Sigstore trusted root cached at {}",
             cache_path.display()
         );
+        println!();
+        Ok(())
+    }
+
+    /// Populate the cached Sigstore trusted root from a user-supplied JSON file.
+    ///
+    /// Validates via the same pipeline `nono trust verify` uses
+    /// (`nono::trust::bundle::load_trusted_root` parse +
+    /// `nono::trust::bundle::check_trusted_root_freshness` gate),
+    /// then byte-copies the validated input to the cache path.
+    /// Fail-closed on any validation or IO error — no partial cache file
+    /// is left on disk (D-49-B2 best-effort cleanup).
+    ///
+    /// Phase 49 D-49-B1 (verbatim copy, no re-serialize) + D-49-B2
+    /// (best-effort cleanup on copy failure) + D-49-B3 (Source breadcrumb).
+    // The `from_*` naming pattern here mirrors `refresh_trust_root_step` —
+    // both are phase-step methods on `SetupRunner`, not "factory from"
+    // constructors. Clippy's `wrong_self_convention` lint fires on the
+    // `from_` prefix, but the method genuinely needs `&self` to read the
+    // runner's `total_phases()` + `refresh_trust_root_phase_index()` for
+    // the `[X/N] Loading...` stdout shape (D-49-B3).
+    #[allow(clippy::wrong_self_convention)]
+    fn from_file_step(&self, src: &std::path::Path) -> Result<()> {
+        let cache_dir = crate::config::nono_home_dir()?
+            .join(".nono")
+            .join("trust-root");
+        std::fs::create_dir_all(&cache_dir).map_err(NonoError::Io)?;
+
+        println!(
+            "[{}/{}] Loading Sigstore trusted root from file...",
+            self.refresh_trust_root_phase_index(),
+            self.total_phases()
+        );
+
+        // Step 1: schema/parse validation via existing pipeline (D-49-B1, SPEC.md
+        // "no new schema validator" — reuses TrustedRoot::from_file).
+        let trusted_root = nono::trust::bundle::load_trusted_root(src).map_err(|e| {
+            NonoError::Setup(format!(
+                "invalid Sigstore trusted root at {}: {e}",
+                src.display()
+            ))
+        })?;
+
+        let cache_path = cache_dir.join("trusted_root.json");
+
+        // Step 2: freshness gate (D-32-03 tlog validFor.end expiry — reuses
+        // bundle::check_trusted_root_freshness, widened to pub in Task 1).
+        nono::trust::bundle::check_trusted_root_freshness(&trusted_root, &cache_path).map_err(
+            |e| {
+                NonoError::Setup(format!(
+                    "Sigstore trusted root at {} failed freshness check: {e}",
+                    src.display()
+                ))
+            },
+        )?;
+
+        // Step 3: byte-identical copy (D-49-B1) with best-effort cleanup on Err
+        // (D-49-B2 — cache is fully-written-or-absent, never partial).
+        if let Err(e) = std::fs::copy(src, &cache_path) {
+            let _ = std::fs::remove_file(&cache_path);
+            return Err(NonoError::Io(e));
+        }
+
+        println!(
+            "  * Sigstore trusted root cached at {}",
+            cache_path.display()
+        );
+        println!("  * Source: {}", src.display()); // D-49-B3 breadcrumb
         println!();
         Ok(())
     }
@@ -1243,6 +1319,7 @@ mod tests {
             #[cfg(target_os = "windows")]
             start_wfp_driver: false,
             refresh_trust_root: false,
+            from_file: None,
             generate_profiles: true,
             show_shell_integration: false,
         };
