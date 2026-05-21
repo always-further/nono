@@ -217,7 +217,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | 46. windows-squash merge + post-merge CI + UAT backlog | 0/TBD | Not started | — |
 | 47. UPST6 audit + v0.41–v0.43 drift ingestion | 0/TBD | Not started | — |
 | 48. UPST6 sync execution | 0/TBD | Not started | — |
-| 49. Sigstore trust-root POC resilience | 3/3 | Complete   | 2026-05-21 |
+| 49. Sigstore trust-root POC resilience | 3/3 | Complete    | 2026-05-21 |
 
 (Prior milestones rolled up under `milestones/v*-ROADMAP.md`.)
 
