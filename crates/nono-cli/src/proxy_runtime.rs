@@ -231,25 +231,34 @@ pub(crate) fn start_proxy_runtime(
             let (tx, mut rx) = nono_proxy::capture::channel(16);
             let broker_clone = broker.clone();
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
+                let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("capture listener runtime");
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        warn!("Failed to build capture listener runtime: {}", e);
+                        return;
+                    }
+                };
                 rt.block_on(async move {
                     while let Some((req, response_tx)) = rx.recv().await {
-                        let result =
-                            broker_clone.capture_or_cache(&req.session_id, &req.credential_name);
-                        let response = match result {
-                            Ok(credential) => nono_proxy::capture::ProxyCaptureResponse {
-                                credential: Some(credential),
-                                error: None,
-                            },
-                            Err(e) => nono_proxy::capture::ProxyCaptureResponse {
-                                credential: None,
-                                error: Some(e.to_string()),
-                            },
-                        };
-                        let _ = response_tx.send(response);
+                        let broker = broker_clone.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result =
+                                broker.capture_or_cache(&req.session_id, &req.credential_name);
+                            let response = match result {
+                                Ok(credential) => nono_proxy::capture::ProxyCaptureResponse {
+                                    credential: Some(credential),
+                                    error: None,
+                                },
+                                Err(e) => nono_proxy::capture::ProxyCaptureResponse {
+                                    credential: None,
+                                    error: Some(e.to_string()),
+                                },
+                            };
+                            let _ = response_tx.send(response);
+                        });
                     }
                 });
             });

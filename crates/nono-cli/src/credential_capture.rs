@@ -80,7 +80,7 @@ impl CredentialCaptureCache {
         let key = Self::make_key(session_id, name);
         self.entries.get(&key).and_then(|cached| {
             if Instant::now() < cached.expires_at {
-                Some(Zeroizing::new(cached.value.as_str().to_string()))
+                Some(cached.value.clone())
             } else {
                 None
             }
@@ -196,14 +196,16 @@ impl CredentialCaptureExecutor {
             )));
         }
 
-        let raw = Zeroizing::new(String::from_utf8(output.stdout).map_err(|_| {
+        let mut raw = String::from_utf8(output.stdout).map_err(|_| {
             NonoError::SandboxInit(
                 "credential capture command produced non-UTF-8 output".to_string(),
             )
-        })?);
+        })?;
 
-        let trimmed = raw.trim_end();
-        if trimmed.is_empty() {
+        let trimmed_len = raw.trim_end().len();
+        raw.truncate(trimmed_len);
+
+        if raw.is_empty() {
             return Err(NonoError::SandboxInit(
                 "credential capture command returned empty output".to_string(),
             ));
@@ -215,7 +217,7 @@ impl CredentialCaptureExecutor {
             elapsed.as_millis()
         );
 
-        Ok(Zeroizing::new(trimmed.to_string()))
+        Ok(Zeroizing::new(raw))
     }
 }
 
