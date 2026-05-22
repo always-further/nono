@@ -42,9 +42,6 @@ const DEFAULT_TTL_SECS: u64 = 900;
 /// Default command timeout (5 seconds).
 const DEFAULT_TIMEOUT_SECS: u64 = 5;
 
-/// Maximum allowed stderr to log (bytes).
-const MAX_STDERR_LOG_BYTES: usize = 200;
-
 /// Configuration for a single credential capture command.
 #[derive(Debug, Clone)]
 pub struct CredentialCaptureDef {
@@ -122,9 +119,8 @@ impl CredentialCaptureExecutor {
         let mut cmd = Command::new(&config.command_path);
         cmd.args(&config.command_args);
         cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        // Don't inherit stdin — command must not block waiting for user input
-        cmd.stdin(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::inherit());
+        cmd.stdin(std::process::Stdio::inherit());
 
         let timeout = Duration::from_secs(config.timeout_secs);
         let start = Instant::now();
@@ -171,27 +167,16 @@ impl CredentialCaptureExecutor {
         };
         let elapsed = start.elapsed();
 
-        // Log scrubbed stderr (never returned to caller)
-        if !output.stderr.is_empty() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let truncated: String = stderr.chars().take(MAX_STDERR_LOG_BYTES).collect();
-            debug!(
-                "credential capture stderr ({}): {}",
-                config.command_path.display(),
-                truncated
-            );
-        }
-
         if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
+            let code = output.status.code();
             warn!(
-                "credential capture command '{}' exited with status {} ({}ms)",
+                "credential capture command '{}' exited with status {:?} ({}ms)",
                 config.command_path.display(),
                 code,
                 elapsed.as_millis()
             );
             return Err(NonoError::SandboxInit(format!(
-                "credential capture command exited with status {}",
+                "credential capture command exited with status {:?}",
                 code
             )));
         }
