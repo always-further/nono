@@ -163,18 +163,43 @@ inline network refresh. Mirror of the WFP service prereq pattern from Step 5
 (below): explicit operator action up front, fail-closed-with-recovery-hint at
 runtime, no implicit network on the verify path.
 
+<Note>
+**As of v0.53.x+:** Path A succeeds natively on Windows hosts behind
+TLS-inspecting corporate proxies whose enterprise CA is in the Windows
+root certificate store. The HTTP client used for the TUF chain walk
+(`nono setup --refresh-trust-root`) now consults the Windows root store
+via the `ureq + platform-verifier` transport. The historic
+corp-network failure (`error sending request for url`) traced in
+`.planning/debug/resolved/sigstore-tuf-fetch-transport.md` is structurally
+resolved. See Phase 50 for details.
+
+**Caveats** (not fixed by Phase 50): explicit proxy discovery (PAC files,
+WPAD), proxy authentication (Basic / NTLM / Kerberos), and corp proxies
+that return HTTP 403 for policy-deny reasons (which nono will report as
+"TUF target not found"). For those scenarios, Path B `--from-file`
+remains the recommended workaround.
+</Note>
+
 Run once after install (pick ONE — Path A for network-reachable hosts, Path B with `--from-file` for offline / network-restricted hosts):
 
 ```powershell
 # Path A — network-reachable host (fetches from https://tuf-repo-cdn.sigstore.dev):
+# As of v0.53.x+, also works natively on Windows hosts behind TLS-inspecting
+# corporate proxies (enterprise CA in the Windows root store).
 nono setup --refresh-trust-root
 
 # Path B — offline host (download the trusted_root.json release asset, then):
 nono setup --from-file C:\path\to\downloaded\trusted_root.json
 ```
 
-Path B is also the recovery path when Path A fails with a stale-embedded-anchor
-error — see the Known issue section below.
+Path B remains the path for hosts with no outbound network at all
+(true air-gapped / offline POC scenarios) AND for corp-network
+failures NOT covered by Phase 50's transparent-TLS-interception fix
+(see Caveats in the v0.53.x+ note above: PAC discovery, proxy auth,
+403-policy-deny). It is also the residual recovery path if Path A
+fails for any reason other than corp-network TLS interception (e.g.,
+upstream Sigstore TUF root rotation; see "Known issue: Sigstore TUF
+root rotation" below).
 
 Either path writes a verified trusted root to your per-user cache. Subsequent
 keyless `nono trust verify` invocations run offline against that cache.
@@ -200,6 +225,14 @@ ERROR Setup error: Failed to fetch Sigstore trusted root from
 rotates the root signing keys; once `sigstore-verify`'s embedded trust anchor
 loses all of its valid keys against the published `root.json`, every
 `--refresh-trust-root` invocation fails until the dep ships a new anchor.
+
+**Scope note (v0.53.x+):** corp-network TLS interception is NO LONGER a cause of
+Path A failure on Windows. That historic failure mode is resolved by the
+v0.53.x+ ureq + platform-verifier transport (see the v0.53.x+ note at the top of
+this section, including the Caveats subsection for residual proxy-discovery /
+proxy-auth / 403-policy-deny scenarios that this fix does NOT cover). The
+remaining Path A failure mode is upstream stale-anchor due to Sigstore root
+rotation, which Phase 49's `--from-file` recovery still covers.
 
 The verify path is structurally offline (Phase 32 D-32-15), so a manually-placed
 `trusted_root.json` works around this without waiting on the dep. Phase 49 ships
