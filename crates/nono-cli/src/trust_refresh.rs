@@ -40,6 +40,15 @@
 //! a single inner helper whose `Result` is captured once; cleanup runs
 //! once on `Err(_)`. Read-target / IntoVec / UTF-8 / TrustedRoot::from_json
 //! failures all trigger the cleanup path now.
+//!
+//! Phase 50 (Review WR-02 / WR-03): cleanup is gated on whether the
+//! datastore directory existed BEFORE this invocation. A pre-existing
+//! tuf-cache holds tough's incremental-update state across runs; wiping
+//! it on every error (including transient network glitches) defeats the
+//! optimization and forces a full N-root chain walk on the next attempt.
+//! Cleanup now runs ONLY when we created the directory fresh in this
+//! invocation, and uses async `tokio::fs::remove_dir_all` so the
+//! executor thread is never blocked.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -225,6 +234,20 @@ pub(crate) async fn refresh_trusted_root_with_transport(
     datastore_dir: PathBuf,
     embedded_root: &[u8],
 ) -> Result<TrustedRoot> {
+    // WR-02: track whether the datastore directory exists BEFORE we create it,
+    // so the broadened cleanup path can preserve a pre-existing incremental
+    // TUF cache on transient failures (network glitches, proxy 403s
+    // misclassified as FileNotFound, momentary ureq timeouts). tough uses
+    // the datastore to incrementally update from the last-known root
+    // version, avoiding a full N-root chain walk on every refresh — wiping
+    // it on every error defeats that optimization and re-pays the chain-walk
+    // cost on the next attempt.
+    //
+    // The original D-50-07 intent ("don't leave partial state on disk")
+    // applies to a brand-new datastore created in the same invocation, not
+    // to a long-lived cache: only fail-clean when WE created the dir fresh.
+    let datastore_existed = tokio::fs::metadata(&datastore_dir).await.is_ok();
+
     // TUF datastore dir (D-50-07). tough requires this to exist BEFORE
     // .load() is called (Pitfall 2; tough-0.22.0/src/lib.rs:228-231).
     tokio::fs::create_dir_all(&datastore_dir)
@@ -250,13 +273,19 @@ pub(crate) async fn refresh_trusted_root_with_transport(
     )
     .await;
 
-    // Broadened cleanup (D-50-07 + Codex R-50-05): on ANY error from the
-    // inner helper — TUF load, read_target, IntoVec, UTF-8, or
-    // TrustedRoot::from_json — best-effort remove the datastore so we
-    // don't leave partial state on disk. Cleanup result is ignored;
-    // the primary error is what surfaces to the user.
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&datastore_for_cleanup);
+    // Broadened cleanup (D-50-07 + Codex R-50-05): on error from the inner
+    // helper — TUF load, read_target, IntoVec, UTF-8, or
+    // TrustedRoot::from_json — best-effort remove the datastore IF AND ONLY
+    // IF we created it in this invocation (WR-02). Pre-existing caches are
+    // preserved so the next refresh can resume from the last-known good
+    // root version. WR-03: use the async `tokio::fs::remove_dir_all` to
+    // avoid blocking the executor thread inside this `async fn` — the
+    // tuf-cache directory can hold dozens of cached root-metadata files
+    // and a sync `std::fs::remove_dir_all` would stall multi-threaded
+    // runtimes for a measurable period. Cleanup result is ignored; the
+    // primary error is what surfaces to the user.
+    if result.is_err() && !datastore_existed {
+        let _ = tokio::fs::remove_dir_all(&datastore_for_cleanup).await;
     }
     result
 }
