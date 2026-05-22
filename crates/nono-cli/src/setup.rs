@@ -800,7 +800,39 @@ impl SetupRunner {
             + usize::from(self.start_wfp_service)
     }
 
-    fn refresh_trust_root_phase_index(&self) -> usize {
+    /// Phase index for whichever trust-root provisioning step runs
+    /// (`refresh_trust_root_step` for `--refresh-trust-root` OR
+    /// `from_file_step` for `--from-file`).
+    ///
+    /// WR-04: the two steps are mutually exclusive — `from_file` declares
+    /// `conflicts_with = "refresh_trust_root"` in `cli.rs:2382`, so clap
+    /// rejects the combination at parse time. The shared phase index is
+    /// safe only because of that constraint. This method asserts the
+    /// invariant at runtime so any future relaxation of the clap
+    /// declaration would surface here as a debug-build panic rather than
+    /// silently producing UX like:
+    ///
+    /// ```text
+    /// [3/5] Refreshing Sigstore trusted root...
+    /// [3/5] Loading Sigstore trusted root from file...
+    /// ```
+    ///
+    /// Renamed from `refresh_trust_root_phase_index` so the dual-purpose
+    /// nature is visible at the call sites in `refresh_trust_root_step`
+    /// and `from_file_step`.
+    fn trust_root_provisioning_phase_index(&self) -> usize {
+        // WR-04: enforce the mutual-exclusion contract that lives in clap.
+        // `!(A && B)` is the correct invariant — either flag is allowed
+        // alone, both unset is allowed (this method just isn't called
+        // then), but both set at once breaks the shared phase-index.
+        debug_assert!(
+            !(self.refresh_trust_root && self.from_file.is_some()),
+            "trust_root_provisioning_phase_index() requires --refresh-trust-root and \
+             --from-file to be mutually exclusive (clap conflicts_with declaration in \
+             cli.rs); both flags were set simultaneously, which would assign the same \
+             phase number to two distinct steps"
+        );
+
         #[cfg(target_os = "windows")]
         if !self.check_only {
             let mut index = 3
@@ -833,7 +865,7 @@ impl SetupRunner {
 
         println!(
             "[{}/{}] Refreshing Sigstore trusted root...",
-            self.refresh_trust_root_phase_index(),
+            self.trust_root_provisioning_phase_index(),
             self.total_phases()
         );
 
@@ -904,8 +936,8 @@ impl SetupRunner {
     // both are phase-step methods on `SetupRunner`, not "factory from"
     // constructors. Clippy's `wrong_self_convention` lint fires on the
     // `from_` prefix, but the method genuinely needs `&self` to read the
-    // runner's `total_phases()` + `refresh_trust_root_phase_index()` for
-    // the `[X/N] Loading...` stdout shape (D-49-B3).
+    // runner's `total_phases()` + `trust_root_provisioning_phase_index()`
+    // for the `[X/N] Loading...` stdout shape (D-49-B3).
     #[allow(clippy::wrong_self_convention)]
     fn from_file_step(&self, src: &std::path::Path) -> Result<()> {
         let cache_dir = crate::config::nono_home_dir()?
@@ -915,7 +947,7 @@ impl SetupRunner {
 
         println!(
             "[{}/{}] Loading Sigstore trusted root from file...",
-            self.refresh_trust_root_phase_index(),
+            self.trust_root_provisioning_phase_index(),
             self.total_phases()
         );
 

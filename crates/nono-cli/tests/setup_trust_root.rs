@@ -231,10 +231,11 @@ fn from_file_phase_index_uses_shared_slot() {
     );
     // The header MUST share the same X with the --refresh-trust-root path
     // (clap-mutex shared slot, F-01-07). On Windows-host (default build),
-    // the trust-root slot is `refresh_trust_root_phase_index()` = 3 (after
-    // install + sandbox + protection-base) and total = 4 + 1 = 5? No —
-    // `total_phases` adds 1 for the trust-root step. Use a tolerant match:
-    // expect `[N/M] Loading...` where N = trust-root slot and M >= N.
+    // the trust-root slot is `trust_root_provisioning_phase_index()` = 3
+    // (after install + sandbox + protection-base) and total = 4 + 1 = 5?
+    // No — `total_phases` adds 1 for the trust-root step. Use a tolerant
+    // match: expect `[N/M] Loading...` where N = trust-root slot and
+    // M >= N.
     assert!(
         stdout.contains("] Loading Sigstore trusted root from file"),
         "expected '[X/N] Loading...' header (single shared phase-index slot); got:\n{stdout}"
