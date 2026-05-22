@@ -1,3 +1,13 @@
+// Phase 50 Plan 02 Task 1 finding: ureq 3.3.0 Body API
+// - read_to_vec(): EXISTS at ureq-3.3.0/src/body/mod.rs:329
+//     `pub fn read_to_vec(&mut self) -> Result<Vec<u8>, Error>`
+// - into_reader(): EXISTS at ureq-3.3.0/src/body/mod.rs:264
+// - Chosen API for Task 2: `Body::read_to_vec(&mut self)` (Option A per plan).
+//   No `use std::io::Read;` needed; the closure body is:
+//     let mut resp = agent.get(&url_str).call()?;
+//     resp.body_mut().read_to_vec()
+// This scratch note is overwritten by Task 2's full file rewrite.
+
 //! Nono-local TUF chain-walk for refreshing the Sigstore trusted root
 //! against `https://tuf-repo-cdn.sigstore.dev` using an HTTP transport
 //! that consults the OS certificate store (`ureq` + `platform-verifier`).
