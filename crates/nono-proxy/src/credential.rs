@@ -9,14 +9,20 @@
 //! is handled by [`crate::route::RouteStore`], which loads independently of
 //! credentials. This module handles only credential-specific concerns.
 
+use crate::capture::{CaptureSender, ProxyCaptureRequest, ProxyCaptureResponse};
 use crate::config::{InjectMode, RouteConfig};
 use crate::error::{ProxyError, Result};
 use crate::oauth2::{OAuth2ExchangeConfig, TokenCache};
 use base64::Engine;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
+
+/// The `cmd://` URI scheme prefix for supervisor-mediated credential capture.
+const CMD_URI_PREFIX: &str = "cmd://";
 
 /// A loaded credential ready for injection.
 ///
@@ -83,13 +89,59 @@ pub struct OAuth2Route {
     pub upstream: String,
 }
 
+/// Configuration for a `cmd://` route (credential resolved lazily via supervisor).
+///
+/// Unlike static credentials which are loaded eagerly at startup, `cmd://`
+/// routes store only their injection configuration here. The actual credential
+/// value is fetched on-demand via [`CredentialStore::resolve_cmd_credential`],
+/// which sends a request over the in-process capture channel to the supervisor.
+#[derive(Debug, Clone)]
+pub struct CmdRouteConfig {
+    /// The logical credential name (extracted from `cmd://<name>`)
+    pub credential_name: String,
+    /// Upstream injection mode
+    pub inject_mode: InjectMode,
+    /// Proxy-side injection mode for phantom token parsing
+    pub proxy_inject_mode: InjectMode,
+    /// Header name to inject
+    pub header_name: String,
+    /// Proxy-side header name for phantom token validation
+    pub proxy_header_name: String,
+    /// Credential format string (e.g., "Bearer {}")
+    pub credential_format: String,
+    /// URL path pattern (for UrlPath mode)
+    pub path_pattern: Option<String>,
+    /// Proxy-side path pattern
+    pub proxy_path_pattern: Option<String>,
+    /// URL path replacement pattern
+    pub path_replacement: Option<String>,
+    /// Query parameter name
+    pub query_param_name: Option<String>,
+    /// Proxy-side query parameter name
+    pub proxy_query_param_name: Option<String>,
+}
+
 /// Credential store for all configured routes.
-#[derive(Debug)]
 pub struct CredentialStore {
     /// Map from route prefix to loaded credential
     credentials: HashMap<String, LoadedCredential>,
     /// Map from route prefix to OAuth2 route (token cache + upstream)
     oauth2_routes: HashMap<String, OAuth2Route>,
+    /// Route prefixes using `cmd://` (lazy, supervisor-mediated capture)
+    cmd_routes: HashMap<String, CmdRouteConfig>,
+    /// Channel for requesting credential capture from the supervisor
+    capture_tx: Option<CaptureSender>,
+}
+
+impl std::fmt::Debug for CredentialStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialStore")
+            .field("credentials", &self.credentials)
+            .field("oauth2_routes", &self.oauth2_routes)
+            .field("cmd_routes", &self.cmd_routes)
+            .field("capture_tx", &self.capture_tx.is_some())
+            .finish()
+    }
 }
 
 impl CredentialStore {
@@ -110,9 +162,14 @@ impl CredentialStore {
     /// Returns an error only for hard failures (config parse errors,
     /// non-UTF-8 values). Missing or inaccessible credentials are logged
     /// as warnings and the route is skipped.
-    pub fn load(routes: &[RouteConfig], tls_connector: &TlsConnector) -> Result<Self> {
+    pub fn load(
+        routes: &[RouteConfig],
+        tls_connector: &TlsConnector,
+        capture_tx: Option<CaptureSender>,
+    ) -> Result<Self> {
         let mut credentials = HashMap::new();
         let mut oauth2_routes = HashMap::new();
+        let mut cmd_routes = HashMap::new();
 
         for route in routes {
             // Normalize prefix: strip leading/trailing slashes so it matches
@@ -120,6 +177,59 @@ impl CredentialStore {
             // the reverse proxy path (e.g., "/anthropic" -> "anthropic").
             let normalized_prefix = route.prefix.trim_matches('/').to_string();
             if let Some(ref key) = route.credential_key {
+                // cmd:// routes are resolved lazily via the supervisor channel
+                if let Some(cred_name) = key.strip_prefix(CMD_URI_PREFIX) {
+                    if capture_tx.is_none() {
+                        warn!(
+                            "Route '{}' uses cmd://{} but no capture channel is available. \
+                             Managed-credential requests on this route will be denied.",
+                            normalized_prefix, cred_name
+                        );
+                        continue;
+                    }
+                    let effective_format = crate::config::resolved_credential_format(
+                        route.inject_header.as_str(),
+                        route.credential_format.as_deref(),
+                    );
+                    cmd_routes.insert(
+                        normalized_prefix.clone(),
+                        CmdRouteConfig {
+                            credential_name: cred_name.to_string(),
+                            inject_mode: route.inject_mode.clone(),
+                            proxy_inject_mode: route
+                                .proxy
+                                .as_ref()
+                                .and_then(|p| p.inject_mode.clone())
+                                .unwrap_or_else(|| route.inject_mode.clone()),
+                            header_name: route.inject_header.clone(),
+                            proxy_header_name: route
+                                .proxy
+                                .as_ref()
+                                .and_then(|p| p.inject_header.clone())
+                                .unwrap_or_else(|| route.inject_header.clone()),
+                            credential_format: effective_format,
+                            path_pattern: route.path_pattern.clone(),
+                            proxy_path_pattern: route
+                                .proxy
+                                .as_ref()
+                                .and_then(|p| p.path_pattern.clone())
+                                .or_else(|| route.path_pattern.clone()),
+                            path_replacement: route.path_replacement.clone(),
+                            query_param_name: route.query_param_name.clone(),
+                            proxy_query_param_name: route
+                                .proxy
+                                .as_ref()
+                                .and_then(|p| p.query_param_name.clone())
+                                .or_else(|| route.query_param_name.clone()),
+                        },
+                    );
+                    debug!(
+                        "Registered cmd:// route for prefix '{}' (credential: '{}')",
+                        normalized_prefix, cred_name
+                    );
+                    continue;
+                }
+
                 debug!(
                     "Loading credential for route prefix: {} (mode: {:?})",
                     normalized_prefix, route.inject_mode
@@ -269,6 +379,8 @@ impl CredentialStore {
         Ok(Self {
             credentials,
             oauth2_routes,
+            cmd_routes,
+            capture_tx,
         })
     }
 
@@ -278,6 +390,8 @@ impl CredentialStore {
         Self {
             credentials: HashMap::new(),
             oauth2_routes: HashMap::new(),
+            cmd_routes: HashMap::new(),
+            capture_tx: None,
         }
     }
 
@@ -293,25 +407,78 @@ impl CredentialStore {
         self.oauth2_routes.get(prefix)
     }
 
-    /// Check if any credentials (static or OAuth2) are loaded.
+    /// Get the `cmd://` route config for a prefix, if configured.
+    #[must_use]
+    pub fn get_cmd_route(&self, prefix: &str) -> Option<&CmdRouteConfig> {
+        self.cmd_routes.get(prefix)
+    }
+
+    /// Resolve a `cmd://` credential via the supervisor capture channel.
+    ///
+    /// Sends a request to the supervisor, which runs the allow-listed command
+    /// and returns the credential. Returns an error if the channel is unavailable,
+    /// the supervisor denies the request, or the timeout is reached.
+    pub async fn resolve_cmd_credential(
+        &self,
+        prefix: &str,
+        session_id: &str,
+    ) -> Result<Zeroizing<String>> {
+        let cmd_config = self.cmd_routes.get(prefix).ok_or_else(|| {
+            ProxyError::Credential(format!("no cmd:// route configured for '{prefix}'"))
+        })?;
+
+        let capture_tx = self.capture_tx.as_ref().ok_or_else(|| {
+            ProxyError::Credential("credential capture channel not available".to_string())
+        })?;
+
+        let (response_tx, response_rx) = oneshot::channel::<ProxyCaptureResponse>();
+        let request = ProxyCaptureRequest {
+            credential_name: cmd_config.credential_name.clone(),
+            session_id: session_id.to_string(),
+        };
+
+        capture_tx
+            .send((request, response_tx))
+            .await
+            .map_err(|_| ProxyError::Credential("capture channel closed".to_string()))?;
+
+        let response = tokio::time::timeout(Duration::from_secs(30), response_rx)
+            .await
+            .map_err(|_| ProxyError::Credential("credential capture timed out".to_string()))?
+            .map_err(|_| {
+                ProxyError::Credential("supervisor dropped capture response".to_string())
+            })?;
+
+        match response.credential {
+            Some(cred) => Ok(cred),
+            None => Err(ProxyError::Credential(
+                response
+                    .error
+                    .unwrap_or_else(|| "credential capture denied".to_string()),
+            )),
+        }
+    }
+
+    /// Check if any credentials (static, OAuth2, or cmd://) are configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.credentials.is_empty() && self.oauth2_routes.is_empty()
+        self.credentials.is_empty() && self.oauth2_routes.is_empty() && self.cmd_routes.is_empty()
     }
 
-    /// Number of loaded credentials (static + OAuth2).
+    /// Number of configured credentials (static + OAuth2 + cmd://).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.credentials.len() + self.oauth2_routes.len()
+        self.credentials.len() + self.oauth2_routes.len() + self.cmd_routes.len()
     }
 
-    /// Returns the set of route prefixes that have loaded credentials
-    /// (both static keystore and OAuth2 routes).
+    /// Returns the set of route prefixes that have loaded or configured credentials
+    /// (static keystore, OAuth2, and cmd:// routes).
     #[must_use]
-    pub fn loaded_prefixes(&self) -> std::collections::HashSet<String> {
+    pub fn loaded_prefixes(&self) -> HashSet<String> {
         self.credentials
             .keys()
             .chain(self.oauth2_routes.keys())
+            .chain(self.cmd_routes.keys())
             .cloned()
             .collect()
     }
@@ -548,7 +715,7 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
         }];
-        let store = CredentialStore::load(&routes, &tls);
+        let store = CredentialStore::load(&routes, &tls, None);
         assert!(store.is_ok());
         let store = store.unwrap_or_else(|_| CredentialStore::empty());
         assert!(store.is_empty());
@@ -581,6 +748,8 @@ mod tests {
         let store = CredentialStore {
             credentials: HashMap::new(),
             oauth2_routes,
+            cmd_routes: HashMap::new(),
+            capture_tx: None,
         };
 
         assert!(
@@ -609,6 +778,8 @@ mod tests {
         let store = CredentialStore {
             credentials: HashMap::new(),
             oauth2_routes,
+            cmd_routes: HashMap::new(),
+            capture_tx: None,
         };
 
         let prefixes = store.loaded_prefixes();
@@ -638,7 +809,7 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
         }];
-        let store = CredentialStore::load(&routes, &tls).expect("credential load");
+        let store = CredentialStore::load(&routes, &tls, None).expect("credential load");
         let cred = store.get("litellm").expect("route should be loaded");
         assert_eq!(cred.header_name, "x-litellm-api-key");
         assert_eq!(cred.header_value.as_str(), "Bearer sk-litellm-test");
@@ -667,7 +838,7 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
         }];
-        let store = CredentialStore::load(&routes, &tls).expect("credential load");
+        let store = CredentialStore::load(&routes, &tls, None).expect("credential load");
         let cred = store.get("api").expect("route should be loaded");
         assert_eq!(cred.header_value.as_str(), "secret-key");
     }
@@ -708,7 +879,7 @@ mod tests {
             }),
         }];
 
-        let store = CredentialStore::load(&routes, &tls);
+        let store = CredentialStore::load(&routes, &tls, None);
 
         // load() should succeed (route skipped, not hard error)
         assert!(
@@ -737,5 +908,71 @@ mod tests {
         };
 
         TokenCache::new_from_parts(config, test_tls_connector(), token, ttl)
+    }
+
+    #[test]
+    fn test_cmd_route_registered_with_capture_channel() {
+        let (tx, _rx) = crate::capture::channel(16);
+        let tls = test_tls_connector();
+        let routes = vec![RouteConfig {
+            prefix: "github".to_string(),
+            upstream: "https://api.github.com".to_string(),
+            credential_key: Some("cmd://github".to_string()),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+        }];
+        let store = CredentialStore::load(&routes, &tls, Some(tx)).unwrap();
+
+        // Not loaded eagerly
+        assert!(store.get("github").is_none());
+        // Registered as cmd:// route
+        let cmd_cfg = store.get_cmd_route("github");
+        assert!(cmd_cfg.is_some(), "cmd:// route should be registered");
+        assert_eq!(cmd_cfg.unwrap().credential_name, "github");
+        // Included in loaded prefixes (available for phantom token injection)
+        assert!(store.loaded_prefixes().contains("github"));
+        assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn test_cmd_route_skipped_without_capture_channel() {
+        let tls = test_tls_connector();
+        let routes = vec![RouteConfig {
+            prefix: "github".to_string(),
+            upstream: "https://api.github.com".to_string(),
+            credential_key: Some("cmd://github".to_string()),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+        }];
+        // No capture channel provided
+        let store = CredentialStore::load(&routes, &tls, None).unwrap();
+
+        // Route should be skipped entirely
+        assert!(store.get("github").is_none());
+        assert!(store.get_cmd_route("github").is_none());
+        assert!(!store.loaded_prefixes().contains("github"));
+        assert!(store.is_empty());
     }
 }

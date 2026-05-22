@@ -18,6 +18,7 @@
 //! child can only reach `localhost:<port>` via `NetworkMode::ProxyOnly`.
 
 pub mod audit;
+pub mod capture;
 pub mod config;
 pub mod connect;
 pub mod credential;
@@ -32,6 +33,7 @@ pub mod server;
 pub mod tls_intercept;
 pub mod token;
 
+pub use capture::{CaptureReceiver, CaptureSender};
 pub use config::ProxyConfig;
 pub use error::{ProxyError, Result};
 pub use server::{ProxyHandle, start};

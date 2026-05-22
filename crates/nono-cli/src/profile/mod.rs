@@ -344,6 +344,49 @@ fn default_inject_header() -> String {
     "Authorization".to_string()
 }
 
+/// Profile entry for a credential capture command.
+///
+/// Maps a logical credential name to a host-side CLI command that produces
+/// the credential on stdout. Resolved via the supervisor channel at runtime.
+///
+/// # JSON format
+///
+/// ```json
+/// {
+///   "credential_capture": {
+///     "github": {
+///       "command": ["gh", "auth", "token"],
+///       "timeout_secs": 5,
+///       "ttl_secs": 900
+///     }
+///   }
+/// }
+/// ```
+///
+/// Only `command` is required; `timeout_secs` defaults to 5 and `ttl_secs`
+/// to 900 (15 minutes).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialCaptureEntry {
+    /// Command and arguments (e.g., `["gh", "auth", "token"]`).
+    /// The first element is resolved to an absolute path at profile-load time.
+    pub command: Vec<String>,
+    /// Timeout for command execution in seconds (default: 5, range: 1–300).
+    #[serde(default = "default_capture_timeout")]
+    pub timeout_secs: u64,
+    /// Cache TTL in seconds (default: 900 = 15 min, range: 0–3600).
+    #[serde(default = "default_capture_ttl")]
+    pub ttl_secs: u64,
+}
+
+fn default_capture_timeout() -> u64 {
+    5
+}
+
+fn default_capture_ttl() -> u64 {
+    900
+}
+
 /// Check if a character is a valid HTTP token character per RFC 7230.
 fn is_http_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
@@ -1512,6 +1555,12 @@ pub struct Profile {
     /// Supports variable expansion (e.g. `$NONO_PACKAGES`).
     #[serde(default)]
     pub command_args: Vec<String>,
+    /// Credential capture commands resolved by the supervisor on behalf of the proxy.
+    ///
+    /// Maps logical credential names to host-side CLI commands. Used with
+    /// `credential_key: "cmd://<name>"` in route configuration.
+    #[serde(default)]
+    pub credential_capture: HashMap<String, CredentialCaptureEntry>,
     /// Raw macOS-only Seatbelt S-expression rules applied verbatim to the sandbox policy.
     ///
     /// Expert escape hatch for capability gaps. Each entry must be a valid Seatbelt
@@ -1583,6 +1632,8 @@ struct ProfileDeserialize {
     #[serde(alias = "brokered_commands")]
     command_args: Vec<String>,
     #[serde(default)]
+    credential_capture: HashMap<String, CredentialCaptureEntry>,
+    #[serde(default)]
     unsafe_macos_seatbelt_rules: Vec<String>,
 }
 
@@ -1616,6 +1667,7 @@ impl From<ProfileDeserialize> for Profile {
             packs: raw.packs,
             binary: raw.binary,
             command_args: raw.command_args,
+            credential_capture: raw.credential_capture,
             unsafe_macos_seatbelt_rules: raw.unsafe_macos_seatbelt_rules,
         };
 
@@ -2589,6 +2641,11 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
         packs: dedup_append(&base.packs, &child.packs),
         binary: child.binary.or(base.binary),
         command_args: dedup_append(&base.command_args, &child.command_args),
+        credential_capture: {
+            let mut merged = base.credential_capture;
+            merged.extend(child.credential_capture);
+            merged
+        },
         unsafe_macos_seatbelt_rules: dedup_append(
             &base.unsafe_macos_seatbelt_rules,
             &child.unsafe_macos_seatbelt_rules,
@@ -2971,6 +3028,36 @@ mod tests {
         let profile: Profile = serde_json::from_str(json).expect("parse");
         assert_eq!(profile.commands.allow, vec!["pip"]);
         assert_eq!(profile.commands.deny, vec!["docker"]);
+    }
+
+    #[test]
+    fn test_credential_capture_deserializes() {
+        let json = r#"{
+            "meta": {"name": "t"},
+            "credential_capture": {
+                "github": {"command": ["gh", "auth", "token"], "timeout_secs": 5, "ttl_secs": 300},
+                "gcloud": {"command": ["gcloud", "auth", "print-access-token"]}
+            }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse");
+        assert_eq!(profile.credential_capture.len(), 2);
+
+        let github = &profile.credential_capture["github"];
+        assert_eq!(github.command, vec!["gh", "auth", "token"]);
+        assert_eq!(github.timeout_secs, 5);
+        assert_eq!(github.ttl_secs, 300);
+
+        let gcloud = &profile.credential_capture["gcloud"];
+        assert_eq!(gcloud.command, vec!["gcloud", "auth", "print-access-token"]);
+        assert_eq!(gcloud.timeout_secs, 5); // default
+        assert_eq!(gcloud.ttl_secs, 900); // default
+    }
+
+    #[test]
+    fn test_credential_capture_defaults_when_absent() {
+        let json = r#"{"meta": {"name": "t"}}"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse");
+        assert!(profile.credential_capture.is_empty());
     }
 
     // Note: in-process unit tests covering the drain (legacy → canonical)
@@ -4432,6 +4519,7 @@ mod tests {
             packs: vec![],
             binary: None,
             command_args: vec![],
+            credential_capture: HashMap::new(),
             unsafe_macos_seatbelt_rules: vec![],
         }
     }
@@ -4511,6 +4599,7 @@ mod tests {
             packs: vec![],
             binary: None,
             command_args: vec![],
+            credential_capture: HashMap::new(),
             unsafe_macos_seatbelt_rules: vec![],
         }
     }

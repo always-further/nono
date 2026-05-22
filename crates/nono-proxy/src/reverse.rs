@@ -16,12 +16,13 @@
 
 use crate::audit;
 use crate::config::InjectMode;
-use crate::credential::{CredentialStore, LoadedCredential};
+use crate::credential::{CmdRouteConfig, CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
 use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
 use crate::route::RouteStore;
 use crate::token;
+use base64::Engine;
 use std::net::SocketAddr;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -130,11 +131,19 @@ pub async fn handle_reverse_proxy(
         })?;
     let static_cred = ctx.credential_store.get(&service);
     let oauth2_route = ctx.credential_store.get_oauth2(&service);
+    let cmd_route = ctx.credential_store.get_cmd_route(&service);
     let managed_ctx = static_cred.map(|cred| {
         managed_credential_event_ctx(
             &service,
             &cred.proxy_inject_mode,
             audit_injection_mode_for_inject_mode(&cred.inject_mode),
+        )
+    });
+    let cmd_ctx = cmd_route.map(|cmd_cfg| {
+        managed_credential_event_ctx(
+            &service,
+            &cmd_cfg.proxy_inject_mode,
+            audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode),
         )
     });
     let oauth2_ctx = oauth2_route.map(|_| audit::EventContext {
@@ -146,6 +155,7 @@ pub async fn handle_reverse_proxy(
     });
     let route_ctx = managed_ctx
         .clone()
+        .or_else(|| cmd_ctx.clone())
         .or_else(|| oauth2_ctx.clone())
         .unwrap_or_else(|| audit::EventContext {
             route_id: Some(&service),
@@ -153,7 +163,10 @@ pub async fn handle_reverse_proxy(
             ..audit::EventContext::default()
         });
 
-    if route.missing_managed_credential(static_cred.is_some(), oauth2_route.is_some()) {
+    if route.missing_managed_credential(
+        static_cred.is_some() || cmd_route.is_some(),
+        oauth2_route.is_some(),
+    ) {
         let reason = format!(
             "managed credential unavailable for service '{}': route is configured for proxy-supplied auth",
             service
@@ -208,6 +221,23 @@ pub async fn handle_reverse_proxy(
     if let Some(oauth2_route) = oauth2_route {
         return handle_oauth2_credential(
             oauth2_route,
+            route,
+            &service,
+            &upstream_path,
+            &method,
+            &version,
+            stream,
+            remaining_header,
+            buffered_body,
+            ctx,
+        )
+        .await;
+    }
+
+    // cmd:// credential: resolve lazily via supervisor capture channel
+    if let Some(cmd_cfg) = cmd_route {
+        return handle_cmd_credential(
+            cmd_cfg,
             route,
             &service,
             &upstream_path,
@@ -613,6 +643,213 @@ async fn handle_oauth2_credential(
             &e.to_string(),
         );
     }
+    Ok(())
+}
+
+/// Handle a `cmd://` credential route: validate phantom token, resolve credential
+/// lazily via the supervisor capture channel, inject and forward.
+#[allow(clippy::too_many_arguments)]
+async fn handle_cmd_credential(
+    cmd_cfg: &CmdRouteConfig,
+    route: &crate::route::LoadedRoute,
+    service: &str,
+    upstream_path: &str,
+    method: &str,
+    version: &str,
+    stream: &mut TcpStream,
+    remaining_header: &[u8],
+    buffered_body: &[u8],
+    ctx: &ReverseProxyCtx<'_>,
+) -> Result<()> {
+    // Validate phantom token using the cmd route's proxy inject mode
+    if let Err(e) = validate_phantom_token_for_mode(
+        &cmd_cfg.proxy_inject_mode,
+        remaining_header,
+        upstream_path,
+        &cmd_cfg.proxy_header_name,
+        cmd_cfg.proxy_path_pattern.as_deref(),
+        cmd_cfg.proxy_query_param_name.as_deref(),
+        ctx.session_token,
+    ) {
+        let deny_ctx = audit::EventContext {
+            route_id: Some(service),
+            auth_mechanism: Some(auth_mechanism_for_inject_mode(&cmd_cfg.proxy_inject_mode)),
+            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+            managed_credential_active: Some(true),
+            injection_mode: Some(audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode)),
+            denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
+        };
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            &deny_ctx,
+            service,
+            0,
+            &e.to_string(),
+        );
+        send_error(stream, 401, "Unauthorized").await?;
+        return Ok(());
+    }
+
+    // Resolve the credential via the supervisor capture channel
+    let credential = match ctx
+        .credential_store
+        .resolve_cmd_credential(service, ctx.session_token.as_str())
+        .await
+    {
+        Ok(cred) => cred,
+        Err(e) => {
+            warn!(
+                "cmd:// credential resolution failed for '{}': {}",
+                service, e
+            );
+            let deny_ctx = audit::EventContext {
+                route_id: Some(service),
+                auth_mechanism: Some(auth_mechanism_for_inject_mode(&cmd_cfg.inject_mode)),
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                managed_credential_active: Some(true),
+                injection_mode: Some(audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode)),
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                ),
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                service,
+                0,
+                &e.to_string(),
+            );
+            send_error(stream, 503, "Service Unavailable").await?;
+            return Ok(());
+        }
+    };
+
+    // Build upstream URL
+    let upstream_url = format!("{}{}", route.upstream.trim_end_matches('/'), upstream_path);
+    debug!("cmd:// forwarding to upstream: {} {}", method, upstream_url);
+
+    let (upstream_scheme, upstream_host, upstream_port, upstream_path_full) =
+        parse_upstream_url(&upstream_url)?;
+
+    // DNS resolve + host check
+    let check = ctx.filter.check_host(&upstream_host, upstream_port).await?;
+    if !check.result.is_allowed() {
+        let reason = check.result.reason();
+        warn!("Upstream host denied by filter: {}", reason);
+        send_error(stream, 403, "Forbidden").await?;
+        return Ok(());
+    }
+    if let Err(reason) =
+        validate_http_upstream_target(upstream_scheme, &upstream_host, &check.resolved_addrs)
+    {
+        warn!("{}", reason);
+        send_error(stream, 502, "Bad Gateway").await?;
+        return Ok(());
+    }
+
+    // Strip proxy artifacts and build the cleaned upstream path
+    let cleaned_path = strip_proxy_artifacts(
+        &upstream_path_full,
+        &cmd_cfg.proxy_inject_mode,
+        &cmd_cfg.inject_mode,
+        cmd_cfg.proxy_path_pattern.as_deref(),
+        cmd_cfg.proxy_query_param_name.as_deref(),
+    );
+    let final_path = transform_path_for_mode(
+        &cmd_cfg.inject_mode,
+        &cleaned_path,
+        cmd_cfg.path_pattern.as_deref(),
+        cmd_cfg.path_replacement.as_deref(),
+        cmd_cfg.query_param_name.as_deref(),
+        &credential,
+    )?;
+
+    // Filter headers (strip the header carrying the phantom token)
+    let filtered_headers = filter_headers(remaining_header, &cmd_cfg.proxy_header_name);
+    let content_length = extract_content_length(remaining_header);
+
+    // Read request body
+    let body = match read_request_body(stream, content_length, buffered_body).await? {
+        Some(body) => body,
+        None => return Ok(()),
+    };
+
+    // Build upstream request
+    let upstream_authority = format_host_header(upstream_scheme, &upstream_host, upstream_port);
+    let mut request = Zeroizing::new(format!(
+        "{} {} {}\r\nHost: {}\r\n",
+        method, final_path, version, upstream_authority
+    ));
+
+    // Inject real credential (intermediates wrapped in Zeroizing to prevent leaks)
+    match cmd_cfg.inject_mode {
+        InjectMode::Header => {
+            let header_value = Zeroizing::new(cmd_cfg.credential_format.replace("{}", &credential));
+            request.push_str(&format!(
+                "{}: {}\r\n",
+                cmd_cfg.header_name,
+                header_value.as_str()
+            ));
+        }
+        InjectMode::BasicAuth => {
+            let encoded = Zeroizing::new(
+                base64::engine::general_purpose::STANDARD.encode(credential.as_bytes()),
+            );
+            request.push_str(&format!(
+                "{}: Basic {}\r\n",
+                cmd_cfg.header_name,
+                encoded.as_str()
+            ));
+        }
+        InjectMode::UrlPath | InjectMode::QueryParam => {
+            // Already handled via transform_path_for_mode above
+        }
+    }
+
+    // Forward filtered headers
+    for (name, value) in &filtered_headers {
+        request.push_str(&format!("{}: {}\r\n", name, value));
+    }
+
+    if !body.is_empty() {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+
+    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
+    let upstream_spec = UpstreamSpec {
+        scheme: upstream_scheme,
+        host: &upstream_host,
+        port: upstream_port,
+        strategy: UpstreamStrategy::Direct {
+            resolved_addrs: &check.resolved_addrs,
+        },
+        tls_connector: connector,
+    };
+    let audit_ctx = AuditCtx {
+        log: ctx.audit_log,
+        mode: audit::ProxyMode::Reverse,
+        event_ctx: audit::EventContext {
+            route_id: Some(service),
+            auth_mechanism: Some(auth_mechanism_for_inject_mode(&cmd_cfg.inject_mode)),
+            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
+            managed_credential_active: Some(true),
+            injection_mode: Some(audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode)),
+            denial_category: None,
+        },
+        target: service,
+        method,
+        path: upstream_path,
+    };
+    if let Err(e) =
+        forward::forward_request(stream, request.as_bytes(), &body, upstream_spec, audit_ctx).await
+    {
+        warn!("Upstream connection failed: {}", e);
+        send_error(stream, 502, "Bad Gateway").await?;
+    }
+
     Ok(())
 }
 

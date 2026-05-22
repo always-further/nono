@@ -85,6 +85,7 @@ pub(crate) fn prepare_proxy_launch_options(
         allow_domain,
         credentials,
         custom_credentials: prepared.custom_credentials.clone(),
+        credential_capture: prepared.credential_capture.clone(),
         upstream_proxy,
         upstream_bypass,
         allow_bind_ports,
@@ -203,13 +204,68 @@ pub(crate) fn start_proxy_runtime(
         proxy_config.intercept_parent_ca_pems = read_parent_ssl_cert_file();
     }
 
+    // Set up credential capture channel if any cmd:// routes are configured
+    let (capture_tx, credential_broker) = if !proxy.credential_capture.is_empty() {
+        let mut configs = std::collections::HashMap::new();
+        for (name, entry) in &proxy.credential_capture {
+            match crate::credential_capture::validate_capture_command(
+                name,
+                &entry.command,
+                Some(entry.timeout_secs),
+                Some(entry.ttl_secs),
+            ) {
+                Ok(def) => {
+                    configs.insert(name.clone(), def);
+                }
+                Err(e) => {
+                    warn!("Skipping credential_capture.{}: {}", name, e);
+                }
+            }
+        }
+        if configs.is_empty() {
+            (None, None)
+        } else {
+            let broker = std::sync::Arc::new(
+                crate::credential_capture::CredentialCaptureBroker::new(configs),
+            );
+            let (tx, mut rx) = nono_proxy::capture::channel(16);
+            let broker_clone = broker.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("capture listener runtime");
+                rt.block_on(async move {
+                    while let Some((req, response_tx)) = rx.recv().await {
+                        let result =
+                            broker_clone.capture_or_cache(&req.session_id, &req.credential_name);
+                        let response = match result {
+                            Ok(credential) => nono_proxy::capture::ProxyCaptureResponse {
+                                credential: Some(credential),
+                                error: None,
+                            },
+                            Err(e) => nono_proxy::capture::ProxyCaptureResponse {
+                                credential: None,
+                                error: Some(e.to_string()),
+                            },
+                        };
+                        let _ = response_tx.send(response);
+                    }
+                });
+            });
+            (Some(tx), Some(broker))
+        }
+    } else {
+        (None, None)
+    };
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .map_err(|e| NonoError::SandboxInit(format!("Failed to start proxy runtime: {}", e)))?;
     let handle = rt
-        .block_on(async { nono_proxy::server::start(proxy_config.clone()).await })
+        .block_on(async { nono_proxy::server::start(proxy_config.clone(), capture_tx).await })
         .map_err(|e| NonoError::SandboxInit(format!("Failed to start proxy: {}", e)))?;
 
     let port = handle.port;
@@ -300,6 +356,11 @@ pub(crate) fn start_proxy_runtime(
     }
 
     std::mem::forget(rt);
+
+    // The credential_broker is kept alive by the listener thread's Arc.
+    // When the proxy shuts down, the channel is dropped, the listener
+    // exits, and the broker (with its cache) is zeroized on drop.
+    drop(credential_broker);
 
     Ok(ActiveProxyRuntime {
         env_vars,

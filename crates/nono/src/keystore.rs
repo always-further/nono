@@ -60,6 +60,10 @@ const ENV_URI_PREFIX: &str = "env://";
 /// Read once at startup before sandbox activation; contents zeroed on drop.
 const FILE_URI_PREFIX: &str = "file://";
 
+/// The `cmd://` URI scheme prefix, indicating a CLI-command credential source.
+/// Resolved only through the supervisor channel in supervised execution mode.
+const CMD_URI_PREFIX: &str = "cmd://";
+
 /// Environment variable names that must never be loaded via `env://`.
 ///
 /// These control linker, interpreter, or shell behavior. Allowing them as
@@ -176,6 +180,13 @@ pub fn load_secrets(
 /// internal buffers.
 #[must_use = "loaded secret should be used or explicitly dropped"]
 pub fn load_secret_by_ref(service: &str, credential_ref: &str) -> Result<Zeroizing<String>> {
+    if credential_ref.starts_with(CMD_URI_PREFIX) {
+        return Err(crate::NonoError::KeystoreAccess(
+            "cmd:// credentials can only be resolved through the supervisor channel \
+             in supervised execution mode"
+                .to_string(),
+        ));
+    }
     if credential_ref.starts_with(FILE_URI_PREFIX) {
         load_from_file(credential_ref)
     } else if credential_ref.starts_with(ENV_URI_PREFIX) {
@@ -2534,6 +2545,24 @@ mod tests {
         assert_eq!(*result.expect("should load"), "dispatched_ok");
 
         unsafe { std::env::remove_var(test_var) };
+    }
+
+    #[test]
+    fn test_load_secret_by_ref_rejects_cmd_uri() {
+        let result = load_secret_by_ref("nono", "cmd://github");
+        assert!(result.is_err(), "cmd:// must be rejected by the keystore");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::NonoError::KeystoreAccess(_)),
+            "expected KeystoreAccess, got: {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("supervisor channel"),
+            "error should mention supervisor channel: {}",
+            msg
+        );
     }
 
     // --- env:// in build_mappings_from_list ---

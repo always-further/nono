@@ -128,6 +128,7 @@ With `--full`, additional sections are included as empty stubs for all additive 
     "custom_credentials": {}
   },
   "env_credentials": {},
+  "credential_capture": {},
   "environment": {
     "allow_vars": []
   },
@@ -313,6 +314,43 @@ nono why --scope abstract-unix-socket --profile my-agent
   }
 }
 ```
+
+### Agent with CLI-Based Credentials (`cmd://`)
+
+When credentials come from a CLI tool (e.g., `gh auth token`, `gcloud auth print-access-token`), use `cmd://` to have the supervisor run the command on the host and inject the result:
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "gh-agent",
+    "description": "Agent with GitHub access via gh CLI token"
+  },
+  "workdir": { "access": "readwrite" },
+  "network": {
+    "network_profile": "standard",
+    "credentials": ["github"],
+    "custom_credentials": {
+      "github": {
+        "upstream": "https://api.github.com",
+        "credential_key": "cmd://github",
+        "env_var": "GITHUB_TOKEN",
+        "inject_header": "Authorization",
+        "credential_format": "token {}"
+      }
+    }
+  },
+  "credential_capture": {
+    "github": {
+      "command": ["gh", "auth", "token"],
+      "timeout_secs": 5,
+      "ttl_secs": 900
+    }
+  }
+}
+```
+
+The `credential_capture` section maps logical names to commands. The command is resolved to an absolute path at profile-load time, and the result is cached for the specified TTL. See [Credential Injection — CLI Command Capture](/cli/features/credential-injection#cli-command-credential-capture-cmd) for full details.
 
 ### CI Build Environment
 

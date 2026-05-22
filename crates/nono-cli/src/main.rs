@@ -16,6 +16,7 @@ mod command_display;
 mod command_runtime;
 mod completions;
 mod config;
+mod credential_capture;
 mod credential_runtime;
 mod deprecated_policy;
 mod deprecated_schema;
@@ -261,6 +262,7 @@ mod tests {
             allow_domain: vec!["docs.python.org".to_string()],
             credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
+            credential_capture: std::collections::HashMap::new(),
             upstream_proxy: None,
             upstream_bypass: Vec::new(),
             listen_ports: Vec::new(),
@@ -308,6 +310,7 @@ mod tests {
             allow_domain: vec!["docs.python.org".to_string()],
             credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
+            credential_capture: std::collections::HashMap::new(),
             upstream_proxy: None,
             upstream_bypass: Vec::new(),
             listen_ports: Vec::new(),

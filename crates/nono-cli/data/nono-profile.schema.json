@@ -116,6 +116,13 @@
       "items": { "type": "string" },
       "description": "Extra arguments appended to the child command at launch. Supports variable expansion (e.g. $NONO_PACKAGES)."
     },
+    "credential_capture": {
+      "type": "object",
+      "description": "Maps logical credential names to host-side CLI commands that produce credentials on stdout. Used with credential_key: \"cmd://<name>\" in custom_credentials routes. Commands are resolved to absolute paths at profile-load time. The supervisor runs these commands just-in-time and caches results per session.",
+      "additionalProperties": {
+        "$ref": "#/$defs/CredentialCaptureEntry"
+      }
+    },
     "unsafe_macos_seatbelt_rules": {
       "type": "array",
       "items": { "type": "string" },
@@ -149,6 +156,34 @@
             { "type": "null" }
           ],
           "description": "Optional author or maintainer of this profile."
+        }
+      }
+    },
+    "CredentialCaptureEntry": {
+      "type": "object",
+      "description": "Configuration for a credential capture command. The command is run by the supervisor and its stdout is used as the credential value.",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Command and arguments to execute (e.g. [\"gh\", \"auth\", \"token\"]). The first element is resolved to an absolute path via PATH at profile-load time. Shell metacharacters are forbidden in all elements."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300,
+          "default": 5,
+          "description": "Maximum time in seconds to wait for the command to complete. Default: 5."
+        },
+        "ttl_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "default": 900,
+          "description": "How long to cache the captured credential in seconds. Default: 900 (15 minutes). Set to 0 to disable caching."
         }
       }
     },
