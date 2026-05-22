@@ -91,6 +91,7 @@ mod trust_intercept;
 #[path = "trust_intercept_windows.rs"]
 mod trust_intercept;
 mod trust_keystore;
+mod trust_refresh;
 mod trust_scan;
 mod update_check;
 mod why_runtime;
