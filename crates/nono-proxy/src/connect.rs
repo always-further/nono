@@ -16,7 +16,7 @@ use crate::filter::ProxyFilter;
 use crate::token;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::debug;
 use zeroize::Zeroizing;
@@ -72,27 +72,27 @@ pub async fn handle_connect(
     let resolved = &check.resolved_addrs;
     if resolved.is_empty() {
         let reason = "DNS resolution returned no addresses".to_string();
-        audit::log_denied(
-            audit_log,
-            audit::ProxyMode::Connect,
-            &audit::EventContext {
-                denial_category: Some(
-                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
-                ),
-                ..audit::EventContext::default()
-            },
-            &host,
-            port,
-            &reason,
-        );
-        send_response(stream, 502, "DNS resolution failed").await?;
+        write_upstream_failure(stream, audit_log, &host, port, &reason).await?;
         return Err(ProxyError::UpstreamConnect {
             host: host.clone(),
             reason,
         });
     }
 
-    let mut upstream = connect_to_resolved(resolved, &host).await?;
+    let mut upstream = match connect_to_resolved(resolved, &host).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            // Mirror the empty-DNS branch above: surface the upstream
+            // failure with a 502 and an audit entry instead of dropping
+            // the client socket silently. See issue #998.
+            let reason = match &err {
+                ProxyError::UpstreamConnect { reason, .. } => reason.clone(),
+                other => other.to_string(),
+            };
+            write_upstream_failure(stream, audit_log, &host, port, &reason).await?;
+            return Err(err);
+        }
+    };
 
     // Send 200 Connection Established
     send_response(stream, 200, "Connection Established").await?;
@@ -170,11 +170,43 @@ fn validate_proxy_auth(header_bytes: &[u8], session_token: &Zeroizing<String>) -
 }
 
 /// Send an HTTP response line to the client.
-async fn send_response(stream: &mut TcpStream, status: u16, reason: &str) -> Result<()> {
+async fn send_response<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    status: u16,
+    reason: &str,
+) -> Result<()> {
     let response = format!("HTTP/1.1 {} {}\r\n\r\n", status, reason);
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+/// Surface an upstream-connect failure to both the client and the audit log.
+///
+/// Used by the two failure branches in [`handle_connect`] that cannot
+/// establish the upstream TCP leg: empty DNS resolution, and a refused or
+/// timed-out connect to a resolved address. Both shapes share the same
+/// observable contract — `502 Bad Gateway` to the client, `log_denied` with
+/// [`NetworkAuditDenialCategory::UpstreamConnectFailed`] in the audit log.
+async fn write_upstream_failure<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    audit_log: Option<&audit::SharedAuditLog>,
+    host: &str,
+    port: u16,
+    reason: &str,
+) -> Result<()> {
+    audit::log_denied(
+        audit_log,
+        audit::ProxyMode::Connect,
+        &audit::EventContext {
+            denial_category: Some(nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed),
+            ..audit::EventContext::default()
+        },
+        host,
+        port,
+        reason,
+    );
+    send_response(stream, 502, &format!("Upstream connect failed: {}", reason)).await
 }
 
 #[cfg(test)]
@@ -228,5 +260,105 @@ mod tests {
         let token = Zeroizing::new("abc123".to_string());
         let header = b"Host: example.com\r\n\r\n";
         assert!(validate_proxy_auth(header, &token).is_err());
+    }
+
+    use nono::undo::{NetworkAuditDecision, NetworkAuditDenialCategory, NetworkAuditMode};
+    use tokio::io::{AsyncReadExt, duplex};
+
+    /// Drain the reader end of a duplex pair until EOF and return the bytes
+    /// as a String.
+    async fn read_to_string<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> String {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[tokio::test]
+    async fn write_upstream_failure_sends_502_status_line() {
+        let (server, client) = duplex(1024);
+        let mut server = server;
+
+        write_upstream_failure(&mut server, None, "example.com", 443, "connection refused")
+            .await
+            .unwrap();
+        drop(server);
+
+        let response = read_to_string(client).await;
+        assert!(
+            response.starts_with("HTTP/1.1 502 "),
+            "expected 502 status line, got: {:?}",
+            response
+        );
+        assert!(
+            response.contains("Upstream connect failed: connection refused"),
+            "expected reason on status line, got: {:?}",
+            response
+        );
+    }
+
+    #[tokio::test]
+    async fn write_upstream_failure_records_audit_entry() {
+        let (mut server, _client) = duplex(1024);
+        let log = audit::new_audit_log();
+
+        write_upstream_failure(
+            &mut server,
+            Some(&log),
+            "example.com",
+            443,
+            "connection refused",
+        )
+        .await
+        .unwrap();
+
+        let events = audit::drain_audit_events(&log);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.mode, NetworkAuditMode::Connect);
+        assert_eq!(event.decision, NetworkAuditDecision::Deny);
+        assert_eq!(
+            event.denial_category,
+            Some(NetworkAuditDenialCategory::UpstreamConnectFailed)
+        );
+        assert_eq!(event.target, "example.com");
+        assert_eq!(event.port, Some(443));
+        assert_eq!(event.reason.as_deref(), Some("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn write_upstream_failure_without_audit_log_still_writes_response() {
+        let (mut server, client) = duplex(1024);
+
+        write_upstream_failure(&mut server, None, "example.com", 443, "connection refused")
+            .await
+            .unwrap();
+        drop(server);
+
+        let response = read_to_string(client).await;
+        assert!(response.starts_with("HTTP/1.1 502 "));
+    }
+
+    #[tokio::test]
+    async fn write_upstream_failure_round_trips_timeout_reason() {
+        let (mut server, client) = duplex(1024);
+        let log = audit::new_audit_log();
+
+        write_upstream_failure(
+            &mut server,
+            Some(&log),
+            "slow.example.com",
+            443,
+            "connection timed out",
+        )
+        .await
+        .unwrap();
+        drop(server);
+
+        let response = read_to_string(client).await;
+        assert!(response.contains("connection timed out"));
+
+        let events = audit::drain_audit_events(&log);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].reason.as_deref(), Some("connection timed out"));
     }
 }
