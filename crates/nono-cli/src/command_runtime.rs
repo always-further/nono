@@ -170,7 +170,7 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         return Ok(());
     }
 
-    let prepared = prepare_sandbox(&args.sandbox, silent)?;
+    let mut prepared = prepare_sandbox(&args.sandbox, silent)?;
 
     if prepared.allow_launch_services_active {
         print_allow_launch_services_warning(silent);
@@ -178,6 +178,13 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
     if prepared.allow_gpu_active {
         print_allow_gpu_warning(silent);
     }
+
+    // Mirror `nono run`: NVIDIA `--allow-gpu` auto-enables capability
+    // elevation in shell sessions too, so the seccomp-notify supervisor
+    // can gate the comm-write pattern. See #924; the previous
+    // launch-only auto-enable left `nono shell --allow-gpu` broken.
+    let auto_capability_elevation =
+        crate::sandbox_prepare::maybe_auto_enable_nvidia_cap_elev(&mut prepared);
 
     if !silent {
         eprintln!("{}", {
@@ -211,6 +218,8 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             workdir: resolve_requested_workdir(args.sandbox.workdir.as_ref()),
             no_diagnostics: true,
             capability_elevation: prepared.capability_elevation,
+            auto_capability_elevation,
+            allow_proc_task_comm_write: prepared.nvidia_procfs_active,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: prepared.wsl2_proxy_policy,
             #[cfg(target_os = "linux")]
@@ -283,6 +292,22 @@ pub(crate) fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
         return Err(NonoError::ConfigParse(
             "nono wrap does not support linux.af_unix_mediation = \"pathname\" because direct \
              exec cannot run the seccomp supervisor. Use `nono run` instead."
+                .to_string(),
+        ));
+    }
+
+    // NVIDIA `--allow-gpu` requires the seccomp-notify supervisor to gate
+    // the `/proc/self/task/<tid>/comm` write pattern (issue #924). Direct
+    // mode has no supervisor, so we cannot satisfy CUDA's thread-name
+    // write without reintroducing the rejected Landlock-grant approach.
+    // Fail explicitly with guidance to `nono run`.
+    #[cfg(target_os = "linux")]
+    if prepared.nvidia_procfs_active {
+        return Err(NonoError::ConfigParse(
+            "nono wrap --allow-gpu cannot support NVIDIA CUDA: Direct execution \
+             mode has no seccomp-notify supervisor to gate the per-thread \
+             /proc/self/task/<tid>/comm write that the NVIDIA driver requires. \
+             Use `nono run --allow-gpu` instead."
                 .to_string(),
         ));
     }

@@ -438,6 +438,9 @@ pub(crate) struct PreparedSandbox {
     pub(crate) af_unix_mediation: crate::profile::LinuxAfUnixMediation,
     pub(crate) allow_launch_services_active: bool,
     pub(crate) allow_gpu_active: bool,
+    /// True iff NVIDIA-specific procfs grants were installed (`--allow-gpu` on NVIDIA).
+    /// Drives auto-enable of `capability_elevation` and the comm-write fast-path.
+    pub(crate) nvidia_procfs_active: bool,
     pub(crate) open_url_origins: Vec<String>,
     pub(crate) open_url_allow_localhost: bool,
     pub(crate) bypass_protection_paths: Vec<PathBuf>,
@@ -454,6 +457,23 @@ pub(crate) struct PreparedSandbox {
     /// True when the profile or CLI requested HTTP/2 to upstream servers
     /// (`network.allow_http2` or `--allow-http2`).
     pub(crate) allow_http2_requested: bool,
+}
+
+/// Auto-enables `capability_elevation` when NVIDIA procfs grants are active.
+/// Returns `true` iff cap_elev was flipped on. No-op on non-NVIDIA / non-Linux.
+#[cfg(target_os = "linux")]
+pub(crate) fn maybe_auto_enable_nvidia_cap_elev(prepared: &mut PreparedSandbox) -> bool {
+    if prepared.nvidia_procfs_active && !prepared.capability_elevation {
+        prepared.capability_elevation = true;
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn maybe_auto_enable_nvidia_cap_elev(_prepared: &mut PreparedSandbox) -> bool {
+    false
 }
 
 fn resolved_workdir(args: &SandboxArgs) -> PathBuf {
@@ -839,14 +859,22 @@ fn missing_cwd_prompt_must_fail(
 ///   CUDA's UVM subsystem reads these during init. We grant each individually
 ///   rather than the parent `/proc/driver` to avoid exposing metadata about
 ///   unrelated kernel drivers.
-/// - `/proc/self` (read): CUDA init reads `/proc/self/maps`, `/proc/self/status`
-///   and other per-process files.
-/// - `/proc/self/task` (read+write): NVIDIA driver 570+ writes to
-///   `/proc/self/task/<tid>/comm` during thread startup to set thread names.
-///   Without write access this returns EACCES and the driver treats it as a
-///   fatal OS error, surfacing as CUDA Error 304 (`cudaErrorOperatingSystem`).
-///   Narrowing write access to the `task` subtree keeps other per-process
-///   procfs entries read-only.
+/// - `/proc/self` (read): CUDA init reads `/proc/self/maps`, `/proc/self/status`,
+///   `/proc/self/task/` (to enumerate threads) and other per-process files.
+///
+/// Notably absent: the NVIDIA driver also writes `/proc/self/task/<tid>/comm`
+/// during thread startup. We do **not** grant Landlock write access to
+/// `/proc/self/task` — Landlock is a filesystem-tree allowlist, so any such
+/// grant would either pin to the direct child's PID inode (breaking
+/// grandchild CUDA, see #924) or widen to all of `/proc` (broadening write
+/// surface to `oom_score_adj`, `coredump_filter`, `attr/*`, etc.).
+/// Instead, the comm write is intercepted by the seccomp-notify supervisor
+/// (see `handle_seccomp_notification` in `exec_strategy/supervisor_linux.rs`):
+/// the supervisor matches paths of the form `/proc/<pid>/task/<tid>/comm`,
+/// validates that `<pid>` equals the caller's TGID (via `validate_procfs_access`),
+/// and lets the kernel's per-thread ownership check enforce that `<tid>` is
+/// the caller's own thread. This gives us a precise pattern allow without
+/// any Landlock-level expansion.
 #[cfg(target_os = "linux")]
 fn grant_nvidia_gpu_procfs(caps: &mut CapabilitySet) -> Result<()> {
     for name in ["nvidia", "nvidia-uvm"] {
@@ -857,17 +885,15 @@ fn grant_nvidia_gpu_procfs(caps: &mut CapabilitySet) -> Result<()> {
         }
     }
 
-    // /proc/self and /proc/self/task are guaranteed on Linux; propagate any
-    // error rather than silently skipping (fail-secure: if the kernel ever
-    // fails to present these, the sandbox should fail rather than grant
-    // less-than-intended access).
+    // /proc/self is guaranteed on Linux; propagate any error rather than
+    // silently skipping (fail-secure: if the kernel ever fails to present
+    // it, the sandbox should fail rather than grant less-than-intended
+    // access). The read grant also covers `/proc/self/task/` for thread
+    // enumeration; writes to `/proc/self/task/<tid>/comm` are handled by
+    // the supervisor's seccomp-notify path (see function doc).
     caps.add_fs(FsCapability::new_dir(
         std::path::Path::new("/proc/self"),
         AccessMode::Read,
-    )?);
-    caps.add_fs(FsCapability::new_dir(
-        std::path::Path::new("/proc/self/task"),
-        AccessMode::ReadWrite,
     )?);
 
     Ok(())
@@ -896,14 +922,31 @@ fn is_nvidia_compute_device(name: &str) -> bool {
     false
 }
 
+/// Result of a `maybe_enable_gpu` call.
+///
+/// `active` is whether any GPU grants were installed (the previous return
+/// type). `nvidia_procfs_active` is whether the NVIDIA-specific procfs
+/// grants applied — used to decide whether the seccomp-notify supervisor
+/// must run to gate the NVIDIA driver's `/proc/self/task/<tid>/comm`
+/// write (issue #924). On non-NVIDIA GPUs (DRM render nodes only, AMD
+/// KFD, WSL2 dxg) the supervisor is not needed; this flag stays false so
+/// those workloads don't pay the seccomp overhead and the comm-write
+/// fast-path doesn't silently apply to unrelated sessions.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct GpuActivation {
+    pub(crate) active: bool,
+    pub(crate) nvidia_procfs_active: bool,
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn maybe_enable_gpu(
     caps: &mut CapabilitySet,
     cli_requested: bool,
     profile_allowed: bool,
-) -> Result<bool> {
+) -> Result<GpuActivation> {
     if !cli_requested {
-        return Ok(false);
+        return Ok(GpuActivation::default());
     }
 
     if !profile_allowed {
@@ -1040,7 +1083,10 @@ pub(crate) fn maybe_enable_gpu(
         "--allow-gpu enabled: allowing {} GPU device(s) on Linux",
         gpu_device_count
     );
-    Ok(true)
+    Ok(GpuActivation {
+        active: true,
+        nvidia_procfs_active: have_nvidia,
+    })
 }
 
 pub(crate) fn print_allow_gpu_warning(silent: bool) {
@@ -1069,8 +1115,10 @@ pub(crate) fn print_allow_gpu_warning(silent: bool) {
         eprintln!(
             "  This grants read/write access to /dev/dri/renderD* and NVIDIA compute devices.\n  \
              On NVIDIA systems, additionally: read access to /proc/driver/nvidia,\n  \
-             /proc/driver/nvidia-uvm, and /proc/self; read/write access to\n  \
-             /proc/self/task (for CUDA thread-name initialisation)."
+             /proc/driver/nvidia-uvm, and /proc/self. The NVIDIA driver's\n  \
+             /proc/self/task/<tid>/comm write is allowed through the supervisor's\n  \
+             seccomp-notify gate (caller's own thread only); no Landlock write rule\n  \
+             is installed for /proc."
         );
     }
 }
@@ -1172,6 +1220,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 af_unix_mediation: crate::profile::LinuxAfUnixMediation::default(),
                 allow_launch_services_active: false,
                 allow_gpu_active: false,
+                nvidia_procfs_active: false,
                 open_url_origins: Vec::new(),
                 open_url_allow_localhost: false,
                 bypass_protection_paths: Vec::new(),
@@ -1354,12 +1403,17 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         args.allow_gpu,
         loaded_profile.is_none() || profile_allow_gpu,
     )?;
+    #[cfg(target_os = "macos")]
+    let nvidia_procfs_active = false;
     #[cfg(target_os = "linux")]
-    let allow_gpu_active = maybe_enable_gpu(
-        &mut caps,
-        args.allow_gpu,
-        loaded_profile.is_none() || profile_allow_gpu,
-    )?;
+    let (allow_gpu_active, nvidia_procfs_active) = {
+        let activation = maybe_enable_gpu(
+            &mut caps,
+            args.allow_gpu,
+            loaded_profile.is_none() || profile_allow_gpu,
+        )?;
+        (activation.active, activation.nvidia_procfs_active)
+    };
 
     if let Some(request) =
         pending_cwd_access_request(&caps, &workdir, profile_workdir_access.as_ref())?
@@ -1511,6 +1565,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             af_unix_mediation,
             allow_launch_services_active,
             allow_gpu_active,
+            nvidia_procfs_active,
             open_url_origins,
             open_url_allow_localhost,
             bypass_protection_paths,
@@ -1555,16 +1610,24 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn grant_nvidia_gpu_procfs_scopes_proc_self_reads_with_task_writes() {
+    fn grant_nvidia_gpu_procfs_grants_proc_self_read_only() {
         // Regression test for the NVIDIA-scoped procfs grants:
-        //   /proc/self       Read        (CUDA init reads maps/status/etc.)
-        //   /proc/self/task  ReadWrite   (driver writes task/<tid>/comm)
+        //   /proc/self  Read   (CUDA init reads maps/status, enumerates task/)
         // Plus any of /proc/driver/{nvidia,nvidia-uvm} that exist.
         //
-        // /proc/self and /proc/self/task always exist on Linux, so those
-        // checks are unconditional. /proc/driver/nvidia entries are only
-        // present when the NVIDIA kernel module is loaded, so we just
-        // assert no unexpected /proc/driver parent grant was added.
+        // Notably, /proc/self/task is NOT granted as a separate Landlock
+        // rule. The NVIDIA driver writes /proc/self/task/<tid>/comm during
+        // cuInit() to set thread names; that one write is permitted by the
+        // supervisor's seccomp-notify handler (see
+        // handle_seccomp_notification + is_proc_task_comm_path), which
+        // matches the path pattern and lets the kernel's per-thread
+        // ownership check enforce that <tid> belongs to the caller.
+        //
+        // Granting /proc/self/task at the Landlock layer is structurally
+        // unsafe: pinning to the direct child's PID inode breaks grandchild
+        // CUDA (#924); widening to /proc broadens the write surface to
+        // every writable /proc/<pid>/* knob. The supervisor gate is the
+        // only place this can be expressed precisely.
         //
         // FsCapability.original is used instead of path_covered_with_access:
         // /proc/self is a symlink to /proc/<pid> which canonicalizes
@@ -1583,20 +1646,17 @@ mod tests {
         assert_eq!(
             proc_self.access,
             AccessMode::Read,
-            "/proc/self must be read-only (writes are scoped to /proc/self/task)"
+            "/proc/self must be read-only; comm writes go through the supervisor"
         );
         assert!(!proc_self.is_file);
 
-        let proc_self_task = find("/proc/self/task").expect(
-            "/proc/self/task must be granted read+write so the NVIDIA driver \
-             can write task/<tid>/comm (CUDA Error 304 root cause)",
+        // Defence-in-depth: /proc/self/task must NOT be granted a separate
+        // Landlock rule. See doc above.
+        assert!(
+            find("/proc/self/task").is_none(),
+            "/proc/self/task must not be granted at the Landlock layer; \
+             the comm write is gated by the supervisor's seccomp-notify path"
         );
-        assert_eq!(
-            proc_self_task.access,
-            AccessMode::ReadWrite,
-            "/proc/self/task must be granted read+write"
-        );
-        assert!(!proc_self_task.is_file);
 
         // Least-privilege regression guard: no parent /proc/driver grant.
         // Only /proc/driver/nvidia and /proc/driver/nvidia-uvm should appear
@@ -1620,6 +1680,134 @@ mod tests {
                 assert_eq!(entry.access, AccessMode::Read);
             }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // maybe_auto_enable_nvidia_cap_elev — the helper that decides
+    // whether `--allow-gpu` should install the seccomp-notify
+    // supervisor for the NVIDIA `task/<tid>/comm` write pattern.
+    // Three-state contract:
+    //   1. NVIDIA active + cap_elev off  → flip on, return true
+    //   2. NVIDIA active + cap_elev on   → no-op, return false
+    //   3. NVIDIA inactive               → no-op, return false (and
+    //      callers must not install the supervisor either)
+    // ─────────────────────────────────────────────────────────────
+
+    #[cfg(test)]
+    fn make_test_prepared(
+        nvidia_procfs_active: bool,
+        capability_elevation: bool,
+    ) -> PreparedSandbox {
+        PreparedSandbox {
+            caps: CapabilitySet::default(),
+            secrets: Vec::new(),
+            profile_display_name: None,
+            command_policies: None,
+            session_hooks: crate::profile::SessionHooks::default(),
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            network_profile: None,
+            allow_domain: Vec::new(),
+            credentials: Vec::new(),
+            custom_credentials: HashMap::new(),
+            credential_capture: HashMap::new(),
+            tls_intercept: None,
+            upstream_proxy: None,
+            upstream_bypass: Vec::new(),
+            listen_ports: Vec::new(),
+            capability_elevation,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
+            #[cfg(target_os = "linux")]
+            af_unix_mediation: crate::profile::LinuxAfUnixMediation::Off,
+            allow_launch_services_active: false,
+            allow_gpu_active: nvidia_procfs_active,
+            nvidia_procfs_active,
+            open_url_origins: Vec::new(),
+            open_url_allow_localhost: false,
+            bypass_protection_paths: Vec::new(),
+            ignored_denial_paths: Vec::new(),
+            suppressed_system_service_operations: Vec::new(),
+            allowed_env_vars: None,
+            denied_env_vars: None,
+            set_vars: None,
+            profile_network_block: false,
+            allow_http2_requested: false,
+        }
+    }
+
+    /// State 1: NVIDIA grants applied AND the user did not opt into
+    /// `--capability-elevation`. The helper must flip cap_elev on and
+    /// return `true`, so the caller threads `auto_capability_elevation =
+    /// true` into `ExecutionFlags` and downstream code swaps to
+    /// `SilentDenyApproval`.
+    #[test]
+    fn maybe_auto_enable_nvidia_cap_elev_flips_when_nvidia_and_no_explicit_opt_in() {
+        let mut prepared = make_test_prepared(true, false);
+        let auto = maybe_auto_enable_nvidia_cap_elev(&mut prepared);
+        // On non-Linux the helper is a no-op (always returns false). Pin
+        // both paths so the contract is exercised on every CI runner.
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                auto,
+                "helper must report it auto-enabled cap_elev for NVIDIA + no opt-in"
+            );
+            assert!(
+                prepared.capability_elevation,
+                "helper must turn capability_elevation on"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(
+                !auto,
+                "non-Linux: helper must not auto-enable (no supervisor pattern there)"
+            );
+            assert!(
+                !prepared.capability_elevation,
+                "non-Linux: capability_elevation must remain off"
+            );
+        }
+    }
+
+    /// State 2: NVIDIA grants applied BUT the user explicitly opted in
+    /// to `--capability-elevation` (or the profile set it). Helper must
+    /// be a no-op AND return `false`, because the caller threading
+    /// `auto_capability_elevation = false` is what keeps
+    /// `TerminalApproval` as the backend — we must not silently demote
+    /// an explicit opt-in to non-interactive denial.
+    #[test]
+    fn maybe_auto_enable_nvidia_cap_elev_noop_when_explicit_cap_elev_already_on() {
+        let mut prepared = make_test_prepared(true, true);
+        let auto = maybe_auto_enable_nvidia_cap_elev(&mut prepared);
+        assert!(
+            !auto,
+            "helper must NOT report auto-enable when cap_elev was already on"
+        );
+        assert!(
+            prepared.capability_elevation,
+            "explicit cap_elev opt-in must be preserved as-is"
+        );
+    }
+
+    /// State 3: NVIDIA grants NOT applied (pure DRM render node / AMD
+    /// KFD / WSL2 dxg `--allow-gpu`, or no `--allow-gpu` at all). Helper
+    /// must be a no-op and return `false`. No supervisor is needed for
+    /// the comm pattern, so paying its per-openat round-trip would be
+    /// wasted overhead.
+    #[test]
+    fn maybe_auto_enable_nvidia_cap_elev_noop_when_no_nvidia() {
+        let mut prepared = make_test_prepared(false, false);
+        let auto = maybe_auto_enable_nvidia_cap_elev(&mut prepared);
+        assert!(
+            !auto,
+            "helper must NOT auto-enable when NVIDIA procfs grants weren't installed"
+        );
+        assert!(
+            !prepared.capability_elevation,
+            "capability_elevation must remain off without NVIDIA"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1989,6 +2177,7 @@ mod tests {
             af_unix_mediation: profile::LinuxAfUnixMediation::default(),
             allow_launch_services_active: false,
             allow_gpu_active: false,
+            nvidia_procfs_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             bypass_protection_paths: Vec::new(),

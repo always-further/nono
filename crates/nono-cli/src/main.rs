@@ -298,6 +298,7 @@ mod tests {
             af_unix_mediation: crate::profile::LinuxAfUnixMediation::Off,
             allow_launch_services_active: false,
             allow_gpu_active: false,
+            nvidia_procfs_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             bypass_protection_paths: Vec::new(),
@@ -356,6 +357,7 @@ mod tests {
             af_unix_mediation: crate::profile::LinuxAfUnixMediation::Off,
             allow_launch_services_active: false,
             allow_gpu_active: false,
+            nvidia_procfs_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             bypass_protection_paths: Vec::new(),
@@ -664,12 +666,16 @@ mod tests {
         // Either outcome is correct. What must NOT happen is an error about
         // /dev/dri specifically, which would break NVIDIA/ROCm-only setups.
         match result {
-            Ok(enabled) => {
-                assert!(enabled, "should be active when devices are found");
+            Ok(activation) => {
+                assert!(activation.active, "should be active when devices are found");
                 assert!(
                     caps.has_fs(),
                     "should have granted fs capabilities for GPU devices"
                 );
+                // `nvidia_procfs_active` is informational: true iff NVIDIA
+                // compute devices were granted. We don't assert either
+                // direction here because CI runners may or may not have
+                // NVIDIA hardware.
             }
             Err(e) => {
                 let msg = e.to_string();

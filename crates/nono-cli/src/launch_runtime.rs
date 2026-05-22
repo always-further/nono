@@ -2,8 +2,8 @@ use crate::cli::RunArgs;
 use crate::config;
 use crate::proxy_runtime::prepare_proxy_launch_options;
 use crate::sandbox_prepare::{
-    PreparedSandbox, prepare_sandbox, print_allow_gpu_warning, print_allow_launch_services_warning,
-    validate_block_net_conflicts,
+    PreparedSandbox, maybe_auto_enable_nvidia_cap_elev, prepare_sandbox, print_allow_gpu_warning,
+    print_allow_launch_services_warning, validate_block_net_conflicts,
 };
 use crate::{exec_strategy, instruction_deny, profile, trust_scan};
 use colored::Colorize;
@@ -209,6 +209,24 @@ pub(crate) struct ExecutionFlags {
     pub(crate) diagnostic_verbosity: u8,
     pub(crate) silent: bool,
     pub(crate) capability_elevation: bool,
+    /// True iff `capability_elevation` was turned on by nono itself (e.g.
+    /// because `--allow-gpu` needs the seccomp-notify supervisor running
+    /// for the `/proc/self/task/<tid>/comm` write pattern, see #924) and
+    /// the user did NOT explicitly request it via `--capability-elevation`
+    /// or `security.capability_elevation: true`. When true, the
+    /// interactive approval backend is replaced with a non-interactive
+    /// deny-all so the supervisor's pattern fast-paths still run but
+    /// unexpected paths don't trigger a prompt.
+    pub(crate) auto_capability_elevation: bool,
+    /// True iff the supervisor is permitted to allow the
+    /// `/proc/<own-tgid>/task/<tid>/comm` write pattern (issue #924).
+    /// Set only when the NVIDIA procfs grants applied (i.e. NVIDIA was
+    /// detected and `--allow-gpu` is in effect). This is intentionally
+    /// independent of `capability_elevation`: a user passing
+    /// `--capability-elevation` without `--allow-gpu` does NOT get the
+    /// comm-write fast-path silently — it is gated to the user's
+    /// declared `--allow-gpu` intent.
+    pub(crate) allow_proc_task_comm_write: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,
     #[cfg(target_os = "linux")]
@@ -242,6 +260,8 @@ impl ExecutionFlags {
             diagnostic_verbosity: 0,
             silent,
             capability_elevation: false,
+            auto_capability_elevation: false,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
             #[cfg(target_os = "linux")]
@@ -322,6 +342,20 @@ pub(crate) fn prepare_run_launch_plan(
         prepared.capability_elevation = true;
     }
 
+    // NVIDIA `--allow-gpu` needs the seccomp-notify supervisor so the
+    // driver's `/proc/self/task/<tid>/comm` write during `cuInit()` can
+    // be allowed by pattern (see `is_proc_task_comm_path` and the 4.5
+    // fast-path in `exec_strategy::supervisor_linux`). The helper auto-
+    // enables `capability_elevation` ONLY when NVIDIA was detected — not
+    // for pure DRM-render-node / AMD-KFD / WSL2-dxg `--allow-gpu` runs
+    // which don't need the broker and shouldn't pay its overhead.
+    //
+    // When the helper auto-enables (user did NOT explicitly opt in to
+    // capability elevation), `SilentDenyApproval` is selected downstream
+    // so the supervisor's pattern fast-paths still run but unexpected
+    // paths fail closed rather than triggering `[nono] Grant access?`.
+    let auto_capability_elevation = maybe_auto_enable_nvidia_cap_elev(&mut prepared);
+
     // On WSL2, seccomp user notification returns EBUSY (microsoft/WSL#9548).
     // Disable features that depend on it and warn the user.
     #[cfg(target_os = "linux")]
@@ -388,6 +422,8 @@ pub(crate) fn prepare_run_launch_plan(
             diagnostic_verbosity: args.verbose,
             silent,
             capability_elevation: prepared.capability_elevation,
+            auto_capability_elevation,
+            allow_proc_task_comm_write: prepared.nvidia_procfs_active,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: prepared.wsl2_proxy_policy,
             #[cfg(target_os = "linux")]

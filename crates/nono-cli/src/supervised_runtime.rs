@@ -245,11 +245,25 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     }
 
     let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
-    let approval_backend = terminal_approval::TerminalApproval;
+    // When capability_elevation was auto-enabled (e.g. by `--allow-gpu` so
+    // the seccomp-notify supervisor can gate `task/<tid>/comm` writes —
+    // see #924), the user did NOT opt into interactive approval prompts.
+    // Use a non-interactive deny-all backend so the supervisor's pattern
+    // fast-paths still run but any path falling through to the approval
+    // step fails closed instead of prompting `[nono] Grant access? [y/N]`.
+    let interactive_approval: terminal_approval::TerminalApproval =
+        terminal_approval::TerminalApproval;
+    let silent_approval: terminal_approval::SilentDenyApproval =
+        terminal_approval::SilentDenyApproval;
+    let approval_backend: &dyn nono::ApprovalBackend = if ctx.config.auto_capability_elevation {
+        &silent_approval
+    } else {
+        &interactive_approval
+    };
     let supervisor_session_id = build_supervisor_session_id(audit_state.as_ref());
     let supervisor_cfg = exec_strategy::SupervisorConfig {
         protected_roots: protected_roots.as_paths(),
-        approval_backend: &approval_backend,
+        approval_backend,
         session_id: &supervisor_session_id,
         attach_initial_client: !session.detached_start,
         detach_sequence: session.detach_sequence.as_deref(),
@@ -268,6 +282,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
             .and_then(|p| p.open_url.as_ref())
             .map(|o| o.allow_launch_services)
             .unwrap_or(false),
+        allow_proc_task_comm_write: ctx.config.allow_proc_task_comm_write,
         #[cfg(target_os = "linux")]
         proxy_port: match caps.network_mode() {
             nono::NetworkMode::ProxyOnly { port, .. } => *port,

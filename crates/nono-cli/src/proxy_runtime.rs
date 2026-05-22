@@ -2663,6 +2663,7 @@ mod tests {
             af_unix_mediation: crate::profile::LinuxAfUnixMediation::Off,
             allow_launch_services_active: false,
             allow_gpu_active: false,
+            nvidia_procfs_active: false,
             open_url_origins: Vec::new(),
             open_url_allow_localhost: false,
             bypass_protection_paths: Vec::new(),
