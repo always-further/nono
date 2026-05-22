@@ -17,8 +17,8 @@ Plans:
 - [x] 50-02-PLAN.md — Wave 1 production code: UreqTransport + tough RepositoryLoader chain-walk (SPEC-50-REQ-1, 2, 3, 4)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 50-03-PLAN.md — Wave 2 call-site swap in setup.rs preserving tokio runtime + cache contract (SPEC-50-REQ-1, 4)
-- [ ] 50-04-PLAN.md — Wave 2 hermetic test suite: StaticMapTransport + 4 tests (SPEC-50-REQ-3, 4, 5)
+- [x] 50-03-PLAN.md — Wave 2 call-site swap in setup.rs preserving tokio runtime + cache contract (SPEC-50-REQ-1, 4)
+- [x] 50-04-PLAN.md — Wave 2 hermetic test suite: StaticMapTransport + 4 tests (SPEC-50-REQ-3, 4, 5)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 50-05-PLAN.md — Wave 3 HUMAN-UAT + windows-poc-handoff doc update + cross-target clippy (SPEC-50-REQ-5, 6)
