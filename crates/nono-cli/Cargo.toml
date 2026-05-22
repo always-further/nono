@@ -70,6 +70,42 @@ sigstore-sign = "0.7.0"
 serde_yaml_ng = "=0.10.0"
 tokio = { version = "1", features = ["rt", "net", "io-util"] }
 
+# Phase 50 D-50-05: promoted from transitive (via sigstore-trust-root 0.7.0 ->
+# tough 0.22.0 in Cargo.lock) to direct dep so we can call
+# `tough::RepositoryLoader` with our own `Transport` impl that consults the
+# Windows certificate store. Version pin matches the existing lockfile entry
+# to avoid a second copy.
+tough = "0.22"
+
+# Phase 50 (Codex R-50-01): direct dep so `crates/nono-cli/src/trust_refresh.rs`
+# can import `PRODUCTION_TUF_ROOT`, `DEFAULT_TUF_URL`, and `TRUSTED_ROOT_TARGET`
+# consts (D-50-06). Already in Cargo.lock at 0.7.0 via sigstore-sign's
+# transitive graph; this just promotes the edge. Exact-minor pin "0.7.0"
+# locks us to the same release Plan 02's source-level imports are written
+# against — looser ranges could break the import surface on a minor bump.
+sigstore-trust-root = "0.7.0"
+
+# Phase 50 (Codex R-50-01): direct dep so the `#[async_trait]` attribute
+# macro is resolvable in `crates/nono-cli/src/trust_refresh.rs`'s
+# `impl Transport for UreqTransport`. Tough's `Transport` trait is itself
+# `#[async_trait]`-decorated; downstream impls require the macro at their
+# call site. Already in Cargo.lock at 0.1.89 (tough's own transitive dep).
+async-trait = "0.1"
+
+# Phase 50 (Codex R-50-01): direct dep for `bytes::Bytes` which is the item
+# type of `tough::TransportStream`'s underlying `futures::Stream`. Used
+# both in `UreqTransport::fetch` (production) and in the
+# `StaticMapTransport` test seam (Plan 04). Already in Cargo.lock at
+# 1.11.1 (tough + h2 transitive dep).
+bytes = "1"
+
+# Phase 50 (Codex R-50-01): direct dep for `futures::stream` (specifically
+# `stream::iter` to wrap a single Vec<u8> chunk into a `TransportStream`
+# for the tough trait return type). Used in `UreqTransport::fetch`
+# (production) and `StaticMapTransport` test seam. Already in Cargo.lock
+# at 0.3.32.
+futures = "0.3"
+
 ureq = { version = "3", features = ["platform-verifier"] }
 semver = "1"
 regress = "0.11"

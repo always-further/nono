@@ -2264,7 +2264,9 @@ dependencies = [
 name = "nono-cli"
 version = "0.53.0"
 dependencies = [
+ "async-trait",
  "aws-lc-rs",
+ "bytes",
  "chrono",
  "clap",
  "clap_complete",
@@ -2272,6 +2274,7 @@ dependencies = [
  "dirs",
  "dns-lookup",
  "ferrisetw",
+ "futures",
  "getrandom 0.4.2",
  "httpmock",
  "ignore",
@@ -2293,12 +2296,14 @@ dependencies = [
  "sha2 0.11.0",
  "shlex",
  "sigstore-sign",
+ "sigstore-trust-root",
  "similar",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
+ "tough",
  "tracing",
  "tracing-subscriber",
  "ureq",
