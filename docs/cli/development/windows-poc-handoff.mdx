@@ -43,7 +43,11 @@ Result: `target\release\nono.exe`.
 
 ### Option C: Versioned MSI for POC users
 
-Per-user is the right choice for a POC — no admin install, no machine-wide footprint, no service registration to undo.
+Option C has two sub-paths depending on whether your POC users need WFP-backed network filtering. Pick C.1 (per-user) if filesystem sandboxing is enough; pick C.2 (machine) if your users need `--block-net`, `--network-profile`, or `--allow-domain`.
+
+#### Sub-path C.1 — Per-user MSI (no WFP)
+
+Use this if your POC users only need filesystem sandboxing — no `--block-net`, no `--network-profile`, no `--allow-domain`. Per-user is the simpler choice: no admin install, no machine-wide footprint, no service registration to undo.
 
 ```powershell
 # Build BOTH binaries for the explicit Windows MSVC target. nono-shell-broker.exe
@@ -63,9 +67,43 @@ cargo build --release --target x86_64-pc-windows-msvc -p nono-cli -p nono-shell-
 
 Output: `dist\windows\nono-v0.37.1-poc.1-x86_64-pc-windows-msvc-user.msi`.
 
-<Warning>
-The **machine** MSI (`-Scope machine`) registers `nono-wfp-service` only when you explicitly pass `-ServiceBinaryPath .\target\x86_64-pc-windows-msvc\release\nono-wfp-service.exe`. The release build DOES produce that binary (`make build-release-cli` → `cargo build --release -p nono-cli`), but the MSI script defaults `-ServiceBinaryPath` to empty — so a machine MSI built without that flag installs successfully but never registers the WFP service. Stay on `-Scope user` for the POC; per-user is the right choice anyway (no admin install, no service to undo).
-</Warning>
+#### Sub-path C.2 — Machine MSI (with WFP backend)
+
+Use this if your POC users need WFP-enforced network filtering (`--block-net`, `--network-profile`, `--allow-domain`) or if the agent will issue requests that exercise the WFP runtime activation path. Requires admin install.
+
+```powershell
+# Build all three binaries for the explicit Windows MSVC target. The machine MSI
+# bundles nono-wfp-service.exe alongside nono.exe and the broker; the pre-signed
+# kernel driver (nono-wfp-driver.sys) is sourced from the checked-in copy under
+# crates\nono-cli\data\windows\ (see driver-source note below).
+cargo build --release --target x86_64-pc-windows-msvc -p nono-cli -p nono-shell-broker -p nono-wfp-service
+
+# Machine MSI — must pass BOTH -ServiceBinaryPath AND -DriverBinaryPath.
+# The build-windows-msi.ps1 scope-coherence guard throws if you pass one without
+# the other (a half-installed WFP backend is worse than none).
+.\scripts\build-windows-msi.ps1 `
+  -VersionTag v0.37.1-poc.1 `
+  -BinaryPath .\target\x86_64-pc-windows-msvc\release\nono.exe `
+  -BrokerPath .\target\x86_64-pc-windows-msvc\release\nono-shell-broker.exe `
+  -ServiceBinaryPath .\target\x86_64-pc-windows-msvc\release\nono-wfp-service.exe `
+  -DriverBinaryPath .\crates\nono-cli\data\windows\nono-wfp-driver.sys `
+  -Scope machine `
+  -OutputDir dist\windows
+```
+
+Output: `dist\windows\nono-v0.37.1-poc.1-x86_64-pc-windows-msvc-machine.msi`.
+
+**Driver source — important:** `-DriverBinaryPath` points to the checked-in pre-signed copy at `crates\nono-cli\data\windows\nono-wfp-driver.sys`, **NOT** the `target\x86_64-pc-windows-msvc\release\nono-wfp-driver.sys` dev build artifact. Windows refuses to load unsigned kernel drivers in production; the checked-in copy is the WHQL-signed distribution artifact, and the `target/` copy is a dev convenience that is not WHQL-signed. The CI/release pipeline uses this same convention.
+
+After installing this MSI, POC users must run a one-time post-install registration command — see Step 3.
+
+<Note>
+**Per-user vs machine MSI tradeoff.** Per-user is simpler (no admin install, no service to undo) but deliberately excludes the WFP backend because (a) the kernel driver cannot load from per-user `LocalAppData`, and (b) the LocalSystem WFP service requires admin install. The user-scope MSI is fail-closed-by-design on the WFP runtime activation path — runtime probes in `exec_strategy_windows::network::probe_wfp_runtime` surface a directive message rather than silently dropping enforcement.
+
+The official release MSI (downloaded from GitHub Releases) is pre-built for both scopes — the CI pipeline passes `-ServiceBinaryPath` AND `-DriverBinaryPath` together for the machine build. Local machine-MSI builds must pass both flags together (the `build-windows-msi.ps1` scope-coherence guard throws on XOR).
+
+The machine MSI lands `nono-wfp-service.exe` and `nono-wfp-driver.sys` at `[InstallFolder]`, but kernel driver registration is **not** done by the MSI itself — WiX's `<ServiceInstall>` cannot represent `SERVICE_KERNEL_DRIVER`. The CLI completes registration post-install via `nono setup --install-wfp-driver`. See Step 3 for the post-install command sequence.
+</Note>
 
 If you want a portable archive instead of MSI:
 
@@ -107,9 +145,27 @@ What you should see (paraphrased from a real run on a Standard User session):
 - `nono binary found at <path>`, `Version: 0.37.x`, `Platform: Windows (restricted execution)`
 - `Support status: supported`
 - `Job Object creation: OK`, `Token Integrity level support: OK`, `BFE service status: OK`
-- `WFP readiness: missing binary` — **expected** for the POC. The `claude-code` profile does not require WFP; this only matters for domain-level network filtering, which is out of scope for the POC.
+- `WFP readiness:` — the expected value depends on which install path you chose in Step 1:
+  - **Per-user MSI / portable zip:** `WFP readiness: missing binary` is the expected state. WFP-backed network filtering (`--block-net`, `--network-profile`, `--allow-domain`) is intentionally unsupported on this install path — the kernel driver and the LocalSystem service cannot ship to per-user `LocalAppData`. The runtime fail-closes with a directive message if WFP activation is attempted.
+  - **Machine MSI (fresh install, before post-install setup):** `WFP readiness: missing service` (or `missing driver`) is the expected state. The MSI landed both `nono-wfp-service.exe` and `nono-wfp-driver.sys` at `[InstallFolder]`, but kernel driver registration happens post-install via the CLI. Run the four-command setup sequence below.
+  - **Machine MSI (after running post-install setup):** `WFP readiness: ok`. Network filtering shapes (`--block-net`, `--network-profile`, `--allow-domain`) are live.
 - `35 sensitive paths blocked by default`, `26 dangerous commands blocked by default`
 - `claude-code` listed under built-in profiles.
+
+### Post-install WFP registration (machine MSI only)
+
+If you installed the machine MSI and need WFP-backed network filtering, run the four registration commands once from an **elevated** PowerShell prompt:
+
+```powershell
+# Admin PowerShell, one-time after machine MSI install:
+nono setup --install-wfp-service --install-wfp-driver --start-wfp-driver --start-wfp-service
+```
+
+What this does: the MSI lands `nono-wfp-service.exe` and `nono-wfp-driver.sys` at `[InstallFolder]`, but kernel driver registration requires `sc create ... type=kernel` (`SERVICE_KERNEL_DRIVER`), which WiX's `<ServiceInstall>` directive cannot represent. The CLI performs that registration here. `--install-wfp-service` and `--install-wfp-driver` register both components with SCM; `--start-wfp-driver` and `--start-wfp-service` start them.
+
+Skip this if `nono setup --check-only` already reports `WFP readiness: ok`. If you are on the per-user MSI or the portable zip, this sequence is not applicable — the binaries are not installed and the registration commands will fail with a missing-binary diagnostic. Install the machine MSI first.
+
+Subsequent `nono setup --check-only` runs should report `WFP readiness: ok` and the WFP service registered + running.
 
 ### One-time fix: `.claude.json` symlink warning
 
@@ -506,13 +562,14 @@ Drop the table below into the README you ship alongside the MSI. These are the i
 
 | Item | What to tell users |
 |------|---|
-| Install | `msiexec /i nono-vX-x86_64-pc-windows-msvc-user.msi`, then open a fresh PowerShell |
+| Install (per-user) | `msiexec /i nono-vX-x86_64-pc-windows-msvc-user.msi` (no admin prompt), then open a fresh PowerShell. Use this if your users do not need WFP-backed network filtering. |
+| Install (machine, with WFP) | `msiexec /i nono-vX-x86_64-pc-windows-msvc-machine.msi` (admin prompt — UAC will ask for elevation), then from an elevated PowerShell run the one-time post-install registration sequence: `nono setup --install-wfp-service --install-wfp-driver --start-wfp-driver --start-wfp-service`. After that, open a fresh PowerShell. Use this if your users need `--block-net`, `--network-profile`, or `--allow-domain`. |
 | First-time symlink warning | Enable Developer Mode (`Settings → System → For developers`) **or** run `nono setup` once as admin to create the symlink. Benign if skipped, but token refresh writes leak outside `~/.claude\`. |
 | Non-TUI commands (cargo, npm, scripts) | `nono run --profile claude-code -- <command>` is the supported invocation for non-interactive children |
 | Quick verification | `nono run --profile claude-code -- claude --version` exercises the full sandbox + profile path without needing a TUI |
 | TUI agents (claude, codex, etc.) | `nono shell --profile claude-code --allow-cwd`, then run `claude` (or other TUI) inside. The broker-process architecture (Phase 31, validated 2026-05-09) delivers full TUI rendering with OS-level mandatory-label `NO_WRITE_UP` write-deny intact. See [Windows `nono shell` — security envelope](#windows-nono-shell--security-envelope-phase-31-validated-2026-05-09) for the security model and what's enforced vs. defense-in-depth. |
-| Triage payload on a bug | Exact command line, full stdout, full stderr, `nono --version`, `claude --version`, `nono setup --check-only` output, Windows build (`(Get-CimInstance Win32_OperatingSystem).BuildNumber` or `[Environment]::OSVersion.Version.Build`), whether WFP was reported missing. |
-| Not yet supported on this build | Domain-level network filtering (`--network-profile`, `--allow-domain`) — needs WFP service, which the per-user MSI does not ship today. Use `--block-net` for offline or unrestricted network for online. (`nono shell` per-session WFP differentiation is waived on the broker path; falls back to AppID-based filtering — see security envelope above.) |
+| Triage payload on a bug | Exact command line, full stdout, full stderr, `nono --version`, `claude --version`, `nono setup --check-only` output (including the `WFP readiness:` line and which install path they used), Windows build (`(Get-CimInstance Win32_OperatingSystem).BuildNumber` or `[Environment]::OSVersion.Version.Build`). |
+| Not yet supported on this build | Per-user MSI deliberately excludes WFP (kernel driver cannot load from per-user `LocalAppData`; LocalSystem service requires admin install). For `--block-net`, `--network-profile`, or `--allow-domain`, install the machine MSI and run the post-install registration commands (see Step 3). `nono shell` per-session WFP differentiation remains waived on the broker path; falls back to AppID-based filtering — see security envelope above. |
 | Uninstall | Apps & Features → "nono" → Uninstall (MSI). For zip: delete the extracted directory and remove from PATH. |
 
 ## Step 7 — Loop yourself before shipping
