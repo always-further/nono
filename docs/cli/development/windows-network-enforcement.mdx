@@ -128,6 +128,8 @@ That keeps setup, readiness, and live WFP activation failures aligned without fa
 
 When the service and driver both probe as present, the Windows runtime performs backend activation by running `nono-wfp-service --probe-runtime-activation` with a JSON activation request over stdio. The runtime request now covers `activate_blocked_mode`, `activate_proxy_mode`, and `activate_allow_all_mode` with port restrictions.
 
+How the service and driver reach "probe as present": the machine MSI ships both `nono-wfp-service.exe` and `nono-wfp-driver.sys` to `[InstallFolder]` at install time. The operator then runs `nono setup --install-wfp-service --install-wfp-driver --start-wfp-service --start-wfp-driver` once from an elevated PowerShell prompt to register both with SCM (the kernel driver via `sc create ... type=kernel`, which the MSI cannot represent itself). The user MSI deliberately omits both binaries — kernel driver cannot load from per-user `LocalAppData` and the LocalSystem service requires admin install — so probes against a user-scope install report `missing binary` by design.
+
 That service-owned workflow now:
 - validates the request kind and protocol version
 - re-checks local backend layout inside the service host
@@ -195,7 +197,7 @@ The first real probing layer is now in place for that scaffold:
   - `missing driver binary`
   - `driver not registered`
   - `driver stopped`
-- because this branch still does not install the backend service or driver, current post-build probe results land on those service/driver readiness failures rather than a working backend
+- because this branch still does not install the backend service or driver automatically on every install path, current post-build probe results land on those service/driver readiness failures rather than a working backend — unless the operator has run the four-command post-install registration sequence (`nono setup --install-wfp-service --install-wfp-driver --start-wfp-service --start-wfp-driver`) on a machine MSI install
 
 ## Real Blockers
 

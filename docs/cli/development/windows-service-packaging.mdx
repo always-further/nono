@@ -1,13 +1,13 @@
 ---
 title: Windows Service Packaging
-description: Planned Windows WFP service packaging contract for a future machine-MSI path
+description: Windows WFP service and kernel-driver packaging contract for the machine-MSI release path
 ---
 
 # Windows Service Packaging
 
-This document describes the intended Windows service-packaging contract for `nono-wfp-service` if and when service-capable packaging is promoted into the supported machine-MSI release path.
+This document describes the Windows service-and-driver packaging contract for `nono-wfp-service` and `nono-wfp-driver.sys` as shipped in the supported machine-MSI release path.
 
-This is not the current default release contract. The current public Windows artifact set is still `nono.exe` plus the machine/user MSI and zip packaging described in the [Windows Installer Strategy](/cli/development/windows-installer-strategy).
+The machine-scope MSI (`nono-vX.Y.Z-x86_64-pc-windows-msvc-machine.msi`) bundles both binaries alongside `nono.exe` at `[InstallFolder]` (typically `C:\Program Files\nono\`). The user-scope MSI (`...-user.msi`) deliberately omits both — see [Windows Installer Strategy](/cli/development/windows-installer-strategy) for the full scope model, and the "Machine MSI only" section below for why.
 
 ## What is nono-wfp-service
 
@@ -15,7 +15,7 @@ This is not the current default release contract. The current public Windows art
 It is a demand-start service: the SCM registers it at install time but does not start it
 automatically at boot. nono starts it on demand when network blocking is requested.
 
-If service packaging is enabled in a future machine MSI, the service binary would be installed alongside `nono.exe` in the nono install folder (typically `C:\Program Files\nono\`).
+The machine MSI installs the service binary alongside `nono.exe` in the nono install folder (typically `C:\Program Files\nono\`).
 
 > **Note:** The current service runtime is a placeholder. The binary installs the WFP
 > service contract and the first user-mode WFP primitives, but the full service backend is
@@ -24,11 +24,14 @@ If service packaging is enabled in a future machine MSI, the service binary woul
 
 ## Machine MSI only
 
-Service registration would be included only in the machine-scoped MSI if that packaging path is enabled. The machine MSI runs with admin elevation — the natural fit for a `LocalSystem` service registration.
+The machine MSI ships both the user-mode service binary (`nono-wfp-service.exe`) and the pre-signed kernel driver (`nono-wfp-driver.sys`) at `[InstallFolder]`. Service registration follows a two-step model:
 
-The user-scoped MSI (`nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`) does not register the
-service and installs only `nono.exe`. A user install cannot register system services without
-elevation; using the machine MSI is required for service-backed network enforcement.
+1. **User-mode service:** The MSI's `<ServiceInstall>` directive registers `nono-wfp-service` with the Service Control Manager (SCM) as demand-start under `LocalSystem` at install time. No CLI action is needed for this step — the MSI handles it.
+2. **Kernel driver:** The MSI lands `nono-wfp-driver.sys` at `[InstallFolder]` but does not register it. WiX's `<ServiceInstall>` directive can only model user-mode services and cannot express `SERVICE_KERNEL_DRIVER`. The CLI command `nono setup --install-wfp-driver` completes registration post-install via `sc create ... type=kernel`. POC operators run this once from an elevated PowerShell prompt; the full post-install sequence is documented in the [Windows POC Handoff Cookbook § Post-install WFP registration](/cli/development/windows-poc-handoff#post-install-wfp-registration-machine-msi-only).
+
+The machine MSI runs with admin elevation — the natural fit for both the `LocalSystem` service registration done by the MSI itself and the kernel-driver registration done by the CLI command.
+
+The user-scoped MSI (`nono-vX.Y.Z-x86_64-pc-windows-msvc-user.msi`) deliberately omits **both** `nono-wfp-service.exe` and `nono-wfp-driver.sys`. The kernel driver cannot load from per-user `LocalAppData` and a `LocalSystem` service registration is not possible without admin elevation; shipping the binaries to user scope would produce an MSI that installs successfully but fails at runtime. The runtime probe in `exec_strategy_windows::network::probe_wfp_runtime` fail-closes with a directive message if WFP runtime activation is attempted from a user-scope install. Using the machine MSI is required for service-backed network enforcement.
 
 See [Windows Installer Strategy](/cli/development/windows-installer-strategy) for the full
 scope model.
@@ -49,7 +52,7 @@ attributes:
 
 ## Verifying service registration after install
 
-If service packaging is enabled, after installing the machine MSI confirm the service is registered:
+After installing the machine MSI, confirm the user-mode service is registered:
 
 ```powershell
 Get-Service -Name nono-wfp-service
@@ -68,7 +71,7 @@ Expected fields include `SERVICE_NAME: nono-wfp-service` and `START_TYPE: 3 DEMA
 
 ## Upgrade lifecycle
 
-If service packaging is enabled, then when upgrading to a newer machine MSI:
+When upgrading to a newer machine MSI:
 
 1. The MSI install sequence stops the running `nono-wfp-service` before replacing files.
 2. The old service binary (`nono-wfp-service.exe`) is replaced with the new version.
@@ -89,7 +92,7 @@ returns an error, see Troubleshooting below.
 
 ## Uninstall lifecycle
 
-If service packaging is enabled, then when uninstalling the machine MSI through Apps & Features:
+When uninstalling the machine MSI through Apps & Features:
 
 1. The MSI install sequence stops the running `nono-wfp-service`.
 2. The MSI removes the service entry from SCM.
@@ -174,9 +177,9 @@ Then re-run the upgrade MSI to re-register the service cleanly.
 
 ## Relationship to the RC checklist
 
-If service packaging becomes part of a future Windows release candidate, verify the service lifecycle in the [Windows Release Candidate Checklist](/cli/development/windows-release-candidate-checklist):
+Verify the service lifecycle in the [Windows Release Candidate Checklist](/cli/development/windows-release-candidate-checklist):
 
-- **Packaging Gate** — machine MSI installs `nono-wfp-service.exe` alongside `nono.exe`
+- **Packaging Gate** — machine MSI installs `nono-wfp-service.exe` and `nono-wfp-driver.sys` alongside `nono.exe`
 - **Upgrade and Uninstall Gate** — after upgrade: no duplicate service entry; after
   uninstall: `Get-Service` returns no entry for `nono-wfp-service`
 
@@ -184,6 +187,6 @@ If service packaging becomes part of a future Windows release candidate, verify 
 
 - **Automatic start at boot** — the service is demand-start. Auto-start will be reconsidered
   when the full WFP backend ships.
-- **Driver packaging (`nono-wfp-driver.sys`)** — the driver artifact is not part of the current public MSI release contract. The service already fails closed when the driver is absent.
+- **Automatic driver registration by the MSI** — the machine MSI bundles `nono-wfp-driver.sys` but does not register it as a kernel-mode service. Registration is a post-install step via `nono setup --install-wfp-driver` (see "Machine MSI only" above). A WiX `CustomAction` to invoke the CLI command at `InstallFinalize` may be added in a future release once the post-install path is empirically stable.
 - **User MSI service registration** — the user MSI does not register the service.
   Per-user service install requires elevated permissions not compatible with a user install.
