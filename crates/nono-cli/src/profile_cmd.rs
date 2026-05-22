@@ -2250,7 +2250,7 @@ fn resolve_validate_target(input: &std::path::Path) -> std::path::PathBuf {
     let Some(name) = input.to_str() else {
         return input.to_path_buf();
     };
-    if name.contains('/') || name.ends_with(".json") || name.ends_with(".jsonc") {
+    if profile::is_file_path_ref(name) {
         return input.to_path_buf();
     }
     if let Ok(p) = profile::resolve_user_profile_path(name)

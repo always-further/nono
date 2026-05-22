@@ -1722,8 +1722,8 @@ pub struct RunArgs {
     #[arg(long, env = "NONO_CAPABILITY_ELEVATION", help_heading = "OPTIONS")]
     pub capability_elevation: bool,
 
-    /// Command to run inside the sandbox
-    #[arg(required = true, hide = true)]
+    /// Command to run inside the sandbox (optional if profile specifies `binary`)
+    #[arg(hide = true)]
     pub command: Vec<String>,
 
     /// Print help
