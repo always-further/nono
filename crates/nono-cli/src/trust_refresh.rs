@@ -154,18 +154,24 @@ fn build_corp_friendly_agent() -> Agent {
 }
 
 /// Inner helper: everything that runs AFTER the datastore directory has
-/// been created. Used by `refresh_production_trusted_root` so we have a
-/// single `Result` to match against for the broadened cleanup path
+/// been created. Used by `refresh_trusted_root_with_transport` so we have
+/// a single `Result` to match against for the broadened cleanup path
 /// (Codex R-50-05 / D-50-07 literal semantics).
 ///
+/// Phase 50 Plan 04 (Task 1): generalized to take `embedded_root: &[u8]`
+/// and an arbitrary `Transport` impl so the test seam can substitute the
+/// fixture's `1.root.json` and an in-memory `StaticMapTransport` while
+/// driving the SAME chain-walk body production uses (D-50-08).
+///
 /// Returns `Result<TrustedRoot>` — the caller is responsible for cleanup.
-async fn do_refresh_after_datastore_create(
+async fn do_refresh_after_datastore_create_with_root(
     metadata_url: Url,
     targets_url: Url,
     datastore_dir: PathBuf,
-    transport: UreqTransport,
+    transport: impl Transport + 'static,
+    embedded_root: &[u8],
 ) -> Result<TrustedRoot> {
-    let repo = RepositoryLoader::new(&PRODUCTION_TUF_ROOT, metadata_url, targets_url)
+    let repo = RepositoryLoader::new(&embedded_root, metadata_url, targets_url)
         .transport(transport)
         .datastore(datastore_dir)
         .load()
@@ -195,6 +201,66 @@ async fn do_refresh_after_datastore_create(
         .map_err(|e| NonoError::Setup(format!("parse trusted_root.json: {e}")))
 }
 
+/// Phase 50 Plan 04 Task 1: wider injectable seam.
+///
+/// Wraps `do_refresh_after_datastore_create_with_root` with the
+/// datastore-creation + broadened-cleanup pattern (R-50-05). Public to
+/// the crate so the colocated test module (`mod tests`) can drive the
+/// SAME chain-walk logic production uses, just with a swapped transport,
+/// URLs, datastore, and embedded root anchor.
+///
+/// Production callers go through `refresh_production_trusted_root` which
+/// composes the production values; tests construct each parameter
+/// explicitly so the chain-walk is exercised hermetically.
+///
+/// # Errors
+///
+/// `NonoError::Setup` for all TUF / transport / parse failures. Best-effort
+/// cleanup of `datastore_dir` is performed on ANY failure path after
+/// `create_dir_all` succeeds.
+pub(crate) async fn refresh_trusted_root_with_transport(
+    transport: impl Transport + 'static,
+    metadata_url: Url,
+    targets_url: Url,
+    datastore_dir: PathBuf,
+    embedded_root: &[u8],
+) -> Result<TrustedRoot> {
+    // TUF datastore dir (D-50-07). tough requires this to exist BEFORE
+    // .load() is called (Pitfall 2; tough-0.22.0/src/lib.rs:228-231).
+    tokio::fs::create_dir_all(&datastore_dir)
+        .await
+        .map_err(|e| {
+            NonoError::Setup(format!(
+                "create tuf-cache dir {}: {e}",
+                datastore_dir.display()
+            ))
+        })?;
+
+    // Drive the TUF chain walk + signature verification (all in tough),
+    // then fetch + parse the trusted_root.json target. ALL of this is
+    // inside the inner helper so we have a single Result to capture for
+    // the broadened cleanup path (Codex R-50-05).
+    let datastore_for_cleanup = datastore_dir.clone();
+    let result = do_refresh_after_datastore_create_with_root(
+        metadata_url,
+        targets_url,
+        datastore_dir,
+        transport,
+        embedded_root,
+    )
+    .await;
+
+    // Broadened cleanup (D-50-07 + Codex R-50-05): on ANY error from the
+    // inner helper — TUF load, read_target, IntoVec, UTF-8, or
+    // TrustedRoot::from_json — best-effort remove the datastore so we
+    // don't leave partial state on disk. Cleanup result is ignored;
+    // the primary error is what surfaces to the user.
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&datastore_for_cleanup);
+    }
+    result
+}
+
 /// Refresh the Sigstore production trusted root by walking the TUF chain
 /// from the embedded v14 anchor (`sigstore_trust_root::PRODUCTION_TUF_ROOT`)
 /// to the current head at `https://tuf-repo-cdn.sigstore.dev/`, using an
@@ -217,6 +283,23 @@ async fn do_refresh_after_datastore_create(
 // it. The `#[allow(dead_code)]` is removed at that point.
 #[allow(dead_code)]
 pub async fn refresh_production_trusted_root() -> Result<TrustedRoot> {
+    // Phase 50 Plan 04 Task 1 (Codex R-50-07): test-only env-seam.
+    //
+    // When `NONO_TEST_TUF_FIXTURE` is set in `#[cfg(test)]` builds, redirect
+    // to a hermetic StaticMapTransport wired against the named fixture so
+    // tests can exercise THIS public wrapper (not just the internal helper).
+    // This validates URL composition, agent type, datastore resolution, and
+    // delegation to `refresh_trusted_root_with_transport` at the integration
+    // boundary — the gap R-50-07 flagged.
+    //
+    // The entire `if let Ok(...)` block is stripped from release builds by
+    // `#[cfg(test)]`, so the env var is unreadable in production and there
+    // is zero runtime overhead in `cargo build --release`.
+    #[cfg(test)]
+    if let Ok(fixture_name) = std::env::var("NONO_TEST_TUF_FIXTURE") {
+        return tests::refresh_via_fixture_env_seam(&fixture_name).await;
+    }
+
     // 1. URL setup (mirror sigstore-trust-root tuf.rs:350-354).
     let base_url = Url::parse(DEFAULT_TUF_URL)
         .map_err(|e| NonoError::Setup(format!("invalid Sigstore TUF URL: {e}")))?;
@@ -225,42 +308,27 @@ pub async fn refresh_production_trusted_root() -> Result<TrustedRoot> {
         .join("targets/")
         .map_err(|e| NonoError::Setup(format!("invalid Sigstore targets URL: {e}")))?;
 
-    // 2. TUF datastore dir (D-50-07). tough requires this to exist BEFORE
-    //    .load() is called (Pitfall 2; tough-0.22.0/src/lib.rs:228-231).
+    // 2. TUF datastore dir (D-50-07).
     let datastore_dir = crate::config::nono_home_dir()
         .map_err(|e| NonoError::Setup(format!("resolve nono home dir: {e}")))?
         .join(".nono")
         .join("trust-root")
         .join("tuf-cache");
-    tokio::fs::create_dir_all(&datastore_dir)
-        .await
-        .map_err(|e| {
-            NonoError::Setup(format!(
-                "create tuf-cache dir {}: {e}",
-                datastore_dir.display()
-            ))
-        })?;
 
     // 3. Build agent + transport.
     let agent = build_corp_friendly_agent();
     let transport = UreqTransport { agent };
 
-    // 4. Drive the TUF chain walk + signature verification (all in tough),
-    //    then fetch + parse the trusted_root.json target. ALL of this is
-    //    inside the inner helper so we have a single Result to capture for
-    //    the broadened cleanup path (Codex R-50-05).
-    let datastore_for_cleanup = datastore_dir.clone();
-    let result =
-        do_refresh_after_datastore_create(metadata_url, targets_url, datastore_dir, transport)
-            .await;
-
-    // 5. Broadened cleanup (D-50-07 + Codex R-50-05): on ANY error from the
-    //    inner helper — TUF load, read_target, IntoVec, UTF-8, or
-    //    TrustedRoot::from_json — best-effort remove the datastore so we
-    //    don't leave partial state on disk. Cleanup result is ignored;
-    //    the primary error is what surfaces to the user.
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&datastore_for_cleanup);
-    }
-    result
+    // 4. Delegate to the wider seam (Plan 04 Task 1). Production passes the
+    //    embedded `PRODUCTION_TUF_ROOT` const as the anchor; tests pass a
+    //    fixture's `1.root.json`. The seam owns datastore creation + the
+    //    R-50-05 broadened cleanup path.
+    refresh_trusted_root_with_transport(
+        transport,
+        metadata_url,
+        targets_url,
+        datastore_dir,
+        PRODUCTION_TUF_ROOT,
+    )
+    .await
 }
