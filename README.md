@@ -28,28 +28,23 @@
 ---
 </div>
 
-
-<div align="center">
-
-<img src="assets/term.gif" alt="nono terminal demo" width="800"/>
-
-</div>
-
 > [!NOTE]
 > In the lead-up to a 1.0 release, APIs are stabilizing. API changes may still occur where necessary, but will be kept to a minimum.
 
+nono is a capability-based, policy-governed runtime for AI agents.
 
-Most sandboxes feel like sandboxes. Rigid, sluggish, and designed for a different problem entirely. nono was built from the ground up for AI agents - and the developer workflows they need to thrive - agent multiplexing, snapshots, credential injection, supply chain security out of the box. Develop alongside nono, then deploy anywhere: CI pipelines, Kubernetes, cloud VMs, microVMs. The one stop shop for all your clankers.
+It gives a process narrowly scoped access to the host resources it actually needs: specific paths, network destinations, sockets, environment variables, credentials, and operations. Policies are explicit, composable, auditable, and enforced by kernel primitives.
+
+nono fits the space between "run the agent directly on my machine with full access to keys and files" and "seal it inside a separate guest OS." Agents work inside real development environments, with host resources modeled as explicit capabilities.
+
+A profile states what the agent may touch, and nono applies it. The core library is policy-free: it applies only the capabilities a caller provides. The CLI, profiles, and registry packages carry the policy - and all inbuilt policy can be extended or overridden, since policy is fully composable.
+
+For organizations, that means policy can be reviewed, versioned, distributed, and reused. A team can ship a standard profile for a class of agents, collect supervised audit records, preserve rollback evidence, and keep sensitive credentials in a trusted proxy path instead of injecting them directly into the agent process.
+
 
 ---
 
-## Latest News
-
-- **nono registry** — The nono registry is now in alpha and available to try out. Host your skills, hooks, policies, and more in your own repository, then securely distribute them through the registry. This gives you the ability to run `nono pull org/repo` to pull agent skills and sandbox policies directly into the nono runtime. We are now in the process of migrating profiles out of tree and into their own packages. Check out the registry at: registry.nono.sh
-
-[All updates](https://github.com/always-further/nono/discussions/categories/announcements)
-
----
+## Installation
 
 **Platform support:** macOS, Linux, and [WSL2](https://nono.sh/docs/cli/internals/wsl2).
 
@@ -64,7 +59,11 @@ Other options in the [Installation Guide](https://docs.nono.sh/cli/getting_start
 
 ## Quick Start
 
-Profiles for [Claude Code](https://docs.nono.sh/cli/clients/claude-code), [Codex](https://docs.nono.sh/cli/clients/codex), [OpenCode](https://docs.nono.sh/cli/clients/opencode), [OpenClaw](https://docs.nono.sh/cli/clients/openclaw), and Swival -- or [define your own](https://docs.nono.sh/cli/features/profiles-groups).
+`nono pull` agent packages from the [registry](https://registry.nono.sh) for all popular agents — Claude Code, Codex, Pi, Hermes, OpenCode, OpenClaw, and more — or [build your own](https://nono.sh/docs/cli/features/package-publishing) and securely share plugins, SKILLS, and hooks with the community or your team.
+
+```bash
+nono run --profile always-further/claude-code -- claude
+```
 
 ## Libraries and Bindings
 

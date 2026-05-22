@@ -1,0 +1,195 @@
+name: PR Review Summary
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  summarize:
+    name: Post Review Summary
+    if: ${{ !startsWith(github.head_ref, 'dependabot/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Analyse PR and post summary comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          MARKER="<!-- pr-review-summary -->"
+
+          # Fetch every changed file with per-file line stats (handles pagination)
+          FILES_JSON=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER/files" --paginate)
+          FILENAMES=$(echo "$FILES_JSON" | jq -r '.[].filename')
+
+          # ── LOC totals ────────────────────────────────────────────────────────
+          ADDITIONS=$(echo "$FILES_JSON" | jq '[.[].additions] | add // 0')
+          DELETIONS=$(echo "$FILES_JSON" | jq '[.[].deletions] | add // 0')
+          TOTAL_LOC=$((ADDITIONS + DELETIONS))
+
+          if   [ "$TOTAL_LOC" -lt 50  ]; then SIZE="Small (< 50 lines)"
+          elif [ "$TOTAL_LOC" -lt 300 ]; then SIZE="Medium (50–300 lines)"
+          else                                SIZE="Large (> 300 lines)"
+          fi
+
+          # ── Crate / area detection ────────────────────────────────────────────
+          TOUCHES_NONO_LIB=false
+          TOUCHES_PROXY=false
+          TOUCHES_CLI=false
+          TOUCHES_FFI=false
+          TOUCHES_CODE=false
+          TOUCHES_DOCS=false
+          TOUCHES_CI=false
+          TOUCHES_CONFIG=false
+
+          while IFS= read -r f; do
+            # Crates
+            [[ "$f" == crates/nono/*       ]] && TOUCHES_NONO_LIB=true
+            [[ "$f" == crates/nono-proxy/* ]] && TOUCHES_PROXY=true
+            [[ "$f" == crates/nono-cli/*   ]] && TOUCHES_CLI=true
+            [[ "$f" == bindings/*          ]] && TOUCHES_FFI=true
+
+            # Rust / C source and manifests
+            if [[ "$f" =~ \.(rs|c|h)$ ]]; then TOUCHES_CODE=true; fi
+            if [[ "$f" =~ (^|/)Cargo\.(toml|lock)$ ]]; then TOUCHES_CODE=true; fi
+            if [[ "$f" =~ (^|/)build\.rs$ ]]; then TOUCHES_CODE=true; fi
+
+            # Docs
+            if [[ "$f" =~ \.(md|txt)$ ]]; then TOUCHES_DOCS=true; fi
+            if [[ "$f" =~ ^LICENSE ]]; then TOUCHES_DOCS=true; fi
+
+            # CI / build tooling
+            if [[ "$f" == .github/workflows/* || "$f" == .github/scripts/* ]]; then TOUCHES_CI=true; fi
+            if [[ "$f" == Makefile ]]; then TOUCHES_CI=true; fi
+
+            # Config / policy (JSON, non-Cargo TOML, non-workflow YAML)
+            if [[ "$f" =~ \.json$ ]]; then TOUCHES_CONFIG=true; fi
+            if [[ "$f" =~ \.toml$ ]] && ! [[ "$f" =~ Cargo\.(toml|lock)$ ]]; then
+              TOUCHES_CONFIG=true
+            fi
+            if [[ "$f" =~ \.(yml|yaml)$ ]] && ! [[ "$f" == .github/workflows/* ]]; then
+              TOUCHES_CONFIG=true
+            fi
+          done <<< "$FILENAMES"
+
+          # ── Crate warning lines ───────────────────────────────────────────────
+          CRATE_LINES=()
+
+          if [ "$TOUCHES_NONO_LIB" = "true" ]; then
+            CRATE_LINES+=("- **crates/nono** (core library) — **careful review required**. This is the security-critical sandbox primitive. A bug here bypasses OS-level isolation for every downstream user.")
+          fi
+          if [ "$TOUCHES_PROXY" = "true" ]; then
+            CRATE_LINES+=("- **crates/nono-proxy** — **downstream consumers depend on this crate**. API or behaviour changes will affect external callers; treat any breaking change with extra scrutiny.")
+          fi
+          if [ "$TOUCHES_CLI" = "true" ]; then
+            CRATE_LINES+=("- **crates/nono-cli** — CLI changes. Verify argument parsing, flag documentation, and UX behaviour across supported platforms.")
+          fi
+          if [ "$TOUCHES_FFI" = "true" ]; then
+            CRATE_LINES+=("- **bindings/c** (C FFI) — ABI changes can silently break C callers. Confirm header and symbol compatibility.")
+          fi
+
+          if [ ${#CRATE_LINES[@]} -eq 0 ]; then
+            CRATE_TEXT="No crate source directories are directly affected."
+          else
+            CRATE_TEXT=$(printf '%s\n' "${CRATE_LINES[@]}")
+          fi
+
+          # ── Blast radius ──────────────────────────────────────────────────────
+          BLAST_PARTS=()
+          [ "$TOUCHES_CODE"   = "true" ] && BLAST_PARTS+=("source code")
+          [ "$TOUCHES_DOCS"   = "true" ] && BLAST_PARTS+=("documentation")
+          [ "$TOUCHES_CI"     = "true" ] && BLAST_PARTS+=("CI / build tooling")
+          [ "$TOUCHES_CONFIG" = "true" ] && BLAST_PARTS+=("configuration / policy files")
+
+          if [ ${#BLAST_PARTS[@]} -eq 0 ]; then
+            BLAST_TEXT="unknown file types"
+          else
+            BLAST_TEXT=$(IFS=", "; echo "${BLAST_PARTS[*]}")
+          fi
+
+          case ${#BLAST_PARTS[@]} in
+            0|1) BLAST_LEVEL="Contained" ;;
+            2)   BLAST_LEVEL="Moderate"  ;;
+            *)   BLAST_LEVEL="Broad"     ;;
+          esac
+
+          # ── Build comment body ────────────────────────────────────────────────
+          BODY_FILE=$(mktemp)
+          cat > "$BODY_FILE" << ENDOFBODY
+          $MARKER
+
+          ## PR Review Summary
+
+          ### Size
+
+          | Metric | Value |
+          |--------|-------|
+          | Lines added | +$ADDITIONS |
+          | Lines removed | -$DELETIONS |
+          | Total changed | $TOTAL_LOC |
+          | **Classification** | **$SIZE** |
+
+          ### Affected crates
+
+          $CRATE_TEXT
+
+          ### Blast radius — $BLAST_LEVEL
+
+          This PR touches: **$BLAST_TEXT**
+
+          ---
+          <sub>Updated automatically on each push to this PR.</sub>
+          ENDOFBODY
+
+          # Strip leading spaces introduced by the heredoc indentation
+          BODY=$(sed 's/^          //' "$BODY_FILE")
+          rm -f "$BODY_FILE"
+
+          # ── Apply labels ──────────────────────────────────────────────────────
+          # Crate labels (already exist in the repo)
+          LABELS_TO_ADD=()
+          [ "$TOUCHES_NONO_LIB" = "true" ] && LABELS_TO_ADD+=("nono")
+          [ "$TOUCHES_PROXY"    = "true" ] && LABELS_TO_ADD+=("nono-proxy")
+          [ "$TOUCHES_CLI"      = "true" ] && LABELS_TO_ADD+=("nono-cli")
+
+          # Size labels — remove any stale size label first, then add the current one
+          SIZE_LABELS="size/small size/medium size/large"
+          for sl in $SIZE_LABELS; do
+            gh pr edit "$PR_NUMBER" --repo "$GH_REPO" --remove-label "$sl" 2>/dev/null || true
+          done
+
+          if   [ "$TOTAL_LOC" -lt 50  ]; then LABELS_TO_ADD+=("size/small")
+          elif [ "$TOTAL_LOC" -lt 300 ]; then LABELS_TO_ADD+=("size/medium")
+          else                                LABELS_TO_ADD+=("size/large")
+          fi
+
+          if [ ${#LABELS_TO_ADD[@]} -gt 0 ]; then
+            ADD_ARGS=""
+            for lbl in "${LABELS_TO_ADD[@]}"; do
+              ADD_ARGS="$ADD_ARGS --add-label $lbl"
+            done
+            # shellcheck disable=SC2086
+            gh pr edit "$PR_NUMBER" --repo "$GH_REPO" $ADD_ARGS
+            echo "Applied labels: ${LABELS_TO_ADD[*]}"
+          fi
+
+          # ── Post or update comment ────────────────────────────────────────────
+          EXISTING_ID=$(gh api "repos/$GH_REPO/issues/$PR_NUMBER/comments" \
+            --paginate \
+            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" \
+            | head -1)
+
+          if [ -n "$EXISTING_ID" ]; then
+            gh api --method PATCH \
+              "repos/$GH_REPO/issues/comments/$EXISTING_ID" \
+              -f body="$BODY"
+            echo "Updated existing comment $EXISTING_ID"
+          else
+            gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body "$BODY"
+            echo "Posted new summary comment"
+          fi

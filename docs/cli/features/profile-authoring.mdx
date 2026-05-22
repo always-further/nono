@@ -393,6 +393,33 @@ them as `read`, `read_file`, `allow`, or `allow_file` grants.
 }
 ```
 
+## Target Binary
+
+User profiles can declare a `binary` field to specify the program that nono should execute. This makes the trailing `-- <command>` optional:
+
+```jsonc
+{
+  "extends": "claude-code",
+  "meta": { "name": "my-claude" },
+  "binary": "/home/user/.local/bin/claude"
+}
+```
+
+```bash
+# No trailing command needed — the profile knows what to run
+nono run --profile ./my-claude.jsonc --allow-cwd
+```
+
+If both a profile `binary` and a CLI trailing command are provided, the profile binary takes precedence and a warning is emitted.
+
+### Restrictions
+
+The `binary` field is only honoured for **user-authored profiles** — profiles loaded from a filesystem path (e.g. `./my-profile.jsonc`) or from the user profile directory (`~/.config/nono/profiles/`). Pack and built-in profiles cannot set `binary`; the field is silently ignored for security reasons.
+
+### Inheritance
+
+When profiles are composed via `extends`, the child's `binary` overrides the parent's. If the child does not specify `binary`, it inherits the parent's value.
+
 ## CLI Reference
 
 | Command | Description |
