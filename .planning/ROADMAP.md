@@ -21,7 +21,7 @@ Plans:
 - [x] 50-04-PLAN.md — Wave 2 hermetic test suite: StaticMapTransport + 4 tests (SPEC-50-REQ-3, 4, 5)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 50-05-PLAN.md — Wave 3 HUMAN-UAT + windows-poc-handoff doc update + cross-target clippy (SPEC-50-REQ-5, 6)
+- [x] 50-05-PLAN.md — Wave 3 HUMAN-UAT + windows-poc-handoff doc update + cross-target clippy (SPEC-50-REQ-5, 6)
 
 ---
 
