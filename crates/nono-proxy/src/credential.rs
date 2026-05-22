@@ -139,13 +139,8 @@ impl CredentialStore {
                         let redacted = redact_credential_ref(key);
                         warn!(
                             "Credential '{}' not available for route '{}': {}. \
-                             Managed-credential requests on this route will be denied until the credential is available.",
-                            redacted, normalized_prefix, msg
-                        );
-                        eprintln!(
-                            "[nono] Credential '{}' not available for route '{}': {}\n\
-                             \x20      Managed-credential requests on this route will be denied.\n\
-                             \x20      Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
+                             Managed-credential requests on this route will be denied until the credential is available. \
+                             Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
                             redacted, normalized_prefix, msg
                         );
                         continue;
@@ -222,13 +217,8 @@ impl CredentialStore {
                         let redacted = redact_credential_ref(&oauth2.client_id);
                         warn!(
                             "OAuth2 client_id '{}' not available for route '{}': {}. \
-                                 Managed-credential requests on this route will be denied.",
-                            redacted, route.prefix, msg
-                        );
-                        eprintln!(
-                            "[nono] OAuth2 client_id '{}' not available for route '{}': {}\n\
-                                 \x20      Managed-credential requests on this route will be denied.\n\
-                                 \x20      Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
+                                 Managed-credential requests on this route will be denied. \
+                                 Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
                             redacted, route.prefix, msg
                         );
                         continue;
@@ -246,13 +236,8 @@ impl CredentialStore {
                         let redacted = redact_credential_ref(&oauth2.client_secret);
                         warn!(
                             "OAuth2 client_secret '{}' not available for route '{}': {}. \
-                             Managed-credential requests on this route will be denied.",
-                            redacted, route.prefix, msg
-                        );
-                        eprintln!(
-                            "[nono] OAuth2 client_secret '{}' not available for route '{}': {}\n\
-                             \x20      Managed-credential requests on this route will be denied.\n\
-                             \x20      Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
+                             Managed-credential requests on this route will be denied. \
+                             Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
                             redacted, route.prefix, msg
                         );
                         continue;
