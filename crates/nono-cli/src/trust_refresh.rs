@@ -95,14 +95,30 @@ impl Transport for UreqTransport {
         })
         .await;
 
+        // WR-05: tokio `JoinError` from spawn_blocking is NEVER a transport
+        // failure — it indicates either a panic inside the blocking task
+        // (corrupted internals / programmer bug in `ureq` or our adapter)
+        // or a runtime cancellation (the tokio executor is shutting down).
+        // Previously we mapped JoinError to `TransportErrorKind::Other`,
+        // which `tough` surfaces as a generic chain-walk failure — an
+        // operator reading the corp-network caveats in
+        // `docs/cli/development/windows-poc-handoff.mdx` would
+        // reasonably (but wrongly) conclude their proxy was the problem.
+        //
+        // Standard `tokio::task::spawn_blocking` pattern: re-panic on panic
+        // so the supervisor's panic hook fires (yielding a usable stack
+        // trace) instead of hiding it behind a typed transport error.
+        // Cancellation cannot occur during a synchronous `await` on the
+        // JoinHandle in normal operation; if it ever does we panic loudly
+        // so the bug is impossible to mistake for a corp-network issue.
         let result = match join_result {
             Ok(r) => r,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Err(e) => {
-                return Err(TransportError::new_with_cause(
-                    TransportErrorKind::Other,
-                    url.as_str(),
-                    e,
-                ));
+                tracing::error!(
+                    "internal bug: ureq blocking task did not complete (cancellation): {e}"
+                );
+                panic!("ureq blocking task cancelled unexpectedly: {e}");
             }
         };
 
