@@ -39,7 +39,7 @@
 
 ### Branch Merge
 
-- [ ] **REQ-MERGE-01**: `windows-squash` → `main` merge landed with PR-583 maintainer response gate moved OR feature-flag-equivalent rollout documented. Re-deferred at v2.3 (2026-04-29 per quick-260428-rsu, commit `7911ef0e`) + v2.4 + v2.5 scope-locks.
+- [x] **REQ-MERGE-01**: `windows-squash` → `main` merge landed with PR-583 maintainer response gate moved OR feature-flag-equivalent rollout documented. Re-deferred at v2.3 (2026-04-29 per quick-260428-rsu, commit `7911ef0e`) + v2.4 + v2.5 scope-locks.
 
 ### Drift Ingestion (DRIFT tooling exercise)
 
@@ -91,7 +91,7 @@ Populated 2026-05-20 by gsd-roadmapper during ROADMAP.md creation.
 | REQ-PORT-CLOSURE-08 | Phase 45 | Complete |
 | REQ-AIPC-G04-01 | Phase 45 | Complete |
 | REQ-RESL-NIX-04 | Phase 45 | Complete |
-| REQ-MERGE-01 | Phase 46 | Pending |
+| REQ-MERGE-01 | Phase 46 | Complete |
 | REQ-CI-FU-01 | Phase 46 | Pending |
 | REQ-CI-FU-02 | Phase 46 | Pending |
 | REQ-CI-FU-03 | Phase 46 | Pending |

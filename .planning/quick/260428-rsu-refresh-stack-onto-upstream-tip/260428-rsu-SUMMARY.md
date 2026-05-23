@@ -4,10 +4,18 @@ slug: refresh-stack-onto-upstream-tip
 description: Refresh the stack (PRs 725 + 726) onto upstream's new tip before a human reviewer engages
 started: 2026-04-28
 resumed: 2026-04-29
-status: re-deferred
+closed: 2026-05-23
+status: closed-via-v2.6-rollout
+closure_disposition: feature-flag-equivalent rollout per ROADMAP § Phase 46 SC#1 (D-46-A1); maintainer-response triggers retained per D-46-A3 — see ADR.
+adr: .planning/architecture/v2.6-upstream-merge-deferral-ADR.md
 deferred_until: maintainer-response on PRs 725/726 (see Outreach posted 2026-04-29)
 runbook: 260428-rsu-PLAN.md
 ---
+
+> **2026-05-23 update (Phase 46 close, D-46-A1/A2/A3/A4):**
+> Closed via the SC#1 "feature-flag-equivalent rollout with the gate-state explicitly documented" path. The 504-commit / 77-conflict rebase scope and the maintainer-non-response since 2026-04-29 outreach were not improving; Phase 46 Plan 46-01 lands a new ADR at `.planning/architecture/v2.6-upstream-merge-deferral-ADR.md` capturing alternative paths considered, why feature-flag-equivalent was chosen, the maintainer-response revival trigger set, and the per-phase umbrella PR pattern as the go-forward upstream-contribution mode. PRs 725/726 remain OPEN; the 2026-04-29 outreach remains the canonical comm. Revival on maintainer response only (no fork-side calendar trigger).
+>
+> The "Re-deferral conditions" section below remains accurate — the new ADR codifies them as the revival trigger set rather than supersedes them.
 
 # Quick Task 260428-rsu — Summary: RE-DEFERRED (awaiting maintainer response)
 
