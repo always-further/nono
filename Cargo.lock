@@ -3583,6 +3583,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "sign-fixture"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "sigstore-oidc",
+ "sigstore-rekor",
+ "sigstore-sign",
+ "tokio",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
