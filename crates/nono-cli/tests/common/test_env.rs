@@ -23,6 +23,17 @@
 /// for design rationale.  Duplicated here because integration tests cannot
 /// import from a binary-only crate's `#[cfg(test)]` modules (Phase 41-05,
 /// REQ-CI-02).
+///
+/// Per-target dead-code justification (matches `lock_env` below): the type
+/// IS used, but each `tests/<name>.rs` file is a separate compilation unit
+/// and the lint runs per-unit. On Linux the only consumer is
+/// `tests/auto_pull_e2e_linux.rs`; the `tests/env_vars.rs` unit only
+/// references `EnvVarGuard` inside `#[cfg(target_os = "windows")]` blocks,
+/// so the type appears dead in that unit on Linux. Symmetric situation on
+/// Windows (consumers in `env_vars.rs` only, `auto_pull_e2e_linux.rs`
+/// excluded by its file-level `#![cfg(target_os = "linux")]`). The allow
+/// is structural, not lazy.
+#[allow(dead_code)]
 pub struct EnvVarGuard {
     original: Vec<(&'static str, Option<String>)>,
 }
@@ -30,6 +41,7 @@ pub struct EnvVarGuard {
 #[allow(clippy::disallowed_methods)] // This IS the safe wrapper around env var mutation.
 impl EnvVarGuard {
     /// Set multiple env vars, capturing originals for restore on drop.
+    #[allow(dead_code)] // See per-target dead-code justification on `EnvVarGuard` above.
     #[must_use]
     pub fn set_all(vars: &[(&'static str, &str)]) -> Self {
         let original = vars
