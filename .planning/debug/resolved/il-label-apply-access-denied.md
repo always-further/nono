@@ -1,6 +1,14 @@
 ---
 slug: il-label-apply-access-denied
-status: fix_pending
+status: resolved
+resolved: 2026-05-23
+resolution_commits:
+  - a1cefc08  # v1 fix(windows-il): pre-flight WRITE_OWNER check (260522-v14)
+  - 27e2db4b  # v1 test+docs(windows-il): cover WRITE_OWNER pre-flight + POC working-dir guidance
+  - e101b03a  # v2 fix(windows-il): drop broken GetEffectiveRightsFromAclW pre-flight; gate directive on ownership (260522-wn0)
+uat_verified: 2026-05-23 — both tests pass on rebuilt binary
+  - C:\poc\temp surfaces the new WRITE_OWNER directive (not the writable/NTFS hint)
+  - %USERPROFILE%\nono-poc still prints "hello" (regression-free working path)
 trigger: |
   `nono run --allow . -- cmd /c echo hello` fails on Windows v0.53.1 with
   `nono: Failed to apply integrity label to C:\poc\temp: ... (HRESULT: 0x00000005)`
