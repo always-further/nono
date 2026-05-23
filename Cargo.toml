@@ -6,6 +6,7 @@ members = [
     "crates/nono-proxy",
     "crates/nono-shell-broker",
     "bindings/c",
+    "tools/sign-fixture",
 ]
 
 [workspace.package]

@@ -1,0 +1,18 @@
+[package]
+name = "sign-fixture"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "CI fixture signing tool — replaces sigstore-sign --example sign_blob (dev-dep workaround)"
+publish = false
+
+[[bin]]
+name = "sign-fixture"
+path = "src/main.rs"
+
+[dependencies]
+sigstore-sign = "0.7.0"
+sigstore-oidc = "0.7.0"
+sigstore-rekor = "0.7.0"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
