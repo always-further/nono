@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 ship
 
 ## Current Position
 
-Phase: 49
+Phase: 46 (next active — 0 plans drafted)
 Plan: Not started
-Status: Executing Phase 45
-Last activity: 2026-05-23 -- Phase 45 execution started
+Status: Between phases (Phase 45 closed 2026-05-23; Phase 49 + 50 already shipped earlier in v2.6)
+Last activity: 2026-05-23 -- Phase 45 closed (3 plans, 13 task commits, status human_needed with 2 Phase-46-deferred items)
 
 ### v2.6 Phase Summary
 
