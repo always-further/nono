@@ -1448,7 +1448,7 @@ pub(super) mod cgroup {
         }
 
         #[test]
-        fn cgroup_session_apply_limits() -> Result<(), Box<dyn std::error::Error>> {
+        fn cgroup_session_apply_limits() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let Some(session) = try_cgroup_session("test-apply-001") else {
                 return Ok(());
             };
@@ -1471,7 +1471,8 @@ pub(super) mod cgroup {
         }
 
         #[test]
-        fn cgroup_session_pre_exec_places_pid() -> Result<(), Box<dyn std::error::Error>> {
+        fn cgroup_session_pre_exec_places_pid(
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
             let Some(session) = try_cgroup_session("test-pre-exec-001") else {
                 return Ok(());
             };
@@ -1502,7 +1503,8 @@ pub(super) mod cgroup {
         }
 
         #[test]
-        fn cgroup_kill_terminates_grandchildren() -> Result<(), Box<dyn std::error::Error>> {
+        fn cgroup_kill_terminates_grandchildren(
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
             let Some(session) = try_cgroup_session("test-kill-001") else {
                 return Ok(());
             };
