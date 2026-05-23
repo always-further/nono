@@ -179,17 +179,18 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-phase37-pkgs-
 
-      # Plan 37-05: build the workspace + the sigstore-sign example. The
-      # `sigstore-sign` crate is a dev/CI helper (sigstore-rs upstream's
-      # example binary `sign_blob`) used here at CI time to mint a fresh
-      # keyless-signed bundle for the auto-pull e2e test fixture (D-13).
+      # Plan 37-05: build the workspace + the sign-fixture tool. The
+      # `sign-fixture` crate (tools/sign-fixture/) is a workspace member that
+      # wraps the sigstore-rs signing API with tokio + chrono as regular deps,
+      # used to mint the keyless-signed bundle fixture (D-13).
       - name: Build workspace and sigstore-sign example
         run: |
           cargo build --workspace --release --verbose
-          # Compile the upstream sigstore-rs example used to mint the
-          # ephemeral Sigstore bundle for the auto-pull e2e fixture
-          # (see 37-RESEARCH.md citations for the upstream pattern).
-          cargo build --release -p sigstore-sign --example sign_blob
+          # Compile the workspace fixture signing tool used to mint the
+          # ephemeral Sigstore bundle for the auto-pull e2e fixture (D-13).
+          # The sign-fixture binary is a workspace member with tokio + chrono
+          # as regular deps (avoids dev-dep availability limitation).
+          cargo build --release -p sign-fixture
 
       # Plan 37-05 Task 4: manufacture a fixture pack on the runner using the
       # ACTUAL PackageManifest schema from crates/nono-cli/src/package.rs:58-128.
@@ -275,7 +276,7 @@ jobs:
           SIGSTORE_ID_TOKEN_AUDIENCE: sigstore
         run: |
           cd target/fixture-pack
-          cargo run --release -p sigstore-sign --example sign_blob -- \
+          cargo run --release -p sign-fixture -- \
             artifact.tar.gz \
             -o artifact.tar.gz.sigstore.json
           ls -la artifact.tar.gz.sigstore.json
