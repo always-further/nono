@@ -15,11 +15,11 @@
 
 ### Port Closure (Cluster 2 Edition 2024 source migration)
 
-- [ ] **REQ-PORT-CLOSURE-08**: 39 `#[unsafe(no_mangle)]` rewrites in `bindings/c/src/` land per upstream Edition 2024 source migration; DIVERGENCE-LEDGER Cluster 2 split-disposition (Phase 43 Plan 43-01b DEC-3, commit `79715aa5`) resolved.
+- [x] **REQ-PORT-CLOSURE-08**: 39 `#[unsafe(no_mangle)]` rewrites in `bindings/c/src/` land per upstream Edition 2024 source migration; DIVERGENCE-LEDGER Cluster 2 split-disposition (Phase 43 Plan 43-01b DEC-3, commit `79715aa5`) resolved.
 
 ### RESL Native Re-validation
 
-- [ ] **REQ-RESL-NIX-04**: Phase 38 REQ-AAHX-HOST-01 native re-validation executed on Linux + macOS host (one or both per host availability). Tactical confirmation pass; only needed if Phase 27's transitive closure leaves a host-native gap.
+- [x] **REQ-RESL-NIX-04**: Phase 38 REQ-AAHX-HOST-01 native re-validation executed on Linux + macOS host (one or both per host availability). Tactical confirmation pass; only needed if Phase 27's transitive closure leaves a host-native gap.
 
 ### UAT Backlog
 
@@ -47,7 +47,7 @@
 
 ### AIPC G-04 Wire-Protocol Tightening
 
-- [ ] **REQ-AIPC-G04-01**: `Approved(ResourceGrant)` inlined at the wire type so `(Approved, grant=None)` is a compile-time error; `aipc_sdk.rs` child SDK demultiplexer + 23 pre-existing tests updated. Deferred from v2.1 Plan 18.1-02; reaffirmed at v2.3 and v2.4 scope-locks.
+- [x] **REQ-AIPC-G04-01**: `Approved(ResourceGrant)` inlined at the wire type so `(Approved, grant=None)` is a compile-time error; `aipc_sdk.rs` child SDK demultiplexer + 23 pre-existing tests updated. Deferred from v2.1 Plan 18.1-02; reaffirmed at v2.3 and v2.4 scope-locks.
 
 ### UPST6 Cycle
 
@@ -88,9 +88,9 @@ Populated 2026-05-20 by gsd-roadmapper during ROADMAP.md creation.
 | REQ-TEST-HYG-02 | Phase 44 | Complete |
 | REQ-TEST-HYG-03 | Phase 44 | Complete |
 | REQ-TEST-HYG-04 | Phase 44 | Complete |
-| REQ-PORT-CLOSURE-08 | Phase 45 | Pending |
-| REQ-AIPC-G04-01 | Phase 45 | Pending |
-| REQ-RESL-NIX-04 | Phase 45 | Pending |
+| REQ-PORT-CLOSURE-08 | Phase 45 | Complete |
+| REQ-AIPC-G04-01 | Phase 45 | Complete |
+| REQ-RESL-NIX-04 | Phase 45 | Complete |
 | REQ-MERGE-01 | Phase 46 | Pending |
 | REQ-CI-FU-01 | Phase 46 | Pending |
 | REQ-CI-FU-02 | Phase 46 | Pending |
