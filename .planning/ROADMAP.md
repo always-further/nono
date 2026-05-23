@@ -128,7 +128,7 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
   4. Baseline-aware CI lane diff vs Phase 41 close SHA `13cc0628` shows zero `success → failure` transitions across all 8 GH Actions lanes (Linux Clippy, macOS Clippy, Windows Build, Integration, Regression, Security, Packaging, Smoke); load-bearing skips categorized correctly in SUMMARY frontmatter per Phase 40 anti-pattern #3 (`skipped_gates_load_bearing` vs `_environmental`).
   5. All 11 Phase 35 + 36 human-UAT scenarios (REQ-UAT-BL-01) executed on native Linux/macOS host reach `pass` or carry a documented `no-test-fixture` waiver; all 7 verification items (REQ-UAT-BL-02) executed on native Linux/macOS host land with a verdict; Phase 35 + 36 HUMAN-UAT.md and VERIFICATION.md transition out of `human_needed` state.
 **Plans**: 3 plans
-- [ ] 46-01-PLAN.md — v2.6 upstream-merge deferral ADR + 260428-rsu re-anchor (REQ-MERGE-01 closed via SC#1 feature-flag-equivalent rollout per D-46-A1/A2/A3/A4)
+- [x] 46-01-PLAN.md — v2.6 upstream-merge deferral ADR + 260428-rsu re-anchor (REQ-MERGE-01 closed via SC#1 feature-flag-equivalent rollout per D-46-A1/A2/A3/A4)
 - [ ] 46-02-PLAN.md — Post-merge CI orchestration: 4 parallel gh actions (Phase 37 + Phase 45 workflow dispatches + Phase 43 umbrella PR + baseline-aware CI lane diff vs 13cc0628) + upstream-sync-quick.md baseline registry update (REQ-CI-FU-01..03)
 - [ ] 46-03-PLAN.md — Phase 35 + 36 UAT backlog drain: new .github/workflows/phase-46-uat-backlog.yml (workflow_dispatch matrix) + Phase 35/36 HUMAN-UAT + VERIFICATION backfills + per-item no-test-fixture waivers per D-46-C3 (REQ-UAT-BL-01..02)
 **UI hint**: no
@@ -237,7 +237,7 @@ These invariants are inherited from prior milestones and remain in force across 
 |-------|----------------|--------|-----------|
 | 44. REVIEW polish + test hygiene | 2/2 | Complete    | 2026-05-20 |
 | 45. Source migration + AIPC G-04 + RESL native re-validation | 3/3 | Complete    | 2026-05-23 |
-| 46. windows-squash merge + post-merge CI + UAT backlog | 0/3 | Not started | — |
+| 46. windows-squash merge + post-merge CI + UAT backlog | 1/3 | In Progress|  |
 | 47. UPST6 audit + v0.41–v0.43 drift ingestion | 0/TBD | Not started | — |
 | 48. UPST6 sync execution | 0/TBD | Not started | — |
 | 49. Sigstore trust-root POC resilience | 3/3 | Complete    | 2026-05-21 |

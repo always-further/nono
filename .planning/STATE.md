@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.6
 milestone_name: UPST6 + v2.5 Drain
 status: executing
-last_updated: "2026-05-23T18:34:31.267Z"
+last_updated: "2026-05-23T18:50:00.000Z"
 last_activity: 2026-05-23
 progress:
   total_phases: 7
   completed_phases: 4
-  total_plans: 12
-  completed_plans: 9
-  percent: 75
+  total_plans: 13
+  completed_plans: 10
+  percent: 77
 ---
 
 # Project State: nono — v2.6 UPST6 + v2.5 Drain
@@ -25,10 +25,20 @@ See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 ship
 
 ## Current Position
 
-Phase: 46 (windows-squash-merge-post-merge-ci-verifications-uat-backlog) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 46
-Last activity: 2026-05-23 -- Phase 46 execution started
+Phase: 46 (windows-squash-merge-post-merge-ci-verifications-uat-backlog) — PAUSED (handed back to operator)
+Plan: 1 of 3 complete (46-01 SHIPPED 2026-05-23; commit `ddb6f4d2` — REQ-MERGE-01 closed via v2.6 upstream-merge deferral ADR)
+Status: Phase 46 paused at operator request; Plans 46-02 + 46-03 deferred to next session
+Last activity: 2026-05-23 -- Plan 46-01 merged to main + pushed to origin; 46-02 blocked on 3 preconditions
+
+### Phase 46 — Resume Preconditions
+
+Plan 46-02 (post-merge CI orchestration) has 3 structural blockers identified during this session:
+
+1. **`feat/phase-43-upst5-sync` branch does not exist** (neither locally nor on `origin`). Phase 43 commits landed straight on `main` without a feature branch. The umbrella PR `gh pr create --head feat/phase-43-upst5-sync` cannot run without this branch. Resolution options: (a) create the branch by isolating Phase 43 commits via `git log --grep="phase-43" --reverse`; (b) update the plan's `--head` argument to a branch that actually exists; (c) defer the upstream PR step entirely with an explicit `_environmental` skip classification per D-46-D2.
+2. **Phase 37 RESL workflow has been failing on recent dispatches** — the most recent push-triggered run at 2026-05-23T13:17:32Z (databaseId 26333731696) was `failure` on the `Phase 37 PKGS-04 (auto-pull e2e)` job. Re-dispatching without diagnosing the failure root cause won't produce the required green run for REQ-CI-FU-01.
+3. **Main is now pushed to origin** (cc14ba97 → 997511f9) as part of this session's handoff — this enables CI lane diff observation against a real `main` HEAD on subsequent runs, but auto-push CI will run against the new HEAD and any failures must be triaged before dispatching additional workflow runs.
+
+Plan 46-03 (UAT backlog drain) was deferred together with 46-02 at operator request. It has no external-PR preconditions and could in principle be run independently in a future session via `/gsd-execute-phase 46`.
 
 ### v2.6 Phase Summary
 
