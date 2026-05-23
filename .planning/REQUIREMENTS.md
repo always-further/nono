@@ -23,8 +23,8 @@
 
 ### UAT Backlog
 
-- [ ] **REQ-UAT-BL-01**: Phase 35 + 36 human-UAT backlog (11 scenarios) executed on native Linux/macOS host; all items reach `pass` or documented `no-test-fixture` waiver.
-- [ ] **REQ-UAT-BL-02**: Phase 35 + 36 verification backlog (7 items) executed on native Linux/macOS host.
+- [x] **REQ-UAT-BL-01**: Phase 35 + 36 human-UAT backlog (11 scenarios) executed on native Linux/macOS host; all items reach `pass` or documented `no-test-fixture` waiver.
+- [x] **REQ-UAT-BL-02**: Phase 35 + 36 verification backlog (7 items) executed on native Linux/macOS host.
 
 ### REVIEW.md Polish
 
@@ -95,8 +95,8 @@ Populated 2026-05-20 by gsd-roadmapper during ROADMAP.md creation.
 | REQ-CI-FU-01 | Phase 46 | Complete |
 | REQ-CI-FU-02 | Phase 46 | Complete |
 | REQ-CI-FU-03 | Phase 46 | Complete |
-| REQ-UAT-BL-01 | Phase 46 | Pending |
-| REQ-UAT-BL-02 | Phase 46 | Pending |
+| REQ-UAT-BL-01 | Phase 46 | Complete |
+| REQ-UAT-BL-02 | Phase 46 | Complete |
 | REQ-UPST6-01 | Phase 47 | Pending |
 | REQ-DRIFT-INGEST-01 | Phase 47 | Pending |
 | REQ-UPST6-02 | Phase 48 | Pending |
