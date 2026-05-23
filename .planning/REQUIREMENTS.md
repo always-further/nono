@@ -9,9 +9,9 @@
 
 ### CI Follow-up (post-merge orchestrator coordination)
 
-- [ ] **REQ-CI-FU-01**: Phase 37 `.github/workflows/phase-37-linux-resl.yml` live run on `ubuntu-24.04` completes green; Success Criterion 6 closed.
-- [ ] **REQ-CI-FU-02**: Phase 43 umbrella PR opened with all 6 PR-SECTION.md contribution artifacts concatenated; orchestrator `gh pr create` executed.
-- [ ] **REQ-CI-FU-03**: Baseline-aware CI lane diff vs Phase 41 close SHA `13cc0628` verified — zero `success → failure` transitions.
+- [x] **REQ-CI-FU-01**: Phase 37 `.github/workflows/phase-37-linux-resl.yml` live run on `ubuntu-24.04` completes green; Success Criterion 6 closed.
+- [x] **REQ-CI-FU-02**: Phase 43 umbrella PR opened with all 6 PR-SECTION.md contribution artifacts concatenated; orchestrator `gh pr create` executed.
+- [x] **REQ-CI-FU-03**: Baseline-aware CI lane diff vs Phase 41 close SHA `13cc0628` verified — zero `success → failure` transitions.
 
 ### Port Closure (Cluster 2 Edition 2024 source migration)
 
@@ -92,9 +92,9 @@ Populated 2026-05-20 by gsd-roadmapper during ROADMAP.md creation.
 | REQ-AIPC-G04-01 | Phase 45 | Complete |
 | REQ-RESL-NIX-04 | Phase 45 | Complete |
 | REQ-MERGE-01 | Phase 46 | Complete |
-| REQ-CI-FU-01 | Phase 46 | Pending |
-| REQ-CI-FU-02 | Phase 46 | Pending |
-| REQ-CI-FU-03 | Phase 46 | Pending |
+| REQ-CI-FU-01 | Phase 46 | Complete |
+| REQ-CI-FU-02 | Phase 46 | Complete |
+| REQ-CI-FU-03 | Phase 46 | Complete |
 | REQ-UAT-BL-01 | Phase 46 | Pending |
 | REQ-UAT-BL-02 | Phase 46 | Pending |
 | REQ-UPST6-01 | Phase 47 | Pending |

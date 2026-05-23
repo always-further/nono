@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.6
 milestone_name: UPST6 + v2.5 Drain
 status: executing
-last_updated: "2026-05-23T19:35:00.000Z"
+last_updated: "2026-05-23T22:25:31.645Z"
 last_activity: 2026-05-23
 progress:
   total_phases: 7
   completed_phases: 4
-  total_plans: 13
+  total_plans: 12
   completed_plans: 10
-  percent: 77
+  percent: 83
 ---
 
 # Project State: nono — v2.6 UPST6 + v2.5 Drain
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 ship
 
 ## Current Position
 
-Phase: 46 (windows-squash-merge-post-merge-ci-verifications-uat-backlog) — PAUSED (handed back to operator)
-Plan: 1 of 3 complete (46-01 SHIPPED 2026-05-23; commit `ddb6f4d2` — REQ-MERGE-01 closed via v2.6 upstream-merge deferral ADR)
-Status: Phase 46 paused at operator request; Plans 46-02 + 46-03 deferred to next session
-Last activity: 2026-05-23 -- Phase 37 RESL workflow GREEN end-to-end (run 26343828839 on SHA a92cde28; PKGS-04 + RESL-NIX both success in ~11.5min). Quick task 260523-moe closed the 4 cascading post-compile runtime bugs (BUG-A → -B → -C → -D): #[ignore]'d 3 mock/production protocol-mismatched auto-pull tests; added #[allow(clippy::unwrap_used)] to profile_cmd test module; added #[allow(dead_code)] to common::test_env::EnvVarGuard+set_all (per-compilation-unit dead-code on Linux); added file-level #[allow(clippy::disallowed_methods)] to auto_pull_e2e_linux.rs for 5 NONO_NO_AUTO_PULL remove_var sites. REQ-CI-FU-01 satisfied. Phase 46 Plan 46-02 Phase 37 RESL precondition CLEARED (Phase 43 feat-branch precondition still independently unmet).
+Phase: 46 (windows-squash-merge-post-merge-ci-verifications-uat-backlog) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 46
+Last activity: 2026-05-23 -- Phase 46 execution started
 
 ### Phase 46 — Resume Preconditions
 

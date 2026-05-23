@@ -99,11 +99,9 @@ For upstream-sync waves landing on top of a known-green baseline, the close
 gate flags ONLY `success → failure` transitions vs the baseline. Drift
 accumulates across milestones; reset at each milestone-internal cleanup.
 
-**Current baseline SHA:** `13cc0628`
-**Last reset:** Phase 41 close (REQ-CI-03), 2026-05-16 → cleaning the
-pre-existing red carried forward from baseline `a72736bb`.
-**Reset cadence:** Every milestone-internal cleanup phase (see Phase 41 for
-the v2.5 precedent).
+**Current baseline SHA:** `3f638dc6`
+**Last reset:** Phase 46 close (REQ-CI-FU-03), 2026-05-23 → post-merge baseline for v2.6 windows-squash-merge + post-merge CI verifications + UAT backlog drain. Previous baseline: `13cc0628` (Phase 41 close, 2026-05-16, v2.5 precedent).
+**Reset cadence:** Every milestone-internal cleanup phase (see Phase 41 + Phase 46 for the v2.5 + v2.6 precedents).
 
 CI gate result interpretation:
 - Lane was green on baseline AND is green on PR head: PASS.

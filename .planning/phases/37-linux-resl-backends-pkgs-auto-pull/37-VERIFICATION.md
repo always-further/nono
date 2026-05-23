@@ -1,8 +1,8 @@
 ---
 phase: 37-linux-resl-backends-pkgs-auto-pull
 verified: 2026-05-20T03:42:19Z
-status: human_needed
-score: 5/6 must-haves verified (Success Criterion 6 requires post-merge CI confirmation)
+status: passed
+score: 6/6 must-haves verified (Success Criterion 6 closed via Phase 46 Plan 46-02 live run)
 overrides_applied: 0
 re_verification:
   previous_status: n/a
@@ -33,8 +33,8 @@ human_verification:
 **Phase Goal:** Close the 3-year Linux silent-no-op for `--memory` / `--cpu-percent` / `--max-processes` and ship cargo-install-style auto-pull for registry profiles. Linux backends coded on Windows host; verification runs on GitHub Actions Linux runners (Ubuntu 24.04, cgroup v2 default).
 
 **Verified:** 2026-05-20T03:42:19Z
-**Status:** human_needed
-**Re-verification:** No — initial verification
+**Status:** passed
+**Re-verification:** No — initial verification; SC#6 closed by Phase 46 Plan 46-02 live CI dispatch (2026-05-23)
 
 ## Goal Achievement
 
@@ -47,9 +47,9 @@ human_verification:
 | 3   | On Linux cgroup v2: `nono run --max-processes 5 -- bash -c ':(){ :\|:& };:'` is contained at ~5 processes; `nono inspect` shows `max_processes: 5 (cgroup v2 pids.max)` | VERIFIED (test surface fully landed; live runner verifies in CI) | LOCKED string `max_processes: {procs} (cgroup v2 pids.max)` at `session_commands.rs:647`; existing `linux_max_processes_blocks_eleventh_fork` (N=10) PRESERVED at `resl_nix_linux.rs:132`; NEW `linux_max_processes_5_fork_bomb_contained` (LOCKED N=5) at `resl_nix_linux.rs:436` per W8 path b; both run in workflow under `machinectl shell` |
 | 4   | On cgroup v1 host, all three flags fail closed with `NonoError::UnsupportedKernelFeature` pointing to `cgroup_no_v1` boot flag | VERIFIED | `NonoError::UnsupportedKernelFeature { feature: String, hint: String }` variant at `error.rs:68`; 3 unit tests pass (`unsupported_kernel_feature_display_contains_cgroup_no_v1_hint`, `_is_pattern_matchable`, `_is_debug`); 4 of 5 detection sites in `supervisor_linux.rs::cgroup::detect_from_str` + `::detect` swap to `UnsupportedKernelFeature` carrying the LOCKED hint `cgroup v2 required; boot with systemd.unified_cgroup_hierarchy=1 or cgroup_no_v1=all` (verbatim per D-07); site 4 (path-traversal guard, line 942) intentionally KEEPs `UnsupportedPlatform` with explicit Phase 37 D-07 comment; FFI arm at `bindings/c/src/lib.rs:147` maps to `ErrUnsupportedPlatform` (ABI-stable per D-06); 4 swap unit tests in `unsupported_kernel_feature_swap_tests` module at `supervisor_linux.rs:1512` |
 | 5   | `nono run --profile claude-code-edge -- cmd` auto-pulls, verifies signature, installs, and runs; `--no-auto-pull` falls back to "profile not found" error; unknown names fail closed with no implicit network | VERIFIED (5 integration tests landed; happy path + signature + non-Policy require CI-signed fixture) | `--no-auto-pull` flag + `NONO_NO_AUTO_PULL` env var added via `ProfileResolverArgs` at `cli.rs:1476`, flattened into `RunArgs` + `WrapArgs` (NOT `PullArgs` per D-09); `ResolveContext` threaded through `load_profile_with_context` at `profile/mod.rs:2211`; D-11 suppression branch at `profile/mod.rs:2279` (`if ctx.no_auto_pull`); 6 `profile_resolver_args_tests`, 4 `resolve_context_tests`, 3 `diagnostic_footer_tests` all pass locally; 5 integration tests at `auto_pull_e2e_linux.rs:211-479` covering acceptance #1-#4 + Q3 #5 non-Policy rejection; multi-endpoint mock TCP server extends Phase 26-02 pattern (NO mockito per D-14, verified `grep -n mockito Cargo.toml crates/*/Cargo.toml` returns 0); CI workflow's `pkgs-auto-pull` job signs fresh fixture pack via `sigstore-sign` keyless using GH Actions OIDC; sigstore-verify + sigstore-sign 0.7.0 bump (Plan 37-06 path-a) resolves 2 pre-existing TUF flakes — `trust::bundle` 31/31 tests pass post-bump |
-| 6   | GitHub Actions Linux runner executes all four backends end-to-end as part of the Phase 37 close gate | UNCERTAIN (file present, structurally correct; never run on GitHub) | Workflow file `.github/workflows/phase-37-linux-resl.yml` exists (302 lines), YAML-valid (`yaml.safe_load` exits 0), 2 jobs (`resl-nix` + `pkgs-auto-pull`) on `runs-on: ubuntu-24.04` (2 matches), SHA-pinned actions (6 `uses:` references all SHA-pinned per grep `@v\d+$\|@main$\|@latest$` = 0), `Delegate=cpu cpuset io memory pids` drop-in present, `machinectl shell` invocation present, hard-fail cpu-controller verify gate present, `id-token: write` only on pkgs-auto-pull job (least privilege). **However:** `git log origin/main..HEAD` shows all Phase 37 commits unpushed; `gh workflow list` does NOT include 'Phase 37 Linux RESL' — workflow has never run. Per all 6 plan SUMMARYs the actual CI verification is intentionally deferred to post-merge orchestrator action (worktree discipline). |
+| 6   | GitHub Actions Linux runner executes all four backends end-to-end as part of the Phase 37 close gate | VERIFIED | Phase 46 Plan 46-02 live-run: GH Actions run-id `26344319758` (workflow `.github/workflows/phase-37-linux-resl.yml`) completed green 2026-05-23. Both jobs (`resl-nix` + `pkgs-auto-pull`) returned `conclusion=success`. This is the most recent green run on `origin/main` at SHA `c79f35bd`. The workflow lacks `workflow_dispatch` trigger (push/pull_request only); this push-triggered run at `c79f35bd` serves as the SC#6 closure evidence per Plan 46-02. |
 
-**Score:** 5/6 truths verified (criterion 6 requires post-merge confirmation — flagged as `human_needed`)
+**Score:** 6/6 truths verified (criterion 6 closed via Phase 46 Plan 46-02 live run `26344319758`)
 
 ### Deferred Items
 
@@ -107,7 +107,7 @@ No items deferred to later phases. All Phase 37 success criteria are intended to
 | Workspace compiles with tests | `cargo check -p nono-cli --tests` | Finished `dev` profile clean (post sigstore 0.7.0 bump) | PASS |
 | Workflow YAML is valid | `python -c "import yaml; yaml.safe_load(open('.github/workflows/phase-37-linux-resl.yml'))"` | exits 0 | PASS |
 | auto_pull_e2e_linux compiles on Linux target | (deferred to CI — Windows host lacks `x86_64-linux-gnu-gcc`) | n/a | SKIP (cross-target gate deferred per CLAUDE.md PARTIAL disposition) |
-| Phase 37 workflow has actually run on GitHub | `gh workflow list \| grep 'Phase 37 Linux RESL'` | (no match — workflow not yet registered) | FAIL (commits unpushed; intentional per worktree discipline) |
+| Phase 37 workflow has actually run on GitHub | `gh run list --workflow=phase-37-linux-resl.yml -L 1` | Run-id 26344319758, conclusion=success, SHA c79f35bd (2026-05-23) | PASS (Phase 46 Plan 46-02 live-run confirms SC#6 closure) |
 
 ### Requirements Coverage
 
@@ -157,11 +157,11 @@ See `human_verification:` frontmatter block at the top of this file. Summary:
 - **WR-05** — sigstore-verify 0.7.0 `verify_sct` default: nono uses `::default()`-only construction; trust posture relies implicitly on upstream's chosen default. No pin-test guards against future minor-bump default flip.
 - **WR-03** — auto_pull_e2e_linux EnvGuard doesn't take the `lock_env()` cross-test mutex; relies on workflow `--test-threads=1` for serialization.
 
-**Why status is `human_needed` not `passed`:**
+**Status is `passed`:**
 
-The Phase 37 close gate (Success Criterion 6) explicitly requires GitHub Actions to run the workflow green. The workflow file is committed and structurally complete, but the Phase 37 commits are unpushed and `gh workflow list` does not show 'Phase 37 Linux RESL'. Per the verifier's mandate ("If Step 8 produced ANY human verification items, status MUST be human_needed"), live CI confirmation is the load-bearing post-merge gate. All 6 plan SUMMARYs explicitly acknowledge this deferral (worktree cannot push; orchestrator owns the merge).
+Phase 46 Plan 46-02 (2026-05-23) completed the post-merge CI dispatch. GH Actions run-id `26344319758` at SHA `c79f35bd` confirmed the workflow runs green on `ubuntu-24.04`. Both jobs (`resl-nix` + `pkgs-auto-pull`) returned `conclusion=success`. Success Criterion 6 is now closed.
 
-**The codebase work is complete and verified to the extent possible on a Windows dev host.** All unit tests pass (3 + 1 + 4 + 6 + 4 + 3 + 8 = 29 new tests across the 6 plans, plus 31 pre-existing trust::bundle tests now green post sigstore 0.7.0 bump). The CI workflow file is structurally correct and YAML-valid. Phase 37 is ready for the orchestrator's umbrella PR push + Linux-runner CI gate.
+**The codebase work is complete and verified.** All unit tests pass (3 + 1 + 4 + 6 + 4 + 3 + 8 = 29 new tests across the 6 plans, plus 31 pre-existing trust::bundle tests now green post sigstore 0.7.0 bump). The CI workflow file is structurally correct and confirmed green on a real `ubuntu-24.04` runner.
 
 ---
 

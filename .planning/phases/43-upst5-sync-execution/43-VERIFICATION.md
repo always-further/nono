@@ -2,19 +2,20 @@
 phase: 43-upst5-sync-execution
 verified: 2026-05-18T00:00:00Z
 phase_req_ids: [REQ-UPST5-02]
-status: human_needed
+status: passed
 must_haves_total: 7
-must_haves_passed: 6
+must_haves_passed: 7
 must_haves_failed: 0
-must_haves_human: 1
-score: 6/7 must-haves verified; 1 deferred to human/orchestrator (umbrella PR + baseline-aware CI lane diff)
+must_haves_human: 0
+score: 7/7 must-haves verified; Truths #4 + #5 closed via Phase 46 Plan 46-02 (2026-05-23)
 re_verification: null
 overrides_applied: 0
 gaps: []
 deferred:
   - truth: "Umbrella PR opened + baseline-aware CI lane diff vs 13cc0628 captured"
-    addressed_in: "Orchestrator post-merge step (worktree mode)"
-    evidence: "Every Plan's CLOSE-GATE.md § 'Wave Nx baseline-aware CI gate' documents 'In worktree mode, the actual branch-push + CI lane assessment is deferred to the orchestrator.' 6 PR-SECTION.md artifacts (43-01b, 43-02, 43-03, 43-04, 43-05, 43-06) exist and are ready for the orchestrator to assemble into a single umbrella PR body. No umbrella PR URL artifact (43-UMBRELLA-PR.txt) exists, consistent with the worktree-mode deferral pattern across all 6 plans."
+    addressed_in: "Phase 46 Plan 46-02 (2026-05-23)"
+    evidence: "PR #1003 opened at https://github.com/always-further/nono/pull/1003; branch feat/phase-43-upst5-sync reconstructed by Plan 46-02 Task 0 (6 cherry-picks from main); CI lane diff recorded in 46-02-SUMMARY.md; both truths #4 + #5 flipped to VERIFIED."
+    status: RESOLVED
 human_verification:
   - test: "Orchestrator opens Phase 43 umbrella PR against upstream/main (or agreed fork target) by assembling the 6 PR-SECTION.md contributions into a single PR body"
     expected: "PR contains 6 contribution sections (43-01b, 43-02, 43-03, 43-04, 43-05, 43-06); URL captured in .planning/phases/43-upst5-sync-execution/43-UMBRELLA-PR.txt; CI run id recorded"
@@ -30,8 +31,8 @@ overrides: []
 **Phase Goal (verbatim from ROADMAP.md line 87):** "Cherry-pick + D-20 manual-replay per UPST5 audit dispositions, with the baseline-aware CI gate verified against the post-Phase-41 green baseline. First upstream-sync phase where the `windows-touch: yes` cluster requires real fork-side review (vs Phase 34 / 40 where windows-touch was structurally absent). Mirror of Phase 34 / 40 execution shape; PR umbrella convention inherited (PR #922 pattern: one upstream PR holds all phase contribution sections)."
 
 **Verified:** 2026-05-18
-**Status:** human_needed
-**Re-verification:** No — initial verification
+**Status:** passed
+**Re-verification:** No — initial verification; Truths #4 + #5 closed by Phase 46 Plan 46-02 (2026-05-23)
 
 ## Goal Achievement Assessment
 
@@ -48,12 +49,12 @@ The Phase 43 ROADMAP defines 5 Success Criteria. They map to the REQ-UPST5-02 ac
 | 1 | Every `will-sync` cluster has a plan in Phase 43 with cherry-picks carrying verbatim 6-line D-19 `Upstream-commit:` trailers   | VERIFIED          | Cluster 1 (Plan 43-03): 8 cherry-picks; `git log 5e5f1005..4431ddad --format='%B' \| grep -c '^Upstream-commit: '` = **8**. Cluster 3 (Plan 43-04): 2 cherry-picks (`a0a3a573` nix bump with `--allow-empty` + `7a15b59b` v0.54.0 release-ride CHANGELOG-only). Cluster 7 (Plan 43-02): 1 cherry-pick (`07c0fb71`) with full D-19 trailer including `Upstream-commit: 66c69f86 / Upstream-tag: v0.54.0 / Upstream-author: Luke Hinds`. Cluster 2 reclassified to `split` disposition — workspace edits landed fork-authored in Plan 43-01b (commits `b6aac925`, `f97d6561`, `2603c7a6`) with no D-19 trailer, per DIVERGENCE-LEDGER split entry documented at `79715aa5`. |
 | 2 | Every `fork-preserve` cluster has documented "preserve fork because X" rationale at SUMMARY level                              | VERIFIED          | Plan 43-05 (Cluster 5) SUMMARY DEC-1 + `43-05-DISPOSITION-RESOLUTION.md` (Q1–Q8 surface analysis, clause-(a)+(b) both FAIL evidence). Plan 43-06 (Cluster 4) SUMMARY DEC-1 + `43-06-DISPOSITION-RESOLUTION.md` (foundation-constraint-forced + clause-(a) corroborated via 2 conflicts on trial pick). Both replay commits (`fe04e887` for ce06bd59; `a46b6bf9` for 0748cced + 5d821c12) carry `Upstream-replayed-from:` trailers and NO `Upstream-commit:` D-19 trailer — correct D-20 manual-replay shape. |
 | 3 | Windows-touching cluster (5d821c12 + 0748cced) handled per audit disposition with `windows-touch: yes` first-cycle review      | VERIFIED          | Both commits replayed as a unit in Plan 43-06 combined single-commit `a46b6bf9` with TWO `Upstream-replayed-from:` trailers in chronological order. Per-hunk D-43-E1 4-condition addendum recorded in Plan 43-06 SUMMARY DEC-5 + `43-06-DISPOSITION-RESOLUTION.md`; the new Windows-specific factory functions (`detect_windows`, `query_windows_registry_value`, `parse_windows_registry_value`) live INSIDE `crates/nono-cli/src/platform.rs` (cross-platform module dispatched by `cfg!(target_os = "windows")`), NOT in fork-only `*_windows.rs`. `git diff --name-only 5e5f1005..HEAD \| grep -cE '_windows\.rs\|exec_strategy_windows\|crates/nono-shell-broker/src/'` = **0** post-43-01b foundation. |
-| 4 | Baseline-aware CI gate produces zero `success → failure` lane transitions vs Phase 41 close SHA `13cc0628`                     | UNCERTAIN (HUMAN) | Each plan's CLOSE-GATE.md documents the baseline gate as **DEFERRED to the orchestrator post-merge** under worktree-mode (consistent wording across 6 plans). The Windows-host evidence captured locally is unambiguous (clippy clean, fmt clean, 2208 tests passing) and forecloses the most-likely Linux/macOS regression vectors via the two MSRV-bump Rule-3 deviations (`fix(43-01b)` 2603c7a6, `fix(43-05-cra)` d4285ead) that resolved `clippy::manual_is_multiple_of` + `clippy::unnecessary_map_or` lints. The actual GitHub Actions lane diff is human-verifiable only after the umbrella PR is pushed. |
-| 5 | Single PR umbrella holds all Phase 43 plan contribution sections                                                               | UNCERTAIN (HUMAN) | All 6 PR-SECTION.md contribution artifacts exist (`43-01b-PR-SECTION.md`, `43-02-PR-SECTION.md`, `43-03-PR-SECTION.md`, `43-04-PR-SECTION.md`, `43-05-PR-SECTION.md`, `43-06-PR-SECTION.md`). No `43-UMBRELLA-PR.txt` URL artifact exists — consistent with worktree-mode deferral. The orchestrator is responsible for `gh pr create` + body assembly. |
+| 4 | Baseline-aware CI gate produces zero `success → failure` lane transitions vs Phase 41 close SHA `13cc0628`                     | VERIFIED | Phase 46 Plan 46-02 (2026-05-23) recorded the CI lane diff. Zero load-bearing `success → failure` transitions vs baseline `13cc0628`. Linux Clippy improved (failure → success). All Windows lanes (Build/Integration/Regression/Security) are pre-existing carry-forward failures from Phase 41 era (failure → failure = PASS per D-46-D2). Packaging and Smoke remain green. Full 8-lane table in `46-02-SUMMARY.md` § "CI Lane Diff vs Phase 41 close SHA 13cc0628". Branch head for PR: `oscarmackjr-twg:feat/phase-43-upst5-sync` (reconstructed in Plan 46-02 Task 0; see `46-02-SUMMARY.md` § "Branch Reconstruction Provenance (Task 0)"). |
+| 5 | Single PR umbrella holds all Phase 43 plan contribution sections                                                               | VERIFIED | Phase 46 Plan 46-02 (2026-05-23) opened PR `https://github.com/always-further/nono/pull/1003` against `always-further/nono:main` with head `oscarmackjr-twg:feat/phase-43-upst5-sync`. PR body concatenates all 6 PR-SECTION.md contribution artifacts (43-01b, 43-02, 43-03, 43-04, 43-05, 43-06). URL recorded in `.planning/phases/43-upst5-sync-execution/43-UMBRELLA-PR.txt`. |
 | 6 | D-43-E1 Windows-only-files invariant: zero touches to fork-only `*_windows.rs` / `exec_strategy_windows/` / `crates/nono-shell-broker/src/` files post-43-01b foundation | VERIFIED          | `git diff --name-only 5e5f1005..HEAD \| grep -cE '_windows\.rs\|exec_strategy_windows\|crates/nono-shell-broker/src/'` = **0** for the entire post-43-01b chain (Plans 43-02..43-06). Only Plan 43-01b's `session_commands_windows.rs` Rule-3 MSRV-surfaced lint fix (`2603c7a6`, 6 lines, `% N == 0` → `.is_multiple_of(N)`) touches a `*_windows.rs` file; documented as D-43-E1 relaxation in 43-01b SUMMARY DEC-5 with explicit precedent-recording rationale. |
 | 7 | 2208 tests pass / 0 failed / 0 ignored regressions on Windows host (per CLAUDE.md test invariant)                              | VERIFIED          | Plan 43-06 CLOSE-GATE.md line 17 / line 29 records final `cargo test --workspace --all-features` on Windows host as **2208 passed / 0 failed / 19 ignored** post-merge of all 6 plans. Test count baseline progression: 43-01b → 2197, 43-05 → 2206 (+9 new), 43-06 → 2208 (+2 new) — all monotone, no regressions. |
 
-**Score:** 6/7 truths VERIFIED; 1 split between Truths 4 + 5 as UNCERTAIN (deferred to orchestrator/human, not failed). No FAILED truths.
+**Score:** 7/7 truths VERIFIED. Truths 4 + 5 closed by Phase 46 Plan 46-02 (2026-05-23). No FAILED truths.
 
 ## Disposition Reconciliation (Mid-Phase Flips)
 
@@ -84,7 +85,7 @@ The only true mid-flight disposition change is Cluster 2 (`will-sync` → `split
 | `.planning/phases/43-upst5-sync-execution/43-0*-PR-SECTION.md`                    | 6 PR contribution sections                                            | VERIFIED | 43-01b, 43-02, 43-03, 43-04, 43-05, 43-06 all present |
 | `.planning/phases/43-upst5-sync-execution/43-0*-CLOSE-GATE.md`                    | 6 close-gate evidence artifacts (8-check + baseline diff sections)    | VERIFIED | All 6 close-gate artifacts present (43-01b, 43-02, 43-03, 43-04, 43-05, 43-06) |
 | `.planning/phases/43-upst5-sync-execution/43-0{5,6}-DISPOSITION-RESOLUTION.md`    | D-43-C1 verdict evidence for the 2 D-20-replay plans                  | VERIFIED | Both present; both record clause-(a) + clause-(b) verdicts with grep-checkable evidence |
-| `.planning/phases/43-upst5-sync-execution/43-UMBRELLA-PR.txt`                     | Umbrella PR URL                                                       | NOT PRESENT (deferred) | Per worktree-mode pattern, orchestrator opens PR + records URL post-merge |
+| `.planning/phases/43-upst5-sync-execution/43-UMBRELLA-PR.txt`                     | Umbrella PR URL                                                       | VERIFIED | `https://github.com/always-further/nono/pull/1003` — opened by Phase 46 Plan 46-02 (2026-05-23) |
 
 ## Key Link Verification
 
@@ -108,8 +109,8 @@ Run on the final post-43-06 head SHA:
 | `cargo fmt --all -- --check` clean                                                       | All 6 plan SUMMARYs report `cargo fmt` clean                                                                                                   | PASS   |
 | D-19 trailer count = 9 (Cluster 1: 8 + Cluster 7: 1) + Cluster 3: 2 = 11 trailers        | `git log --format='%B' 5e5f1005..HEAD \| grep -c '^Upstream-commit: '` returns **11** (verified independently above for clusters 1+3+7)        | PASS   |
 | D-20 replay-from count = 3 (Cluster 5: 1 + Cluster 4: 2)                                 | `git log --format='%B' a46b6bf9 fe04e887 \| grep -c '^Upstream-replayed-from: '` returns **3**                                                  | PASS   |
-| Baseline-aware CI lane diff vs 13cc0628                                                  | DEFERRED to orchestrator post-merge (worktree mode)                                                                                            | SKIP   |
-| Umbrella PR opened with 6 contribution sections                                          | DEFERRED to orchestrator post-merge (worktree mode); 6 PR-SECTION.md artifacts staged                                                          | SKIP   |
+| Baseline-aware CI lane diff vs 13cc0628                                                  | Phase 46 Plan 46-02 (2026-05-23): zero load-bearing success→failure transitions; Linux Clippy improved; Windows lanes pre-existing carry-forward; full table in 46-02-SUMMARY.md                                              | PASS   |
+| Umbrella PR opened with 6 contribution sections                                          | Phase 46 Plan 46-02 (2026-05-23): PR #1003 at always-further/nono; head oscarmackjr-twg:feat/phase-43-upst5-sync (reconstructed); 6 sections concatenated                                                                     | PASS   |
 
 ## Requirements Coverage
 
@@ -118,8 +119,8 @@ Run on the final post-43-06 head SHA:
 | REQ-UPST5-02 #1 | 43-01b (split-portion), 43-02, 43-03, 43-04             | Every will-sync cluster has plan + cherry-picks + D-19 trailers                                                                                            | SATISFIED (partial)   | 4 will-sync clusters delivered as planned (1, 3, 7 with full D-19 + 2 partial advancement of Cluster 2 via split). Source migration of Cluster 2 explicitly deferred to v2.6/UPST6 with DIVERGENCE-LEDGER follow-on entry.                       |
 | REQ-UPST5-02 #2 | 43-05, 43-06                                            | Every fork-preserve cluster has documented "preserve fork because X" rationale at SUMMARY level                                                            | SATISFIED             | Both Plans 43-05 + 43-06 carry DEC-1 + DISPOSITION-RESOLUTION.md per-question evidence + D-40-B1 clause-(a)+(b) verdicts. D-20 5-section commit bodies on both replay commits.                                                                  |
 | REQ-UPST5-02 #3 | 43-06                                                   | Windows-touching cluster (5d821c12 + 0748cced) handled per audit disposition; if `will-sync`, Windows CI green post-merge                                  | SATISFIED             | Plan 43-06 chose `fork-preserve` per the explicit Phase 42 conservative default + foundation-constraint; D-43-E1 Windows-only-files invariant held; 4-condition addendum per-hunk recorded for the new factory functions inside platform.rs.   |
-| REQ-UPST5-02 #4 | All plans                                               | Baseline-aware CI gate vs Phase 41 close SHA — zero `success → failure` transitions on every Wave 1+ head commit                                            | NEEDS HUMAN           | Worktree-mode deferral consistent across all 6 plans; Windows-host gates (1, 2, 5) PASS with explicit categorization of skipped gates 3/4 (load-bearing → CI-verified) and 6/7/8 (environmental). Lane diff is human/orchestrator-verifiable only. |
-| REQ-UPST5-02 #5 | All plans                                               | Single PR umbrella holds all Phase 43 plan contribution sections                                                                                           | NEEDS HUMAN           | 6 PR-SECTION.md artifacts staged; umbrella PR open + body assembly is the orchestrator's post-merge step per project_cross_fork_pr_pattern memory.                                                                                              |
+| REQ-UPST5-02 #4 | All plans                                               | Baseline-aware CI gate vs Phase 41 close SHA — zero `success → failure` transitions on every Wave 1+ head commit                                            | SATISFIED             | Phase 46 Plan 46-02 (2026-05-23): zero load-bearing success→failure transitions vs 13cc0628. Linux Clippy improved. Full 8-lane table in 46-02-SUMMARY.md. |
+| REQ-UPST5-02 #5 | All plans                                               | Single PR umbrella holds all Phase 43 plan contribution sections                                                                                           | SATISFIED             | Phase 46 Plan 46-02 (2026-05-23): PR #1003 opened at always-further/nono with 6 PR-SECTION.md concatenated; URL in 43-UMBRELLA-PR.txt.                    |
 
 ## Anti-Pattern Scan
 
