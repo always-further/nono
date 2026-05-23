@@ -21,14 +21,14 @@ See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 ship
 
 **Core Value:** Windows security must be as structurally impossible and feature-complete as Unix platforms; every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 50 — corp-network-tuf-refresh-via-os-root-store-replace-or-wrap-t
+**Current Focus:** Phase 50 fully closed (SPEC Req 6 UAT PASS 2026-05-23); next active phase is 45 (source migration + AIPC G-04 + RESL native re-validation) — 3 plans drafted, 0 executed.
 
 ## Current Position
 
-Phase: 50
+Phase: 45 (next active — has 3 PLAN.md, 0 SUMMARY.md)
 Plan: Not started
-Status: Executing Phase 50
-Last activity: 2026-05-23 - Completed quick task 260522-wn0: v2 WRITE_OWNER fix (drop broken pre-flight, gate directive hint on path ownership in catch-all branch)
+Status: Between phases (Phase 50 closed, Phase 45 ready for execution)
+Last activity: 2026-05-23 - Phase 50 SPEC Req 6 UAT PASS on corp-network host; status flipped human_needed → passed
 
 ### v2.6 Phase Summary
 

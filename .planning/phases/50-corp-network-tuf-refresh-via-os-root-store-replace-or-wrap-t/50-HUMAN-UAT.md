@@ -2,8 +2,11 @@
 phase: 50
 slug: corp-network-tuf-refresh-via-os-root-store-replace-or-wrap-t
 created: 2026-05-21
-status: pending
+closed: 2026-05-23
+status: passed
 scenarios: 1
+result: 1/1 pass
+recording_location: 50-VERIFICATION.md § "Scenario 1 — TLS-inspecting corporate proxy refresh"
 ---
 
 # Phase 50 — Human-UAT Scenarios

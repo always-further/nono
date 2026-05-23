@@ -1,28 +1,32 @@
 ---
 phase: 50-corp-network-tuf-refresh-via-os-root-store-replace-or-wrap-t
 verified: 2026-05-22T00:00:00Z
-status: human_needed
-score: 6/6 must-haves verified (Req 6 awaits POC-user UAT run)
+uat_closed: 2026-05-23
+status: passed
+score: 6/6 must-haves verified + SPEC Req 6 UAT PASS (corp-network TLS-inspecting proxy)
 overrides_applied: 0
 re_verification:
-  previous_status: none
-  previous_score: n/a
-  gaps_closed: []
+  previous_status: human_needed
+  previous_score: 6/6 must-haves verified (Req 6 awaits POC-user UAT run)
+  gaps_closed:
+    - "SPEC Req 6 corp-network UAT — PASS confirmed 2026-05-23 by POC user on TLS-inspecting domain-managed Windows host"
   gaps_remaining: []
   regressions: []
 human_verification:
   - test: "Run `nono setup --refresh-trust-root` on a Windows host behind a TLS-inspecting corporate proxy whose interceptor CA is in the Windows root store"
     expected: "Step [3/5] exits 0; <nono_home>/.nono/trust-root/trusted_root.json is written and non-empty; stderr contains ZERO `error sending request for url` errors"
     why_human: "SPEC Req 6 acceptance is binary and dispositive — only a real corp-network host can verify that ureq + rustls-platform-verifier actually consults the Windows Crypt32 root store as advertised. Hermetic unit tests deliberately do not exercise a real TLS handshake (D-50-09)."
+    result: pass
+    result_date: 2026-05-23
 ---
 
 # Phase 50: Corp-network TUF refresh via OS root store Verification Report
 
 **Phase Goal:** `nono setup --refresh-trust-root` succeeds on a Windows host behind a TLS-inspecting corporate proxy (whose interceptor CA is in the Windows root store but not in the Mozilla webpki-roots bundle), by replacing the single `sigstore-rs TrustedRoot::production()` call with a nono-local TUF chain-walk that uses an HTTP client (ureq + platform-verifier) consulting the OS certificate store.
 
-**Verified:** 2026-05-22
-**Status:** human_needed (all automated checks PASS; SPEC Req 6 awaits POC-user UAT run)
-**Re-verification:** No — initial verification
+**Verified:** 2026-05-22 (automated checks) + 2026-05-23 (corp-network UAT closed)
+**Status:** **passed** — 6/6 must-haves verified AND SPEC Req 6 dispositive UAT confirmed PASS on TLS-inspecting domain-managed Windows host
+**Re-verification:** 2026-05-23 UAT closure flips status `human_needed` → `passed`. No regressions; SPEC Req 6 gap closed.
 
 ## Goal Achievement
 
@@ -152,5 +156,29 @@ Phase status should advance to `human_needed` (not `passed`) until the UAT row i
 
 ---
 
+## Scenario 1 — TLS-inspecting corporate proxy refresh
+
+- **Host:** Windows (domain-managed; non-elevated PowerShell session)
+- **Corp proxy:** TLS-inspecting enterprise gateway with interceptor CA in `HKLM\SOFTWARE\Microsoft\SystemCertificates\ROOT` (confirmed by prior corp-network failure traced in `.planning/debug/resolved/sigstore-tuf-fetch-transport.md` and now resolved by Phase 50)
+- **nono build SHA:** fdefeee1 (HEAD after 260522-wn0 v2 WRITE_OWNER fix and origin push; built locally from `target/x86_64-pc-windows-msvc/release/nono.exe`, v0.53.1)
+- **Result:** **pass**
+- **Cache file size:** 6,897 bytes (`$env:USERPROFILE\.nono\trust-root\trusted_root.json`)
+- **TUF cache hydration:** full chain present at `$env:USERPROFILE\.nono\trust-root\tuf-cache\` — `latest_known_time.json` (32b), `root.json` (4,912b), `snapshot.json` (1,496b), `targets.json` (3,980b), `timestamp.json` (384b), plus delegated targets `8.registry.npmjs.org.json` (551b). All timestamped 2026-05-23 09:13.
+- **Stderr excerpt:** none — zero `error sending request for url` errors; setup completed cleanly through `[5/5] Built-in profiles...` and printed `Setup complete!`
+- **Date:** 2026-05-23
+- **Tester:** POC user (oscarmackjr-twg)
+- **If failed, which Residual Risk category applied?** n/a (PASS)
+
+Side observations (informational, not blocking Phase 50):
+- `[2/5]` setup probe correctly reports WFP driver `not registered` (dev-build path; `nono-wfp-driver.sys` lives in `crates/nono-cli/data/windows/` and is only registered post-MSI-install via `nono setup --install-wfp-driver`). WFP service shows `present and running` — irrelevant to Phase 50 TUF/TLS path which is hermetic from network enforcement.
+- Setup probe reports `Administrator session: NO (Standard User)` — consistent with the non-elevated reproduction; corp-network TUF refresh works without elevation as designed.
+
+### Disposition
+
+**`pass`** → SPEC Req 6 satisfied. Phase 50 closes. `ureq + rustls-platform-verifier` empirically proven to consult the Windows Crypt32 root store on a real TLS-inspecting corp network. The fork-local TUF chain-walk is dispositively superior to the prior `sigstore-rs TrustedRoot::production()` path that failed on this exact host (per `sigstore-tuf-fetch-transport.md`).
+
+---
+
 _Verified: 2026-05-22T00:00:00Z_
-_Verifier: Claude (gsd-verifier)_
+_UAT closed: 2026-05-23 (corp-network host, oscarmackjr-twg)_
+_Verifier: Claude (gsd-verifier) + human UAT_
