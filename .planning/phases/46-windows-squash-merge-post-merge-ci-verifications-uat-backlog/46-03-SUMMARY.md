@@ -204,3 +204,16 @@ Items 5, 9, 10, 11 (Phase 35) and Items 13, 16, 17, 18 (Phase 36) are no longer 
 - **D-46-C2:** workflow_dispatch-only tactical workflow — deletable in v3.0
 - **D-46-C3:** `no-test-fixture` waiver per-item in this SUMMARY (7 items remain waived)
 - **D-46-C4:** Backfill Phase 35 + 36 HUMAN-UAT + VERIFICATION files
+
+## Self-Check: PASSED
+
+- FOUND: `.github/workflows/phase-46-uat-backlog.yml` (libdbus-1-dev step + no RUSTFLAGS)
+- FOUND: `35-HUMAN-UAT.md` (6/11 pass + 5/11 no-test-fixture)
+- FOUND: `35-VERIFICATION.md` (score updated, run-id 26347039444)
+- FOUND: `36-HUMAN-UAT.md` (5/7 pass + 2/7 no-test-fixture)
+- FOUND: `36-VERIFICATION.md` (score updated, run-id 26347039444)
+- FOUND: `46-03-SUMMARY.md` (workflow fix iteration section + new disposition table)
+- FOUND: `supervisor_macos.rs` `#[derive(Debug)]` on `MacosResourceLimits`
+- FOUND: Commits 60a15f37, f6a6d97d, 5fb3ff15, 65da7a19, 6634bc30 in git log
+- VERIFIED: GH Actions run 26347039444 — both jobs success; all test steps pass
+- VERIFIED: REQUIREMENTS.md REQ-UAT-BL-01 + REQ-UAT-BL-02 remain `[x]` (SC#5 satisfied; all items have documented disposition)
