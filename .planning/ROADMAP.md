@@ -143,8 +143,8 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
   3. `## Empirical cross-check` section spot-checks at least 4 fork-shared files for any upstream path the drift tool missed, closing the `feedback_cluster_isolation_invalid` empirical lesson (DIVERGENCE-LEDGER cluster isolation can be empirically false; diff-inspect re-export surfaces, not just `--name-only`).
   4. Upstream `v0.41–v0.43` drift inventory produced via the same DRIFT-01/02 tooling; per-cluster dispositions recorded with a "backfill-cleanup, not parity-sync" framing in SUMMARY; the inventory either resolves the deferral by confirming no fork-side action needed (most likely outcome for a 1-year-stale backfill range) or flags any cherry-picks worth absorbing in Phase 48 alongside UPST6.
   5. Phase 47 ships zero `crates/` / `bindings/` / `scripts/` source-tree edits (audit-only output; D-39-E5 Windows-only-files invariant trivially honored).
-**Plans**: 2 plans
-- [ ] 47-01-UPST6-AUDIT-PLAN.md — UPST6 cycle audit ledger v0.54.0..v0.57.0 (REQ-UPST6-01) with ## ADR review + ## Empirical cross-check ≥4 files + ## Cross-cluster re-export deps detected; D-47-D1..D4 close feedback_cluster_isolation_invalid; UPST7 stub appended
+**Plans**: 1 / 2 plans complete
+- [x] 47-01-UPST6-AUDIT-PLAN.md — UPST6 cycle audit ledger v0.54.0..v0.57.0 (REQ-UPST6-01) with ## ADR review + ## Empirical cross-check ≥4 files + ## Cross-cluster re-export deps detected; D-47-D1..D4 close feedback_cluster_isolation_invalid; UPST7 stub appended (completed 2026-05-24; 42 commits / 9 clusters / disposition breakdown 8 will-sync + 1 fork-preserve + 0 won't-sync + 0 split; windows-touch:yes count 0; ADR outcome (a) confirm Option A continue; 5 files walked in Empirical cross-check; 0 cross-cluster re-export deps detected)
 - [ ] 47-02-V041-V043-BACKFILL-PLAN.md — v0.41.0..v0.43.0 backfill drift ingestion ledger (REQ-DRIFT-INGEST-01) with absorbed-via: column reconstructing Phase 22/34 historical absorption + ## Phase 48 hand-off subsection for unmatched candidates; SKIPS ## ADR review per D-47-C4; closes v2.3 scope-lock 2026-04-29 deferral
 **UI hint**: no
 
@@ -176,6 +176,22 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
 - [x] 49-02-release-asset-bundling-PLAN.md — release.yml byte-identity assert + SHA256SUMS extension + files-glob entry (REQ-POC-TRUST-02)
 - [x] 49-03-fixture-refresh-cadence-PLAN.md — sigstore-rotation-refresh.md template + matched .sh/.ps1 smoke scripts + windows-poc-handoff.mdx rewrite (REQ-POC-TRUST-03)
 **UI hint**: no
+
+## Future Cycles
+
+Entries queued under v2.6 § Future Cycles per the Phase 33 ADR `### Future audit cadence` rule — "per upstream release, lazily-evaluated". They activate when the next upstream release ships OR when the maintainer decides accumulated cherry-pick labor warrants firing. **UPST7 cadence trigger partially met:** 19 post-v0.57.0 commits visible between `10cec984` and audit-open upstream/main HEAD `807fca38` at Phase 47 Plan 47-01 fetch (2026-05-24); will continue accumulating before UPST7 fires.
+
+### UPST7 — Upstream v0.57.0… sync audit (placeholder)
+
+**Goal**: Audit upstream `v0.57.0..<next-tag>` divergence per the Phase 33 ADR `continue` cadence rule. Inherits the audit-shape template from Phase 33 + 39 + 42 + 47 verbatim. Title may flip from `sync audit` to `sync execution` if the next cycle's commit set is small enough to skip a dedicated audit (auditor's call at UPST7 plan-phase).
+
+**Depends on**: Phase 48 (UPST6 sync execution must close before UPST7 audit; cadence rule preserves linear ordering).
+
+**Plans**: 0 / TBD — to be populated during `/gsd-plan-phase` invocation when UPST7 fires.
+
+**Reference**: `docs/architecture/upstream-parity-strategy.md` § Future audit cadence (Phase 33 ADR cadence rule). Also `.planning/phases/47-upst6-audit-v0-41-v0-43-drift-ingestion/DIVERGENCE-LEDGER.md` as the most-recent worked audit-shape template (42 commits / 9 clusters / D-47-D1..D4 cross-cluster re-export hardening structurally closing the `feedback_cluster_isolation_invalid` lesson).
+
+UPST7 fires when the next upstream release ships OR the maintainer decides the accumulated cherry-pick labor warrants firing. At Phase 47 close (2026-05-24), 19 known post-v0.57.0 commits are visible — will grow before UPST7 fires.
 
 ## Sequencing Rationale
 
