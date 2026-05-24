@@ -1965,7 +1965,7 @@ pub fn seccomp_network_fallback_mode(caps: &CapabilitySet) -> SeccompNetFallback
 /// 17: ret bind_action           ; bind (USER_NOTIF or ERRNO)
 /// 18: ret ALLOW                 ; allowed socket/socketpair
 /// ```
-fn build_seccomp_proxy_filter(has_bind_ports: bool) -> Vec<SockFilterInsn> {
+fn build_seccomp_proxy_filter(_has_bind_ports: bool) -> Vec<SockFilterInsn> {
     let errno_ret = SECCOMP_RET_ERRNO | (libc::EACCES as u32);
 
     // bind() always routes to USER_NOTIF so the supervisor can make the
@@ -2422,11 +2422,6 @@ pub fn read_notif_sockaddr(pid: u32, addr_ptr: u64, addrlen: u64) -> Result<Sock
                 unix_path,
             })
         }
-        libc::AF_UNIX => Ok(SockaddrInfo {
-            family,
-            port: 0,
-            is_loopback: true, // Unix sockets are always local
-        }),
         _ => Ok(SockaddrInfo {
             family,
             port: 0,

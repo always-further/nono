@@ -319,15 +319,15 @@ pub(super) fn handle_seccomp_notification(
                     Some(procfs_context),
                 ) {
                     Ok(file) => {
-                        if notif_id_valid(notify_fd, notif.id)?
-                            && let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd())
-                        {
-                            debug!(
-                                "inject_fd failed for initial-set proc path {}: {}",
-                                path.display(),
-                                e
-                            );
-                            let _ = deny_notif(notify_fd, notif.id);
+                        if notif_id_valid(notify_fd, notif.id)? {
+                            if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
+                                debug!(
+                                    "inject_fd failed for initial-set proc path {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                                let _ = deny_notif(notify_fd, notif.id);
+                            }
                         }
                     }
                     Err(e) => {
@@ -351,15 +351,15 @@ pub(super) fn handle_seccomp_notification(
                         }
                     }
                 }
-            } else if notif_id_valid(notify_fd, notif.id)?
-                && let Err(e) = continue_notif(notify_fd, notif.id)
-            {
-                debug!(
-                    "continue_notif failed for initial-set path {}: {}",
-                    path.display(),
-                    e
-                );
-                let _ = deny_notif(notify_fd, notif.id);
+            } else if notif_id_valid(notify_fd, notif.id)? {
+                if let Err(e) = continue_notif(notify_fd, notif.id) {
+                    debug!(
+                        "continue_notif failed for initial-set path {}: {}",
+                        path.display(),
+                        e
+                    );
+                    let _ = deny_notif(notify_fd, notif.id);
+                }
             }
             return Ok(());
         }
@@ -377,15 +377,15 @@ pub(super) fn handle_seccomp_notification(
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.raw_os_error() == Some(libc::ENOTDIR) =>
         {
-            if notif_id_valid(notify_fd, notif.id)?
-                && let Err(send_err) = continue_notif(notify_fd, notif.id)
-            {
-                debug!(
-                    "continue_notif failed for missing path {}: {}",
-                    path.display(),
-                    send_err
-                );
-                let _ = deny_notif(notify_fd, notif.id);
+            if notif_id_valid(notify_fd, notif.id)? {
+                if let Err(send_err) = continue_notif(notify_fd, notif.id) {
+                    debug!(
+                        "continue_notif failed for missing path {}: {}",
+                        path.display(),
+                        send_err
+                    );
+                    let _ = deny_notif(notify_fd, notif.id);
+                }
             }
             return Ok(());
         }
