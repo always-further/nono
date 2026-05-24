@@ -427,6 +427,17 @@ mod tests {
     }
 
     #[test]
+    fn test_pre_exec_update_check_disabled_for_pack_update_hint_helper() {
+        let helper = Cli::parse_from([
+            "nono",
+            "pack-update-hint-helper",
+            "always-further/claude",
+            "1.0.0",
+        ]);
+        assert!(!allows_pre_exec_update_check(&helper.command));
+    }
+
+    #[test]
     fn test_pre_exec_update_check_enabled_for_non_exec_commands() {
         let why = Cli::parse_from(["nono", "why", "--path", "/tmp", "--op", "read"]);
         assert!(allows_pre_exec_update_check(&why.command));
