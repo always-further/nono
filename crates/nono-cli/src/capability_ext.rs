@@ -7,9 +7,12 @@ use crate::cli::SandboxArgs;
 use crate::policy;
 use crate::profile::{expand_vars, Profile};
 use crate::protected_paths::{self, ProtectedRoots};
-use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
+use nono::{
+    AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result,
+    UnixSocketCapability, UnixSocketMode,
+};
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Try to create a directory capability, warning and skipping on PathNotFound.
 /// Propagates all other errors.
@@ -34,6 +37,205 @@ fn try_new_file(path: &Path, access: AccessMode, label: &str) -> Result<Option<F
     }
 }
 
+/// Try to create a single-file AF_UNIX socket capability.
+///
+/// Both modes accept non-existent paths:
+/// - `Connect`: via the library's NotFound warn-and-skip path (useful
+///   for profile grants that only exist in some environments).
+/// - `ConnectBind`: via the library's parent-canonicalise fallback.
+///   `bind(2)` creates the socket file, so granting before the file
+///   exists is the normal workflow; the caller must separately widen
+///   the implied filesystem grant to the parent directory in that
+///   case — see [`add_cli_unix_socket_caps`].
+fn try_new_unix_socket_file(
+    path: &Path,
+    mode: UnixSocketMode,
+    label: &str,
+) -> Result<Option<UnixSocketCapability>> {
+    match UnixSocketCapability::new_file(path, mode) {
+        Ok(cap) => Ok(Some(cap)),
+        Err(NonoError::PathNotFound(_)) => {
+            info!("{}: {}", label, path.display());
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Try to create a directory-scoped AF_UNIX socket capability.
+fn try_new_unix_socket_dir(
+    path: &Path,
+    mode: UnixSocketMode,
+    label: &str,
+) -> Result<Option<UnixSocketCapability>> {
+    match UnixSocketCapability::new_dir(path, mode) {
+        Ok(cap) => Ok(Some(cap)),
+        Err(NonoError::PathNotFound(_)) => {
+            info!("{}: {}", label, path.display());
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Try to create a subtree-scoped AF_UNIX socket capability.
+fn try_new_unix_socket_subtree(
+    path: &Path,
+    mode: UnixSocketMode,
+    label: &str,
+) -> Result<Option<UnixSocketCapability>> {
+    match UnixSocketCapability::new_dir_subtree(path, mode) {
+        Ok(cap) => Ok(Some(cap)),
+        Err(NonoError::PathNotFound(_)) => {
+            info!("{}: {}", label, path.display());
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Apply all `--allow-unix-socket*` flag groups to `caps`.
+///
+/// Each flag adds a [`UnixSocketCapability`] and auto-registers the
+/// implied [`FsCapability`] (CLI-side sugar per #696). The socket-level
+/// grant is non-recursive (enforced by `UnixSocketCapability::covers`);
+/// the fs grant for directory forms is recursive by design — that's
+/// Landlock's only expressible granularity.
+fn add_cli_unix_socket_caps(
+    caps: &mut CapabilitySet,
+    args: &SandboxArgs,
+    protected_roots: &ProtectedRoots,
+    allow_parent_of_protected: bool,
+) -> Result<()> {
+    const LBL_SOCK_FILE: &str = "Skipping non-existent unix socket (connect grant)";
+    const LBL_SOCK_FILE_BIND: &str = "Skipping non-existent unix socket (connect+bind grant)";
+    const LBL_SOCK_DIR: &str = "Skipping non-existent unix socket directory (connect grant)";
+    const LBL_SOCK_DIR_BIND: &str =
+        "Skipping non-existent unix socket directory (connect+bind grant)";
+    const LBL_FS_FILE_IMPLIED: &str = "Skipping implied fs grant for non-existent unix socket";
+    const LBL_FS_DIR_IMPLIED: &str =
+        "Skipping implied fs grant for non-existent unix socket directory";
+    const LBL_SOCK_SUBTREE: &str = "Skipping non-existent unix socket subtree (connect grant)";
+    const LBL_SOCK_SUBTREE_BIND: &str =
+        "Skipping non-existent unix socket subtree (connect+bind grant)";
+    const LBL_FS_DIR_IMPLIED_BIND_PARENT: &str =
+        "Skipping implied fs grant on parent of pending unix socket bind path";
+
+    for path in &args.allow_unix_socket {
+        validate_requested_file(path, "CLI", protected_roots, allow_parent_of_protected)?;
+        let sock_cap = try_new_unix_socket_file(path, UnixSocketMode::Connect, LBL_SOCK_FILE)?;
+        if let Some(cap) = sock_cap {
+            caps.add_unix_socket(cap);
+            // Only register the implied fs grant when the socket grant
+            // itself was accepted — otherwise we'd silently add a
+            // filesystem permission on a path the user is also asking
+            // to connect to, without the corresponding unix-socket
+            // grant (the two must stay coupled).
+            if let Some(cap) = try_new_file(path, AccessMode::Read, LBL_FS_FILE_IMPLIED)? {
+                caps.add_fs(cap);
+            }
+        }
+    }
+
+    for path in &args.allow_unix_socket_bind {
+        validate_requested_file(path, "CLI", protected_roots, allow_parent_of_protected)?;
+
+        // Dangling symlink guard: a symlink that exists on disk but
+        // whose target doesn't is NOT the normal "future socket file"
+        // case — `bind(2)` would punch through the symlink to create
+        // at the target, which might be a different path than the
+        // operator supplied. Reject loudly; users with a legitimate
+        // dangling-symlink workflow can unlink the symlink first.
+        //
+        // `path.symlink_metadata().is_ok()` checks the link itself,
+        // `path.exists()` follows it. The combination is: link exists
+        // (symlink_metadata ok) but target doesn't (exists false).
+        if path.symlink_metadata().is_ok() && !path.exists() {
+            return Err(NonoError::SandboxInit(format!(
+                "connect+bind unix socket grant rejects dangling symlink \
+                 (bind would create at the symlink's target path, which is \
+                 not what operators usually intend): {}",
+                path.display()
+            )));
+        }
+
+        let sock_cap =
+            try_new_unix_socket_file(path, UnixSocketMode::ConnectBind, LBL_SOCK_FILE_BIND)?;
+        if let Some(cap) = sock_cap {
+            caps.add_unix_socket(cap);
+            // Implied fs grant: ReadWrite. If the path exists, grant
+            // file-scoped — narrow. If it doesn't, widen to the parent
+            // directory because `bind(2)` needs write on the parent to
+            // create the inode. Landlock/Seatbelt can't express a
+            // per-file "create at this exact path" grant; operators
+            // who want tighter scope should prefer
+            // `--allow-unix-socket-dir-bind` with a scoped directory.
+            if path.exists() {
+                if let Some(cap) = try_new_file(path, AccessMode::ReadWrite, LBL_FS_FILE_IMPLIED)? {
+                    caps.add_fs(cap);
+                }
+            } else if let Some(parent) = path.parent() {
+                if let Some(cap) = try_new_dir(
+                    parent,
+                    AccessMode::ReadWrite,
+                    LBL_FS_DIR_IMPLIED_BIND_PARENT,
+                )? {
+                    caps.add_fs(cap);
+                }
+            }
+        }
+    }
+
+    for path in &args.allow_unix_socket_dir {
+        validate_requested_dir(path, "CLI", protected_roots, allow_parent_of_protected)?;
+        let sock_cap = try_new_unix_socket_dir(path, UnixSocketMode::Connect, LBL_SOCK_DIR)?;
+        if let Some(cap) = sock_cap {
+            caps.add_unix_socket(cap);
+            if let Some(cap) = try_new_dir(path, AccessMode::Read, LBL_FS_DIR_IMPLIED)? {
+                caps.add_fs(cap);
+            }
+        }
+    }
+
+    for path in &args.allow_unix_socket_dir_bind {
+        validate_requested_dir(path, "CLI", protected_roots, allow_parent_of_protected)?;
+        let sock_cap =
+            try_new_unix_socket_dir(path, UnixSocketMode::ConnectBind, LBL_SOCK_DIR_BIND)?;
+        if let Some(cap) = sock_cap {
+            caps.add_unix_socket(cap);
+            if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, LBL_FS_DIR_IMPLIED)? {
+                caps.add_fs(cap);
+            }
+        }
+    }
+
+    for path in &args.allow_unix_socket_subtree {
+        validate_requested_dir(path, "CLI", protected_roots, allow_parent_of_protected)?;
+        let sock_cap =
+            try_new_unix_socket_subtree(path, UnixSocketMode::Connect, LBL_SOCK_SUBTREE)?;
+        if let Some(cap) = sock_cap {
+            caps.add_unix_socket(cap);
+            if let Some(cap) = try_new_dir(path, AccessMode::Read, LBL_FS_DIR_IMPLIED)? {
+                caps.add_fs(cap);
+            }
+        }
+    }
+
+    for path in &args.allow_unix_socket_subtree_bind {
+        validate_requested_dir(path, "CLI", protected_roots, allow_parent_of_protected)?;
+        let sock_cap =
+            try_new_unix_socket_subtree(path, UnixSocketMode::ConnectBind, LBL_SOCK_SUBTREE_BIND)?;
+        if let Some(cap) = sock_cap {
+            caps.add_unix_socket(cap);
+            if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, LBL_FS_DIR_IMPLIED)? {
+                caps.add_fs(cap);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Create a profile capability for an exact path that is usually expected to be a file.
 ///
 /// Some clients use lock directories at paths that historically held lock files
@@ -46,7 +248,7 @@ fn try_new_profile_exact_path(
     label: &str,
     protected_roots: &ProtectedRoots,
 ) -> Result<Option<FsCapability>> {
-    validate_requested_file(path, "Profile", protected_roots)?;
+    validate_requested_file(path, "Profile", protected_roots, false)?;
     match try_new_file(path, access, label) {
         Err(NonoError::ExpectedFile(_)) => {
             handle_exact_directory_path(path, access, protected_roots)
@@ -61,7 +263,7 @@ fn handle_exact_directory_path(
     access: AccessMode,
     protected_roots: &ProtectedRoots,
 ) -> Result<Option<FsCapability>> {
-    validate_requested_dir(path, "Profile", protected_roots)?;
+    validate_requested_dir(path, "Profile", protected_roots, false)?;
     let resolved = path.canonicalize().map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
             NonoError::PathNotFound(path.to_path_buf())
@@ -229,7 +431,7 @@ fn apply_profile_dir_allows(
 ) -> Result<()> {
     for path_template in path_templates {
         let path = expand_vars(path_template, workdir)?;
-        validate_requested_dir(&path, "Profile", protected_roots)?;
+        validate_requested_dir(&path, "Profile", protected_roots, false)?;
         let label = format!(
             "{label_prefix} '{}' does not exist, skipping",
             path_template
@@ -246,6 +448,7 @@ fn validate_requested_dir(
     path: &Path,
     source: &str,
     protected_roots: &ProtectedRoots,
+    allow_parent_of_protected: bool,
 ) -> Result<()> {
     if path.exists() && !path.is_dir() {
         return Err(NonoError::ConfigParse(format!(
@@ -263,6 +466,7 @@ fn validate_requested_dir(
         false,
         source,
         protected_roots.as_paths(),
+        allow_parent_of_protected,
     )
 }
 
@@ -270,12 +474,14 @@ fn validate_requested_file(
     path: &Path,
     source: &str,
     protected_roots: &ProtectedRoots,
+    allow_parent_of_protected: bool,
 ) -> Result<()> {
     protected_paths::validate_requested_path_against_protected_roots(
         path,
         true,
         source,
         protected_roots.as_paths(),
+        allow_parent_of_protected,
     )
 }
 
@@ -328,7 +534,7 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Directory permissions (canonicalize handles existence check atomically)
         for path in &args.allow {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
+            validate_requested_dir(path, "CLI", &protected_roots, false)?;
             if let Some(cap) =
                 try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")?
             {
@@ -337,14 +543,14 @@ impl CapabilitySetExt for CapabilitySet {
         }
 
         for path in &args.read {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
+            validate_requested_dir(path, "CLI", &protected_roots, false)?;
             if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
                 caps.add_fs(cap);
             }
         }
 
         for path in &args.write {
-            validate_requested_dir(path, "CLI", &protected_roots)?;
+            validate_requested_dir(path, "CLI", &protected_roots, false)?;
             if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
                 caps.add_fs(cap);
             }
@@ -352,7 +558,7 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Single file permissions
         for path in &args.allow_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
+            validate_requested_file(path, "CLI", &protected_roots, false)?;
             if let Some(cap) =
                 try_new_file(path, AccessMode::ReadWrite, "Skipping non-existent file")?
             {
@@ -361,19 +567,24 @@ impl CapabilitySetExt for CapabilitySet {
         }
 
         for path in &args.read_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
+            validate_requested_file(path, "CLI", &protected_roots, false)?;
             if let Some(cap) = try_new_file(path, AccessMode::Read, "Skipping non-existent file")? {
                 caps.add_fs(cap);
             }
         }
 
         for path in &args.write_file {
-            validate_requested_file(path, "CLI", &protected_roots)?;
+            validate_requested_file(path, "CLI", &protected_roots, false)?;
             if let Some(cap) = try_new_file(path, AccessMode::Write, "Skipping non-existent file")?
             {
                 caps.add_fs(cap);
             }
         }
+
+        // AF_UNIX socket caps (file, directory, and subtree forms)
+        // See add_cli_unix_socket_caps for the full flag handling + implied
+        // filesystem grant logic.
+        add_cli_unix_socket_caps(&mut caps, args, &protected_roots, false)?;
 
         apply_cli_network_mode(&mut caps, args);
 
@@ -428,6 +639,7 @@ impl CapabilitySetExt for CapabilitySet {
     fn from_profile(profile: &Profile, workdir: &Path, args: &SandboxArgs) -> Result<PreparedCaps> {
         let mut caps = CapabilitySet::new();
         let protected_roots = ProtectedRoots::from_defaults()?;
+        let allow_parent_of_protected = profile.allow_parent_of_protected.unwrap_or(false);
 
         // Resolve policy groups from the already-finalized profile.
         let loaded_policy = policy::load_embedded_policy()?;
@@ -444,7 +656,7 @@ impl CapabilitySetExt for CapabilitySet {
         // Directories with read+write access
         for path_template in &fs.allow {
             let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
+            validate_requested_dir(&path, "Profile", &protected_roots, allow_parent_of_protected)?;
             let label = format!("Profile path '{}' does not exist, skipping", path_template);
             if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
                 cap.source = CapabilitySource::Profile;
@@ -462,10 +674,10 @@ impl CapabilitySetExt for CapabilitySet {
                 .unwrap_or(false);
 
             let maybe_cap = if reads_file {
-                validate_requested_file(&path, "Profile", &protected_roots)?;
+                validate_requested_file(&path, "Profile", &protected_roots, allow_parent_of_protected)?;
                 try_new_file(&path, AccessMode::Read, &label)?
             } else {
-                validate_requested_dir(&path, "Profile", &protected_roots)?;
+                validate_requested_dir(&path, "Profile", &protected_roots, allow_parent_of_protected)?;
                 try_new_dir(&path, AccessMode::Read, &label)?
             };
 
@@ -478,7 +690,7 @@ impl CapabilitySetExt for CapabilitySet {
         // Directories with write-only access
         for path_template in &fs.write {
             let path = expand_vars(path_template, workdir)?;
-            validate_requested_dir(&path, "Profile", &protected_roots)?;
+            validate_requested_dir(&path, "Profile", &protected_roots, allow_parent_of_protected)?;
             let label = format!("Profile path '{}' does not exist, skipping", path_template);
             if let Some(mut cap) = try_new_dir(&path, AccessMode::Write, &label)? {
                 cap.source = CapabilitySource::Profile;
@@ -552,6 +764,175 @@ impl CapabilitySetExt for CapabilitySet {
             "Profile policy path",
         )?;
 
+        for path_template in &fs.unix_socket {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_file(
+                &path,
+                "Profile",
+                &protected_roots,
+                allow_parent_of_protected,
+            )?;
+            let label = format!(
+                "Profile unix socket '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) = try_new_unix_socket_file(&path, UnixSocketMode::Connect, &label)?
+            {
+                cap.source = CapabilitySource::Profile;
+                caps.add_unix_socket(cap);
+                // Implied fs grant only when the socket grant itself
+                // was accepted — the two must stay coupled so we never
+                // add an fs grant for a path with no matching socket
+                // grant.
+                if let Some(mut cap) = try_new_file(&path, AccessMode::Read, &label)? {
+                    cap.source = CapabilitySource::Profile;
+                    caps.add_fs(cap);
+                }
+            }
+        }
+
+        for path_template in &fs.unix_socket_bind {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_file(
+                &path,
+                "Profile",
+                &protected_roots,
+                allow_parent_of_protected,
+            )?;
+            // Dangling-symlink guard — see add_cli_unix_socket_caps.
+            if path.symlink_metadata().is_ok() && !path.exists() {
+                return Err(NonoError::SandboxInit(format!(
+                    "Profile unix_socket_bind rejects dangling symlink \
+                     (bind would punch through to the link target): '{}'",
+                    path_template
+                )));
+            }
+            let label = format!(
+                "Profile unix socket '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) =
+                try_new_unix_socket_file(&path, UnixSocketMode::ConnectBind, &label)?
+            {
+                cap.source = CapabilitySource::Profile;
+                caps.add_unix_socket(cap);
+                // Implied fs grant. See add_cli_unix_socket_caps for the
+                // parent-widening rationale.
+                if path.exists() {
+                    if let Some(mut cap) = try_new_file(&path, AccessMode::ReadWrite, &label)? {
+                        cap.source = CapabilitySource::Profile;
+                        caps.add_fs(cap);
+                    }
+                } else if let Some(parent) = path.parent() {
+                    if let Some(mut cap) = try_new_dir(parent, AccessMode::ReadWrite, &label)? {
+                        cap.source = CapabilitySource::Profile;
+                        caps.add_fs(cap);
+                    }
+                }
+            }
+        }
+
+        for path_template in &fs.unix_socket_dir {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_dir(
+                &path,
+                "Profile",
+                &protected_roots,
+                allow_parent_of_protected,
+            )?;
+            let label = format!(
+                "Profile unix socket dir '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) = try_new_unix_socket_dir(&path, UnixSocketMode::Connect, &label)?
+            {
+                cap.source = CapabilitySource::Profile;
+                caps.add_unix_socket(cap);
+                if let Some(mut cap) = try_new_dir(&path, AccessMode::Read, &label)? {
+                    cap.source = CapabilitySource::Profile;
+                    caps.add_fs(cap);
+                }
+            }
+        }
+
+        for path_template in &fs.unix_socket_dir_bind {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_dir(
+                &path,
+                "Profile",
+                &protected_roots,
+                allow_parent_of_protected,
+            )?;
+            let label = format!(
+                "Profile unix socket dir '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) =
+                try_new_unix_socket_dir(&path, UnixSocketMode::ConnectBind, &label)?
+            {
+                cap.source = CapabilitySource::Profile;
+                caps.add_unix_socket(cap);
+                if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
+                    cap.source = CapabilitySource::Profile;
+                    caps.add_fs(cap);
+                }
+            }
+        }
+
+        for path_template in &fs.unix_socket_subtree {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_dir(
+                &path,
+                "Profile",
+                &protected_roots,
+                allow_parent_of_protected,
+            )?;
+            let label = format!(
+                "Profile unix socket subtree '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) =
+                try_new_unix_socket_subtree(&path, UnixSocketMode::Connect, &label)?
+            {
+                cap.source = CapabilitySource::Profile;
+                caps.add_unix_socket(cap);
+                if let Some(mut cap) = try_new_dir(&path, AccessMode::Read, &label)? {
+                    cap.source = CapabilitySource::Profile;
+                    caps.add_fs(cap);
+                }
+            }
+        }
+
+        for path_template in &fs.unix_socket_subtree_bind {
+            let path = expand_vars(path_template, workdir)?;
+            validate_requested_dir(
+                &path,
+                "Profile",
+                &protected_roots,
+                allow_parent_of_protected,
+            )?;
+            let label = format!(
+                "Profile unix socket subtree '{}' does not exist, skipping",
+                path_template
+            );
+            if let Some(mut cap) =
+                try_new_unix_socket_subtree(&path, UnixSocketMode::ConnectBind, &label)?
+            {
+                cap.source = CapabilitySource::Profile;
+                caps.add_unix_socket(cap);
+                if let Some(mut cap) = try_new_dir(&path, AccessMode::ReadWrite, &label)? {
+                    cap.source = CapabilitySource::Profile;
+                    caps.add_fs(cap);
+                }
+            }
+        }
+
+        // Additional profile filesystem grants (canonical fields
+        // `filesystem.deny` / `filesystem.bypass_protection` + historical
+        // drain sources `filesystem.allow` / `.read` / `.write`). The core
+        // allow/read/write entries are already applied above — these branches
+        // apply the remaining deny and deny-command surfaces.
+        // Fork-side note: field is `profile.policy.add_deny_access` per Phase 36-01b rename.
         for path_template in &profile.policy.add_deny_access {
             let path = expand_vars(path_template, workdir)?;
             let path_str = path.to_str().ok_or_else(|| {
@@ -643,7 +1024,7 @@ impl CapabilitySetExt for CapabilitySet {
         caps.set_ipc_mode_mut(ipc_mode);
 
         // Apply CLI overrides (CLI args take precedence)
-        add_cli_overrides(&mut caps, args)?;
+        add_cli_overrides(&mut caps, args, allow_parent_of_protected)?;
 
         // Expand profile-level bypass_protection paths for finalize_caps.
         // Existing override targets must fail closed in apply_deny_overrides
@@ -748,26 +1129,30 @@ fn apply_cli_network_mode(caps: &mut CapabilitySet, args: &SandboxArgs) {
 /// a profile or group capability. The subsequent `deduplicate()` call resolves
 /// conflicts using source priority (User wins over Group/System) and merges
 /// complementary access modes (Read + Write = ReadWrite).
-fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()> {
+fn add_cli_overrides(
+    caps: &mut CapabilitySet,
+    args: &SandboxArgs,
+    allow_parent_of_protected: bool,
+) -> Result<()> {
     let protected_roots = ProtectedRoots::from_defaults()?;
 
     // Additional directories from CLI
     for path in &args.allow {
-        validate_requested_dir(path, "CLI", &protected_roots)?;
+        validate_requested_dir(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_dir(path, AccessMode::ReadWrite, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.read {
-        validate_requested_dir(path, "CLI", &protected_roots)?;
+        validate_requested_dir(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_dir(path, AccessMode::Read, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.write {
-        validate_requested_dir(path, "CLI", &protected_roots)?;
+        validate_requested_dir(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_dir(path, AccessMode::Write, "Skipping non-existent path")? {
             caps.add_fs(cap);
         }
@@ -775,7 +1160,7 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
 
     // Additional files from CLI
     for path in &args.allow_file {
-        validate_requested_file(path, "CLI", &protected_roots)?;
+        validate_requested_file(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_file(path, AccessMode::ReadWrite, "Skipping non-existent file")?
         {
             caps.add_fs(cap);
@@ -783,18 +1168,21 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
     }
 
     for path in &args.read_file {
-        validate_requested_file(path, "CLI", &protected_roots)?;
+        validate_requested_file(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_file(path, AccessMode::Read, "Skipping non-existent file")? {
             caps.add_fs(cap);
         }
     }
 
     for path in &args.write_file {
-        validate_requested_file(path, "CLI", &protected_roots)?;
+        validate_requested_file(path, "CLI", &protected_roots, allow_parent_of_protected)?;
         if let Some(cap) = try_new_file(path, AccessMode::Write, "Skipping non-existent file")? {
             caps.add_fs(cap);
         }
     }
+
+    // AF_UNIX socket capabilities from CLI overrides.
+    add_cli_unix_socket_caps(caps, args, &protected_roots, allow_parent_of_protected)?;
 
     // CLI network flags override profile network settings.
     apply_cli_network_mode(caps, args);
@@ -844,6 +1232,7 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nono::SocketScope;
     use tempfile::tempdir;
 
     fn json_string(path: &Path) -> String {
@@ -2481,5 +2870,394 @@ mod tests {
             caps.platform_rules().is_empty(),
             "read-only file should not get atomic write rule"
         );
+    }
+
+    // --- --allow-unix-socket* flag tests (issue #685 / #696) -----------------
+
+    #[test]
+    fn test_allow_unix_socket_adds_cap_and_implied_read_fs_grant() {
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("a.sock");
+        std::fs::write(&sock, b"").expect("create socket stub");
+
+        let args = SandboxArgs {
+            allow_unix_socket: vec![sock.clone()],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("from_args");
+
+        // One UnixSocketCapability with mode=Connect.
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::Connect);
+        assert!(!socks[0].is_directory());
+
+        // Exactly one implied FsCapability at Read.
+        let fs_matches: Vec<_> = caps
+            .fs_capabilities()
+            .iter()
+            .filter(|c| c.is_file && c.resolved == sock.canonicalize().expect("canonicalize sock"))
+            .collect();
+        assert_eq!(fs_matches.len(), 1);
+        assert_eq!(fs_matches[0].access, AccessMode::Read);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_allow_unix_socket_bind_rejects_dangling_symlink() {
+        // A dangling symlink is not a typical "future socket file" — bind(2)
+        // follows the link and creates at the target, which is usually not
+        // what the operator intended. Must reject loudly.
+        let dir = tempdir().expect("tempdir");
+        let link = dir.path().join("dangling.sock");
+        let missing_target = dir.path().join("does-not-exist");
+        std::os::unix::fs::symlink(&missing_target, &link).expect("create dangling symlink");
+
+        let args = SandboxArgs {
+            allow_unix_socket_bind: vec![link],
+            ..sandbox_args()
+        };
+
+        let err = from_args_locked(&args)
+            .expect_err("dangling symlink must be rejected by the bind guard");
+        assert!(
+            format!("{err}").contains("dangling symlink"),
+            "error message should mention dangling symlink"
+        );
+    }
+
+    #[test]
+    fn test_allow_unix_socket_missing_skips_both_socket_and_fs_grants() {
+        // On macOS, try_new_file's handle_missing_file_capability can
+        // manufacture an exact-file FsCapability even when the path
+        // doesn't exist. The unix-socket branch must NOT register that
+        // fs grant when the socket grant itself was skipped — otherwise
+        // the user gets a filesystem permission for a path they can't
+        // `connect()` to anyway.
+        let dir = tempdir().expect("tempdir");
+        let missing = dir.path().join("never-exists.sock");
+
+        let args = SandboxArgs {
+            allow_unix_socket: vec![missing.clone()],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("from_args");
+
+        assert!(
+            caps.unix_socket_capabilities().is_empty(),
+            "no unix-socket grant for missing path"
+        );
+        assert!(
+            !caps
+                .fs_capabilities()
+                .iter()
+                .any(|c| c.original == missing || c.resolved == missing),
+            "no implied fs grant when the socket grant was skipped"
+        );
+    }
+
+    #[test]
+    fn test_allow_unix_socket_bind_accepts_nonexistent_path_and_widens_fs_to_parent() {
+        // The normal bind(2) workflow: grant is registered before the
+        // socket file exists. The UnixSocketCapability is added
+        // (ConnectBind, file-scoped, canonical parent + filename), and
+        // the implied fs grant widens to ReadWrite on the parent
+        // directory since the kernel needs write on the parent to
+        // create the new inode.
+        let dir = tempdir().expect("tempdir");
+        let pending = dir.path().join("future.sock");
+        assert!(!pending.exists(), "test precondition: path must not exist");
+
+        let args = SandboxArgs {
+            allow_unix_socket_bind: vec![pending.clone()],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("from_args");
+
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::ConnectBind);
+        assert!(!socks[0].is_directory());
+
+        // Implied fs grant should cover the parent dir with ReadWrite.
+        let canonical_parent = dir.path().canonicalize().expect("canonicalize dir");
+        let parent_grant = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| !c.is_file && c.resolved == canonical_parent)
+            .expect("implied parent-dir fs grant missing");
+        assert_eq!(parent_grant.access, AccessMode::ReadWrite);
+    }
+
+    #[test]
+    fn test_allow_unix_socket_bind_existing_grants_readwrite_fs() {
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("b.sock");
+        std::fs::write(&sock, b"").expect("create socket stub");
+
+        let args = SandboxArgs {
+            allow_unix_socket_bind: vec![sock.clone()],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("from_args");
+
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::ConnectBind);
+
+        let fs_match = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| c.is_file && c.resolved == sock.canonicalize().expect("canonicalize sock"))
+            .expect("implied fs cap not found");
+        assert_eq!(fs_match.access, AccessMode::ReadWrite);
+    }
+
+    #[test]
+    fn test_allow_unix_socket_dir_bind_directory_grants_readwrite_fs() {
+        // The tsx case (#685): runtime-generated socket filenames inside a
+        // known directory.
+        let dir = tempdir().expect("tempdir");
+
+        let args = SandboxArgs {
+            allow_unix_socket_dir_bind: vec![dir.path().to_path_buf()],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("from_args");
+
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::ConnectBind);
+        assert!(socks[0].is_directory());
+        assert_eq!(socks[0].scope, SocketScope::DirChildren);
+
+        let fs_match = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| {
+                !c.is_file && c.resolved == dir.path().canonicalize().expect("canonicalize dir")
+            })
+            .expect("implied fs dir cap not found");
+        assert_eq!(fs_match.access, AccessMode::ReadWrite);
+    }
+
+    #[test]
+    fn test_allow_unix_socket_dir_implies_read_fs_grant() {
+        let dir = tempdir().expect("tempdir");
+
+        let args = SandboxArgs {
+            allow_unix_socket_dir: vec![dir.path().to_path_buf()],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("from_args");
+
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::Connect);
+        assert!(socks[0].is_directory());
+        assert_eq!(socks[0].scope, SocketScope::DirChildren);
+        assert_eq!(socks[0].scope, SocketScope::DirChildren);
+
+        let fs_match = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| {
+                !c.is_file && c.resolved == dir.path().canonicalize().expect("canonicalize dir")
+            })
+            .expect("implied fs dir cap not found");
+        assert_eq!(fs_match.access, AccessMode::Read);
+    }
+
+    #[test]
+    fn test_allow_unix_socket_subtree_implies_read_fs_grant() {
+        let dir = tempdir().expect("tempdir");
+
+        let args = SandboxArgs {
+            allow_unix_socket_subtree: vec![dir.path().to_path_buf()],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("from_args");
+
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::Connect);
+        assert_eq!(socks[0].scope, SocketScope::DirSubtree);
+
+        let fs_match = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| {
+                !c.is_file && c.resolved == dir.path().canonicalize().expect("canonicalize dir")
+            })
+            .expect("implied fs dir cap not found");
+        assert_eq!(fs_match.access, AccessMode::Read);
+    }
+
+    #[test]
+    fn test_allow_unix_socket_subtree_bind_implies_readwrite_fs_grant() {
+        let dir = tempdir().expect("tempdir");
+
+        let args = SandboxArgs {
+            allow_unix_socket_subtree_bind: vec![dir.path().to_path_buf()],
+            ..sandbox_args()
+        };
+
+        let (caps, _) = from_args_locked(&args).expect("from_args");
+
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::ConnectBind);
+        assert_eq!(socks[0].scope, SocketScope::DirSubtree);
+
+        let fs_match = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| {
+                !c.is_file && c.resolved == dir.path().canonicalize().expect("canonicalize dir")
+            })
+            .expect("implied fs dir cap not found");
+        assert_eq!(fs_match.access, AccessMode::ReadWrite);
+    }
+
+    /// Build a minimal profile JSON with a single filesystem field set,
+    /// then parse it into a [`crate::profile::Profile`].
+    fn profile_with_fs_field(field: &str, value: &str) -> crate::profile::Profile {
+        // On Windows, path separators are backslashes which must be escaped
+        // in JSON strings.
+        let escaped = value.replace('\\', "\\\\");
+        let json = format!(
+            r#"{{
+                "meta": {{ "name": "test-unix-socket" }},
+                "security": {{ "groups": [] }},
+                "filesystem": {{ "{field}": ["{escaped}"] }}
+            }}"#
+        );
+        serde_json::from_str(&json).expect("parse profile")
+    }
+
+    #[test]
+    fn test_profile_unix_socket_field_connect_file() {
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("a.sock");
+        std::fs::write(&sock, b"").expect("create socket stub");
+        let profile = profile_with_fs_field("unix_socket", &sock.display().to_string());
+
+        let (caps, _) =
+            from_profile_locked(&profile, dir.path(), &sandbox_args()).expect("from_profile");
+
+        let socks: Vec<_> = caps
+            .unix_socket_capabilities()
+            .iter()
+            .filter(|c| c.source == CapabilitySource::Profile)
+            .collect();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::Connect);
+        assert!(!socks[0].is_directory());
+    }
+
+    #[test]
+    fn test_profile_unix_socket_field_connect_bind_file() {
+        let dir = tempdir().expect("tempdir");
+        let sock = dir.path().join("b.sock");
+        std::fs::write(&sock, b"").expect("create socket stub");
+        let profile = profile_with_fs_field("unix_socket_bind", &sock.display().to_string());
+
+        let (caps, _) =
+            from_profile_locked(&profile, dir.path(), &sandbox_args()).expect("from_profile");
+
+        let socks: Vec<_> = caps
+            .unix_socket_capabilities()
+            .iter()
+            .filter(|c| c.source == CapabilitySource::Profile)
+            .collect();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::ConnectBind);
+        assert!(!socks[0].is_directory());
+    }
+
+    #[test]
+    fn test_profile_unix_socket_field_connect_dir() {
+        let dir = tempdir().expect("tempdir");
+        let profile = profile_with_fs_field("unix_socket_dir", &dir.path().display().to_string());
+
+        let (caps, _) =
+            from_profile_locked(&profile, dir.path(), &sandbox_args()).expect("from_profile");
+
+        let socks: Vec<_> = caps
+            .unix_socket_capabilities()
+            .iter()
+            .filter(|c| c.source == CapabilitySource::Profile)
+            .collect();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::Connect);
+        assert!(socks[0].is_directory());
+    }
+
+    #[test]
+    fn test_profile_unix_socket_field_connect_bind_dir() {
+        // The tsx (#685) case, expressed via profile JSON.
+        let dir = tempdir().expect("tempdir");
+        let profile =
+            profile_with_fs_field("unix_socket_dir_bind", &dir.path().display().to_string());
+
+        let (caps, _) =
+            from_profile_locked(&profile, dir.path(), &sandbox_args()).expect("from_profile");
+
+        let socks: Vec<_> = caps
+            .unix_socket_capabilities()
+            .iter()
+            .filter(|c| c.source == CapabilitySource::Profile)
+            .collect();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::ConnectBind);
+        assert!(socks[0].is_directory());
+        assert_eq!(socks[0].scope, SocketScope::DirChildren);
+    }
+
+    #[test]
+    fn test_profile_unix_socket_field_connect_subtree() {
+        let dir = tempdir().expect("tempdir");
+        let profile =
+            profile_with_fs_field("unix_socket_subtree", &dir.path().display().to_string());
+
+        let (caps, _) =
+            from_profile_locked(&profile, dir.path(), &sandbox_args()).expect("from_profile");
+
+        let socks: Vec<_> = caps
+            .unix_socket_capabilities()
+            .iter()
+            .filter(|c| c.source == CapabilitySource::Profile)
+            .collect();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::Connect);
+        assert_eq!(socks[0].scope, SocketScope::DirSubtree);
+    }
+
+    #[test]
+    fn test_profile_unix_socket_field_connect_bind_subtree() {
+        let dir = tempdir().expect("tempdir");
+        let profile = profile_with_fs_field(
+            "unix_socket_subtree_bind",
+            &dir.path().display().to_string(),
+        );
+
+        let (caps, _) =
+            from_profile_locked(&profile, dir.path(), &sandbox_args()).expect("from_profile");
+
+        let socks: Vec<_> = caps
+            .unix_socket_capabilities()
+            .iter()
+            .filter(|c| c.source == CapabilitySource::Profile)
+            .collect();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::ConnectBind);
+        assert_eq!(socks[0].scope, SocketScope::DirSubtree);
     }
 }

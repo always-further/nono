@@ -173,6 +173,349 @@ impl std::fmt::Display for FsCapability {
     }
 }
 
+/// Which operations are permitted on a pathname AF_UNIX socket.
+///
+/// Mirrors [`AccessMode`] for files: `Connect` is the read-analog
+/// (client-side use of an existing socket), `ConnectBind` is the write-analog
+/// (also permits `bind(2)`, which creates the socket file — i.e. offering a
+/// service at that path). Default grants should omit bind; use `ConnectBind`
+/// only when the sandboxed program creates the socket itself (e.g. `tsx`'s
+/// self-IPC pipe in issue #685).
+///
+/// Invariant `separate-read-write` (see `proj/invariants.yaml`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnixSocketMode {
+    /// Allow `connect(2)` only. The socket must already exist.
+    Connect,
+    /// Allow both `connect(2)` and `bind(2)`. `bind(2)` creates the socket
+    /// file at grant time so the path need not exist yet.
+    ConnectBind,
+}
+
+impl UnixSocketMode {
+    /// True if this mode permits `bind(2)` on the granted path.
+    #[must_use]
+    pub fn permits_bind(self) -> bool {
+        matches!(self, UnixSocketMode::ConnectBind)
+    }
+}
+
+impl std::fmt::Display for UnixSocketMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnixSocketMode::Connect => write!(f, "connect"),
+            UnixSocketMode::ConnectBind => write!(f, "connect+bind"),
+        }
+    }
+}
+
+/// Operation being queried against a [`UnixSocketCapability`].
+///
+/// Kept distinct from [`UnixSocketMode`] so the grant-side (what a
+/// capability permits) and the query-side (what the caller is about to
+/// do) are not conflated. The supervisor's seccomp-notify handler maps
+/// `SYS_CONNECT` → `Connect`, `SYS_BIND` → `Bind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnixSocketOp {
+    /// About to call `connect(2)`.
+    Connect,
+    /// About to call `bind(2)`.
+    Bind,
+}
+
+impl std::fmt::Display for UnixSocketOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnixSocketOp::Connect => write!(f, "connect"),
+            UnixSocketOp::Bind => write!(f, "bind"),
+        }
+    }
+}
+
+/// Path matching scope for a pathname AF_UNIX socket capability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketScope {
+    /// A single socket path; matches only the canonical file path.
+    #[default]
+    File,
+    /// Any direct child of a directory; does not match grandchildren.
+    DirChildren,
+    /// Any descendant of a directory subtree.
+    DirSubtree,
+}
+
+impl SocketScope {
+    /// Human-readable label for summaries and diagnostics.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            SocketScope::File => "file",
+            SocketScope::DirChildren => "dir-children",
+            SocketScope::DirSubtree => "dir-subtree",
+        }
+    }
+
+    /// Whether this scope is directory-backed.
+    #[must_use]
+    pub fn is_directory(self) -> bool {
+        matches!(self, SocketScope::DirChildren | SocketScope::DirSubtree)
+    }
+}
+
+impl std::fmt::Display for SocketScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// A capability granting AF_UNIX socket access on a filesystem path.
+///
+/// Only pathname sockets (filesystem-backed) are grantable through this
+/// type. Abstract-namespace sockets (`sun_path[0] == '\0'`) and unnamed
+/// sockets are never covered by a grant — see issue #685 for the design
+/// note. Those kinds are denied by the sandbox's `decide_network_notification`
+/// policy on Linux and have no analog on macOS.
+///
+/// Invariants:
+/// - `path-canonicalize`: canonicalised at construction. For `ConnectBind`
+///   grants where the socket itself doesn't yet exist, we canonicalise the
+///   parent directory and re-append the final component (bind creates the
+///   socket file).
+/// - `lib-policy-free`: this is a pure data type. Policy coupling (e.g.
+///   auto-granting an implied `FsCapability`) lives in `nono-cli`.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnixSocketCapability {
+    /// Original path as specified by the caller, pre-canonicalisation.
+    /// Retained for diagnostic output and for macOS dual-path emission
+    /// (`/tmp/foo.sock` vs `/private/tmp/foo.sock`).
+    pub original: PathBuf,
+    /// Canonical absolute path.
+    pub resolved: PathBuf,
+    /// Path matching scope for this grant.
+    pub scope: SocketScope,
+    /// Which socket operations are permitted.
+    pub mode: UnixSocketMode,
+    /// Where this capability originated.
+    #[serde(default)]
+    pub source: CapabilitySource,
+}
+
+impl<'de> Deserialize<'de> for UnixSocketCapability {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            original: PathBuf,
+            resolved: PathBuf,
+            #[serde(default)]
+            scope: Option<SocketScope>,
+            #[serde(default)]
+            is_directory: Option<bool>,
+            mode: UnixSocketMode,
+            #[serde(default)]
+            source: CapabilitySource,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let scope = wire.scope.unwrap_or_else(|| {
+            if wire.is_directory.unwrap_or(false) {
+                SocketScope::DirChildren
+            } else {
+                SocketScope::File
+            }
+        });
+        Ok(Self {
+            original: wire.original,
+            resolved: wire.resolved,
+            scope,
+            mode: wire.mode,
+            source: wire.source,
+        })
+    }
+}
+
+impl UnixSocketCapability {
+    /// Grant for a single socket file.
+    ///
+    /// If `mode == Connect`, the path must already exist and must not be
+    /// a directory.
+    ///
+    /// If `mode == ConnectBind`, the path may not yet exist (bind creates
+    /// it). In that case the parent directory must exist; canonicalisation
+    /// resolves the parent and re-appends the final path component.
+    pub fn new_file(path: impl AsRef<Path>, mode: UnixSocketMode) -> Result<Self> {
+        let path = path.as_ref();
+
+        let resolved = match path.canonicalize() {
+            Ok(p) if p.is_dir() => {
+                return Err(NonoError::ExpectedFile(path.to_path_buf()));
+            }
+            Ok(p) => p,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // ConnectBind is allowed to grant paths that do not exist
+                // yet — bind(2) will create the socket file. Canonicalise
+                // the parent and re-append the final component so the
+                // resolved path is anchored in a real directory.
+                if !mode.permits_bind() {
+                    return Err(NonoError::PathNotFound(path.to_path_buf()));
+                }
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| NonoError::PathCanonicalization {
+                        path: path.to_path_buf(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "socket path has no parent directory",
+                        ),
+                    })?;
+                let file_name =
+                    path.file_name()
+                        .ok_or_else(|| NonoError::PathCanonicalization {
+                            path: path.to_path_buf(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "socket path has no final component",
+                            ),
+                        })?;
+                let resolved_parent = parent.canonicalize().map_err(|parent_err| {
+                    if parent_err.kind() == std::io::ErrorKind::NotFound {
+                        NonoError::PathNotFound(parent.to_path_buf())
+                    } else {
+                        NonoError::PathCanonicalization {
+                            path: parent.to_path_buf(),
+                            source: parent_err,
+                        }
+                    }
+                })?;
+                if !resolved_parent.is_dir() {
+                    return Err(NonoError::ExpectedDirectory(parent.to_path_buf()));
+                }
+                resolved_parent.join(file_name)
+            }
+            Err(e) => {
+                return Err(NonoError::PathCanonicalization {
+                    path: path.to_path_buf(),
+                    source: e,
+                });
+            }
+        };
+
+        Ok(Self {
+            original: path.to_path_buf(),
+            resolved,
+            scope: SocketScope::File,
+            mode,
+            source: CapabilitySource::User,
+        })
+    }
+
+    /// Grant for any pathname socket directly within a directory.
+    ///
+    /// Non-recursive: a socket one level deeper (e.g. `<dir>/subdir/foo.sock`)
+    /// is not covered. The directory itself must already exist.
+    ///
+    /// Rejects the filesystem root (`/`) as defence-in-depth against
+    /// accidental grants that would cover sockets anywhere at top level
+    /// (cf. [`validate_platform_rule`]'s rejection of root-level subpath
+    /// grants for filesystem rules). Use explicit subdirectory paths.
+    pub fn new_dir(path: impl AsRef<Path>, mode: UnixSocketMode) -> Result<Self> {
+        Self::new_dir_with_scope(path, mode, SocketScope::DirChildren)
+    }
+
+    /// Grant for any pathname socket within a directory subtree.
+    ///
+    /// Recursive: sockets in nested subdirectories are covered. The directory
+    /// itself must already exist.
+    pub fn new_dir_subtree(path: impl AsRef<Path>, mode: UnixSocketMode) -> Result<Self> {
+        Self::new_dir_with_scope(path, mode, SocketScope::DirSubtree)
+    }
+
+    fn new_dir_with_scope(
+        path: impl AsRef<Path>,
+        mode: UnixSocketMode,
+        scope: SocketScope,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        if !scope.is_directory() {
+            return Err(NonoError::SandboxInit(
+                "unix socket directory constructor requires a directory scope".to_string(),
+            ));
+        }
+
+        let resolved = path.canonicalize().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                NonoError::PathNotFound(path.to_path_buf())
+            } else {
+                NonoError::PathCanonicalization {
+                    path: path.to_path_buf(),
+                    source: e,
+                }
+            }
+        })?;
+
+        if !resolved.is_dir() {
+            return Err(NonoError::ExpectedDirectory(path.to_path_buf()));
+        }
+
+        if resolved.parent().is_none() {
+            return Err(NonoError::SandboxInit(
+                "unix socket directory grant at filesystem root is not permitted".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            original: path.to_path_buf(),
+            resolved,
+            scope,
+            mode,
+            source: CapabilitySource::User,
+        })
+    }
+
+    /// True if `sockaddr_path` is covered by this grant.
+    ///
+    /// - File grants: `sockaddr_path == resolved` exactly.
+    /// - Direct-child directory grants: `sockaddr_path`'s parent equals
+    ///   `resolved`, component-wise (non-recursive).
+    /// - Subtree directory grants: `sockaddr_path` starts with `resolved`,
+    ///   component-wise.
+    ///
+    /// Uses `Path` component semantics; never string prefix
+    /// (`path-component-compare` invariant).
+    #[must_use]
+    pub fn covers(&self, sockaddr_path: &Path) -> bool {
+        match self.scope {
+            SocketScope::File => sockaddr_path == self.resolved.as_path(),
+            SocketScope::DirChildren => sockaddr_path.parent() == Some(self.resolved.as_path()),
+            SocketScope::DirSubtree => {
+                sockaddr_path != self.resolved.as_path()
+                    && sockaddr_path.starts_with(&self.resolved)
+            }
+        }
+    }
+
+    /// Whether this grant is directory-backed.
+    #[must_use]
+    pub fn is_directory(&self) -> bool {
+        self.scope.is_directory()
+    }
+}
+
+impl std::fmt::Display for UnixSocketCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} ({})",
+            self.scope.label(),
+            self.resolved.display(),
+            self.mode
+        )
+    }
+}
+
 /// Validate a platform-specific rule for obvious security issues.
 ///
 /// Rejects rules that:
@@ -522,6 +865,9 @@ impl std::fmt::Display for NetworkMode {
 pub struct CapabilitySet {
     /// Filesystem capabilities
     fs: Vec<FsCapability>,
+    /// AF_UNIX socket capabilities (pathname grants only; see
+    /// [`UnixSocketCapability`] and issue #685).
+    unix_sockets: Vec<UnixSocketCapability>,
     /// Network access mode (default: AllowAll)
     network_mode: NetworkMode,
     /// Per-port TCP connect allowlist (Linux Landlock V4+ only).
@@ -606,6 +952,62 @@ impl CapabilitySet {
     pub fn allow_file(mut self, path: impl AsRef<Path>, mode: AccessMode) -> Result<Self> {
         let cap = FsCapability::new_file(path, mode)?;
         self.fs.push(cap);
+        Ok(self)
+    }
+
+    /// In-place equivalent of [`Self::allow_file`] for mutable contexts.
+    ///
+    /// Mirrors the `set_network_mode` / `set_network_mode_mut` split. Used
+    /// by callers that hold `&mut CapabilitySet` and can't move ownership
+    /// for the builder chain — e.g. the CLI's proxy runtime, which needs
+    /// to grant the sandboxed child read access to the TLS-intercept
+    /// trust bundle after the proxy has minted it.
+    pub fn allow_file_mut(&mut self, path: impl AsRef<Path>, mode: AccessMode) -> Result<()> {
+        let cap = FsCapability::new_file(path, mode)?;
+        self.fs.push(cap);
+        Ok(())
+    }
+
+    /// Add a file-scoped AF_UNIX socket capability (builder pattern).
+    ///
+    /// The path is canonicalized. If `mode` is [`UnixSocketMode::Connect`],
+    /// the path must exist; if `mode` is [`UnixSocketMode::ConnectBind`],
+    /// the path may not exist yet (bind creates it) but the parent must.
+    pub fn allow_unix_socket(
+        mut self,
+        path: impl AsRef<Path>,
+        mode: UnixSocketMode,
+    ) -> Result<Self> {
+        let cap = UnixSocketCapability::new_file(path, mode)?;
+        self.unix_sockets.push(cap);
+        Ok(self)
+    }
+
+    /// Add a directory-scoped AF_UNIX socket capability (builder pattern).
+    ///
+    /// Grants cover any pathname socket directly within the directory
+    /// (non-recursive). The directory must exist at grant time.
+    pub fn allow_unix_socket_dir(
+        mut self,
+        path: impl AsRef<Path>,
+        mode: UnixSocketMode,
+    ) -> Result<Self> {
+        let cap = UnixSocketCapability::new_dir(path, mode)?;
+        self.unix_sockets.push(cap);
+        Ok(self)
+    }
+
+    /// Add a subtree-scoped AF_UNIX socket capability (builder pattern).
+    ///
+    /// Grants cover any pathname socket below the directory recursively. The
+    /// directory must exist at grant time.
+    pub fn allow_unix_socket_subtree(
+        mut self,
+        path: impl AsRef<Path>,
+        mode: UnixSocketMode,
+    ) -> Result<Self> {
+        let cap = UnixSocketCapability::new_dir_subtree(path, mode)?;
+        self.unix_sockets.push(cap);
         Ok(self)
     }
 
@@ -810,6 +1212,11 @@ impl CapabilitySet {
         self.fs.push(cap);
     }
 
+    /// Add an AF_UNIX socket capability (mutable, in-place).
+    pub fn add_unix_socket(&mut self, cap: UnixSocketCapability) {
+        self.unix_sockets.push(cap);
+    }
+
     /// Set network blocking state
     ///
     /// `true` sets `NetworkMode::Blocked`, `false` sets `NetworkMode::AllowAll`.
@@ -916,6 +1323,25 @@ impl CapabilitySet {
     #[must_use]
     pub fn fs_capabilities(&self) -> &[FsCapability] {
         &self.fs
+    }
+
+    /// Get AF_UNIX socket capabilities.
+    #[must_use]
+    pub fn unix_socket_capabilities(&self) -> &[UnixSocketCapability] {
+        &self.unix_sockets
+    }
+
+    /// True if any AF_UNIX socket capability covers `sockaddr_path` and
+    /// permits `op` on it.
+    #[must_use]
+    pub fn unix_socket_allowed(&self, sockaddr_path: &Path, op: UnixSocketOp) -> bool {
+        self.unix_sockets.iter().any(|cap| {
+            cap.covers(sockaddr_path)
+                && match op {
+                    UnixSocketOp::Connect => true, // any grant allows connect
+                    UnixSocketOp::Bind => cap.mode.permits_bind(),
+                }
+        })
     }
 
     /// Rewrite self-referential procfs capabilities for a specific process.
@@ -1200,6 +1626,103 @@ impl CapabilitySet {
         for idx in to_remove {
             self.fs.remove(idx);
         }
+
+        self.deduplicate_unix_sockets();
+    }
+
+    /// Deduplicate [`UnixSocketCapability`] entries in-place.
+    ///
+    /// Two entries collide when they share `(resolved, scope)`.
+    /// Merge rules match [`Self::deduplicate`]'s user-intent policy:
+    ///
+    /// - **User-intent beats system/group.** When a user- or profile-
+    ///   sourced entry collides with a system/group entry, the user entry
+    ///   is kept with *its own* mode unchanged. A user choosing `Connect`
+    ///   for a path is deliberately narrowing the grant; dedup must not
+    ///   silently re-widen it to `ConnectBind` just because an
+    ///   unsolicited system grant also covers the path.
+    /// - **Same-provenance collisions merge to the superset.** Two user-
+    ///   intent entries (or two system entries) differing in mode end up
+    ///   as `ConnectBind`, since `Connect` is a subset. This is the
+    ///   socket-layer analog of the fs dedup's `Read + Write → ReadWrite`
+    ///   rule, but one-directional: `Connect` never strengthens a
+    ///   `ConnectBind` grant.
+    fn deduplicate_unix_sockets(&mut self) {
+        use std::collections::HashMap;
+
+        let mut seen: HashMap<(PathBuf, SocketScope), usize> = HashMap::new();
+        let mut to_remove: Vec<usize> = Vec::new();
+        let mut mode_upgrades: Vec<(usize, UnixSocketMode)> = Vec::new();
+        let mut original_updates: Vec<(usize, PathBuf)> = Vec::new();
+
+        for (i, cap) in self.unix_sockets.iter().enumerate() {
+            let key = (cap.resolved.clone(), cap.scope);
+            if let Some(&existing_idx) = seen.get(&key) {
+                let existing = &self.unix_sockets[existing_idx];
+
+                let new_is_user = cap.source.is_user_intent();
+                let existing_is_user = existing.source.is_user_intent();
+
+                // Only merge modes when both entries share provenance.
+                // Across tiers, the user-intent entry's literal mode wins
+                // — a user narrowing to Connect must not be silently
+                // upgraded because a group also granted ConnectBind.
+                let same_provenance = new_is_user == existing_is_user;
+                let merged_mode = if same_provenance
+                    && (existing.mode.permits_bind() || cap.mode.permits_bind())
+                {
+                    UnixSocketMode::ConnectBind
+                } else {
+                    // Keep whichever mode the retained entry had; decided
+                    // per-branch below.
+                    UnixSocketMode::Connect
+                };
+
+                let keep_new = match (new_is_user, existing_is_user) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    // Same provenance: prefer the stronger-mode entry, or
+                    // the existing one when modes are equal.
+                    _ => cap.mode.permits_bind() && !existing.mode.permits_bind(),
+                };
+
+                if keep_new {
+                    to_remove.push(existing_idx);
+                    seen.insert(key, i);
+                    if cap.original == cap.resolved && existing.original != existing.resolved {
+                        original_updates.push((i, existing.original.clone()));
+                    }
+                    // Mode upgrade only applies in the same-provenance
+                    // case; otherwise cap.mode stays as-is.
+                    if same_provenance && merged_mode != cap.mode {
+                        mode_upgrades.push((i, merged_mode));
+                    }
+                } else {
+                    if existing.original == existing.resolved && cap.original != cap.resolved {
+                        original_updates.push((existing_idx, cap.original.clone()));
+                    }
+                    to_remove.push(i);
+                    if same_provenance && merged_mode != existing.mode {
+                        mode_upgrades.push((existing_idx, merged_mode));
+                    }
+                }
+            } else {
+                seen.insert(key, i);
+            }
+        }
+
+        for (idx, original) in original_updates {
+            self.unix_sockets[idx].original = original;
+        }
+        for (idx, mode) in mode_upgrades {
+            self.unix_sockets[idx].mode = mode;
+        }
+
+        to_remove.sort_unstable();
+        to_remove.reverse();
+        for idx in to_remove {
+            self.unix_sockets.remove(idx);
+        }
     }
 
     /// Check if the given path is already covered by an existing directory capability.
@@ -1239,6 +1762,18 @@ impl CapabilitySet {
                     cap.resolved.display(),
                     cap.access,
                     kind
+                ));
+            }
+        }
+
+        if !self.unix_sockets.is_empty() {
+            lines.push("Unix sockets:".to_string());
+            for cap in &self.unix_sockets {
+                lines.push(format!(
+                    "  {} [{}] ({})",
+                    cap.resolved.display(),
+                    cap.mode,
+                    cap.scope
                 ));
             }
         }
@@ -2415,14 +2950,414 @@ mod tests {
     }
 
     #[test]
+    fn test_unix_socket_connect_on_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("existing.sock");
+        fs::write(&path, b"").unwrap(); // stand-in for a real socket file
+
+        let cap = UnixSocketCapability::new_file(&path, UnixSocketMode::Connect).unwrap();
+        assert_eq!(cap.mode, UnixSocketMode::Connect);
+        assert!(!cap.is_directory());
+        assert!(cap.resolved.is_absolute());
+    }
+
+    #[test]
+    fn test_unix_socket_connect_bind_allows_nonexistent_path() {
+        // The #685 use case: tsx grants `/tmp/tsx-1000/<pid>.pipe` before
+        // the process has even started. Path doesn't exist yet; parent does.
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("pending.sock");
+
+        let cap = UnixSocketCapability::new_file(&missing, UnixSocketMode::ConnectBind).unwrap();
+        assert_eq!(cap.mode, UnixSocketMode::ConnectBind);
+        assert!(!cap.is_directory());
+        // Resolved path is canonical-parent + final component
+        assert_eq!(cap.resolved.file_name().unwrap(), "pending.sock");
+        assert!(cap.resolved.parent().unwrap().is_absolute());
+    }
+
+    #[test]
+    fn test_unix_socket_connect_bind_fails_when_parent_missing() {
+        let result = UnixSocketCapability::new_file(
+            "/definitely/does/not/exist/12345/x.sock",
+            UnixSocketMode::ConnectBind,
+        );
+        assert!(
+            matches!(result, Err(NonoError::PathNotFound(_))),
+            "bind grant must fail when parent is missing: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_unix_socket_file_rejects_directory_path() {
+        let dir = tempdir().unwrap();
+
+        let result = UnixSocketCapability::new_file(dir.path(), UnixSocketMode::Connect);
+        assert!(
+            matches!(result, Err(NonoError::ExpectedFile(_))),
+            "new_file must reject a directory path: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_unix_socket_dir_on_existing_directory() {
+        let dir = tempdir().unwrap();
+
+        let cap = UnixSocketCapability::new_dir(dir.path(), UnixSocketMode::Connect).unwrap();
+        assert!(cap.is_directory());
+        assert_eq!(cap.scope, SocketScope::DirChildren);
+        assert!(cap.resolved.is_absolute());
+    }
+
+    #[test]
+    fn test_unix_socket_subtree_on_existing_directory() {
+        let dir = tempdir().unwrap();
+
+        let cap =
+            UnixSocketCapability::new_dir_subtree(dir.path(), UnixSocketMode::Connect).unwrap();
+        assert!(cap.is_directory());
+        assert_eq!(cap.scope, SocketScope::DirSubtree);
+        assert!(cap.resolved.is_absolute());
+    }
+
+    #[test]
+    fn test_unix_socket_dir_rejects_file_path() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("regular.txt");
+        fs::write(&file, "not a dir").unwrap();
+
+        let result = UnixSocketCapability::new_dir(&file, UnixSocketMode::Connect);
+        assert!(
+            matches!(result, Err(NonoError::ExpectedDirectory(_))),
+            "new_dir must reject a file path: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_unix_socket_dir_nonexistent() {
+        let result = UnixSocketCapability::new_dir(
+            "/nonexistent/dir/for/tests/99999",
+            UnixSocketMode::Connect,
+        );
+        assert!(matches!(result, Err(NonoError::PathNotFound(_))));
+    }
+
+    #[test]
+    fn test_unix_socket_dir_rejects_filesystem_root() {
+        let result = UnixSocketCapability::new_dir("/", UnixSocketMode::Connect);
+        assert!(
+            matches!(result, Err(NonoError::SandboxInit(_))),
+            "filesystem root must be rejected as a directory grant: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_unix_socket_covers_file_exact_match() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.sock");
+        fs::write(&path, b"").unwrap();
+        let cap = UnixSocketCapability::new_file(&path, UnixSocketMode::Connect).unwrap();
+
+        // Exact match covers; anything else does not.
+        assert!(cap.covers(&cap.resolved));
+        assert!(!cap.covers(&dir.path().canonicalize().unwrap()));
+        let sibling = dir.path().canonicalize().unwrap().join("b.sock");
+        assert!(!cap.covers(&sibling));
+    }
+
+    #[test]
+    fn test_unix_socket_covers_directory_one_level() {
+        let dir = tempdir().unwrap();
+        let cap = UnixSocketCapability::new_dir(dir.path(), UnixSocketMode::Connect).unwrap();
+
+        // Direct child is covered.
+        let child = cap.resolved.join("x.sock");
+        assert!(cap.covers(&child), "direct child should be covered");
+
+        // Grandchild is NOT (non-recursive).
+        let grandchild = cap.resolved.join("sub").join("x.sock");
+        assert!(!cap.covers(&grandchild), "grandchild must not be covered");
+
+        // The directory itself, with no filename component, isn't a socket.
+        assert!(!cap.covers(&cap.resolved));
+    }
+
+    #[test]
+    fn test_unix_socket_covers_directory_subtree() {
+        let dir = tempdir().unwrap();
+        let cap =
+            UnixSocketCapability::new_dir_subtree(dir.path(), UnixSocketMode::Connect).unwrap();
+
+        let child = cap.resolved.join("x.sock");
+        assert!(cap.covers(&child), "direct child should be covered");
+
+        let grandchild = cap.resolved.join("sub").join("x.sock");
+        assert!(cap.covers(&grandchild), "grandchild should be covered");
+
+        assert!(
+            !cap.covers(&cap.resolved),
+            "directory itself is not a socket"
+        );
+    }
+
+    #[test]
+    fn test_unix_socket_covers_does_not_string_prefix() {
+        // Regression: a directory grant for /tmp/foo must NOT cover
+        // /tmp/foobar/x.sock, which a naive string starts_with would match.
+        let dir = tempdir().unwrap();
+        let foo = dir.path().join("foo");
+        let foobar = dir.path().join("foobar");
+        fs::create_dir(&foo).unwrap();
+        fs::create_dir(&foobar).unwrap();
+
+        let cap = UnixSocketCapability::new_dir(&foo, UnixSocketMode::Connect).unwrap();
+        let evil = foobar.canonicalize().unwrap().join("x.sock");
+        assert!(!cap.covers(&evil), "string-prefix match must not leak");
+    }
+
+    #[test]
+    fn test_unix_socket_display() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.sock");
+        fs::write(&path, b"").unwrap();
+
+        let file_cap = UnixSocketCapability::new_file(&path, UnixSocketMode::Connect).unwrap();
+        let rendered = format!("{file_cap}");
+        assert!(rendered.contains("connect"));
+        assert!(rendered.starts_with("file "));
+
+        let dir_cap =
+            UnixSocketCapability::new_dir(dir.path(), UnixSocketMode::ConnectBind).unwrap();
+        let rendered = format!("{dir_cap}");
+        assert!(rendered.contains("connect+bind"));
+        assert!(rendered.starts_with("dir-children "));
+
+        let subtree_cap =
+            UnixSocketCapability::new_dir_subtree(dir.path(), UnixSocketMode::Connect).unwrap();
+        let rendered = format!("{subtree_cap}");
+        assert!(rendered.starts_with("dir-subtree "));
+    }
+
+    #[test]
+    fn test_capability_set_allow_unix_socket_accumulates() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.sock");
+        let b = dir.path().join("b.sock");
+        fs::write(&a, b"").unwrap();
+
+        let caps = CapabilitySet::new()
+            .allow_unix_socket(&a, UnixSocketMode::Connect)
+            .unwrap()
+            .allow_unix_socket(&b, UnixSocketMode::ConnectBind)
+            .unwrap();
+
+        assert_eq!(caps.unix_socket_capabilities().len(), 2);
+        assert_eq!(
+            caps.unix_socket_capabilities()[0].mode,
+            UnixSocketMode::Connect
+        );
+        assert_eq!(
+            caps.unix_socket_capabilities()[1].mode,
+            UnixSocketMode::ConnectBind
+        );
+    }
+
+    #[test]
+    fn test_capability_set_unix_socket_allowed_mode_split() {
+        // Invariant `separate-read-write`: Connect entries must not
+        // accidentally permit bind.
+        let dir = tempdir().unwrap();
+        let connect_sock = dir.path().join("connect-only.sock");
+        let bind_sock = dir.path().join("bind.sock");
+        fs::write(&connect_sock, b"").unwrap();
+        // bind_sock deliberately does not exist — allow_unix_socket with
+        // ConnectBind must accept that.
+
+        let caps = CapabilitySet::new()
+            .allow_unix_socket(&connect_sock, UnixSocketMode::Connect)
+            .unwrap()
+            .allow_unix_socket(&bind_sock, UnixSocketMode::ConnectBind)
+            .unwrap();
+
+        let resolved_connect = connect_sock.canonicalize().unwrap();
+        let resolved_bind = dir.path().canonicalize().unwrap().join("bind.sock");
+
+        // Connect-only entry: connect ok, bind denied.
+        assert!(caps.unix_socket_allowed(&resolved_connect, UnixSocketOp::Connect));
+        assert!(!caps.unix_socket_allowed(&resolved_connect, UnixSocketOp::Bind));
+
+        // ConnectBind entry: both ok.
+        assert!(caps.unix_socket_allowed(&resolved_bind, UnixSocketOp::Connect));
+        assert!(caps.unix_socket_allowed(&resolved_bind, UnixSocketOp::Bind));
+
+        // Unrelated path: nothing allowed.
+        let other = dir.path().canonicalize().unwrap().join("other.sock");
+        assert!(!caps.unix_socket_allowed(&other, UnixSocketOp::Connect));
+        assert!(!caps.unix_socket_allowed(&other, UnixSocketOp::Bind));
+    }
+
+    #[test]
+    fn test_capability_set_unix_socket_allowed_directory_grant() {
+        let dir = tempdir().unwrap();
+
+        let caps = CapabilitySet::new()
+            .allow_unix_socket_dir(dir.path(), UnixSocketMode::Connect)
+            .unwrap();
+
+        let resolved_dir = dir.path().canonicalize().unwrap();
+        let direct_child = resolved_dir.join("x.sock");
+        let grandchild = resolved_dir.join("sub").join("x.sock");
+
+        assert!(caps.unix_socket_allowed(&direct_child, UnixSocketOp::Connect));
+        assert!(!caps.unix_socket_allowed(&grandchild, UnixSocketOp::Connect));
+        assert!(!caps.unix_socket_allowed(&direct_child, UnixSocketOp::Bind));
+    }
+
+    #[test]
+    fn test_capability_set_unix_socket_allowed_subtree_grant() {
+        let dir = tempdir().unwrap();
+        let caps = CapabilitySet::new()
+            .allow_unix_socket_subtree(dir.path(), UnixSocketMode::Connect)
+            .unwrap();
+
+        let direct_child = dir.path().canonicalize().unwrap().join("x.sock");
+        let grandchild = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("nested")
+            .join("x.sock");
+
+        assert!(caps.unix_socket_allowed(&direct_child, UnixSocketOp::Connect));
+        assert!(caps.unix_socket_allowed(&grandchild, UnixSocketOp::Connect));
+        assert!(!caps.unix_socket_allowed(&direct_child, UnixSocketOp::Bind));
+    }
+
+    #[test]
+    fn test_deduplicate_unix_sockets_merges_identical_grants() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("a.sock");
+        fs::write(&sock, b"").unwrap();
+
+        let mut caps = CapabilitySet::new()
+            .allow_unix_socket(&sock, UnixSocketMode::Connect)
+            .unwrap()
+            .allow_unix_socket(&sock, UnixSocketMode::Connect)
+            .unwrap();
+        assert_eq!(caps.unix_socket_capabilities().len(), 2);
+
+        caps.deduplicate();
+        assert_eq!(caps.unix_socket_capabilities().len(), 1);
+    }
+
+    #[test]
+    fn test_deduplicate_unix_sockets_promotes_connect_to_connect_bind() {
+        // When Connect and ConnectBind grants collide on the same resolved
+        // path, the retained entry ends up as ConnectBind (superset).
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("a.sock");
+        fs::write(&sock, b"").unwrap();
+
+        let mut caps = CapabilitySet::new()
+            .allow_unix_socket(&sock, UnixSocketMode::Connect)
+            .unwrap()
+            .allow_unix_socket(&sock, UnixSocketMode::ConnectBind)
+            .unwrap();
+
+        caps.deduplicate();
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].mode, UnixSocketMode::ConnectBind);
+    }
+
+    #[test]
+    fn test_deduplicate_unix_sockets_does_not_widen_user_intent() {
+        // Security-critical: a user explicitly narrowing a path to
+        // Connect must not be silently upgraded to ConnectBind just
+        // because a group/default also covers it.
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("a.sock");
+        fs::write(&sock, b"").unwrap();
+
+        let group_cap = UnixSocketCapability {
+            original: sock.clone(),
+            resolved: sock.canonicalize().unwrap(),
+            scope: SocketScope::File,
+            mode: UnixSocketMode::ConnectBind,
+            source: CapabilitySource::Group("example_group".to_string()),
+        };
+        let user_cap = UnixSocketCapability {
+            original: sock.clone(),
+            resolved: sock.canonicalize().unwrap(),
+            scope: SocketScope::File,
+            mode: UnixSocketMode::Connect,
+            source: CapabilitySource::User,
+        };
+
+        let mut caps = CapabilitySet::new();
+        caps.add_unix_socket(group_cap);
+        caps.add_unix_socket(user_cap);
+        caps.deduplicate();
+
+        let socks = caps.unix_socket_capabilities();
+        assert_eq!(socks.len(), 1);
+        assert_eq!(
+            socks[0].mode,
+            UnixSocketMode::Connect,
+            "user-intent Connect must not be upgraded to ConnectBind by dedup"
+        );
+        assert!(matches!(socks[0].source, CapabilitySource::User));
+    }
+
+    #[test]
+    fn test_deduplicate_unix_sockets_keeps_file_and_dir_grants_separate() {
+        // File grant on /path/foo.sock and dir grant on /path/ are
+        // different keys — both should survive.
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("a.sock");
+        fs::write(&sock, b"").unwrap();
+
+        let mut caps = CapabilitySet::new()
+            .allow_unix_socket(&sock, UnixSocketMode::Connect)
+            .unwrap()
+            .allow_unix_socket_dir(dir.path(), UnixSocketMode::Connect)
+            .unwrap();
+
+        caps.deduplicate();
+        assert_eq!(caps.unix_socket_capabilities().len(), 2);
+    }
+
+    #[test]
+    fn test_summary_includes_unix_sockets() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("a.sock");
+        fs::write(&sock, b"").unwrap();
+
+        let caps = CapabilitySet::new()
+            .allow_unix_socket(&sock, UnixSocketMode::Connect)
+            .unwrap()
+            .allow_unix_socket_dir(dir.path(), UnixSocketMode::ConnectBind)
+            .unwrap();
+
+        let summary = caps.summary();
+        assert!(
+            summary.contains("Unix sockets:"),
+            "summary must include unix socket section: {summary}"
+        );
+        assert!(summary.contains("connect"));
+        assert!(summary.contains("connect+bind"));
+        assert!(summary.contains("file"));
+        assert!(summary.contains("dir"));
+    }
+
+    #[test]
     fn test_allow_gpu_builder_sets_flag() {
         let caps = CapabilitySet::new().allow_gpu();
         assert!(caps.gpu());
     }
 
     #[test]
-    fn test_set_gpu_toggles_flag() {
-        let mut caps = CapabilitySet::new();
+    fn test_set_gpu_toggles_flag() {        let mut caps = CapabilitySet::new();
         assert!(!caps.gpu());
         caps.set_gpu(true);
         assert!(caps.gpu());

@@ -524,13 +524,38 @@ pub struct FilesystemConfig {
     /// Single files with write-only access
     #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub write_file: Vec<String>,
-    /// Directories explicitly denied for the sandboxed child.
-    ///
-    /// Canonical section per upstream f0abd413 (v0.47.0). Paths here
-    /// activate the platform deny mechanism (macOS Seatbelt `(deny
-    /// file-read*)`, Linux Landlock restricted ruleset) even if the
-    /// path would otherwise be accessible by default. Applied AFTER
-    /// `filesystem.allow` grants so that deny takes precedence.
+    /// Single AF_UNIX socket paths — connect only.
+    /// Implies read access on the socket path. See issue #685.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket: Vec<String>,
+    /// Single AF_UNIX socket paths — connect and bind.
+    /// Implies read+write access on the socket path when it exists, or
+    /// on its parent directory when it does not yet exist (the normal
+    /// `bind(2)` workflow — the syscall creates the socket file).
+    /// Dangling symlinks are rejected at grant time. For runtime-generated
+    /// filenames (e.g. PID-suffixed paths) prefer `unix_socket_dir_bind`
+    /// so the implied fs grant stays scoped to a dedicated directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_bind: Vec<String>,
+    /// Directories where any direct-child AF_UNIX socket may be connected to.
+    /// Non-recursive. Implies read access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_dir: Vec<String>,
+    /// Directories where any direct-child AF_UNIX socket may be connected to
+    /// or bound. Non-recursive. Implies read+write access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_dir_bind: Vec<String>,
+    /// Directories where any descendant AF_UNIX socket may be connected to.
+    /// Recursive. Implies read access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_subtree: Vec<String>,
+    /// Directories where any descendant AF_UNIX socket may be connected to or
+    /// bound. Recursive. Implies read+write access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_subtree_bind: Vec<String>,
+    /// Paths denied filesystem access. Canonical location for deny entries
+    /// in the #594 schema; the legacy deny-access key drains here via
+    /// `deprecated_schema::LegacyPolicyPatch`.
     #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub deny: Vec<String>,
     /// Paths that bypass deny rules when paired with an explicit
@@ -2014,6 +2039,12 @@ pub struct Profile {
     /// construction path; this field is the canonical target shape.
     #[serde(default)]
     pub commands: CommandsConfig,
+    /// When `Some(true)`, allows granting a directory that is a parent of a
+    /// protected nono state root (e.g., `/var/run` if `/var/run/nono` is protected).
+    /// Used by AF_UNIX socket directory grants that legitimately need broad
+    /// directory access. Defaults to `false` (strict) when absent.
+    #[serde(default)]
+    pub allow_parent_of_protected: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2063,6 +2094,8 @@ struct ProfileDeserialize {
     command_args: Vec<String>,
     #[serde(default)]
     commands: CommandsConfig,
+    #[serde(default)]
+    allow_parent_of_protected: Option<bool>,
 }
 
 impl From<ProfileDeserialize> for Profile {
@@ -2091,6 +2124,7 @@ impl From<ProfileDeserialize> for Profile {
             // Exhaustively enumerated here so rustc's struct-literal completeness
             // check (T-36-01-CANONICAL) catches any future field additions.
             commands: raw.commands,
+            allow_parent_of_protected: raw.allow_parent_of_protected,
         }
     }
 }
@@ -2738,6 +2772,27 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             allow_file: dedup_append(&base.filesystem.allow_file, &child.filesystem.allow_file),
             read_file: dedup_append(&base.filesystem.read_file, &child.filesystem.read_file),
             write_file: dedup_append(&base.filesystem.write_file, &child.filesystem.write_file),
+            unix_socket: dedup_append(&base.filesystem.unix_socket, &child.filesystem.unix_socket),
+            unix_socket_bind: dedup_append(
+                &base.filesystem.unix_socket_bind,
+                &child.filesystem.unix_socket_bind,
+            ),
+            unix_socket_dir: dedup_append(
+                &base.filesystem.unix_socket_dir,
+                &child.filesystem.unix_socket_dir,
+            ),
+            unix_socket_dir_bind: dedup_append(
+                &base.filesystem.unix_socket_dir_bind,
+                &child.filesystem.unix_socket_dir_bind,
+            ),
+            unix_socket_subtree: dedup_append(
+                &base.filesystem.unix_socket_subtree,
+                &child.filesystem.unix_socket_subtree,
+            ),
+            unix_socket_subtree_bind: dedup_append(
+                &base.filesystem.unix_socket_subtree_bind,
+                &child.filesystem.unix_socket_subtree_bind,
+            ),
             deny: dedup_append(&base.filesystem.deny, &child.filesystem.deny),
             bypass_protection: dedup_append(
                 &base.filesystem.bypass_protection,
@@ -2896,6 +2951,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             allow: dedup_append(&base.commands.allow, &child.commands.allow),
             deny: dedup_append(&base.commands.deny, &child.commands.deny),
         },
+        // Child overrides base; if child has None, inherit base.
+        allow_parent_of_protected: child
+            .allow_parent_of_protected
+            .or(base.allow_parent_of_protected),
     }
 }
 
@@ -4447,18 +4506,15 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec!["/base/file.txt".to_string()],
                 write_file: vec![],
-                deny: vec![],
-                bypass_protection: vec![],
-                suppress_save_prompt: vec![],
-            },
-            policy: PolicyPatchConfig {
-                exclude_groups: vec!["base_excluded".to_string()],
-                add_allow_read: vec!["/base/policy-read".to_string()],
-                add_allow_write: vec![],
-                add_allow_readwrite: vec![],
-                add_deny_access: vec!["/base/policy-deny".to_string()],
-                add_deny_commands: vec![],
+                unix_socket: vec![],
+                unix_socket_bind: vec![],
+                unix_socket_dir: vec![],
+                unix_socket_dir_bind: vec![],
+                unix_socket_subtree: vec![],
+                unix_socket_subtree_bind: vec![],
+                deny: vec!["/base/policy-deny".to_string()],
                 bypass_protection: vec!["/base/override-deny".to_string()],
+                suppress_save_prompt: vec![],
             },
             network: NetworkConfig {
                 block: false,
@@ -4502,6 +4558,16 @@ mod tests {
             packs: Vec::new(),
             command_args: Vec::new(),
             commands: CommandsConfig::default(),
+            allow_parent_of_protected: None,
+            policy: PolicyPatchConfig {
+                exclude_groups: vec!["base_excluded".to_string()],
+                add_allow_read: vec!["/base/policy-read".to_string()],
+                add_allow_write: vec![],
+                add_allow_readwrite: vec![],
+                add_deny_access: vec!["/base/policy-deny".to_string()],
+                add_deny_commands: vec![],
+                bypass_protection: vec!["/base/override-deny".to_string()],
+            },
         }
     }
 
@@ -4525,18 +4591,15 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec![],
                 write_file: vec![],
-                deny: vec![],
-                bypass_protection: vec![],
-                suppress_save_prompt: vec![],
-            },
-            policy: PolicyPatchConfig {
-                exclude_groups: vec!["child_excluded".to_string()],
-                add_allow_read: vec![],
-                add_allow_write: vec!["/child/policy-write".to_string()],
-                add_allow_readwrite: vec!["/child/policy-rw".to_string()],
-                add_deny_access: vec!["/child/policy-deny".to_string()],
-                add_deny_commands: vec![],
+                unix_socket: vec![],
+                unix_socket_bind: vec![],
+                unix_socket_dir: vec![],
+                unix_socket_dir_bind: vec![],
+                unix_socket_subtree: vec![],
+                unix_socket_subtree_bind: vec![],
+                deny: vec!["/child/policy-deny".to_string()],
                 bypass_protection: vec!["/child/override-deny".to_string()],
+                suppress_save_prompt: vec![],
             },
             network: NetworkConfig {
                 block: false,
@@ -4580,6 +4643,16 @@ mod tests {
             packs: Vec::new(),
             command_args: Vec::new(),
             commands: CommandsConfig::default(),
+            allow_parent_of_protected: None,
+            policy: PolicyPatchConfig {
+                exclude_groups: vec!["child_excluded".to_string()],
+                add_allow_read: vec![],
+                add_allow_write: vec!["/child/policy-write".to_string()],
+                add_allow_readwrite: vec!["/child/policy-rw".to_string()],
+                add_deny_access: vec!["/child/policy-deny".to_string()],
+                add_deny_commands: vec![],
+                bypass_protection: vec!["/child/override-deny".to_string()],
+            },
         }
     }
 

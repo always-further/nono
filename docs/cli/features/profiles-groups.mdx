@@ -68,22 +68,46 @@ Profiles use JSON format:
     "read_file": [],
     "write_file": [],
     "deny": [],
-    "bypass_protection": []
-  },
-  "policy": {
-    "exclude_groups": [],
-    "add_allow_read": [],
-    "add_allow_write": [],
-    "add_allow_readwrite": [],
-    "add_deny_access": [],
-    "add_deny_commands": [],
-    "bypass_protection": []
+    "bypass_protection": [],
+    "suppress_save_prompt": [],
+    "unix_socket": [],
+    "unix_socket_bind": [],
+    "unix_socket_dir": [],
+    "unix_socket_dir_bind": [],
+    "unix_socket_subtree": [],
+    "unix_socket_subtree_bind": []
   },
   "network": {
     "block": false
   }
 }
 ```
+
+### AF_UNIX Socket Grants
+
+The `unix_socket*` filesystem fields grant `connect(2)` (and optionally
+`bind(2)`) on pathname AF_UNIX sockets. Abstract-namespace and unnamed
+sockets are never grantable — only filesystem-backed socket paths.
+
+| Field | Grants | Implied fs grant |
+|---|---|---|
+| `unix_socket` | `connect` only, single socket file | Read on the file |
+| `unix_socket_bind` | `connect` + `bind`, single socket file | ReadWrite on the file (exists) or on the parent directory (pending — bind will create the file) |
+| `unix_socket_dir` | `connect` only, any direct child of a directory | Read on the directory (recursive) |
+| `unix_socket_dir_bind` | `connect` + `bind`, any direct child of a directory | ReadWrite on the directory (recursive) |
+| `unix_socket_subtree` | `connect` only, any descendant of a directory | Read on the directory (recursive) |
+| `unix_socket_subtree_bind` | `connect` + `bind`, any descendant of a directory | ReadWrite on the directory (recursive) |
+
+`unix_socket_dir*` forms are **non-recursive at the socket layer**: only
+sockets directly inside the named directory are covered. Use
+`unix_socket_subtree*` when a tool creates sockets below nested
+subdirectories. The implied filesystem grant is recursive (Landlock's
+only expressible granularity), so socket scope is enforced separately by
+the supervisor (Linux) or Seatbelt path emission (macOS).
+
+Under restricted network modes (`--block-net` or `--network-profile`),
+`connect(2)` to a Unix socket requires an explicit `unix_socket*` grant
+— a plain `allow_file`/`allow` grant no longer implicitly permits it.
 
 ### Working Directory
 

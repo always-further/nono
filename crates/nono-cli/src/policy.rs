@@ -195,6 +195,9 @@ impl ProfileDef {
             // default (empty CommandsConfig) means no additional command
             // policy beyond the group-based allow/deny lists.
             commands: profile::CommandsConfig::default(),
+            // Built-in policy.json profiles use strict parent-of-protected
+            // checking; individual user profiles can opt in via the field.
+            allow_parent_of_protected: None,
         }
     }
 }

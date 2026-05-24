@@ -112,6 +112,58 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
         }
     }
 
+    // AF_UNIX socket capabilities (issue #685 / #696)
+    let unix_caps = caps.unix_socket_capabilities();
+    if !unix_caps.is_empty() {
+        let (user_caps, hidden_count) = if verbose > 0 {
+            (unix_caps.to_vec(), 0)
+        } else {
+            let user: Vec<_> = unix_caps
+                .iter()
+                .filter(|c| c.source.is_user_intent())
+                .cloned()
+                .collect();
+            let hidden = unix_caps.len() - user.len();
+            (user, hidden)
+        };
+
+        for cap in &user_caps {
+            let mode_badge = format_unix_socket_mode_badge(cap.mode);
+            let scope_suffix = match cap.scope {
+                nono::SocketScope::File => "",
+                nono::SocketScope::DirChildren => "  (directory grant — direct child sockets only)",
+                nono::SocketScope::DirSubtree => "  (subtree grant — recursive socket paths)",
+            };
+            if verbose > 0 {
+                let source_str = format!("{}", cap.source);
+                eprintln!(
+                    "  {} {} {}{}",
+                    mode_badge,
+                    theme::fg(&cap.resolved.display().to_string(), t.text),
+                    theme::fg(&format!("[{source_str}]"), t.subtext),
+                    theme::fg(scope_suffix, t.subtext),
+                );
+            } else {
+                eprintln!(
+                    "  {} {}{}",
+                    mode_badge,
+                    theme::fg(&cap.resolved.display().to_string(), t.text),
+                    theme::fg(scope_suffix, t.subtext),
+                );
+            }
+        }
+
+        if hidden_count > 0 {
+            eprintln!(
+                "       {}",
+                theme::fg(
+                    &format!("+ {hidden_count} system/group unix sockets (-v to show)"),
+                    t.subtext
+                )
+            );
+        }
+    }
+
     // Network status
     match caps.network_mode() {
         NetworkMode::Blocked => {
@@ -172,6 +224,14 @@ fn format_access_badge(access: &AccessMode) -> String {
         AccessMode::Read => theme::badge("  r  ", t.green, BADGE_FG_DARK),
         AccessMode::Write => theme::badge("  w  ", t.yellow, BADGE_FG_DARK),
         AccessMode::ReadWrite => theme::badge(" r+w ", t.brand, BADGE_FG_DARK),
+    }
+}
+
+fn format_unix_socket_mode_badge(mode: nono::UnixSocketMode) -> String {
+    let t = theme::current();
+    match mode {
+        nono::UnixSocketMode::Connect => theme::badge("sock ", t.green, BADGE_FG_DARK),
+        nono::UnixSocketMode::ConnectBind => theme::badge("sock+", t.brand, BADGE_FG_DARK),
     }
 }
 

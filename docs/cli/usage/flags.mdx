@@ -323,6 +323,104 @@ Grant write-only access to a single file.
 nono run --write-file ./output.log -- command
 ```
 
+### Denial Prompt Control
+
+#### `--suppress-save-prompt`
+
+Suppress the post-run save-profile prompt for denials under a path. This does
+not grant access and does not remove the diagnostic footer; it only prevents
+the same denied path from being offered as a profile addition repeatedly.
+
+```bash
+nono run --profile claude-code \
+  --suppress-save-prompt ~/.copilot/settings.json \
+  -- claude
+```
+
+For persistent behavior, put the same path in
+`filesystem.suppress_save_prompt` in a user profile. The older
+`--ignore-denied` spelling is accepted as an alias, but the suppress wording is
+preferred because this flag never turns a denial into an allow rule.
+
+When nono offers to save denied paths after a run, choosing `suppress` writes
+all listed path suggestions to `filesystem.suppress_save_prompt` instead of
+adding them as filesystem grants.
+
+### AF_UNIX Socket Permissions
+
+These flags grant `connect(2)` (and optionally `bind(2)`) on pathname AF_UNIX
+sockets. Abstract-namespace and unnamed sockets are never grantable — only
+filesystem-backed socket paths are supported.
+
+Under restricted network modes (`--block-net` or `--network-profile`),
+explicit socket grants are required. A plain `--allow-file`/`--allow` grant
+no longer implicitly permits socket access.
+
+#### `--allow-unix-socket`
+
+Allow `connect(2)` to an existing AF_UNIX socket file. Implies read access on
+the socket path.
+
+```bash
+# Connect to a running Postgres dev server via Unix socket
+nono run --block-net --allow-unix-socket /tmp/.s.PGSQL.5432 -- psql
+```
+
+#### `--allow-unix-socket-bind`
+
+Allow `connect(2)` and `bind(2)` on an AF_UNIX socket at this path. Use when
+the sandboxed program creates the socket itself. If the path doesn't exist
+yet (the typical `bind(2)` case), the CLI auto-grants write on the parent
+directory so the kernel can create the socket file.
+
+```bash
+# Server that binds its own IPC socket
+nono run --block-net --allow-unix-socket-bind /run/myapp.sock -- myapp
+```
+
+Prefer `--allow-unix-socket-dir-bind` for runtime-generated filenames (e.g.
+PID-suffixed paths) so the implied fs grant stays scoped.
+
+#### `--allow-unix-socket-dir`
+
+Allow `connect(2)` to any AF_UNIX socket **directly** within this directory
+(non-recursive — grandchildren are not covered). Implies read access on the
+directory.
+
+```bash
+# Connect to any Unix socket directly in /run/user/1000
+nono run --block-net --allow-unix-socket-dir /run/user/$UID -- my-client
+```
+
+#### `--allow-unix-socket-dir-bind`
+
+Allow `connect(2)` and `bind(2)` on any AF_UNIX socket directly within this
+directory. Non-recursive. Use for runtime-generated socket filenames.
+
+```bash
+# tsx creates /tmp/tsx-<uid>/<pid>.pipe on every invocation
+nono run --block-net --allow-unix-socket-dir-bind $TMPDIR/tsx-$UID -- tsx app.ts
+```
+
+#### `--allow-unix-socket-subtree`
+
+Allow `connect(2)` to any AF_UNIX socket within this directory subtree
+(recursive — nested subdirectories are covered). Implies read access on the
+directory.
+
+```bash
+nono run --block-net --allow-unix-socket-subtree $TMPDIR/nx -- nx serve
+```
+
+#### `--allow-unix-socket-subtree-bind`
+
+Allow `connect(2)` and `bind(2)` on any AF_UNIX socket within this directory
+subtree. Implies read/write access on the directory.
+
+```bash
+nono run --block-net --allow-unix-socket-subtree-bind $TMPDIR/nx -- nx serve
+```
+
 ### Network Control
 
 #### `--block-net`
