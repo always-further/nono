@@ -26,9 +26,13 @@ See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 ship
 ## Current Position
 
 Phase: 48 (upst6-sync-execution) — EXECUTING
-Plan: 1 of 9
-Status: Executing Phase 48
-Last activity: 2026-05-24 -- Phase 48 execution started
+Plan: 1 of 9 (PARTIAL — 2/9 cherry-picks landed on plan branch `phase-48-01-landlock-v6-af-unix`)
+Status: Plan 48-01 partial — audit verdict flipped YELLOW → RED after 858ad009 attempt; see `.planning/phases/48-upst6-sync-execution/48-01-PARTIAL-SUMMARY.md` for resume path
+Last activity: 2026-05-24 -- Plan 48-01 session 1 break (2/9 cherry-picks: caab9967 + a93b2bed; RED verdict documented)
+
+**Session 1 outcome:** Cherry-picks 1-2 (c2c6f2ca, b8a32006) landed cleanly with verbatim D-19 trailers. Cherry-pick 3 (858ad009) revealed structural fork-side divergence (Phase 36-01b `add_deny_access` rename + 11-line HEAD blocks in profile/mod.rs) beyond what the diff-stat audit predicted. Aborted via `git reset --hard HEAD` to clean state at `a93b2bed`. Plan branch carries the 2 cherry-picks + a partial-handoff doc commit (`baccda48`). No PR opened. No close-gate run.
+
+**Resume:** `/gsd-execute-phase 48` in a fresh context. Recommend the executor read `48-01-PARTIAL-SUMMARY.md` § "Resume path" + `48-01-PRE-CHERRY-PICK-AUDIT.md` § 9 before continuing cherry-pick 3.
 
 ### v2.6 Phase Summary
 
