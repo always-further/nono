@@ -43,7 +43,7 @@
 
 ### Drift Ingestion (DRIFT tooling exercise)
 
-- [ ] **REQ-DRIFT-INGEST-01**: Upstream `v0.41`–`v0.43` ingestion executed via DRIFT-01/02 tooling (backfill cleanup, not parity-sync); inventory + per-cluster dispositions recorded. First real load of the DRIFT tooling shipped in v2.2 Phase 24; deferred at v2.3 scope-lock 2026-04-29.
+- [x] **REQ-DRIFT-INGEST-01**: Upstream `v0.41`–`v0.43` ingestion executed via DRIFT-01/02 tooling (backfill cleanup, not parity-sync); inventory + per-cluster dispositions recorded. First real load of the DRIFT tooling shipped in v2.2 Phase 24; deferred at v2.3 scope-lock 2026-04-29.
 
 ### AIPC G-04 Wire-Protocol Tightening
 
@@ -51,7 +51,7 @@
 
 ### UPST6 Cycle
 
-- [ ] **REQ-UPST6-01**: Upstream `v0.54.0..v0.55.0+` audit — DIVERGENCE-LEDGER.md inventory + per-cluster dispositions + `## ADR review` per-cell L/M/H verdict table on 5 dimensions (security/windows/maintenance/divergence/contributor); outcome confirms or revises Phase 33 ADR Option A `continue` strategy.
+- [x] **REQ-UPST6-01**: Upstream `v0.54.0..v0.55.0+` audit — DIVERGENCE-LEDGER.md inventory + per-cluster dispositions + `## ADR review` per-cell L/M/H verdict table on 5 dimensions (security/windows/maintenance/divergence/contributor); outcome confirms or revises Phase 33 ADR Option A `continue` strategy.
 - [ ] **REQ-UPST6-02**: Upstream `v0.54.0..v0.55.0+` sync execution — D-19 cherry-picks + D-20 manual replays per UPST6 audit dispositions; D-19 trailer convention + Windows-only-files invariant inherited from Phase 22+34+43; baseline-aware CI gate verified.
 
 ## v2 Requirements (Deferred)
@@ -97,8 +97,8 @@ Populated 2026-05-20 by gsd-roadmapper during ROADMAP.md creation.
 | REQ-CI-FU-03 | Phase 46 | Complete |
 | REQ-UAT-BL-01 | Phase 46 | Complete |
 | REQ-UAT-BL-02 | Phase 46 | Complete |
-| REQ-UPST6-01 | Phase 47 | Pending |
-| REQ-DRIFT-INGEST-01 | Phase 47 | Pending |
+| REQ-UPST6-01 | Phase 47 | Complete |
+| REQ-DRIFT-INGEST-01 | Phase 47 | Complete |
 | REQ-UPST6-02 | Phase 48 | Pending |
 
 **Coverage:**
