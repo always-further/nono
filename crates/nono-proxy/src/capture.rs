@@ -31,6 +31,12 @@ pub struct ProxyCaptureRequest {
     pub credential_name: String,
     /// Session identifier for cache keying and audit correlation.
     pub session_id: String,
+    /// Upstream host that triggered the request (e.g., "api.github.com").
+    pub request_host: Option<String>,
+    /// Request path (e.g., "/repos/owner/name").
+    pub request_path: Option<String>,
+    /// HTTP method (e.g., "GET", "POST").
+    pub request_method: Option<String>,
 }
 
 /// Response from the supervisor to the proxy with the captured credential.

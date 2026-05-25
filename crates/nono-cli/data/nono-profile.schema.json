@@ -184,6 +184,10 @@
           "maximum": 3600,
           "default": 900,
           "description": "How long to cache the captured credential in seconds. Default: 900 (15 minutes). Set to 0 to disable caching."
+        },
+        "cache_path_pattern": {
+          "type": "string",
+          "description": "Optional regex applied to the request path (NONO_REQUEST_PATH). The first capture group becomes part of the cache key, enabling per-path-segment credential caching. Must contain at least one capture group. Example: \"^/([^/]+)\" caches by the first path segment."
         }
       }
     },

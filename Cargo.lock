@@ -1701,6 +1701,7 @@ dependencies = [
  "nono-proxy",
  "proptest",
  "rand 0.10.1",
+ "regex",
  "semver",
  "serde",
  "serde_json",

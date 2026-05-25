@@ -24,6 +24,18 @@ use zeroize::Zeroizing;
 /// The `cmd://` URI scheme prefix for supervisor-mediated credential capture.
 const CMD_URI_PREFIX: &str = "cmd://";
 
+/// Request context passed to `resolve_cmd_credential` for environment variable
+/// injection into credential capture commands.
+#[derive(Debug, Clone)]
+pub struct CaptureRequestContext {
+    /// Upstream host (e.g., "api.github.com").
+    pub host: String,
+    /// Request path (e.g., "/repos/owner/name").
+    pub path: String,
+    /// HTTP method (e.g., "GET").
+    pub method: String,
+}
+
 /// A loaded credential ready for injection.
 ///
 /// Contains only credential-specific fields (injection mode, header name/value,
@@ -422,6 +434,7 @@ impl CredentialStore {
         &self,
         prefix: &str,
         session_id: &str,
+        context: Option<&CaptureRequestContext>,
     ) -> Result<Zeroizing<String>> {
         let cmd_config = self.cmd_routes.get(prefix).ok_or_else(|| {
             ProxyError::Credential(format!("no cmd:// route configured for '{prefix}'"))
@@ -435,6 +448,9 @@ impl CredentialStore {
         let request = ProxyCaptureRequest {
             credential_name: cmd_config.credential_name.clone(),
             session_id: session_id.to_string(),
+            request_host: context.map(|c| c.host.clone()),
+            request_path: context.map(|c| c.path.clone()),
+            request_method: context.map(|c| c.method.clone()),
         };
 
         capture_tx

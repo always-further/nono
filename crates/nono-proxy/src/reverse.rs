@@ -16,7 +16,7 @@
 
 use crate::audit;
 use crate::config::InjectMode;
-use crate::credential::{CmdRouteConfig, CredentialStore, LoadedCredential};
+use crate::credential::{CaptureRequestContext, CmdRouteConfig, CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
 use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
@@ -694,9 +694,18 @@ async fn handle_cmd_credential(
     }
 
     // Resolve the credential via the supervisor capture channel
+    let request_context = CaptureRequestContext {
+        host: route
+            .upstream_host_port
+            .as_deref()
+            .unwrap_or("")
+            .to_string(),
+        path: upstream_path.to_string(),
+        method: method.to_string(),
+    };
     let credential = match ctx
         .credential_store
-        .resolve_cmd_credential(service, ctx.session_token.as_str())
+        .resolve_cmd_credential(service, ctx.session_token.as_str(), Some(&request_context))
         .await
     {
         Ok(cred) => cred,

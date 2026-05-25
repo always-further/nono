@@ -377,6 +377,12 @@ pub struct CredentialCaptureEntry {
     /// Cache TTL in seconds (default: 900 = 15 min, range: 0–3600).
     #[serde(default = "default_capture_ttl")]
     pub ttl_secs: u64,
+    /// Optional regex applied to the request path (`NONO_REQUEST_PATH`).
+    /// The first capture group becomes part of the cache key, enabling
+    /// per-path-segment credential caching. No pattern means the cache
+    /// key is just the credential name (one cached value per route).
+    #[serde(default)]
+    pub cache_path_pattern: Option<String>,
 }
 
 fn default_capture_timeout() -> u64 {

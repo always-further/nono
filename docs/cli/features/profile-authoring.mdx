@@ -350,7 +350,7 @@ When credentials come from a CLI tool (e.g., `gh auth token`, `gcloud auth print
 }
 ```
 
-The `credential_capture` section maps logical names to commands. The command is resolved to an absolute path at profile-load time, and the result is cached for the specified TTL. See [Credential Injection — CLI Command Capture](/cli/features/credential-injection#cli-command-credential-capture-cmd) for full details.
+The `credential_capture` section maps logical names to commands. The command is resolved to an absolute path at profile-load time, and the result is cached for the specified TTL. The command receives `NONO_REQUEST_HOST`, `NONO_REQUEST_PATH`, and `NONO_REQUEST_METHOD` environment variables so it can produce context-aware credentials. Use `cache_path_pattern` to partition the cache when the command returns different values based on the request path. See [Credential Injection — CLI Command Capture](/cli/features/credential-injection#cli-command-credential-capture-cmd) for full details.
 
 ### CI Build Environment
 

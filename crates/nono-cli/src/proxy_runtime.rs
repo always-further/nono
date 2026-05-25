@@ -213,6 +213,7 @@ pub(crate) fn start_proxy_runtime(
                 &entry.command,
                 Some(entry.timeout_secs),
                 Some(entry.ttl_secs),
+                entry.cache_path_pattern.as_deref(),
             ) {
                 Ok(def) => {
                     configs.insert(name.clone(), def);
@@ -245,8 +246,22 @@ pub(crate) fn start_proxy_runtime(
                     while let Some((req, response_tx)) = rx.recv().await {
                         let broker = broker_clone.clone();
                         tokio::task::spawn_blocking(move || {
-                            let result =
-                                broker.capture_or_cache(&req.session_id, &req.credential_name);
+                            let context =
+                                match (&req.request_host, &req.request_path, &req.request_method) {
+                                    (Some(h), Some(p), Some(m)) => {
+                                        Some(crate::credential_capture::CaptureContext {
+                                            host: h.clone(),
+                                            path: p.clone(),
+                                            method: m.clone(),
+                                        })
+                                    }
+                                    _ => None,
+                                };
+                            let result = broker.capture_or_cache(
+                                &req.session_id,
+                                &req.credential_name,
+                                context.as_ref(),
+                            );
                             let response = match result {
                                 Ok(credential) => nono_proxy::capture::ProxyCaptureResponse {
                                     credential: Some(credential),
