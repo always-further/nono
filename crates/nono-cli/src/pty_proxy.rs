@@ -213,6 +213,8 @@ pub unsafe fn setup_child_pty(slave_fd: RawFd) {
 
     // Set the slave as the controlling terminal (TIOCSCTTY).
     // The arg 0 means "don't steal if another process has it".
+    // Use `as _` to let Rust infer the correct cast type for each platform:
+    // c_ulong on macOS/glibc, c_int on musl.
     if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
         child_setup_pty_fatal(b"nono: ioctl(TIOCSCTTY) failed while configuring child PTY\n");
     }
