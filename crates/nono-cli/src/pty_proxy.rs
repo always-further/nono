@@ -346,8 +346,19 @@ impl PtyProxy {
             return false;
         }
 
+        let in_alt_screen = self.screen.alternate_screen_active();
         leave_attach_screen();
         self.restore_terminal();
+        // If the child's last output had no trailing newline, `\r\x1b[K` inside
+        // `prepare_parent_output_area` would erase it.  Emit a newline first so
+        // the child's output is preserved.  Skip in alt-screen: the terminal
+        // restores the normal-screen cursor on exit, making the column moot.
+        if !in_alt_screen {
+            let (_row, col) = self.screen.cursor_position();
+            if col > 0 {
+                let _ = write_all_fd(libc::STDOUT_FILENO, b"\n");
+            }
+        }
         self.client = None;
         self.resize_notifier = None;
         self.pending_detach_match_len = 0;
@@ -2019,6 +2030,17 @@ mod tests {
     fn terminal_restore_escape_can_clear_screen() {
         let esc = std::str::from_utf8(terminal_restore_escape(true)).unwrap_or("");
         assert!(esc.ends_with("\u{1b}[2J\u{1b}[H"));
+    }
+
+    #[test]
+    fn cursor_column_nonzero_after_output_without_trailing_newline() {
+        let mut proxy = build_test_proxy(&DEFAULT_DETACH_SEQUENCE);
+        proxy.record_output(b"hello");
+        let (_row, col) = proxy.screen.cursor_position();
+        assert!(
+            col > 0,
+            "cursor column should be > 0 after output without a trailing newline"
+        );
     }
 
     #[test]
