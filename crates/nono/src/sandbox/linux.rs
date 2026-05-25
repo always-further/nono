@@ -3146,11 +3146,9 @@ mod tests {
 
         let v6 = DetectedAbi::new(ABI::V6);
         let names = v6.feature_names();
-        assert!(
-            names
-                .iter()
-                .any(|n| n == "Signal and abstract UNIX socket scoping")
-        );
+        assert!(names
+            .iter()
+            .any(|n| n == "Signal and abstract UNIX socket scoping"));
     }
 
     #[test]
@@ -3445,7 +3443,6 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("macOS-only"), "unexpected error: {msg}");
     }
-
 
     #[test]
     fn test_seccomp_network_fallback_mode_proxy_only() {

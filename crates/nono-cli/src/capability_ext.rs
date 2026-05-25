@@ -259,57 +259,46 @@ fn try_new_profile_exact_path(
     label: &str,
     protected_roots: &ProtectedRoots,
 ) -> Result<Option<FsCapability>> {
-    validate_requested_file(path, "Profile", protected_roots, false)?;
-    match try_new_file(path, access, label) {
-        Err(NonoError::ExpectedFile(_)) => {
-            handle_exact_directory_path(path, access, protected_roots)
+    #[cfg(target_os = "macos")]
+    let _ = label;
+
+    if path.exists() && path.is_dir() {
+        validate_requested_dir(path, "Profile", protected_roots, false)?;
+    } else {
+        validate_requested_file(path, "Profile", protected_roots, false)?;
+    }
+
+    match new_exact_path_capability(path, access) {
+        Ok(cap) => Ok(Some(cap)),
+        #[cfg(not(target_os = "macos"))]
+        Err(NonoError::PathNotFound(_)) => {
+            info!("{}: {}", label, path.display());
+            Ok(None)
         }
-        result => result,
+        Err(err) => Err(err),
     }
 }
 
 #[cfg(target_os = "macos")]
-fn handle_exact_directory_path(
-    path: &Path,
-    access: AccessMode,
-    protected_roots: &ProtectedRoots,
-) -> Result<Option<FsCapability>> {
-    validate_requested_dir(path, "Profile", protected_roots, false)?;
-    let resolved = path.canonicalize().map_err(|source| {
-        if source.kind() == std::io::ErrorKind::NotFound {
-            NonoError::PathNotFound(path.to_path_buf())
-        } else {
-            NonoError::PathCanonicalization {
-                path: path.to_path_buf(),
-                source,
-            }
+pub(crate) fn new_exact_path_capability(path: &Path, access: AccessMode) -> Result<FsCapability> {
+    match FsCapability::new_file(path, access) {
+        Ok(cap) => Ok(cap),
+        Err(NonoError::ExpectedFile(_)) => new_exact_directory_path_capability(path, access),
+        Err(NonoError::PathNotFound(_)) => {
+            let cap = new_future_file_capability(path, access)?;
+            debug!(
+                "Granting future exact file capability on macOS for missing path: {}",
+                path.display()
+            );
+            Ok(cap)
         }
-    })?;
-
-    debug!(
-        "Profile exact-file path resolved as directory; granting exact macOS literal path access: {}",
-        path.display()
-    );
-
-    Ok(Some(FsCapability {
-        original: path.to_path_buf(),
-        resolved,
-        access,
-        // On macOS, `is_file = true` makes Seatbelt emit a literal path rule
-        // rather than a recursive subpath rule. The target may still be a
-        // directory; the important property is exact-path matching.
-        is_file: true,
-        source: CapabilitySource::Profile,
-    }))
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn handle_exact_directory_path(
-    path: &Path,
-    _access: AccessMode,
-    _protected_roots: &ProtectedRoots,
-) -> Result<Option<FsCapability>> {
-    Err(NonoError::ExpectedFile(path.to_path_buf()))
+fn new_exact_path_capability(path: &Path, access: AccessMode) -> Result<FsCapability> {
+    FsCapability::new_file(path, access)
 }
 
 #[cfg(target_os = "macos")]
@@ -334,6 +323,36 @@ fn handle_missing_file_capability(
 ) -> Result<Option<FsCapability>> {
     warn!("{}: {}", label, path.display());
     Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn new_exact_directory_path_capability(path: &Path, access: AccessMode) -> Result<FsCapability> {
+    let resolved = path.canonicalize().map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            NonoError::PathNotFound(path.to_path_buf())
+        } else {
+            NonoError::PathCanonicalization {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })?;
+
+    debug!(
+        "Profile exact-file path resolved as directory; granting exact macOS literal path access: {}",
+        path.display()
+    );
+
+    Ok(FsCapability {
+        original: path.to_path_buf(),
+        resolved,
+        access,
+        // On macOS, `is_file = true` makes Seatbelt emit a literal path rule
+        // rather than a recursive subpath rule. The target may still be a
+        // directory; the important property is exact-path matching.
+        is_file: true,
+        source: CapabilitySource::Profile,
+    })
 }
 
 #[cfg(target_os = "macos")]

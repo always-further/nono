@@ -5,7 +5,7 @@
 //! to query their own capabilities using `nono why --self`.
 
 #[cfg(target_os = "macos")]
-use crate::capability_ext::new_future_file_capability;
+use crate::capability_ext::new_exact_path_capability;
 use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
@@ -113,14 +113,7 @@ impl SandboxState {
             let source = parse_capability_source(fs_cap.source.as_deref())?;
 
             let cap = if fs_cap.is_file {
-                match restore_existing_file_capability(fs_cap, access, &source) {
-                    Ok(cap) => cap,
-                    #[cfg(target_os = "macos")]
-                    Err(NonoError::PathNotFound(_)) => {
-                        restore_missing_file_capability(fs_cap, access, &source)?
-                    }
-                    Err(err) => return Err(err),
-                }
+                restore_exact_path_capability(fs_cap, access, &source)?
             } else {
                 restore_directory_capability(fs_cap, access, &source)?
             };
@@ -235,7 +228,20 @@ fn validate_restored_path(fs_cap: &FsCapState, actual: &Path) -> Result<()> {
     Ok(())
 }
 
-fn restore_existing_file_capability(
+#[cfg(target_os = "macos")]
+fn restore_exact_path_capability(
+    fs_cap: &FsCapState,
+    access: AccessMode,
+    source: &CapabilitySource,
+) -> Result<FsCapability> {
+    let mut cap = new_exact_path_capability(Path::new(&fs_cap.original), access)?;
+    validate_restored_path(fs_cap, &cap.resolved)?;
+    cap.source = source.clone();
+    Ok(cap)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_exact_path_capability(
     fs_cap: &FsCapState,
     access: AccessMode,
     source: &CapabilitySource,
@@ -252,18 +258,6 @@ fn restore_directory_capability(
     source: &CapabilitySource,
 ) -> Result<FsCapability> {
     let mut cap = FsCapability::new_dir(&fs_cap.original, access)?;
-    validate_restored_path(fs_cap, &cap.resolved)?;
-    cap.source = source.clone();
-    Ok(cap)
-}
-
-#[cfg(target_os = "macos")]
-fn restore_missing_file_capability(
-    fs_cap: &FsCapState,
-    access: AccessMode,
-    source: &CapabilitySource,
-) -> Result<FsCapability> {
-    let mut cap = new_future_file_capability(Path::new(&fs_cap.original), access)?;
     validate_restored_path(fs_cap, &cap.resolved)?;
     cap.source = source.clone();
     Ok(cap)
@@ -593,6 +587,39 @@ mod tests {
         assert_eq!(
             restored.fs_capabilities()[0].source,
             CapabilitySource::Profile
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_sandbox_state_restores_exact_directory_literal_path() {
+        let dir = tempdir().expect("tempdir");
+        let lock_dir = dir.path().join("claude.lock");
+        std::fs::create_dir_all(&lock_dir).expect("create lock dir");
+        let child = lock_dir.join("child.txt");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: lock_dir.clone(),
+            resolved: lock_dir.canonicalize().expect("canonicalize lock dir"),
+            access: AccessMode::ReadWrite,
+            is_file: true,
+            source: CapabilitySource::Profile,
+        });
+
+        let state = SandboxState::from_caps(&caps, &[], &[]);
+        let restored = state.to_caps().expect("restore exact directory literal");
+
+        assert_eq!(restored.fs_capabilities().len(), 1);
+        assert_eq!(restored.fs_capabilities()[0].original, lock_dir);
+        assert!(restored.fs_capabilities()[0].is_file);
+        assert_eq!(
+            restored.fs_capabilities()[0].source,
+            CapabilitySource::Profile
+        );
+        assert!(
+            !restored.path_covered(&child),
+            "exact-path directory literal must not recursively cover descendants"
         );
     }
 
