@@ -167,7 +167,7 @@ Audit: [`milestones/v2.5-MILESTONE-AUDIT.md`](milestones/v2.5-MILESTONE-AUDIT.md
 - [x] 48-06-PTY-MUSL-PORTABILITY-PLAN.md — Wave 2 polish: Cluster C7 PTY proxy fixes + musl libc Ioctl portability (4 cherry-picks; D-48-D4 musl-target verification close-gate add)
 - [x] 48-07-PROXY-CRED-FORMAT-PLAN.md — Wave 2 polish: Cluster C8 proxy credential_format on custom inject headers (2 cherry-picks + conditional D-48-D2 regression test if coverage gap)
 - [x] 48-08-PACKAGE-MANIFEST-PLAN.md — Wave 2 fork-preserve: Cluster C9 package manifest + trust-bundle schema (2 cherry-picks OR D-20 manual-replays per D-48-C1 verdict; D-48-C2 disposition-resolution artifact; mandatory D-48-C3 regression test for D-32-15 offline-verify; D-48-C4 Phase 47 ledger immutability)
-- [ ] 48-09-RELEASE-RIDE-PLAN.md — Wave 3 release-ride: Cluster C3 consolidated CHANGELOG-only commit with 3 stacked D-19 trailers (D-48-D1 + D-48-E10 Cargo.toml/lock drops; structurally last; ships 48-SUMMARY.md phase-level close artifact)
+- [x] 48-09-RELEASE-RIDE-PLAN.md — Wave 3 release-ride: Cluster C3 consolidated CHANGELOG-only commit with 3 stacked D-19 trailers (D-48-D1 + D-48-E10 Cargo.toml/lock drops; structurally last; ships 48-SUMMARY.md phase-level close artifact)
 **UI hint**: no
 
 ### Phase 49: Sigstore trust-root POC resilience (--from-file flag + release-asset bundling + fixture refresh cadence)
@@ -266,7 +266,7 @@ These invariants are inherited from prior milestones and remain in force across 
 | 45. Source migration + AIPC G-04 + RESL native re-validation | 3/3 | Complete    | 2026-05-23 |
 | 46. windows-squash merge + post-merge CI + UAT backlog | 3/3 | Complete    | 2026-05-24 |
 | 47. UPST6 audit + v0.41–v0.43 drift ingestion | 2/2 | Complete    | 2026-05-24 |
-| 48. UPST6 sync execution | 9/9 | Complete   | 2026-05-25 |
+| 48. UPST6 sync execution | 11/9 | Complete   | 2026-05-25 |
 | 49. Sigstore trust-root POC resilience | 3/3 | Complete    | 2026-05-21 |
 
 (Prior milestones rolled up under `milestones/v*-ROADMAP.md`.)
