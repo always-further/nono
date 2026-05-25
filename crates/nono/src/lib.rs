@@ -64,11 +64,11 @@ pub mod undo;
 // Re-exports for convenience
 pub use capability::{
     AccessMode, CapabilitySet, CapabilitySource, FsCapability, IpcMode, NetworkMode,
-    ProcessInfoMode, SignalMode,
+    ProcessInfoMode, SignalMode, SocketScope, UnixSocketCapability, UnixSocketMode, UnixSocketOp,
 };
 pub use diagnostic::{
     CommandContext, DenialReason, DenialRecord, DiagnosticFormatter, DiagnosticMode,
-    SandboxViolation,
+    IpcDenialRecord, SandboxViolation,
 };
 pub use error::{NonoError, Result, CGROUP_V2_HINT};
 pub use keystore::{
@@ -85,7 +85,7 @@ pub use sandbox::windows::{
     path_is_owned_by_current_user, try_set_mandatory_label, OwnedHandle,
 };
 #[cfg(target_os = "linux")]
-pub use sandbox::{detect_abi, is_wsl2, DetectedAbi};
+pub use sandbox::{detect_abi, is_wsl2, landlock_scope_policy, DetectedAbi, LandlockScopePolicy};
 pub use sandbox::{PreviewRuntimeStatus, Sandbox, SupportInfo, SupportStatus};
 #[cfg(target_os = "windows")]
 pub use sandbox::{

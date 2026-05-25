@@ -112,6 +112,58 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
         }
     }
 
+    // AF_UNIX socket capabilities (issue #685 / #696)
+    let unix_caps = caps.unix_socket_capabilities();
+    if !unix_caps.is_empty() {
+        let (user_caps, hidden_count) = if verbose > 0 {
+            (unix_caps.to_vec(), 0)
+        } else {
+            let user: Vec<_> = unix_caps
+                .iter()
+                .filter(|c| c.source.is_user_intent())
+                .cloned()
+                .collect();
+            let hidden = unix_caps.len() - user.len();
+            (user, hidden)
+        };
+
+        for cap in &user_caps {
+            let mode_badge = format_unix_socket_mode_badge(cap.mode);
+            let scope_suffix = match cap.scope {
+                nono::SocketScope::File => "",
+                nono::SocketScope::DirChildren => "  (directory grant — direct child sockets only)",
+                nono::SocketScope::DirSubtree => "  (subtree grant — recursive socket paths)",
+            };
+            if verbose > 0 {
+                let source_str = format!("{}", cap.source);
+                eprintln!(
+                    "  {} {} {}{}",
+                    mode_badge,
+                    theme::fg(&cap.resolved.display().to_string(), t.text),
+                    theme::fg(&format!("[{source_str}]"), t.subtext),
+                    theme::fg(scope_suffix, t.subtext),
+                );
+            } else {
+                eprintln!(
+                    "  {} {}{}",
+                    mode_badge,
+                    theme::fg(&cap.resolved.display().to_string(), t.text),
+                    theme::fg(scope_suffix, t.subtext),
+                );
+            }
+        }
+
+        if hidden_count > 0 {
+            eprintln!(
+                "       {}",
+                theme::fg(
+                    &format!("+ {hidden_count} system/group unix sockets (-v to show)"),
+                    t.subtext
+                )
+            );
+        }
+    }
+
     // Network status
     match caps.network_mode() {
         NetworkMode::Blocked => {
@@ -172,6 +224,14 @@ fn format_access_badge(access: &AccessMode) -> String {
         AccessMode::Read => theme::badge("  r  ", t.green, BADGE_FG_DARK),
         AccessMode::Write => theme::badge("  w  ", t.yellow, BADGE_FG_DARK),
         AccessMode::ReadWrite => theme::badge(" r+w ", t.brand, BADGE_FG_DARK),
+    }
+}
+
+fn format_unix_socket_mode_badge(mode: nono::UnixSocketMode) -> String {
+    let t = theme::current();
+    match mode {
+        nono::UnixSocketMode::Connect => theme::badge("sock ", t.green, BADGE_FG_DARK),
+        nono::UnixSocketMode::ConnectBind => theme::badge("sock+", t.brand, BADGE_FG_DARK),
     }
 }
 
@@ -261,6 +321,89 @@ pub fn print_abi_info(silent: bool) {
                 fg(&format!("Landlock detection failed: {e}"), t.red),
             );
         }
+    }
+}
+
+/// Print the Landlock scope policy derived from the current capabilities.
+#[cfg(target_os = "linux")]
+pub fn print_landlock_scope_policy(caps: &CapabilitySet, verbose: u8, silent: bool) {
+    if silent || verbose == 0 {
+        return;
+    }
+
+    let t = theme::current();
+    match nono::landlock_scope_policy(caps) {
+        Ok(policy) => {
+            eprintln!(
+                "  {} {}",
+                badge(" scope ", t.blue, BADGE_FG_DARK),
+                fg(
+                    &format!("Landlock {} detected", policy.abi_version),
+                    t.subtext,
+                )
+            );
+            eprintln!(
+                "          {} {}",
+                fg("signal:", t.subtext),
+                fg(
+                    &format_scope_status(
+                        policy.signal_requested,
+                        policy.signal_enforced,
+                        policy.scoping_supported,
+                    ),
+                    scope_status_color(
+                        policy.signal_requested,
+                        policy.signal_enforced,
+                        policy.scoping_supported,
+                        t,
+                    ),
+                )
+            );
+            eprintln!(
+                "          {} {}",
+                fg("abstract-unix-socket:", t.subtext),
+                fg(
+                    &format_scope_status(
+                        policy.abstract_unix_socket_requested,
+                        policy.abstract_unix_socket_enforced,
+                        policy.scoping_supported,
+                    ),
+                    scope_status_color(
+                        policy.abstract_unix_socket_requested,
+                        policy.abstract_unix_socket_enforced,
+                        policy.scoping_supported,
+                        t,
+                    ),
+                )
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "  {} {}",
+                badge(" scope ", t.red, BADGE_FG_DARK),
+                fg(&format!("Landlock scope policy unavailable: {err}"), t.red),
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn format_scope_status(requested: bool, enforced: bool, supported: bool) -> String {
+    match (requested, enforced, supported) {
+        (true, true, _) => "requested, enforced".to_string(),
+        (true, false, false) => "requested, unsupported by detected ABI".to_string(),
+        (true, false, true) => "requested, not enforced".to_string(),
+        (false, _, true) => "not requested".to_string(),
+        (false, _, false) => "not requested; detected ABI has no scope support".to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn scope_status_color(requested: bool, enforced: bool, supported: bool, t: &theme::Theme) -> Rgb {
+    match (requested, enforced, supported) {
+        (true, true, _) => t.green,
+        (true, false, _) => t.yellow,
+        (false, _, _) => t.subtext,
     }
 }
 

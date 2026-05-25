@@ -8,6 +8,8 @@ pub(crate) struct PreparedProfile {
     pub(crate) capability_elevation: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: profile::Wsl2ProxyPolicy,
+    #[cfg(target_os = "linux")]
+    pub(crate) af_unix_mediation: profile::LinuxAfUnixMediation,
     pub(crate) workdir_access: Option<profile::WorkdirAccess>,
     pub(crate) rollback_exclude_patterns: Vec<String>,
     pub(crate) rollback_exclude_globs: Vec<String>,
@@ -193,6 +195,11 @@ pub(crate) fn prepare_profile_with_context(
         wsl2_proxy_policy: loaded_profile
             .as_ref()
             .and_then(|profile| profile.security.wsl2_proxy_policy)
+            .unwrap_or_default(),
+        #[cfg(target_os = "linux")]
+        af_unix_mediation: loaded_profile
+            .as_ref()
+            .and_then(|profile| profile.linux.af_unix_mediation)
             .unwrap_or_default(),
         workdir_access: loaded_profile
             .as_ref()

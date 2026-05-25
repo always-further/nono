@@ -3,14 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.6
 milestone_name: UPST6 + v2.5 Drain
 status: executing
-last_updated: "2026-05-24T14:02:58.437Z"
+last_updated: "2026-05-24T21:00:00.000Z"
 last_activity: 2026-05-24
 progress:
   total_phases: 7
   completed_phases: 6
   total_plans: 23
-  completed_plans: 14
-  percent: 61
+  completed_plans: 15
+  percent: 65
+  note: "Phase 48 IN PROGRESS — only Plan 48-01 (Wave 0, Cluster C4 af_unix/landlock-v6, 9 commits) of 9 plans complete. Plans 48-02..48-09 (Waves 1-3: clusters C1/C2/C5/C6/C7/C8/C9/C3, ~33 more commits) remain. completed_plans +1 for 48-01; completed_phases unchanged (48 not done). v2.6 NOT ready for close."
 ---
 
 # Project State: nono — v2.6 UPST6 + v2.5 Drain
@@ -21,18 +22,17 @@ See: .planning/PROJECT.md (updated 2026-05-20 at v2.5 milestone close; v2.5 ship
 
 **Core Value:** Windows security must be as structurally impossible and feature-complete as Unix platforms; every nono command that works on Linux/macOS should work on Windows with equivalent security guarantees, or be explicitly documented as intentionally unsupported with a clear rationale.
 
-**Current Focus:** Phase 48 — upst6-sync-execution
+**Current Focus:** Phase 48 — upst6-sync-execution. **Wave 0 (Plan 48-01 / Cluster C4) COMPLETE; Plans 48-02..48-09 (Waves 1-3) REMAIN.** Phase 48 is ~1/9 done.
 
 ## Current Position
 
-Phase: 48 (upst6-sync-execution) — EXECUTING
-Plan: 1 of 9 (PARTIAL — 2/9 cherry-picks landed on plan branch `phase-48-01-landlock-v6-af-unix`)
-Status: Plan 48-01 partial — audit verdict flipped YELLOW → RED after 858ad009 attempt; see `.planning/phases/48-upst6-sync-execution/48-01-PARTIAL-SUMMARY.md` for resume path
-Last activity: 2026-05-24 -- Plan 48-01 session 1 break (2/9 cherry-picks: caab9967 + a93b2bed; RED verdict documented)
+Phase: 48 (upst6-sync-execution) — **IN PROGRESS (1 of 9 plans / Wave 0 of 4 complete).**
+Plan: 48-01-LANDLOCK-V6-AF-UNIX (Cluster C4) — **COMPLETE**, regression-free vs baseline `3f638dc6`, landed on local `main`. 9 cherry-picks `caab9967..e7da4998` + 3 CR-A cross-target fix rounds (`f072eef7` lib Linux, `715f979b` nono-cli fork-invariant restore, `4e3a7799` macOS seatbelt wiring) + close-doc `9eeea207`, merged via `--no-ff` of `phase-48-01-landlock-v6-af-unix` (merge `e0584f34`).
+Remaining plans: 48-02-PROFILE-SHADOWING (C1), 48-03-STARTUP-TIMEOUT (C2) [Wave 1, parallel after C4]; 48-04-LINUX-POLICY-POLISH (C5), 48-05-MACOS-GRANT-RESTORE (C6), 48-06-PTY-MUSL-PORTABILITY (C7), 48-07-PROXY-CRED-FORMAT (C8), 48-08-PACKAGE-MANIFEST (C9 fork-preserve) [Wave 2, parallel]; 48-09-RELEASE-RIDE (C3) [Wave 3, last]. ~33 more upstream commits across these 8 clusters.
+Status: REQ-UPST6-02 NOT yet satisfied (covers all 9 clusters / 42 commits; only C4's 9 done). Local `main` carries the Wave-0 merge but is NOT pushed to `origin` (~35 commits ahead, incl. pre-existing unpushed Phase 46/47 doc commits). Next: `/gsd-execute-phase 48` to run Waves 1-3 (plan files now exist on `main`, so dispatch works). Remaining red CI lanes on `main` are pre-existing Class-B debt (macОS clippy/test, Integration, Rustfmt, Cargo Audit, Docs Checks) — deferred.
+Last activity: 2026-05-24 -- Resumed from HANDOFF.json (which framed 48-01 as the SOLE plan — WRONG; the handoff was written on `pre-merge` which forked before the 9 plan files were created on `main`). Closed Plan 48-01 (C4): the 8/8 close-gate matrix proved **Windows-only and unreliable** (never compiled cfg-unix/macos/nix-test code), so the cherry-picks did NOT compile cross-platform as landed; fixed via 3 CR-A rounds (all reverts to fork baseline shape). Merged Wave 0 onto `main`. The merge then surfaced the true 9-plan Phase 48 scope.
 
-**Session 1 outcome:** Cherry-picks 1-2 (c2c6f2ca, b8a32006) landed cleanly with verbatim D-19 trailers. Cherry-pick 3 (858ad009) revealed structural fork-side divergence (Phase 36-01b `add_deny_access` rename + 11-line HEAD blocks in profile/mod.rs) beyond what the diff-stat audit predicted. Aborted via `git reset --hard HEAD` to clean state at `a93b2bed`. Plan branch carries the 2 cherry-picks + a partial-handoff doc commit (`baccda48`). No PR opened. No close-gate run.
-
-**Resume:** `/gsd-execute-phase 48` in a fresh context. Recommend the executor read `48-01-PARTIAL-SUMMARY.md` § "Resume path" + `48-01-PRE-CHERRY-PICK-AUDIT.md` § 9 before continuing cherry-pick 3.
+**FORK-BEHAVIOR DECISION pending confirmation (Plan 48-01):** kept the fork's 4-arg `should_offer_profile_save` (not upstream's violations-aware 5-arg) — see `48-01-SUMMARY.md`. **CARRY-FORWARD CONCERN:** main's pre-existing Class-B CI debt (macОS clippy + Rustfmt + Cargo Audit + Docs Checks red for ~weeks) blocks the v2.6 "every cross-platform lane green" core value — candidate for a dedicated CI-cleanup effort.
 
 ### v2.6 Phase Summary
 
@@ -42,7 +42,7 @@ Last activity: 2026-05-24 -- Plan 48-01 session 1 break (2/9 cherry-picks: caab9
 | 45 | Source migration + AIPC G-04 + RESL native re-validation | REQ-PORT-CLOSURE-08 + REQ-AIPC-G04-01 + REQ-RESL-NIX-04 | Complete |
 | 46 | windows-squash merge + post-merge CI verifs + UAT backlog | REQ-MERGE-01 + REQ-CI-FU-01..03 + REQ-UAT-BL-01..02 | Complete (2026-05-23) |
 | 47 | UPST6 audit + v0.41–v0.43 drift ingestion | REQ-UPST6-01 + REQ-DRIFT-INGEST-01 | Complete (2026-05-24) |
-| 48 | UPST6 sync execution | REQ-UPST6-02 | Not started |
+| 48 | UPST6 sync execution | REQ-UPST6-02 | **IN PROGRESS** — Plan 48-01/C4 done (Wave 0 of 4); 48-02..48-09 remain |
 | 49 | Sigstore trust-root POC resilience (--from-file + release asset + fixture cadence) | TBD (anticipated REQ-POC-TRUST-01..03) | Not started |
 
 ## Deferred Items
@@ -322,6 +322,14 @@ Items acknowledged at v2.4 close (user chose [A] Acknowledge in `/gsd-complete-m
 Known deferred items at v2.4 close: 5 host-blocked requirements (re-anchored to v2.5) + ~18 human-verify items (Phase 35/36) + 1 context question + 20 audit-open cataloging glitches. None block release; cross-phase integration confirmed clean. v24 CR-A class (4 todos) resolved by Phase 41; cleared 2026-05-16.
 
 ## Session Continuity
+
+**Resumed 2026-05-24 — closed Plan 48-01 (Wave 0); Phase 48 still IN PROGRESS (1/9 plans).** Resumed from `HANDOFF.json` at Task 4/8. Closed Plan 48-01 (Cluster C4, af_unix/landlock-v6). The 8/8 close-gate matrix was **Windows-only and unreliable** — never compiled cfg(linux)/cfg(macos)/nix-test code, so the 9 cherry-picks did NOT compile on Linux/macOS as landed; fixed via 3 CR-A rounds (`f072eef7` Linux lib, `715f979b` nono-cli fork invariants, `4e3a7799` macOS seatbelt wiring), all reverts to fork baseline shape. Got CI signal via fork-internal draft PR `oscarmackjr-twg#3` (`ci.yml` only triggers on `main`, so a push to `pre-merge` alone runs nothing). Baseline-aware lane diff: **regression-free** — every red lane was also red on `main` pre-Phase-48 (Class-B debt, deferred). Merged `phase-48-01-landlock-v6-af-unix` → local `main` (merge `e0584f34`, only 3 planning-doc conflicts; source clean). **The merge then revealed Phase 48 is a 9-PLAN phase** (48-CONTEXT.md: 9 clusters / 4 waves / 42 commits) — the HANDOFF framed 48-01 as the sole plan because it was authored on `pre-merge`, which forked before the plans were created on `main`. **Initially mis-marked Phase 48 complete; corrected (this amend) to Wave-0-done / in-progress.** **REMAINING:** run Plans 48-02..48-09 (Waves 1-3) via `/gsd-execute-phase 48` (plan files now on `main`, so dispatch works); then close Phase 48 → `/gsd-complete-milestone v2.6`. Local `main` (~35 commits ahead of origin, incl. pre-existing unpushed Phase 46/47 docs) is NOT pushed — operator decision. **FLAGGED DECISION:** Plan 48-01 kept fork's 4-arg `should_offer_profile_save` (not upstream's 5-arg) — confirm before adopting upstream UX.
+
+**Current Milestone (per STATE frontmatter, authoritative):** v2.6 — UPST6 + v2.5 Drain (executing; 7/8 phases shipped per memory `project_v26_opened`; only Phase 48 remains). The stale "v2.3" line below was never cleaned at v2.4/v2.5/v2.6 transitions and is retained as forensic history only — do not trust.
+
+---
+
+**[Stale — pre-v2.4 forensic history below this line. Authoritative state is the YAML frontmatter at the top of this file plus the resume entry above.]**
 
 **Current Milestone:** v2.3 — Linux POC Unblock + Deferreds Closure (scope-locked 2026-04-29; in progress; status=gaps_found per audit).
 **Last Activity:** 2026-05-24

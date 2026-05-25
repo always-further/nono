@@ -178,6 +178,8 @@ pub(crate) struct ExecutionFlags {
     pub(crate) interactive_shell: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,
+    #[cfg(target_os = "linux")]
+    pub(crate) af_unix_mediation: crate::profile::LinuxAfUnixMediation,
     pub(crate) bypass_protection_paths: Vec<PathBuf>,
     /// Plan 34-08a Task 3 (D-20 manual replay of upstream `1b412a7`):
     /// allow-list of environment variable names forwarded from
@@ -212,6 +214,8 @@ impl ExecutionFlags {
             interactive_shell: false,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
+            #[cfg(target_os = "linux")]
+            af_unix_mediation: crate::profile::LinuxAfUnixMediation::Off,
             bypass_protection_paths: Vec::new(),
             allowed_env_vars: None,
             denied_env_vars: None,
@@ -335,6 +339,8 @@ pub(crate) fn prepare_run_launch_plan(
             interactive_shell: false,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: prepared.wsl2_proxy_policy,
+            #[cfg(target_os = "linux")]
+            af_unix_mediation: prepared.af_unix_mediation,
             bypass_protection_paths: prepared.bypass_protection_paths,
             allowed_env_vars: prepared.allowed_env_vars,
             denied_env_vars: prepared.denied_env_vars,

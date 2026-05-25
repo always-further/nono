@@ -166,6 +166,7 @@ impl ProfileDef {
             filesystem: self.filesystem.clone(),
             policy,
             network: self.network.clone(),
+            linux: profile::LinuxConfig::default(),
             env_credentials: self.env_credentials.clone(),
             // Plan 34-08a Task 3 (D-20 manual replay of upstream `1b412a7`):
             // built-in policy.json profiles don't declare env-filter today;
@@ -195,6 +196,9 @@ impl ProfileDef {
             // default (empty CommandsConfig) means no additional command
             // policy beyond the group-based allow/deny lists.
             commands: profile::CommandsConfig::default(),
+            // Built-in policy.json profiles use strict parent-of-protected
+            // checking; individual user profiles can opt in via the field.
+            allow_parent_of_protected: None,
         }
     }
 }

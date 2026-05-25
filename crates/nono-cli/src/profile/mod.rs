@@ -524,13 +524,38 @@ pub struct FilesystemConfig {
     /// Single files with write-only access
     #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub write_file: Vec<String>,
-    /// Directories explicitly denied for the sandboxed child.
-    ///
-    /// Canonical section per upstream f0abd413 (v0.47.0). Paths here
-    /// activate the platform deny mechanism (macOS Seatbelt `(deny
-    /// file-read*)`, Linux Landlock restricted ruleset) even if the
-    /// path would otherwise be accessible by default. Applied AFTER
-    /// `filesystem.allow` grants so that deny takes precedence.
+    /// Single AF_UNIX socket paths — connect only.
+    /// Implies read access on the socket path. See issue #685.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket: Vec<String>,
+    /// Single AF_UNIX socket paths — connect and bind.
+    /// Implies read+write access on the socket path when it exists, or
+    /// on its parent directory when it does not yet exist (the normal
+    /// `bind(2)` workflow — the syscall creates the socket file).
+    /// Dangling symlinks are rejected at grant time. For runtime-generated
+    /// filenames (e.g. PID-suffixed paths) prefer `unix_socket_dir_bind`
+    /// so the implied fs grant stays scoped to a dedicated directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_bind: Vec<String>,
+    /// Directories where any direct-child AF_UNIX socket may be connected to.
+    /// Non-recursive. Implies read access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_dir: Vec<String>,
+    /// Directories where any direct-child AF_UNIX socket may be connected to
+    /// or bound. Non-recursive. Implies read+write access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_dir_bind: Vec<String>,
+    /// Directories where any descendant AF_UNIX socket may be connected to.
+    /// Recursive. Implies read access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_subtree: Vec<String>,
+    /// Directories where any descendant AF_UNIX socket may be connected to or
+    /// bound. Recursive. Implies read+write access on the directory.
+    #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
+    pub unix_socket_subtree_bind: Vec<String>,
+    /// Paths denied filesystem access. Canonical location for deny entries
+    /// in the #594 schema; the legacy deny-access key drains here via
+    /// `deprecated_schema::LegacyPolicyPatch`.
     #[serde(default, deserialize_with = "deserialize_conditional_path_vec")]
     pub deny: Vec<String>,
     /// Paths that bypass deny rules when paired with an explicit
@@ -1751,6 +1776,40 @@ pub enum Wsl2ProxyPolicy {
     InsecureProxy,
 }
 
+/// Linux pathname AF_UNIX seccomp mediation mode.
+///
+/// When set to `pathname`, pathname Unix socket `connect(2)` and `bind(2)`
+/// calls are mediated by the supervisor and must match explicit
+/// `filesystem.unix_socket*` grants. The default `off` mode preserves
+/// compatibility: filesystem grants may still make pathname sockets reachable
+/// on Landlock V4+.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinuxAfUnixMediation {
+    /// Do not install the V4+ AF_UNIX-only seccomp mediation filter.
+    #[default]
+    Off,
+    /// Mediate pathname AF_UNIX sockets through explicit socket grants.
+    Pathname,
+}
+
+impl LinuxAfUnixMediation {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[must_use]
+    pub fn is_pathname(self) -> bool {
+        matches!(self, LinuxAfUnixMediation::Pathname)
+    }
+}
+
+/// Linux-specific profile controls.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinuxConfig {
+    /// Opt-in pathname AF_UNIX mediation mode.
+    #[serde(default)]
+    pub af_unix_mediation: Option<LinuxAfUnixMediation>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkdirAccess {
@@ -1941,6 +2000,9 @@ pub struct Profile {
     pub policy: PolicyPatchConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub linux: LinuxConfig,
+    /// ALIAS(canonical="env_credentials", introduced="v0.0.0", remove_by="indefinite", issue="#143")
     #[serde(default, alias = "secrets")]
     pub env_credentials: SecretsConfig,
     /// Environment variable allow-list (ported from upstream v0.37.0 `1b412a7`).
@@ -2014,6 +2076,12 @@ pub struct Profile {
     /// construction path; this field is the canonical target shape.
     #[serde(default)]
     pub commands: CommandsConfig,
+    /// When `Some(true)`, allows granting a directory that is a parent of a
+    /// protected nono state root (e.g., `/var/run` if `/var/run/nono` is protected).
+    /// Used by AF_UNIX socket directory grants that legitimately need broad
+    /// directory access. Defaults to `false` (strict) when absent.
+    #[serde(default)]
+    pub allow_parent_of_protected: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2034,6 +2102,9 @@ struct ProfileDeserialize {
     policy: PolicyPatchConfig,
     #[serde(default)]
     network: NetworkConfig,
+    #[serde(default)]
+    linux: LinuxConfig,
+    /// ALIAS(canonical="env_credentials", introduced="v0.0.0", remove_by="indefinite", issue="#143")
     #[serde(default, alias = "secrets")]
     env_credentials: SecretsConfig,
     #[serde(default)]
@@ -2063,6 +2134,8 @@ struct ProfileDeserialize {
     command_args: Vec<String>,
     #[serde(default)]
     commands: CommandsConfig,
+    #[serde(default)]
+    allow_parent_of_protected: Option<bool>,
 }
 
 impl From<ProfileDeserialize> for Profile {
@@ -2074,6 +2147,7 @@ impl From<ProfileDeserialize> for Profile {
             filesystem: raw.filesystem,
             policy: raw.policy,
             network: raw.network,
+            linux: raw.linux,
             env_credentials: raw.env_credentials,
             environment: raw.environment,
             workdir: raw.workdir,
@@ -2091,6 +2165,7 @@ impl From<ProfileDeserialize> for Profile {
             // Exhaustively enumerated here so rustc's struct-literal completeness
             // check (T-36-01-CANONICAL) catches any future field additions.
             commands: raw.commands,
+            allow_parent_of_protected: raw.allow_parent_of_protected,
         }
     }
 }
@@ -2738,6 +2813,27 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             allow_file: dedup_append(&base.filesystem.allow_file, &child.filesystem.allow_file),
             read_file: dedup_append(&base.filesystem.read_file, &child.filesystem.read_file),
             write_file: dedup_append(&base.filesystem.write_file, &child.filesystem.write_file),
+            unix_socket: dedup_append(&base.filesystem.unix_socket, &child.filesystem.unix_socket),
+            unix_socket_bind: dedup_append(
+                &base.filesystem.unix_socket_bind,
+                &child.filesystem.unix_socket_bind,
+            ),
+            unix_socket_dir: dedup_append(
+                &base.filesystem.unix_socket_dir,
+                &child.filesystem.unix_socket_dir,
+            ),
+            unix_socket_dir_bind: dedup_append(
+                &base.filesystem.unix_socket_dir_bind,
+                &child.filesystem.unix_socket_dir_bind,
+            ),
+            unix_socket_subtree: dedup_append(
+                &base.filesystem.unix_socket_subtree,
+                &child.filesystem.unix_socket_subtree,
+            ),
+            unix_socket_subtree_bind: dedup_append(
+                &base.filesystem.unix_socket_subtree_bind,
+                &child.filesystem.unix_socket_subtree_bind,
+            ),
             deny: dedup_append(&base.filesystem.deny, &child.filesystem.deny),
             bypass_protection: dedup_append(
                 &base.filesystem.bypass_protection,
@@ -2814,6 +2910,12 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 &base.network.upstream_bypass,
                 &child.network.upstream_bypass,
             ),
+        },
+        linux: LinuxConfig {
+            af_unix_mediation: child
+                .linux
+                .af_unix_mediation
+                .or(base.linux.af_unix_mediation),
         },
         env_credentials: SecretsConfig {
             mappings: {
@@ -2896,6 +2998,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             allow: dedup_append(&base.commands.allow, &child.commands.allow),
             deny: dedup_append(&base.commands.deny, &child.commands.deny),
         },
+        // Child overrides base; if child has None, inherit base.
+        allow_parent_of_protected: child
+            .allow_parent_of_protected
+            .or(base.allow_parent_of_protected),
     }
 }
 
@@ -4447,18 +4553,15 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec!["/base/file.txt".to_string()],
                 write_file: vec![],
-                deny: vec![],
-                bypass_protection: vec![],
-                suppress_save_prompt: vec![],
-            },
-            policy: PolicyPatchConfig {
-                exclude_groups: vec!["base_excluded".to_string()],
-                add_allow_read: vec!["/base/policy-read".to_string()],
-                add_allow_write: vec![],
-                add_allow_readwrite: vec![],
-                add_deny_access: vec!["/base/policy-deny".to_string()],
-                add_deny_commands: vec![],
+                unix_socket: vec![],
+                unix_socket_bind: vec![],
+                unix_socket_dir: vec![],
+                unix_socket_dir_bind: vec![],
+                unix_socket_subtree: vec![],
+                unix_socket_subtree_bind: vec![],
+                deny: vec!["/base/policy-deny".to_string()],
                 bypass_protection: vec!["/base/override-deny".to_string()],
+                suppress_save_prompt: vec![],
             },
             network: NetworkConfig {
                 block: false,
@@ -4472,6 +4575,7 @@ mod tests {
                 upstream_proxy: None,
                 upstream_bypass: Vec::new(),
             },
+            linux: LinuxConfig::default(),
             env_credentials: SecretsConfig {
                 mappings: {
                     let mut m = HashMap::new();
@@ -4502,6 +4606,16 @@ mod tests {
             packs: Vec::new(),
             command_args: Vec::new(),
             commands: CommandsConfig::default(),
+            allow_parent_of_protected: None,
+            policy: PolicyPatchConfig {
+                exclude_groups: vec!["base_excluded".to_string()],
+                add_allow_read: vec!["/base/policy-read".to_string()],
+                add_allow_write: vec![],
+                add_allow_readwrite: vec![],
+                add_deny_access: vec!["/base/policy-deny".to_string()],
+                add_deny_commands: vec![],
+                bypass_protection: vec!["/base/override-deny".to_string()],
+            },
         }
     }
 
@@ -4525,18 +4639,15 @@ mod tests {
                 allow_file: vec![],
                 read_file: vec![],
                 write_file: vec![],
-                deny: vec![],
-                bypass_protection: vec![],
-                suppress_save_prompt: vec![],
-            },
-            policy: PolicyPatchConfig {
-                exclude_groups: vec!["child_excluded".to_string()],
-                add_allow_read: vec![],
-                add_allow_write: vec!["/child/policy-write".to_string()],
-                add_allow_readwrite: vec!["/child/policy-rw".to_string()],
-                add_deny_access: vec!["/child/policy-deny".to_string()],
-                add_deny_commands: vec![],
+                unix_socket: vec![],
+                unix_socket_bind: vec![],
+                unix_socket_dir: vec![],
+                unix_socket_dir_bind: vec![],
+                unix_socket_subtree: vec![],
+                unix_socket_subtree_bind: vec![],
+                deny: vec!["/child/policy-deny".to_string()],
                 bypass_protection: vec!["/child/override-deny".to_string()],
+                suppress_save_prompt: vec![],
             },
             network: NetworkConfig {
                 block: false,
@@ -4550,6 +4661,7 @@ mod tests {
                 upstream_proxy: None,
                 upstream_bypass: Vec::new(),
             },
+            linux: LinuxConfig::default(),
             env_credentials: SecretsConfig {
                 mappings: {
                     let mut m = HashMap::new();
@@ -4580,6 +4692,16 @@ mod tests {
             packs: Vec::new(),
             command_args: Vec::new(),
             commands: CommandsConfig::default(),
+            allow_parent_of_protected: None,
+            policy: PolicyPatchConfig {
+                exclude_groups: vec!["child_excluded".to_string()],
+                add_allow_read: vec![],
+                add_allow_write: vec!["/child/policy-write".to_string()],
+                add_allow_readwrite: vec!["/child/policy-rw".to_string()],
+                add_deny_access: vec!["/child/policy-deny".to_string()],
+                add_deny_commands: vec![],
+                bypass_protection: vec!["/child/override-deny".to_string()],
+            },
         }
     }
 
@@ -4602,6 +4724,30 @@ mod tests {
         let merged = merge_profiles(base_profile(), child_profile());
         // base has [3000], child has [3000, 5000] — merged should dedup to [3000, 5000]
         assert_eq!(merged.network.open_port, vec![3000, 5000]);
+    }
+
+    #[test]
+    fn test_profile_parses_linux_af_unix_mediation() {
+        let json = r#"{
+            "meta": {"name": "linux-ipc", "version": "1.0"},
+            "linux": {"af_unix_mediation": "pathname"}
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse profile");
+        assert_eq!(
+            profile.linux.af_unix_mediation,
+            Some(LinuxAfUnixMediation::Pathname)
+        );
+    }
+
+    #[test]
+    fn test_merge_profiles_inherits_linux_af_unix_mediation() {
+        let mut base = base_profile();
+        base.linux.af_unix_mediation = Some(LinuxAfUnixMediation::Pathname);
+        let merged = merge_profiles(base, child_profile());
+        assert_eq!(
+            merged.linux.af_unix_mediation,
+            Some(LinuxAfUnixMediation::Pathname)
+        );
     }
 
     #[test]

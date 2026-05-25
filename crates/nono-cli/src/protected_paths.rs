@@ -76,6 +76,7 @@ pub fn validate_caps_against_protected_roots(
             cap.is_file,
             &cap.source.to_string(),
             protected_roots,
+            false,
         )?;
     }
 
@@ -91,6 +92,7 @@ pub fn validate_requested_path_against_protected_roots(
     is_file: bool,
     source: &str,
     protected_roots: &[PathBuf],
+    allow_parent_of_protected: bool,
 ) -> Result<()> {
     // Fork divergence: retain resolve_path (Windows `\\?\` verbatim-prefix
     // normalization) — semantically equivalent to nono::try_canonicalize on
@@ -105,7 +107,11 @@ pub fn validate_requested_path_against_protected_roots(
     for protected_root in protected_roots {
         let inside_protected = path_starts_with(&requested_path, protected_root);
         let parent_of_protected = !is_file && path_starts_with(protected_root, &requested_path);
-        if inside_protected || parent_of_protected {
+        // Being inside a protected root is always an error.
+        // Being a parent of a protected root is only blocked when the caller
+        // has not explicitly opted in (e.g., unix socket directory grants
+        // on directories that happen to contain a protected root).
+        if inside_protected || (parent_of_protected && !allow_parent_of_protected) {
             return Err(NonoError::SandboxInit(format!(
                 "Refusing to grant '{}' (source: {}) because it overlaps protected nono state root '{}'.",
                 requested_path.display(),
@@ -344,7 +350,7 @@ mod tests {
         let child = protected.join("rollbacks").join("future-session");
 
         let err =
-            validate_requested_path_against_protected_roots(&child, false, "CLI", &[protected])
+            validate_requested_path_against_protected_roots(&child, false, "CLI", &[protected], false)
                 .expect_err("blocked");
         assert!(
             err.to_string()

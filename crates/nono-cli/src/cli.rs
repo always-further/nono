@@ -1535,6 +1535,42 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
     pub write_file: Vec<PathBuf>,
 
+    /// Allow connect() to an AF_UNIX socket at this path (implies --read-file)
+    #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on an AF_UNIX socket at this path.
+    /// If the path exists, implies --allow-file on the socket. If it
+    /// does not yet exist (the typical bind(2) case), implies --allow
+    /// on the parent directory so the kernel can create the socket
+    /// file. Prefer --allow-unix-socket-dir-bind for runtime-generated
+    /// filenames.
+    #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_bind: Vec<PathBuf>,
+
+    /// Allow connect() to any AF_UNIX socket directly within this directory.
+    /// Non-recursive on macOS and future Linux AF_UNIX mediation; current
+    /// Linux Landlock filesystem fallback is recursive.
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_dir: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on any AF_UNIX socket directly within this
+    /// directory. Non-recursive on macOS and future Linux AF_UNIX mediation;
+    /// current Linux Landlock filesystem fallback is recursive. Use for
+    /// runtime-generated socket filenames (PID-derived paths, etc.).
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_dir_bind: Vec<PathBuf>,
+
+    /// Allow connect() to any AF_UNIX socket within this directory subtree
+    /// (recursive; implies --read)
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_subtree: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on any AF_UNIX socket within this directory
+    /// subtree (recursive; implies --allow).
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_subtree_bind: Vec<PathBuf>,
+
     /// Override a deny rule for a path. Pair with --allow/--read/--write grant
     ///
     /// Plan 36-01c (upstream f0abd413, v0.47.0, #594): canonical flag name
@@ -1786,6 +1822,9 @@ pub struct SandboxArgs {
         value_name = "FILE",
         conflicts_with_all = &[
             "allow", "read", "write", "allow_file", "read_file", "write_file",
+            "allow_unix_socket", "allow_unix_socket_bind",
+            "allow_unix_socket_dir", "allow_unix_socket_dir_bind",
+            "allow_unix_socket_subtree", "allow_unix_socket_subtree_bind",
             "profile", "bypass_protection", "allow_cwd",
             "block_net", "allow_net", "network_profile", "allow_proxy",
             "allow_bind", "allow_port", "allow_connect_port", "external_proxy", "proxy_port",
@@ -1897,6 +1936,42 @@ pub struct WrapSandboxArgs {
     /// Allow write-only access to a single file
     #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
     pub write_file: Vec<PathBuf>,
+
+    /// Allow connect() to an AF_UNIX socket at this path (implies --read-file)
+    #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on an AF_UNIX socket at this path.
+    /// If the path exists, implies --allow-file on the socket. If it
+    /// does not yet exist (the typical bind(2) case), implies --allow
+    /// on the parent directory so the kernel can create the socket
+    /// file. Prefer --allow-unix-socket-dir-bind for runtime-generated
+    /// filenames.
+    #[arg(long, value_name = "SOCKET", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_bind: Vec<PathBuf>,
+
+    /// Allow connect() to any AF_UNIX socket directly within this directory.
+    /// Non-recursive on macOS and future Linux AF_UNIX mediation; current
+    /// Linux Landlock filesystem fallback is recursive.
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_dir: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on any AF_UNIX socket directly within this
+    /// directory. Non-recursive on macOS and future Linux AF_UNIX mediation;
+    /// current Linux Landlock filesystem fallback is recursive. Use for
+    /// runtime-generated socket filenames (PID-derived paths, etc.).
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_dir_bind: Vec<PathBuf>,
+
+    /// Allow connect() to any AF_UNIX socket within this directory subtree
+    /// (recursive; implies --read)
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_subtree: Vec<PathBuf>,
+
+    /// Allow connect() and bind() on any AF_UNIX socket within this directory
+    /// subtree (recursive; implies --allow).
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub allow_unix_socket_subtree_bind: Vec<PathBuf>,
 
     /// Override a deny rule for a path. Pair with --allow/--read/--write grant
     ///
@@ -2051,6 +2126,9 @@ pub struct WrapSandboxArgs {
         value_name = "FILE",
         conflicts_with_all = &[
             "allow", "read", "write", "allow_file", "read_file", "write_file",
+            "allow_unix_socket", "allow_unix_socket_bind",
+            "allow_unix_socket_dir", "allow_unix_socket_dir_bind",
+            "allow_unix_socket_subtree", "allow_unix_socket_subtree_bind",
             "profile", "bypass_protection", "allow_cwd",
             "block_net", "allow_bind", "allow_port", "allow_connect_port",
             "env_credential", "env_credential_map",
@@ -2078,6 +2156,12 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             allow_file: args.allow_file,
             read_file: args.read_file,
             write_file: args.write_file,
+            allow_unix_socket: args.allow_unix_socket,
+            allow_unix_socket_bind: args.allow_unix_socket_bind,
+            allow_unix_socket_dir: args.allow_unix_socket_dir,
+            allow_unix_socket_dir_bind: args.allow_unix_socket_dir_bind,
+            allow_unix_socket_subtree: args.allow_unix_socket_subtree,
+            allow_unix_socket_subtree_bind: args.allow_unix_socket_subtree_bind,
             bypass_protection: args.bypass_protection,
             allow_cwd: args.allow_cwd,
             workdir: args.workdir,
@@ -2415,6 +2499,10 @@ pub struct WhyArgs {
     #[arg(long, help_heading = "QUERY")]
     pub host: Option<String>,
 
+    /// Landlock scope to check
+    #[arg(long, value_enum, value_name = "SCOPE", help_heading = "QUERY")]
+    pub scope: Option<WhyScope>,
+
     /// Network port (default 443)
     #[arg(long, default_value = "443", help_heading = "QUERY")]
     pub port: u16,
@@ -2537,6 +2625,16 @@ pub enum WhyOp {
     /// Read and write access
     #[value(name = "readwrite")]
     ReadWrite,
+}
+
+/// Landlock scope type for why command
+#[derive(Clone, Debug, ValueEnum)]
+pub enum WhyScope {
+    /// Signal scoping
+    Signal,
+    /// Abstract UNIX socket scoping
+    #[value(name = "abstract-unix-socket")]
+    AbstractUnixSocket,
 }
 
 #[derive(Parser, Debug)]
@@ -4347,6 +4445,40 @@ mod tests {
                 assert!(args.block_net);
             }
             _ => panic!("Expected Why command"),
+        }
+
+        let cli = Cli::parse_from(["nono", "why", "--scope", "abstract-unix-socket"]);
+        match cli.command {
+            Commands::Why(args) => {
+                assert!(matches!(args.scope, Some(WhyScope::AbstractUnixSocket)));
+            }
+            _ => panic!("Expected Why command"),
+        }
+    }
+
+    #[test]
+    fn test_unix_socket_subtree_flags_parse() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow-unix-socket-subtree",
+            "/tmp/nx",
+            "--allow-unix-socket-subtree-bind",
+            "/tmp/nx-bind",
+            "echo",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(
+                    args.sandbox.allow_unix_socket_subtree,
+                    vec![PathBuf::from("/tmp/nx")]
+                );
+                assert_eq!(
+                    args.sandbox.allow_unix_socket_subtree_bind,
+                    vec![PathBuf::from("/tmp/nx-bind")]
+                );
+            }
+            _ => panic!("Expected Run command"),
         }
     }
 

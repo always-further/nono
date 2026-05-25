@@ -368,6 +368,16 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         }
     };
 
+    #[cfg(target_os = "linux")]
+    if flags.af_unix_mediation.is_pathname() && nono::sandbox::is_wsl2() {
+        return Err(NonoError::SandboxInit(
+            "WSL2: linux.af_unix_mediation = \"pathname\" requires seccomp user notification, \
+             but WSL2 reports EBUSY for seccomp notify listeners. Disable AF_UNIX mediation or \
+             run on native Linux."
+                .to_string(),
+        ));
+    }
+
     #[cfg(not(target_os = "windows"))]
     let config = exec_strategy::ExecConfig {
         command: &command,
@@ -396,8 +406,10 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         capability_elevation: flags.capability_elevation,
         #[cfg(target_os = "linux")]
         seccomp_proxy_fallback,
-        allowed_env_vars: flags.allowed_env_vars.clone(),
-        denied_env_vars: flags.denied_env_vars.clone(),
+        #[cfg(target_os = "linux")]
+        af_unix_mediation: flags.af_unix_mediation,
+        allowed_env_vars: flags.allowed_env_vars,
+        denied_env_vars: flags.denied_env_vars,
     };
     #[cfg(target_os = "windows")]
     let config = exec_strategy::ExecConfig {

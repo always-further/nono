@@ -43,7 +43,8 @@ Landlock capabilities have evolved across kernel versions:
 | 5.19+ | v2 | `REFER` - rename/link across directories |
 | 6.2+ | v3 | `TRUNCATE` - file truncation |
 | 6.7+ | v4 | TCP `bind` and `connect` filtering |
-| 6.10+ | v5 | `IOCTL_DEV`, signal/socket scoping |
+| 6.10+ | v5 | `IOCTL_DEV` - device ioctl filtering |
+| 6.12+ | v6 | Signal and abstract UNIX socket scoping |
 
 nono automatically detects the highest available ABI and uses it. On older kernels, some features are unavailable but core filesystem sandboxing still works.
 
@@ -93,6 +94,89 @@ AccessNet::ConnectTcp // Control outbound connections
 
 <Warning>
   Network filtering requires kernel 6.7+. On older kernels, nono cannot enforce network restrictions via Landlock and will warn you.
+</Warning>
+
+## Signal and IPC Scoping
+
+Landlock ABI v6 added scope restrictions for process signals and abstract UNIX sockets:
+
+```rust
+Scope::Signal
+Scope::AbstractUnixSocket
+```
+
+nono derives these scopes from the effective capability set:
+
+| Profile / capability setting | Linux V6 behavior |
+|------------------------------|-------------------|
+| `security.signal_mode: "allow_same_sandbox"` | Requests signal scoping and fails closed if the kernel cannot enforce it |
+| `security.signal_mode: "isolated"` | Requests signal scoping when available |
+| `security.signal_mode: "allow_all"` | Does not request signal scoping |
+| `security.ipc_mode: "shared_memory_only"` | Requests abstract UNIX socket scoping when available |
+| `security.ipc_mode: "full"` | Does not request abstract UNIX socket scoping |
+
+`shared_memory_only` is the default IPC mode. On V6 kernels it prevents connecting to abstract UNIX sockets created outside the current Landlock domain. Profiles that need broader runtime IPC compatibility can opt into `ipc_mode: "full"`.
+
+Use verbose dry-run output to see what would be requested and enforced:
+
+```bash
+nono run --dry-run -v --profile claude-code -- claude
+```
+
+Use `nono why` for a focused scope query:
+
+```bash
+nono why --scope signal --profile claude-code
+nono why --scope abstract-unix-socket --profile claude-code
+```
+
+## Pathname Unix Socket Mediation
+
+Landlock filesystem rules and pathname Unix socket IPC are separate security
+surfaces. On Linux, a process that can reach a filesystem-backed Unix socket
+path may be able to communicate with a user-session service through that
+socket unless nono separately mediates AF_UNIX `connect(2)` and `bind(2)`.
+
+For compatibility, this mediation is off by default on Landlock V4+ kernels.
+Profiles that need stricter IPC isolation can opt in:
+
+```json
+{
+  "linux": {
+    "af_unix_mediation": "pathname"
+  },
+  "filesystem": {
+    "unix_socket": ["$XDG_RUNTIME_DIR/bus"],
+    "unix_socket_dir_bind": ["$TMPDIR/my-tool"]
+  }
+}
+```
+
+When enabled, pathname AF_UNIX sockets are default-deny and must match explicit
+`filesystem.unix_socket*` grants. Broad filesystem read/write grants no longer
+imply permission to talk to every socket under those paths.
+
+Allowed pathname sockets are resumed through Linux seccomp user notification.
+Because seccomp receives the syscall before the kernel copies `sockaddr_un`
+from userspace, a multi-threaded sandboxed process can race an allowed
+`connect(2)` or `bind(2)` by mutating that userspace address before the kernel
+continues the syscall. Denied sockets do not have this race because nono returns
+`EACCES` directly and the kernel never runs the original syscall. Treat this
+mode as a strong default-deny IPC hardening layer; avoid broad socket grants for
+untrusted multi-threaded workloads.
+
+High-risk socket categories include user service managers, session buses,
+keyring and credential agents, SSH/GPG agents, container runtimes, and package
+manager daemons. Hardened profiles should grant only the specific sockets they
+need.
+
+<Warning>
+  If you run with `linux.af_unix_mediation` off in a public-facing,
+  multi-tenant, privacy-sensitive, or otherwise high-risk deployment, run nono
+  inside a stronger outer isolation boundary such as a MicroVM. Firecracker
+  style MicroVMs are a good fit for service deployments where the VM boundary
+  can isolate host user-session services and credentials from the sandboxed
+  agent.
 </Warning>
 
 ## Enforcement Status
@@ -176,6 +260,7 @@ If a command fails with permission errors:
 - Basic sandboxing requires kernel 5.13+
 - Full filesystem control requires kernel 6.2+
 - Network filtering requires kernel 6.7+
+- Signal and abstract UNIX socket scoping requires Landlock ABI v6
 
 ### No Network Filtering on Older Kernels
 
