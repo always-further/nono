@@ -314,11 +314,44 @@ mod tests {
         assert!(store.is_empty());
     }
 
+    // Minimal env-var save/restore helper for tests in this module.
+    // Fork: nono-proxy does not depend on nono-cli's test_env module.
+    // CLAUDE.md: env vars modified in tests must be saved and restored;
+    // tests are run in parallel within the same process.
+    struct TestEnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            // SAFETY: test-only; no threads spawned between set and restore.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prior }
+        }
+    }
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: symmetric restore in Drop; matches the set_var above.
+            #[allow(unsafe_code)]
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_load_non_authorization_header_explicit_bearer_format() {
-        // Test Case B: explicit 'Bearer {}' on custom inject header → honored exactly
-        let _lock = ENV_LOCK.lock().expect("env mutex poisoned");
-        let _guard = EnvVarGuard::set_all(&[("NONO_PROXY_TEST_LITELLM_TOKEN", "sk-litellm-test")]);
+        // Test Case B: explicit 'Bearer {}' on custom inject header → honored exactly.
+        // Fork adaptation: uses inline env guard (no nono-cli test_env dependency);
+        // RouteConfig uses fork struct (no proxy/tls_client_cert/tls_client_key fields).
+        let _guard = TestEnvGuard::set("NONO_PROXY_TEST_LITELLM_TOKEN", "sk-litellm-test");
         let routes = vec![RouteConfig {
             prefix: "litellm".to_string(),
             upstream: "https://litellm".to_string(),
@@ -329,12 +362,9 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
-            proxy: None,
             env_var: None,
             endpoint_rules: vec![],
             tls_ca: None,
-            tls_client_cert: None,
-            tls_client_key: None,
             oauth2: None,
         }];
         // Fork: CredentialStore::load takes only routes (no TLS connector arg)
@@ -346,9 +376,9 @@ mod tests {
 
     #[test]
     fn test_load_non_authorization_header_omitted_format_injects_bare_secret() {
-        // Test Case C: credential_format omitted on non-Authorization header → bare secret
-        let _lock = ENV_LOCK.lock().expect("env mutex poisoned");
-        let _guard = EnvVarGuard::set_all(&[("NONO_PROXY_TEST_API_KEY", "secret-key")]);
+        // Test Case C: credential_format omitted on non-Authorization header → bare secret.
+        // Fork adaptation: uses inline env guard; RouteConfig uses fork struct.
+        let _guard = TestEnvGuard::set("NONO_PROXY_TEST_API_KEY", "secret-key");
         let routes = vec![RouteConfig {
             prefix: "api".to_string(),
             upstream: "https://api.example.com".to_string(),
@@ -359,12 +389,9 @@ mod tests {
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
-            proxy: None,
             env_var: None,
             endpoint_rules: vec![],
             tls_ca: None,
-            tls_client_cert: None,
-            tls_client_key: None,
             oauth2: None,
         }];
         // Fork: CredentialStore::load takes only routes (no TLS connector arg)

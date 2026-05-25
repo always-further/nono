@@ -592,235 +592,14 @@ mod tests {
         handle.shutdown();
     }
 
-    /// End-to-end smoke test: when `intercept_ca_dir` is set AND a route
-    /// requires L7 visibility, the proxy:
-    /// 1. generates an ephemeral CA;
-    /// 2. writes a trust bundle file with at least the ephemeral cert + system roots;
-    /// 3. exposes the path via `intercept_ca_path()`;
-    /// 4. emits trust env vars (`SSL_CERT_FILE` etc.) pointing at it;
-    /// 5. cleans the file on `Drop`.
-    #[tokio::test]
-    async fn test_intercept_lifecycle_end_to_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let ca_path_clone;
-
-        {
-            let config = ProxyConfig {
-                routes: vec![crate::config::RouteConfig {
-                    prefix: "openai".to_string(),
-                    upstream: "https://api.openai.com".to_string(),
-                    credential_key: Some("env://NONO_TEST_TOTALLY_MISSING".to_string()),
-                    inject_mode: Default::default(),
-                    inject_header: "Authorization".to_string(),
-                    credential_format: Some("Bearer {}".to_string()),
-                    path_pattern: None,
-                    path_replacement: None,
-                    query_param_name: None,
-                    proxy: None,
-                    env_var: None,
-                    endpoint_rules: vec![],
-                    tls_ca: None,
-                    tls_client_cert: None,
-                    tls_client_key: None,
-                    oauth2: None,
-                }],
-                intercept_ca_dir: Some(dir.path().to_path_buf()),
-                ..Default::default()
-            };
-            let handle = start(config).await.unwrap();
-            assert!(
-                handle.intercept_ca_path().is_some(),
-                "intercept-eligible route + intercept_ca_dir → bundle path should be Some"
-            );
-            ca_path_clone = handle.intercept_ca_path().unwrap().to_path_buf();
-            assert!(
-                ca_path_clone.exists(),
-                "bundle file should have been written"
-            );
-
-            let contents = std::fs::read_to_string(&ca_path_clone).unwrap();
-            assert!(
-                contents.contains("BEGIN CERTIFICATE"),
-                "bundle should contain at least one PEM block"
-            );
-
-            // Trust env vars should reference the bundle.
-            let vars = handle.env_vars();
-            let ssl = vars
-                .iter()
-                .find(|(k, _)| k == "SSL_CERT_FILE")
-                .expect("SSL_CERT_FILE should be set when intercept active");
-            assert_eq!(std::path::Path::new(&ssl.1), ca_path_clone);
-            assert!(vars.iter().any(|(k, _)| k == "REQUESTS_CA_BUNDLE"));
-            assert!(vars.iter().any(|(k, _)| k == "NODE_EXTRA_CA_CERTS"));
-            assert!(vars.iter().any(|(k, _)| k == "CURL_CA_BUNDLE"));
-
-            handle.shutdown();
-        }
-        // After `handle` is dropped, the bundle file should be gone.
-        assert!(
-            !ca_path_clone.exists(),
-            "bundle should be removed when ProxyHandle drops"
-        );
-    }
-
-    /// When `intercept_ca_dir` is set but no route requires L7 visibility,
-    /// the proxy should NOT generate a CA (it would just be wasted material).
-    #[tokio::test]
-    async fn test_intercept_skipped_for_purely_declarative_routes() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = ProxyConfig {
-            routes: vec![crate::config::RouteConfig {
-                prefix: "alias".to_string(),
-                upstream: "https://aliased.example.com".to_string(),
-                credential_key: None,
-                inject_mode: Default::default(),
-                inject_header: "Authorization".to_string(),
-                credential_format: Some("Bearer {}".to_string()),
-                path_pattern: None,
-                path_replacement: None,
-                query_param_name: None,
-                proxy: None,
-                env_var: None,
-                endpoint_rules: vec![],
-                tls_ca: None,
-                tls_client_cert: None,
-                tls_client_key: None,
-                oauth2: None,
-            }],
-            intercept_ca_dir: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        };
-        let handle = start(config).await.unwrap();
-        assert!(
-            handle.intercept_ca_path().is_none(),
-            "no L7-bearing route → no CA should be generated"
-        );
-        let vars = handle.env_vars();
-        assert!(
-            vars.iter().all(|(k, _)| k != "SSL_CERT_FILE"),
-            "trust env vars must not be set when intercept inactive"
-        );
-        handle.shutdown();
-    }
-
-    /// Intercept setup failures must not abort proxy startup for reverse-proxy
-    /// routes. We degrade to "intercept off" so credential routes still work,
-    /// while CONNECT interception remains unavailable and will keep its
-    /// existing deny behaviour.
-    #[tokio::test]
-    async fn test_intercept_setup_failure_degrades_without_aborting_proxy() {
-        let missing_dir = tempfile::tempdir()
-            .unwrap()
-            .path()
-            .join("missing")
-            .join("intercept");
-        let config = ProxyConfig {
-            routes: vec![crate::config::RouteConfig {
-                prefix: "openai".to_string(),
-                upstream: "https://api.openai.com".to_string(),
-                credential_key: Some("env://NONO_TEST_TOTALLY_MISSING".to_string()),
-                inject_mode: Default::default(),
-                inject_header: "Authorization".to_string(),
-                credential_format: Some("Bearer {}".to_string()),
-                path_pattern: None,
-                path_replacement: None,
-                query_param_name: None,
-                proxy: None,
-                env_var: None,
-                endpoint_rules: vec![],
-                tls_ca: None,
-                tls_client_cert: None,
-                tls_client_key: None,
-                oauth2: None,
-            }],
-            intercept_ca_dir: Some(missing_dir),
-            ..Default::default()
-        };
-        let handle = start(config.clone()).await.unwrap();
-        assert!(
-            handle.intercept_ca_path().is_none(),
-            "intercept setup failure should disable interception instead of aborting startup"
-        );
-        let vars = handle.env_vars();
-        assert!(
-            vars.iter().all(|(k, _)| k != "SSL_CERT_FILE"),
-            "trust env vars must not be set when interception setup fails"
-        );
-        let route_vars = handle.credential_env_vars(&config);
-        assert!(
-            route_vars.iter().any(|(k, _)| k == "OPENAI_BASE_URL"),
-            "reverse-proxy route env vars should still be emitted"
-        );
-        handle.shutdown();
-    }
-
-    /// `route_diagnostics()` returns one row per route summarising
-    /// upstream, credential resolution, intercept on/off, and rule count.
-    #[tokio::test]
-    async fn test_route_diagnostics_summarises_each_route() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = ProxyConfig {
-            routes: vec![
-                crate::config::RouteConfig {
-                    prefix: "openai".to_string(),
-                    upstream: "https://api.openai.com".to_string(),
-                    credential_key: Some("env://NONO_TEST_MISSING".to_string()),
-                    inject_mode: Default::default(),
-                    inject_header: "Authorization".to_string(),
-                    credential_format: Some("Bearer {}".to_string()),
-                    path_pattern: None,
-                    path_replacement: None,
-                    query_param_name: None,
-                    proxy: None,
-                    env_var: None,
-                    endpoint_rules: vec![],
-                    tls_ca: None,
-                    tls_client_cert: None,
-                    tls_client_key: None,
-                    oauth2: None,
-                },
-                crate::config::RouteConfig {
-                    prefix: "alias".to_string(),
-                    upstream: "https://aliased.example.com".to_string(),
-                    credential_key: None,
-                    inject_mode: Default::default(),
-                    inject_header: "Authorization".to_string(),
-                    credential_format: Some("Bearer {}".to_string()),
-                    path_pattern: None,
-                    path_replacement: None,
-                    query_param_name: None,
-                    proxy: None,
-                    env_var: None,
-                    endpoint_rules: vec![],
-                    tls_ca: None,
-                    tls_client_cert: None,
-                    tls_client_key: None,
-                    oauth2: None,
-                },
-            ],
-            intercept_ca_dir: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        };
-        let handle = start(config.clone()).await.unwrap();
-        let rows = handle.route_diagnostics(&config);
-        assert_eq!(rows.len(), 2);
-
-        let openai = rows.iter().find(|(p, _)| p == "openai").unwrap();
-        assert!(openai.1.contains("api.openai.com"));
-        assert!(openai.1.contains("intercept: on"));
-        assert!(
-            openai.1.contains("✗") || openai.1.contains("not found"),
-            "missing credential should show ✗, got: {}",
-            openai.1
-        );
-
-        let alias = rows.iter().find(|(p, _)| p == "alias").unwrap();
-        assert!(alias.1.contains("creds: none"));
-        assert!(alias.1.contains("intercept: off"));
-
-        handle.shutdown();
-    }
+    // Fork divergence: test_intercept_lifecycle_end_to_end,
+    // test_intercept_skipped_for_purely_declarative_routes,
+    // test_intercept_setup_failure_degrades_without_aborting_proxy,
+    // test_route_diagnostics_summarises_each_route omitted.
+    // These tests require ProxyConfig::intercept_ca_dir, ProxyHandle::intercept_ca_path(),
+    // ProxyHandle::route_diagnostics(), and RouteConfig fields
+    // (proxy, tls_client_cert, tls_client_key) not present in this fork.
+    // Deferred to a future plan porting the intercept surface.
 
     #[tokio::test]
     async fn test_proxy_env_vars() {
@@ -1144,6 +923,9 @@ mod tests {
         // never set to the phantom token. Only ANTHROPIC_BASE_URL was injected,
         // leaving the sandbox to send the host's real key directly.
         //
+        // Fork adaptation: removed intercept_ca_path (not in fork's ProxyHandle),
+        // proxy, tls_client_cert, tls_client_key (not in fork's RouteConfig).
+        //
         // Pre-fix state: route in loaded_routes but no env_var / credential_key
         // => ANTHROPIC_API_KEY must NOT appear (demonstrates the bug).
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
@@ -1154,7 +936,6 @@ mod tests {
             shutdown_tx: shutdown_tx.clone(),
             loaded_routes: ["anthropic".to_string()].into_iter().collect(),
             no_proxy_hosts: Vec::new(),
-            intercept_ca_path: None,
         };
         let config_no_env_var = ProxyConfig {
             routes: vec![crate::config::RouteConfig {
@@ -1167,12 +948,9 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
-                proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
                 tls_ca: None,
-                tls_client_cert: None,
-                tls_client_key: None,
                 oauth2: None,
             }],
             ..Default::default()
@@ -1195,7 +973,6 @@ mod tests {
             shutdown_tx: shutdown_tx2,
             loaded_routes: ["anthropic".to_string()].into_iter().collect(),
             no_proxy_hosts: Vec::new(),
-            intercept_ca_path: None,
         };
         let config_fixed = ProxyConfig {
             routes: vec![crate::config::RouteConfig {
@@ -1208,12 +985,9 @@ mod tests {
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
-                proxy: None,
                 env_var: Some("ANTHROPIC_API_KEY".to_string()),
                 endpoint_rules: vec![],
                 tls_ca: None,
-                tls_client_cert: None,
-                tls_client_key: None,
                 oauth2: None,
             }],
             ..Default::default()
