@@ -1047,17 +1047,12 @@ pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> R
             }
             // Check if deny path is a child of an allowed directory
             if deny_path.starts_with(&cap.resolved) && *deny_path != cap.resolved {
-                let conflict = format!(
+                fatal_conflicts.push(format!(
                     "deny '{}' overlaps allowed parent '{}' (source: {})",
                     deny_path.display(),
                     cap.resolved.display(),
                     cap.source,
-                );
-                warn!(
-                    "Landlock cannot enforce {}. This deny has no effect on Linux.",
-                    conflict
-                );
-                fatal_conflicts.push(conflict);
+                ));
             }
         }
     }
@@ -1069,25 +1064,19 @@ pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) -> R
     fatal_conflicts.sort();
     fatal_conflicts.dedup();
 
-    let preview = fatal_conflicts
-        .iter()
-        .take(5)
-        .map(|c| format!("- {}", c))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let remainder = fatal_conflicts.len().saturating_sub(5);
-    let more = if remainder > 0 {
-        format!("\n- ... and {} more conflict(s)", remainder)
+    let count = fatal_conflicts.len();
+    let first = &fatal_conflicts[0];
+    let more = if count > 1 {
+        format!("\n(+ {} more conflict(s))", count - 1)
     } else {
         String::new()
     };
 
     Err(NonoError::SandboxInit(format!(
         "Landlock deny-overlap is not enforceable on Linux. Refusing to start with conflicting policy.\n\
-         Remove the broad allow path, remove the deny path, or restructure permissions.\n\
-         Conflicts:\n{}{}",
-        preview, more
+         {count} deny rule(s) cannot apply under an allowed parent directory.\n\
+         First conflict: {first}{more}\n\
+         Remove the broad allow path, remove the deny path, or restructure permissions.",
     )))
 }
 

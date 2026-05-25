@@ -122,6 +122,10 @@ fn run_allow_cwd_with_profile_deny_under_workdir_fails_closed() {
         "expected validator pre-flight OR runtime Landlock denial in stderr, got:\n{stderr}",
     );
     assert!(
+        !stderr.contains("Landlock cannot enforce deny '"),
+        "expected a single overlap summary warning, got per-deny warnings:\n{stderr}",
+    );
+    assert!(
         !stdout.contains("fake-test-secret"),
         "secret content leaked to stdout despite profile deny:\n{stdout}",
     );
