@@ -213,7 +213,7 @@ pub unsafe fn setup_child_pty(slave_fd: RawFd) {
 
     // Set the slave as the controlling terminal (TIOCSCTTY).
     // The arg 0 means "don't steal if another process has it".
-    if libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+    if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
         child_setup_pty_fatal(b"nono: ioctl(TIOCSCTTY) failed while configuring child PTY\n");
     }
 
@@ -705,7 +705,7 @@ impl PtyProxy {
         unsafe {
             let _ = libc::ioctl(
                 self.master.as_raw_fd(),
-                libc::TIOCSWINSZ as libc::c_ulong,
+                libc::TIOCSWINSZ,
                 winsize as *const Winsize,
             );
         }
