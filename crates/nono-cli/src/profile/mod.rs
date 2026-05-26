@@ -3251,6 +3251,15 @@ mod tests {
 
     #[test]
     fn test_list_profiles() {
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let dir = tempdir().expect("tmpdir");
+        let canonical = dir.path().canonicalize().expect("canonicalize tmpdir");
+        let canonical_str = canonical.to_str().expect("tmpdir is valid UTF-8");
+        let _env = crate::test_env::EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", canonical_str)]);
+
         let profiles = list_profiles();
         assert!(profiles.contains(&"openclaw".to_string()));
         assert!(profiles.contains(&"opencode".to_string()));
