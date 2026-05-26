@@ -62,7 +62,7 @@ When you run `nono run --profile <name>`, nono checks whether any pack in the ac
   update available  always-further/claude  0.0.12 → 0.0.13   run: nono update
 ```
 
-Results are cached for 24 hours so the check never blocks startup. A background thread refreshes stale entries for the next run. The hint respects the same opt-out as the CLI update check: set `NONO_NO_UPDATE_CHECK=1` or `[updates] check = false` in `~/.config/nono/config.toml` to suppress it.
+Results are cached for 24 hours so the check never blocks startup. Stale entries refresh in a detached helper process for the next run. To suppress only pack update hints, set `NONO_NO_PACK_UPDATE_HINTS=1`. The hint also respects the global CLI update-check opt-out: set `NONO_NO_UPDATE_CHECK=1` or `[updates] check = false` in `~/.config/nono/config.toml`.
 
 ## Checking for Updates
 
