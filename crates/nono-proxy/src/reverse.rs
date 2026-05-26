@@ -236,21 +236,63 @@ pub async fn handle_reverse_proxy(
             cred.proxy_query_param_name.as_deref(),
             ctx.session_token,
         ) {
-            let deny_ctx = audit::EventContext {
-                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
-                denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
-                ..managed_ctx.clone().unwrap_or_else(|| route_ctx.clone())
-            };
-            audit::log_denied(
-                ctx.audit_log,
-                audit::ProxyMode::Reverse,
-                &deny_ctx,
-                &service,
-                0,
-                &e.to_string(),
+            let token_was_present = phantom_token_is_present(
+                &cred.proxy_inject_mode,
+                remaining_header,
+                &upstream_path,
+                &cred.proxy_header_name,
+                cred.proxy_path_pattern.as_deref(),
+                cred.proxy_query_param_name.as_deref(),
             );
-            send_error(stream, 401, "Unauthorized").await?;
-            return Ok(());
+
+            if !token_was_present {
+                // Fallback: accept Proxy-Authorization when phantom token is absent.
+                // Some tools cannot send the expected auth header.
+                if let Err(proxy_err) =
+                    token::validate_proxy_auth(remaining_header, ctx.session_token)
+                {
+                    let deny_ctx = audit::EventContext {
+                        auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                        denial_category: Some(
+                            nono::undo::NetworkAuditDenialCategory::AuthenticationFailed,
+                        ),
+                        ..managed_ctx.clone().unwrap_or_else(|| route_ctx.clone())
+                    };
+                    audit::log_denied(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &deny_ctx,
+                        &service,
+                        0,
+                        &format!("{}; proxy-auth: {}", e, proxy_err),
+                    );
+                    send_error(stream, 401, "Unauthorized").await?;
+                    return Ok(());
+                }
+                debug!(
+                    "Phantom token absent; accepted Proxy-Authorization fallback for {}",
+                    service
+                );
+            } else {
+                // Token was present but invalid — reject immediately, no fallback.
+                let deny_ctx = audit::EventContext {
+                    auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::AuthenticationFailed,
+                    ),
+                    ..managed_ctx.clone().unwrap_or_else(|| route_ctx.clone())
+                };
+                audit::log_denied(
+                    ctx.audit_log,
+                    audit::ProxyMode::Reverse,
+                    &deny_ctx,
+                    &service,
+                    0,
+                    &e.to_string(),
+                );
+                send_error(stream, 401, "Unauthorized").await?;
+                return Ok(());
+            }
         }
     } else if let Err(e) = token::validate_proxy_auth(remaining_header, ctx.session_token) {
         let deny_ctx = audit::EventContext {
@@ -453,27 +495,65 @@ async fn handle_oauth2_credential(
     let access_token = oauth2_route.cache.get_or_refresh().await;
 
     // Validate session token from Authorization header (phantom token pattern).
-    // OAuth2 routes still require the agent to authenticate with the session
-    // token — this prevents unauthorized access to the token-exchanged credential.
+    // Falls back to Proxy-Authorization only when the header is absent.
     if let Err(e) = validate_phantom_token(remaining_header, "Authorization", ctx.session_token) {
-        let deny_ctx = audit::EventContext {
-            route_id: Some(service),
-            auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
-            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
-            managed_credential_active: Some(true),
-            injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
-            denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
-        };
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &deny_ctx,
-            service,
-            0,
-            &e.to_string(),
+        let has_auth_header = phantom_token_is_present(
+            &InjectMode::Header,
+            remaining_header,
+            "",
+            "Authorization",
+            None,
+            None,
         );
-        send_error(stream, 401, "Unauthorized").await?;
-        return Ok(());
+
+        if !has_auth_header {
+            if let Err(proxy_err) = token::validate_proxy_auth(remaining_header, ctx.session_token)
+            {
+                let deny_ctx = audit::EventContext {
+                    route_id: Some(service),
+                    auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
+                    auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                    managed_credential_active: Some(true),
+                    injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::AuthenticationFailed,
+                    ),
+                };
+                audit::log_denied(
+                    ctx.audit_log,
+                    audit::ProxyMode::Reverse,
+                    &deny_ctx,
+                    service,
+                    0,
+                    &format!("{}; proxy-auth: {}", e, proxy_err),
+                );
+                send_error(stream, 401, "Unauthorized").await?;
+                return Ok(());
+            }
+            debug!(
+                "OAuth2 phantom token absent; accepted Proxy-Authorization fallback for {}",
+                service
+            );
+        } else {
+            let deny_ctx = audit::EventContext {
+                route_id: Some(service),
+                auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                managed_credential_active: Some(true),
+                injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                service,
+                0,
+                &e.to_string(),
+            );
+            send_error(stream, 401, "Unauthorized").await?;
+            return Ok(());
+        }
     }
 
     let upstream_url = format!(
@@ -903,6 +983,37 @@ async fn send_error(stream: &mut TcpStream, status: u16, reason: &str) -> Result
 // ============================================================================
 // Injection mode helpers
 // ============================================================================
+
+/// Check whether the phantom token mechanism is present (header exists, path
+/// pattern matches, or query param exists) without validating the value.
+fn phantom_token_is_present(
+    mode: &InjectMode,
+    header_bytes: &[u8],
+    path: &str,
+    header_name: &str,
+    path_pattern: Option<&str>,
+    query_param_name: Option<&str>,
+) -> bool {
+    match mode {
+        InjectMode::Header | InjectMode::BasicAuth => {
+            let header_str = std::str::from_utf8(header_bytes).unwrap_or("");
+            let target = format!("{}:", header_name.to_lowercase());
+            header_str
+                .lines()
+                .any(|line| line.to_lowercase().starts_with(&target))
+        }
+        InjectMode::UrlPath => path_pattern
+            .and_then(|p| p.split("{}").next())
+            .is_some_and(|prefix| path.contains(prefix)),
+        InjectMode::QueryParam => query_param_name.is_some_and(|param| {
+            path.find('?')
+                .map(|i| &path[i + 1..])
+                .unwrap_or("")
+                .split('&')
+                .any(|pair| pair.split_once('=').is_some_and(|(name, _)| name == param))
+        }),
+    }
+}
 
 /// Validate phantom token based on injection mode.
 ///
@@ -1901,5 +2012,89 @@ mod tests {
             transform_path_for_mode(&InjectMode::Header, &cleaned, None, None, None, &credential)
                 .unwrap();
         assert_eq!(transformed, "/api/v1/pods?limit=100");
+    }
+
+    #[test]
+    fn test_phantom_token_fallback_proxy_auth_bearer() {
+        let token = Zeroizing::new("secret123".to_string());
+        // No Authorization header, but valid Proxy-Authorization
+        let header =
+            b"Proxy-Authorization: Bearer secret123\r\nContent-Type: application/json\r\n\r\n";
+
+        // Phantom token validation fails (no Authorization header)
+        assert!(validate_phantom_token(header, "Authorization", &token).is_err());
+        // Proxy-Authorization fallback succeeds
+        assert!(token::validate_proxy_auth(header, &token).is_ok());
+    }
+
+    #[test]
+    fn test_phantom_token_fallback_proxy_auth_basic() {
+        let token = Zeroizing::new("secret123".to_string());
+        // base64("nono:secret123") = "bm9ubzpzZWNyZXQxMjM="
+        let header = b"Proxy-Authorization: Basic bm9ubzpzZWNyZXQxMjM=\r\n\r\n";
+
+        // Phantom token validation fails (no Authorization header)
+        assert!(validate_phantom_token(header, "Authorization", &token).is_err());
+        // Proxy-Authorization fallback succeeds (Basic auth)
+        assert!(token::validate_proxy_auth(header, &token).is_ok());
+    }
+
+    #[test]
+    fn test_phantom_token_fallback_both_fail() {
+        let token = Zeroizing::new("secret123".to_string());
+        // Neither Authorization nor valid Proxy-Authorization
+        let header = b"Content-Type: application/json\r\n\r\n";
+
+        assert!(validate_phantom_token(header, "Authorization", &token).is_err());
+        assert!(token::validate_proxy_auth(header, &token).is_err());
+    }
+
+    #[test]
+    fn test_phantom_token_present_no_fallback_needed() {
+        let token = Zeroizing::new("secret123".to_string());
+        // Authorization header present — phantom token succeeds directly
+        let header = b"Authorization: Bearer secret123\r\nContent-Type: application/json\r\n\r\n";
+
+        assert!(validate_phantom_token(header, "Authorization", &token).is_ok());
+    }
+
+    #[test]
+    fn test_phantom_token_invalid_no_fallback() {
+        let token = Zeroizing::new("secret123".to_string());
+        // Authorization header present with WRONG value — must not fallback
+        let header =
+            b"Authorization: Bearer wrong_token\r\nProxy-Authorization: Bearer secret123\r\n\r\n";
+
+        // Phantom token validation fails
+        assert!(validate_phantom_token(header, "Authorization", &token).is_err());
+        // Header IS present — fallback gate blocks
+        assert!(phantom_token_is_present(
+            &InjectMode::Header,
+            header,
+            "",
+            "Authorization",
+            None,
+            None
+        ));
+        // Even though Proxy-Authorization is valid, fallback must not be used
+        assert!(token::validate_proxy_auth(header, &token).is_ok());
+    }
+
+    #[test]
+    fn test_phantom_token_absent_allows_fallback() {
+        let token = Zeroizing::new("secret123".to_string());
+        let header = b"Content-Type: application/json\r\n\r\n";
+
+        // Phantom token validation fails
+        assert!(validate_phantom_token(header, "Authorization", &token).is_err());
+        // Header is NOT present — fallback gate allows
+        assert!(!phantom_token_is_present(
+            &InjectMode::Header,
+            header,
+            "",
+            "Authorization",
+            None,
+            None
+        ));
     }
 }
