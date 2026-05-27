@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Bug Fixes
+
+- *(sandbox)* `--allow-gpu` now correctly supports CUDA initialisation from
+  descendant (grandchild) processes — e.g. `claude → python → cuInit()` —
+  without expanding the Landlock write surface. The NVIDIA driver's
+  `/proc/self/task/<tid>/comm` thread-name write is now gated by the
+  seccomp-notify supervisor with a strict TGID match, rather than a
+  PID-pinned Landlock rule that broke on grandchildren. `nono run --allow-gpu`
+  and `nono shell --allow-gpu` are supported; `nono wrap --allow-gpu` is
+  rejected on NVIDIA with a structured error pointing at `nono run` (Direct
+  mode has no supervisor). Closes #924.
+
 ## [0.58.0] - 2026-05-26
 
 ### Bug Fixes

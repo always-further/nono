@@ -99,6 +99,89 @@ fn read_tgid(tid: u32) -> u32 {
         .unwrap_or(tid)
 }
 
+/// True iff `path` is exactly `/proc/<expected_tgid>/task/<digits>/comm`.
+///
+/// Used by the seccomp-notify handler to identify CUDA thread-name writes
+/// that should be allowed through fd-injection without a Landlock grant.
+/// Match is component-wise (`path-component-compare` invariant) and the
+/// `<pid>` component must equal the caller's TGID as a literal string
+/// comparison.
+///
+/// **Security: the TGID gate lives here.**
+///
+/// `validate_procfs_access` (called later inside `open_path_for_access`)
+/// only inspects the *pre-canonicalised* path — a symlink from outside
+/// `/proc` that resolves to a sensitive procfs location bypasses it.
+/// Concretely: if a sandboxed process creates `/tmp/evil → /proc/1/task/1/comm`,
+/// the openat path argument is `/tmp/evil`, `validate_procfs_access`
+/// sees no `/proc/` prefix and returns Ok, then `canonicalize` inside
+/// `open_path_for_access` resolves the symlink and the supervisor would
+/// inject an fd to init's `comm`. Catastrophic if the matcher's only
+/// check was structural.
+///
+/// Performing the TGID comparison here, against the **canonicalised**
+/// path the matcher receives from the caller, closes that gap: the
+/// canonical PID component must equal the caller's TGID, regardless of
+/// how the original path argument was constructed.
+///
+/// - **TGID ownership** — enforced by this matcher (literal equality
+///   between the path's `<pid>` component and `expected_tgid`).
+/// - **TID ownership** (the `<tid>` belongs to the caller's TGID) —
+///   enforced by the kernel itself when the file is opened.
+///   `/proc/<pid>/task/<tid>` only exists when `<tid>` is one of
+///   `<pid>`'s threads; opens of any other `<tid>` return ENOENT.
+///
+/// Crafted strings like `/proc/123/task/456/comm/../etc` are rejected
+/// by the component-wise iteration. Trailing slash on the final `comm`
+/// component is rejected by `iter.next().is_none()` because `comm` is a
+/// regular file.
+///
+/// See issue #924 for the design rationale: granting `/proc/self/task` as
+/// a Landlock RW rule was structurally unsafe (either PID-pinned and
+/// broken for grandchildren, or widened to `/proc` and expanding write
+/// surface). This pattern check lets us be precise instead.
+#[cfg(target_os = "linux")]
+fn is_proc_task_comm_path(path: &std::path::Path, expected_tgid: u32) -> bool {
+    use std::ffi::OsStr;
+    use std::path::Component;
+
+    let is_numeric_normal = |c: &Component<'_>| -> bool {
+        matches!(c, Component::Normal(s)
+            if s.to_str()
+                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())))
+    };
+
+    let expected_pid_str = expected_tgid.to_string();
+    let mut iter = path.components();
+    if iter.next() != Some(Component::RootDir) {
+        return false;
+    }
+    if iter.next() != Some(Component::Normal(OsStr::new("proc"))) {
+        return false;
+    }
+    // /proc/<expected_tgid> — literal equality, not just "any digits".
+    // This is the security gate (see fn doc); a symlink-bypass attempt
+    // that resolves to /proc/<other-tgid>/... is rejected here even
+    // though the structure matches.
+    match iter.next() {
+        Some(Component::Normal(s)) if s == OsStr::new(&expected_pid_str) => {}
+        _ => return false,
+    }
+    if iter.next() != Some(Component::Normal(OsStr::new("task"))) {
+        return false;
+    }
+    // /proc/<expected_tgid>/task/<digits>. Any TID — the kernel rejects
+    // opens for TIDs that don't belong to this TGID with ENOENT.
+    match iter.next() {
+        Some(c) if is_numeric_normal(&c) => {}
+        _ => return false,
+    }
+    if iter.next() != Some(Component::Normal(OsStr::new("comm"))) {
+        return false;
+    }
+    iter.next().is_none()
+}
+
 /// Handle a seccomp notification on Linux.
 ///
 /// Flow:
@@ -283,6 +366,96 @@ pub(super) fn handle_seccomp_notification(
             },
         );
         let _ = deny_notif(notify_fd, notif.id);
+        return Ok(());
+    }
+
+    // 4.5. Pattern fast-path: caller-owned `/proc/<tgid>/task/<tid>/comm`
+    // writes. The NVIDIA driver writes here during `cuInit()` to set thread
+    // names (see issue #924). We do NOT install a Landlock rule covering
+    // /proc/self/task — see `grant_nvidia_gpu_procfs` for why that is
+    // structurally unsafe. Instead, when the resolved path matches the comm
+    // pattern and the caller is requesting write access, the supervisor
+    // opens the file in its own (unsandboxed) context and injects the fd.
+    //
+    // Gated on `config.allow_proc_task_comm_write` so the fast-path is
+    // ONLY available to sessions that explicitly opted into NVIDIA
+    // `--allow-gpu`. A user passing `--capability-elevation` without
+    // `--allow-gpu` (or `--allow-gpu` on non-NVIDIA hardware) does not
+    // receive the comm-write allow — it isn't policy they asked for.
+    //
+    // Security:
+    //   - `is_proc_task_comm_path` verifies that the path's `<pid>`
+    //     equals `notifying_tgid` directly, on the **canonicalised** path
+    //     the matcher receives. This is critical: `validate_procfs_access`
+    //     inside `open_path_for_access` inspects only the path it
+    //     receives, so a symlink from outside `/proc` that resolves to a
+    //     sensitive procfs location (e.g. `/tmp/evil → /proc/1/task/1/comm`)
+    //     would bypass that check if we passed it the pre-canonical
+    //     `path`. The TGID gate has to live here, on the canonical form,
+    //     or the matcher itself is the vulnerability.
+    //   - We pass `&canonicalized` (NOT the pre-canonical `path`) into
+    //     `open_path_for_access`. This pins the file that ultimately
+    //     gets opened to exactly the path the matcher validated. Passing
+    //     `&path` here would re-introduce a TOCTOU: a multithreaded
+    //     child could `unlinkat`/`symlinkat`-swap a non-`/proc` symlink
+    //     between the matcher's canonicalize (line 234) and the open's
+    //     internal canonicalize (`open_path_for_access` →
+    //     `std::fs::canonicalize` in `exec_strategy.rs`), causing a
+    //     different file to be opened than the one the matcher
+    //     approved. `resolve_procfs_path_for_child` is a no-op on the
+    //     canonical `/proc/<digits>/…` form (no `self`/`thread-self`
+    //     component to rewrite) and the internal canonicalize is
+    //     idempotent on `/proc/<pid>/task/<tid>/comm` (a regular file,
+    //     no further symlinks), so this is safe and behaviour-preserving
+    //     for the legitimate case.
+    //   - `<tid>` ownership is enforced by the kernel: the openat returns
+    //     ENOENT for any `<tid>` not belonging to the TGID.
+    //   - Only WRITE access takes this branch; reads fall through to the
+    //     existing `/proc/self` Read grant in the initial capability set.
+    if config.allow_proc_task_comm_write
+        && access.contains(AccessMode::Write)
+        && is_proc_task_comm_path(&canonicalized, notifying_tgid)
+    {
+        match open_path_for_access(
+            &canonicalized,
+            &access,
+            config.protected_roots,
+            None,
+            Some(procfs_context),
+        ) {
+            Ok(file) => {
+                if notif_id_valid(notify_fd, notif.id)?
+                    && let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd())
+                {
+                    debug!(
+                        "inject_fd failed for task/<tid>/comm write {}: {}",
+                        path.display(),
+                        e
+                    );
+                    let _ = deny_notif(notify_fd, notif.id);
+                }
+            }
+            Err(e) => {
+                debug!(
+                    "Failed to open task/<tid>/comm path {}: {}",
+                    path.display(),
+                    e
+                );
+                if e.is_policy_blocked() {
+                    record_denial(
+                        denials,
+                        DenialRecord {
+                            path: canonicalized.clone(),
+                            access,
+                            reason: DenialReason::PolicyBlocked,
+                        },
+                    );
+                    let _ = deny_notif(notify_fd, notif.id);
+                } else {
+                    let _ = respond_notif_errno(notify_fd, notif.id, e.errno());
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -1132,7 +1305,152 @@ fn match_initial_capability<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    // ─────────────────────────────────────────────────────────────
+    // Pattern matcher for the /proc/<pid>/task/<tid>/comm fast-path
+    // (issue #924). The check is component-wise: the security work
+    // (caller TGID == path PID, TID ownership) is done by
+    // validate_procfs_access + the kernel respectively. The unit
+    // tests below pin the matcher's behaviour so a future refactor
+    // doesn't silently widen the surface.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_proc_task_comm_path_matches_canonical_form() {
+        assert!(is_proc_task_comm_path(
+            Path::new("/proc/123/task/456/comm"),
+            123
+        ));
+        // Single-digit PIDs and TIDs (init's main thread).
+        assert!(is_proc_task_comm_path(Path::new("/proc/1/task/1/comm"), 1));
+    }
+
+    /// Issue #924, the Gemini security review: the matcher must verify
+    /// that the path's `<pid>` component equals the caller's TGID. The
+    /// security argument relies on this check happening on the
+    /// canonicalised path — if a sandboxed process creates
+    /// `/tmp/evil → /proc/1/task/1/comm` then `validate_procfs_access`
+    /// (which inspects the pre-canonical path) doesn't see `/proc/`
+    /// and returns Ok; only this matcher prevents the supervisor
+    /// from opening init's `comm`. A naive "any digits" PID check
+    /// would let the canonicalised `/proc/1/task/1/comm` through.
+    #[test]
+    fn is_proc_task_comm_path_rejects_pid_mismatch_symlink_bypass() {
+        // Caller TGID is 4242. A canonicalised path pointing at init
+        // (pid 1) must be rejected even though the structure matches.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/1/task/1/comm"),
+            4242,
+        ));
+        // Off-by-one: caller is 4242, path is 4243.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/4243/task/4243/comm"),
+            4242,
+        ));
+        // Numeric prefix is not enough: 42 must not match 4242.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/42/task/1/comm"),
+            4242,
+        ));
+    }
+
+    #[test]
+    fn is_proc_task_comm_path_rejects_non_numeric_components() {
+        // The path must start `/proc/<expected_tgid>/task/<digits>/comm`.
+        // `self` is not the expected_tgid string — must be resolved before
+        // matching. Expected TGID is 123 throughout this test.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/self/task/123/comm"),
+            123,
+        ));
+        // Non-numeric pid component.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/abc/task/123/comm"),
+            123,
+        ));
+        // Non-numeric tid component.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/123/task/abc/comm"),
+            123,
+        ));
+        // Mixed alphanumeric is rejected (could otherwise admit `123a`).
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/123a/task/456/comm"),
+            123,
+        ));
+    }
+
+    #[test]
+    fn is_proc_task_comm_path_rejects_wrong_structure() {
+        // Wrong terminal filename — `cmdline`, `status`, etc. must not match.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/123/task/456/cmdline"),
+            123,
+        ));
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/123/task/456/status"),
+            123,
+        ));
+        // Wrong subdirectory — `/proc/<pid>/comm` is the process-level comm,
+        // not a task comm; supervisor must not bypass via this branch.
+        assert!(!is_proc_task_comm_path(Path::new("/proc/123/comm"), 123));
+        // Missing `task` segment.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/123/456/comm"),
+            123,
+        ));
+        // Path doesn't start with /proc.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/usr/proc/123/task/456/comm"),
+            123,
+        ));
+        // Relative path.
+        assert!(!is_proc_task_comm_path(
+            Path::new("proc/123/task/456/comm"),
+            123,
+        ));
+        // Empty path.
+        assert!(!is_proc_task_comm_path(Path::new(""), 123));
+        // Bare /proc.
+        assert!(!is_proc_task_comm_path(Path::new("/proc"), 123));
+    }
+
+    #[test]
+    fn is_proc_task_comm_path_rejects_extra_trailing_segments() {
+        // Crafted paths that try to slip extra components past the matcher
+        // must fail. The strict `iter.next().is_none()` check is the gate.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/123/task/456/comm/anything"),
+            123,
+        ));
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/123/task/456/comm/../etc/passwd"),
+            123,
+        ));
+    }
+
+    #[test]
+    fn is_proc_task_comm_path_rejects_double_slash_paths() {
+        // `Path::components()` collapses consecutive separators, so
+        // `/proc//task/123/comm` is iterated as `[proc, task, 123, comm]`.
+        // The matcher rejects at the pid-component comparison ("task"
+        // doesn't equal the expected_tgid string "123"). Likewise
+        // `/proc/123/task//comm` is iterated as `[proc, 123, task, comm]`
+        // and rejects at the tid-component check (`is_numeric_normal`
+        // returns false for "comm"). This test pins both behaviours so a
+        // future change that, say, started accepting empty components or
+        // skipped them differently couldn't slip a malformed path
+        // through.
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc//task/123/comm"),
+            123,
+        ));
+        assert!(!is_proc_task_comm_path(
+            Path::new("/proc/123/task//comm"),
+            123,
+        ));
+    }
 
     #[test]
     fn test_rate_limiter_allows_burst() {
@@ -1361,6 +1679,7 @@ mod tests {
                 network_audit_events: None,
                 redaction_policy: &REDACTION_POLICY,
                 allow_launch_services_active: false,
+                allow_proc_task_comm_write: false,
                 proxy_port,
                 proxy_bind_ports,
                 unix_socket_allowlist,

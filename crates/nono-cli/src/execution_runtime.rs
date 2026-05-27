@@ -364,6 +364,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 recommended_profile: known_builtin_profile,
             }),
         capability_elevation: flags.capability_elevation,
+        auto_capability_elevation: flags.auto_capability_elevation,
+        allow_proc_task_comm_write: flags.allow_proc_task_comm_write,
         #[cfg(target_os = "linux")]
         seccomp_proxy_fallback,
         #[cfg(target_os = "linux")]

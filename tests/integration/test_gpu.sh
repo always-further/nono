@@ -254,6 +254,86 @@ with open(f'/proc/self/task/{tid}/comm', 'wb') as f:
 print('OK: wrote thread comm under --allow-gpu')
 "
 
+    # Issue #924 regression — grandchild process (different TGID from the
+    # direct child) must also be able to write /proc/self/task/<tid>/comm.
+    # The previous Landlock-based --allow-gpu grant pinned to the direct
+    # child's PID inode and broke this path; the new supervisor-gated
+    # implementation handles arbitrary descendant TGIDs.
+    #
+    # The python3 command is backgrounded with `&` and then `wait`-ed,
+    # which forces the shell to fork before exec'ing python — without
+    # the `&`, /bin/sh would tail-call-exec python directly and the
+    # writer would be the direct child rather than a grandchild,
+    # silently degrading the test.
+    expect_success "grandchild /proc/self/task/<tid>/comm write allowed with --allow-gpu (#924)" \
+        "$NONO_BIN" run --silent --allow-cwd --allow "$TMPDIR" --allow-gpu -- \
+        sh -c 'python3 -c "
+import os, sys
+direct_child = os.getppid()
+pid = os.getpid()
+if pid == direct_child:
+    print(f\"FAIL: writer pid ({pid}) equals direct child; not a grandchild\", file=sys.stderr)
+    sys.exit(2)
+tid = os.gettid() if hasattr(os, \"gettid\") else pid
+with open(f\"/proc/self/task/{tid}/comm\", \"wb\") as f:
+    f.write(b\"probe\\n\")
+print(f\"OK grandchild pid={pid} direct_child={direct_child} wrote comm\")
+" & wait $!'
+
+    # Cross-process write attempt — supervisor must reject writes that
+    # target a /proc/<other-pid>/task/<tid>/comm path where <other-pid>
+    # is not the caller's TGID, even with --allow-gpu.
+    expect_failure "cross-process /proc/<other>/task/<tid>/comm write denied with --allow-gpu (#924)" \
+        "$NONO_BIN" run --silent --allow-cwd --allow "$TMPDIR" --allow-gpu -- \
+        python3 -c "
+import os, sys
+# pid 1 is init; we are not init, and init's tid 1 is not our thread.
+try:
+    with open('/proc/1/task/1/comm', 'wb') as f:
+        f.write(b'evil\n')
+    print('FAIL: wrote to init thread comm', file=sys.stderr)
+    sys.exit(0)  # success means the sandbox failed
+except (PermissionError, FileNotFoundError, OSError):
+    sys.exit(1)  # expected: supervisor or kernel denied
+"
+
+    # Symlink-bypass regression (Gemini security review): a sandboxed
+    # process must not be able to slip past the supervisor's TGID gate by
+    # creating a symlink from outside /proc that resolves to another
+    # process's task/<tid>/comm. validate_procfs_access only inspects the
+    # pre-canonicalized path, so the matcher itself is the security gate.
+    expect_failure "symlink to /proc/1/task/1/comm denied with --allow-gpu (#924 Gemini review)" \
+        "$NONO_BIN" run --silent --allow-cwd --allow "$TMPDIR" --allow-gpu -- \
+        sh -c "ln -sf /proc/1/task/1/comm $TMPDIR/evil && python3 -c \"
+with open('$TMPDIR/evil', 'wb') as f: f.write(b'pwn')
+import sys; sys.exit(0)
+\""
+
+    # `nono wrap --allow-gpu` on NVIDIA must be rejected with a
+    # structured error pointing users to `nono run`. Direct execution
+    # has no seccomp-notify supervisor and therefore no way to gate the
+    # comm-write pattern; this test catches regressions where someone
+    # "fixes" the rejection by silently re-adding the Landlock
+    # /proc/self/task grant for the Direct-mode path.
+    expect_failure "nono wrap --allow-gpu rejected on NVIDIA (#924)" \
+        "$NONO_BIN" wrap --silent --allow-cwd --allow-gpu -- \
+        python3 -c "print('should not reach')"
+
+    # The error message must explicitly point at `nono run` so users
+    # know what to do — a generic "permission denied" would leave the
+    # underlying #924 reasoning invisible.
+    TESTS_RUN=$((TESTS_RUN + 1))
+    wrap_stderr=$("$NONO_BIN" wrap --silent --allow-cwd --allow-gpu -- \
+        python3 -c "print('should not reach')" 2>&1 || true)
+    if echo "$wrap_stderr" | grep -q "nono wrap --allow-gpu cannot support NVIDIA CUDA"; then
+        echo -e "  ${GREEN}PASS${NC}: nono wrap --allow-gpu error message names the rejection cause (#924)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "  ${RED}FAIL${NC}: nono wrap --allow-gpu rejection message regressed; expected explicit NVIDIA CUDA mention"
+        echo "       Actual stderr: ${wrap_stderr:0:600}"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
     # /proc/driver/nvidia — CUDA UVM init read. Only test if the driver is
     # loaded (the grant itself skips the path when it doesn't exist).
     if [[ -d /proc/driver/nvidia ]]; then

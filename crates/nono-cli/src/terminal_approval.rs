@@ -2,10 +2,47 @@
 //!
 //! Prompts the user at the terminal when the sandboxed child requests
 //! additional filesystem access. This is the default approval backend
-//! for `nono run`.
+//! for `nono run` with explicit `--capability-elevation`.
+//!
+//! Also provides `SilentDenyApproval` for the case where the supervisor
+//! has been installed automatically (e.g. by `--allow-gpu` to gate the
+//! NVIDIA `task/<tid>/comm` write) but the user did not opt into
+//! interactive prompts. In that case the supervisor still runs its
+//! pattern fast-paths but any path that falls through to the approval
+//! backend is denied without prompting.
 
 use nono::{AccessMode, ApprovalBackend, ApprovalDecision, CapabilityRequest, NonoError, Result};
 use std::io::{BufRead, IsTerminal, Write};
+
+/// Non-interactive deny-all backend.
+///
+/// Used when `capability_elevation` was enabled implicitly (e.g. by
+/// `--allow-gpu` on Linux, which needs the seccomp-notify supervisor
+/// running so the NVIDIA driver's `/proc/self/task/<tid>/comm` write can
+/// be allowed by pattern — see `is_proc_task_comm_path`). The supervisor
+/// still handles its fast-paths (protected roots, initial-set match,
+/// pattern matchers); only the final approval step — which would
+/// otherwise prompt the user — is short-circuited to a denial.
+///
+/// Behaviour matches "no terminal available" branch of `TerminalApproval`:
+/// any path reaching this point is denied with a structured reason so
+/// the diagnostic footer can explain what happened.
+pub struct SilentDenyApproval;
+
+impl ApprovalBackend for SilentDenyApproval {
+    fn request_capability(&self, _request: &CapabilityRequest) -> Result<ApprovalDecision> {
+        Ok(ApprovalDecision::Denied {
+            reason: "capability elevation auto-enabled (e.g. by --allow-gpu); \
+                     interactive approval disabled — pass --capability-elevation \
+                     to enable prompts"
+                .to_string(),
+        })
+    }
+
+    fn backend_name(&self) -> &str {
+        "silent-deny"
+    }
+}
 
 /// Interactive terminal approval backend.
 ///

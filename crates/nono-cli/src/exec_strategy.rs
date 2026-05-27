@@ -226,6 +226,23 @@ pub struct ExecConfig<'a> {
     /// capabilities at runtime. On macOS this is currently unused.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub capability_elevation: bool,
+    /// True iff `capability_elevation` was auto-enabled by nono (e.g. by
+    /// `--allow-gpu` to gate the NVIDIA `/proc/self/task/<tid>/comm` write
+    /// pattern, see issue #924). When true, callers should select a
+    /// non-interactive approval backend so the supervisor's pattern
+    /// fast-paths run but unexpected paths fail closed instead of
+    /// prompting the user.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub auto_capability_elevation: bool,
+    /// True iff this session is permitted to use the supervisor's
+    /// `/proc/<own-tgid>/task/<tid>/comm` write fast-path (issue #924).
+    /// Set only when the NVIDIA procfs grants applied. A user passing
+    /// `--capability-elevation` without `--allow-gpu` does NOT receive
+    /// the comm-write fast-path — it is gated to the user's explicit
+    /// `--allow-gpu` intent so unrelated cap-elev sessions don't
+    /// silently get a write surface they didn't ask for.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub allow_proc_task_comm_write: bool,
     /// Whether the seccomp proxy-only network fallback is needed.
     /// Set by the parent before fork when Landlock ABI lacks AccessNet
     /// and ProxyOnly network mode is requested. Both child and parent
@@ -288,6 +305,13 @@ pub struct SupervisorConfig<'a> {
     /// Whether direct LaunchServices opening is enabled for this session.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub allow_launch_services_active: bool,
+    /// True iff the supervisor may allow the
+    /// `/proc/<own-tgid>/task/<tid>/comm` write pattern (#924). Set only
+    /// when NVIDIA procfs grants applied — the pattern fast-path stays
+    /// off for any session that did not opt into `--allow-gpu` with
+    /// NVIDIA, even if `capability_elevation` is otherwise true.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub allow_proc_task_comm_write: bool,
     /// Proxy port allowed for seccomp proxy-only fallback (0 = not active).
     #[cfg(target_os = "linux")]
     pub proxy_port: u16,
@@ -3950,6 +3974,7 @@ mod tests {
             network_audit_events: None,
             redaction_policy: &nono::ScrubPolicy::secure_default(),
             allow_launch_services_active: false,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             proxy_port: 0,
             #[cfg(target_os = "linux")]
@@ -4068,6 +4093,7 @@ mod tests {
             network_audit_events: None,
             redaction_policy: &nono::ScrubPolicy::secure_default(),
             allow_launch_services_active: false,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             proxy_port: 8080,
             #[cfg(target_os = "linux")]
@@ -4152,6 +4178,7 @@ mod tests {
             network_audit_events: None,
             redaction_policy: &nono::ScrubPolicy::secure_default(),
             allow_launch_services_active: false,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             proxy_port: 0,
             #[cfg(target_os = "linux")]
@@ -4193,6 +4220,7 @@ mod tests {
             network_audit_events: None,
             redaction_policy: &nono::ScrubPolicy::secure_default(),
             allow_launch_services_active: false,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             proxy_port: 0,
             #[cfg(target_os = "linux")]
@@ -4232,6 +4260,7 @@ mod tests {
             network_audit_events: None,
             redaction_policy: &nono::ScrubPolicy::secure_default(),
             allow_launch_services_active: false,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             proxy_port: 0,
             #[cfg(target_os = "linux")]
@@ -4253,6 +4282,7 @@ mod tests {
             network_audit_events: None,
             redaction_policy: &nono::ScrubPolicy::secure_default(),
             allow_launch_services_active: false,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             proxy_port: 0,
             #[cfg(target_os = "linux")]
@@ -4297,6 +4327,7 @@ mod tests {
             network_audit_events: None,
             redaction_policy: &nono::ScrubPolicy::secure_default(),
             allow_launch_services_active: false,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             proxy_port: 0,
             #[cfg(target_os = "linux")]
@@ -4446,6 +4477,7 @@ mod tests {
             network_audit_events: None,
             redaction_policy: &nono::ScrubPolicy::secure_default(),
             allow_launch_services_active: true,
+            allow_proc_task_comm_write: false,
             #[cfg(target_os = "linux")]
             proxy_port: 0,
             #[cfg(target_os = "linux")]
