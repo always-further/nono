@@ -2347,6 +2347,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tower-service",
  "tracing",
  "url",
  "urlencoding",

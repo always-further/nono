@@ -146,6 +146,8 @@ pub(crate) struct ProxyLaunchOptions {
     pub(crate) session_id: String,
     /// Supervisor-side CLI command credential-capture entries.
     pub(crate) credential_capture: HashMap<String, profile::CredentialCaptureEntry>,
+    /// Enable HTTP/2 negotiation for upstream connections.
+    pub(crate) enable_h2: bool,
 }
 
 impl ProxyLaunchOptions {

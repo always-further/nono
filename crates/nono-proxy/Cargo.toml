@@ -42,6 +42,7 @@ hyper-rustls = { version = "0.27", features = ["http1", "http2", "ring", "webpki
 h2 = "0.4"
 bytes = "1"
 http = "1"
+tower-service = "0.3"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "1"

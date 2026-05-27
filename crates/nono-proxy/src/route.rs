@@ -47,6 +47,11 @@ pub struct LoadedRoute {
     /// When `None`, the shared default connector (webpki roots only) is used.
     pub tls_connector: Option<tokio_rustls::TlsConnector>,
 
+    /// Per-route TLS client config (same config backing `tls_connector`).
+    /// Stored separately so the upstream pool can build per-route pooled
+    /// clients without needing to extract the config from the connector.
+    pub tls_client_config: Option<std::sync::Arc<rustls::ClientConfig>>,
+
     /// `true` if this route requires L7 visibility — i.e. it declares
     /// `credential_key`, `oauth2`, or non-empty `endpoint_rules` and would
     /// not function as a transparent CONNECT tunnel. Computed once at load
@@ -175,7 +180,7 @@ impl RouteStore {
             )
             .map_err(|e| ProxyError::Config(format!("route '{}': {}", normalized_prefix, e)))?;
 
-            let tls_connector = if route.tls_ca.is_some()
+            let (tls_connector, tls_client_config) = if route.tls_ca.is_some()
                 || route.tls_client_cert.is_some()
                 || route.tls_client_key.is_some()
             {
@@ -185,14 +190,15 @@ impl RouteStore {
                     route.tls_ca.is_some(),
                     route.tls_client_cert.is_some(),
                 );
-                Some(build_tls_connector(
+                let (connector, config) = build_tls_connector(
                     &base_root_store,
                     route.tls_ca.as_deref(),
                     route.tls_client_cert.as_deref(),
                     route.tls_client_key.as_deref(),
-                )?)
+                )?;
+                (Some(connector), Some(config))
             } else {
-                None
+                (None, None)
             };
 
             let upstream_host_port = extract_host_port(&route.upstream);
@@ -219,6 +225,7 @@ impl RouteStore {
                     endpoint_rules,
                     endpoint_policy,
                     tls_connector,
+                    tls_client_config,
                     requires_intercept,
                     requires_managed_credential,
                     managed_auth_mechanism,
@@ -505,12 +512,14 @@ fn build_base_root_store() -> rustls::RootCertStore {
 
 /// Build a per-route `TlsConnector`, optionally adding a custom CA
 /// and/or mTLS client certificate on top of `base_root_store`.
+/// Returns both the connector and the underlying `Arc<ClientConfig>` so the
+/// upstream pool can build per-route pooled clients.
 fn build_tls_connector(
     base_root_store: &rustls::RootCertStore,
     ca_path: Option<&str>,
     client_cert_path: Option<&str>,
     client_key_path: Option<&str>,
-) -> Result<tokio_rustls::TlsConnector> {
+) -> Result<(tokio_rustls::TlsConnector, Arc<rustls::ClientConfig>)> {
     let mut root_store = base_root_store.clone();
 
     // Add custom CA if provided
@@ -630,14 +639,17 @@ fn build_tls_connector(
         tls_config.resumption = rustls::client::Resumption::disabled();
     }
 
-    Ok(tokio_rustls::TlsConnector::from(Arc::new(tls_config)))
+    let config_arc = Arc::new(tls_config);
+    let connector = tokio_rustls::TlsConnector::from(Arc::clone(&config_arc));
+    Ok((connector, config_arc))
 }
 
 /// Compatibility shim: build a connector with only a custom CA (no client cert).
 #[cfg(test)]
 fn build_tls_connector_with_ca(ca_path: &str) -> Result<tokio_rustls::TlsConnector> {
     let base = build_base_root_store();
-    build_tls_connector(&base, Some(ca_path), None, None)
+    let (connector, _config) = build_tls_connector(&base, Some(ca_path), None, None)?;
+    Ok(connector)
 }
 
 #[cfg(test)]
@@ -853,6 +865,7 @@ mod tests {
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
             endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
+            tls_client_config: None,
             requires_intercept: false,
             requires_managed_credential: false,
             managed_auth_mechanism: None,
@@ -976,6 +989,7 @@ mod tests {
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
             endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
+            tls_client_config: None,
             requires_intercept: true,
             requires_managed_credential: true,
             managed_auth_mechanism: Some(NetworkAuditAuthMechanism::PhantomHeader),
@@ -992,6 +1006,7 @@ mod tests {
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
             endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
+            tls_client_config: None,
             requires_intercept: true,
             requires_managed_credential: false,
             managed_auth_mechanism: None,

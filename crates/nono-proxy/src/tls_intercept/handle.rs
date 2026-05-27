@@ -89,6 +89,7 @@ pub struct InterceptCtx<'a> {
     /// Optional nonce resolver for substituting tool-sandbox broker nonces
     /// (`nono_<hex>`) found in request header values before forwarding upstream.
     pub nonce_resolver: Option<Arc<dyn crate::token::NonceResolver>>,
+    pub enable_h2: bool,
 }
 
 /// Handle a CONNECT request that matched a route requiring L7 visibility.
@@ -107,7 +108,7 @@ pub async fn handle_intercept_connect(stream: &mut TcpStream, ctx: InterceptCtx<
     stream.write_all(response).await?;
     stream.flush().await?;
 
-    let server_config = acceptor::build_server_config(Arc::clone(&ctx.cert_cache))?;
+    let server_config = acceptor::build_server_config(Arc::clone(&ctx.cert_cache), ctx.enable_h2)?;
     let tls_acceptor = TlsAcceptor::from(server_config);
 
     let mut tls_stream = match tls_acceptor.accept(&mut *stream).await {

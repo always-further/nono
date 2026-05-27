@@ -20,7 +20,7 @@ use crate::config::{EndpointPolicyOutcome, InjectMode};
 use crate::credential::{CmdCredentialRoute, CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
-use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
+use crate::forward::UpstreamScheme;
 use crate::route::RouteStore;
 use crate::token;
 use std::net::SocketAddr;
@@ -95,6 +95,10 @@ pub struct ReverseProxyCtx<'a> {
     pub filter: &'a ProxyFilter,
     /// Shared TLS connector
     pub tls_connector: &'a TlsConnector,
+    /// Default TLS client config (for routes without custom CA)
+    pub default_tls_config: &'a std::sync::Arc<rustls::ClientConfig>,
+    /// Upstream connection pool (HTTP/1.1 keep-alive + HTTP/2 multiplexing)
+    pub upstream_pool: &'a crate::pool::UpstreamPool,
     /// Shared network audit sink for session metadata capture
     pub audit_log: Option<&'a audit::SharedAuditLog>,
     /// Optional approval backend registry for endpoint-policy approve decisions.
@@ -462,13 +466,23 @@ pub async fn handle_reverse_proxy(
     };
 
     let upstream_authority = format_host_header(upstream_scheme, &upstream_host, upstream_port);
-    let mut request = Zeroizing::new(format!(
-        "{} {} {}\r\nHost: {}\r\n",
-        method, upstream_path_full, version, upstream_authority
-    ));
+    let scheme_str = match upstream_scheme {
+        UpstreamScheme::Https => "https",
+        UpstreamScheme::Http => "http",
+    };
+    let uri = format!(
+        "{}://{}{}",
+        scheme_str, upstream_authority, upstream_path_full
+    );
 
+    let mut req_builder = http::Request::builder()
+        .method(method.as_str())
+        .uri(&uri)
+        .header("Host", &upstream_authority);
+
+    // Inject credential header
     if let Some(cred) = cred {
-        inject_credential_for_mode(cred, &mut request);
+        req_builder = inject_credential_structured(cred, req_builder);
     }
 
     let injected_header_names = injected_credential_header_names(cred);
@@ -479,50 +493,51 @@ pub async fn handle_reverse_proxy(
         {
             continue;
         }
-        request.push_str(&format!("{}: {}\r\n", name, value));
+        req_builder = req_builder.header(name.as_str(), value.as_str());
     }
 
-    request.push_str("Connection: close\r\n");
-    if !body.is_empty() {
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    request.push_str("\r\n");
+    let req = req_builder
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| ProxyError::HttpParse(format!("request build error: {}", e)))?;
 
-    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
-    let upstream_spec = UpstreamSpec {
-        scheme: upstream_scheme,
-        host: &upstream_host,
-        port: upstream_port,
-        strategy: UpstreamStrategy::Direct {
-            resolved_addrs: &check.resolved_addrs,
-        },
-        tls_connector: connector,
-    };
-    let audit_ctx = AuditCtx {
-        log: ctx.audit_log,
-        mode: audit::ProxyMode::Reverse,
-        event_ctx: success_ctx.clone(),
-        target: &service,
-        method: &method,
-        path: &upstream_path,
-    };
-    if let Err(e) =
-        forward::forward_request(stream, request.as_bytes(), &body, upstream_spec, audit_ctx).await
-    {
-        warn!("Upstream connection failed: {}", e);
-        send_error(stream, 502, "Bad Gateway").await?;
-        let deny_ctx = audit::EventContext {
-            denial_category: Some(nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed),
-            ..success_ctx.clone()
-        };
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &deny_ctx,
-            &service,
-            0,
-            &e.to_string(),
-        );
+    let tls_config = route
+        .tls_client_config
+        .as_ref()
+        .unwrap_or(ctx.default_tls_config);
+
+    ctx.upstream_pool
+        .pin_host(&upstream_host, &check.resolved_addrs);
+
+    match pool_forward(ctx.upstream_pool, tls_config, req, stream).await {
+        Ok(status) => {
+            audit::log_l7_request(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &success_ctx,
+                &service,
+                &method,
+                &upstream_path,
+                status,
+            );
+        }
+        Err(e) => {
+            warn!("Upstream connection failed: {}", e);
+            send_error(stream, 502, "Bad Gateway").await?;
+            let deny_ctx = audit::EventContext {
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
+                ),
+                ..success_ctx.clone()
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                &service,
+                0,
+                &e.to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -948,7 +963,7 @@ async fn handle_oauth2_credential(
     service: &str,
     upstream_path: &str,
     method: &str,
-    version: &str,
+    _version: &str,
     stream: &mut TcpStream,
     remaining_header: &[u8],
     buffered_body: &[u8],
@@ -1050,76 +1065,77 @@ async fn handle_oauth2_credential(
 
     // Build upstream request with Bearer token injection
     let upstream_authority = format_host_header(upstream_scheme, &upstream_host, upstream_port);
-    let mut request = Zeroizing::new(format!(
-        "{} {} {}\r\nHost: {}\r\n",
-        method, upstream_path_full, version, upstream_authority
-    ));
+    let scheme_str = match upstream_scheme {
+        UpstreamScheme::Https => "https",
+        UpstreamScheme::Http => "http",
+    };
+    let uri = format!(
+        "{}://{}{}",
+        scheme_str, upstream_authority, upstream_path_full
+    );
 
-    // Inject OAuth2 access token as Authorization: Bearer
-    request.push_str(&format!(
-        "Authorization: Bearer {}\r\n",
-        access_token.as_str()
-    ));
+    let bearer_value = Zeroizing::new(format!("Bearer {}", access_token.as_str()));
+    let mut req_builder = http::Request::builder()
+        .method(method)
+        .uri(&uri)
+        .header("Host", &upstream_authority)
+        .header("Authorization", bearer_value.as_str());
 
-    // Forward filtered headers (auth headers already stripped by filter_headers)
     for (name, value) in &filtered_headers {
-        request.push_str(&format!("{}: {}\r\n", name, value));
+        req_builder = req_builder.header(name.as_str(), value.as_str());
     }
 
-    if !body.is_empty() {
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    request.push_str("\r\n");
+    let req = req_builder
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| ProxyError::HttpParse(format!("request build error: {}", e)))?;
 
-    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
-    let upstream_spec = UpstreamSpec {
-        scheme: upstream_scheme,
-        host: &upstream_host,
-        port: upstream_port,
-        strategy: UpstreamStrategy::Direct {
-            resolved_addrs: &check.resolved_addrs,
-        },
-        tls_connector: connector,
+    let tls_config = route
+        .tls_client_config
+        .as_ref()
+        .unwrap_or(ctx.default_tls_config);
+
+    ctx.upstream_pool
+        .pin_host(&upstream_host, &check.resolved_addrs);
+
+    let success_event = audit::EventContext {
+        route_id: Some(service),
+        auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
+        auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
+        managed_credential_active: Some(true),
+        injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
+        denial_category: None,
+        ..audit::EventContext::default()
     };
-    let audit_ctx = AuditCtx {
-        log: ctx.audit_log,
-        mode: audit::ProxyMode::Reverse,
-        event_ctx: audit::EventContext {
-            route_id: Some(service),
-            auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
-            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
-            managed_credential_active: Some(true),
-            injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
-            denial_category: None,
-            ..audit::EventContext::default()
-        },
-        target: service,
-        method,
-        path: upstream_path,
-    };
-    if let Err(e) =
-        forward::forward_request(stream, request.as_bytes(), &body, upstream_spec, audit_ctx).await
-    {
-        warn!("Upstream connection failed: {}", e);
-        send_error(stream, 502, "Bad Gateway").await?;
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &audit::EventContext {
-                route_id: Some(service),
-                auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
-                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
-                managed_credential_active: Some(true),
-                injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
-                denial_category: Some(
-                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
-                ),
-                ..audit::EventContext::default()
-            },
-            service,
-            0,
-            &e.to_string(),
-        );
+
+    match pool_forward(ctx.upstream_pool, tls_config, req, stream).await {
+        Ok(status) => {
+            audit::log_l7_request(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &success_event,
+                service,
+                method,
+                upstream_path,
+                status,
+            );
+        }
+        Err(e) => {
+            warn!("Upstream connection failed: {}", e);
+            send_error(stream, 502, "Bad Gateway").await?;
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &audit::EventContext {
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
+                    ),
+                    ..success_event
+                },
+                service,
+                0,
+                &e.to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -1173,6 +1189,65 @@ where
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+/// Forward a request through the upstream pool and stream the response back
+/// to the inbound client as HTTP/1.1.
+///
+/// Handles both the pool send and writing the full HTTP/1.1 response (status
+/// line, headers, body) back to the raw TCP stream. Returns the response
+/// status code on success.
+async fn pool_forward(
+    pool: &crate::pool::UpstreamPool,
+    tls_config: &std::sync::Arc<rustls::ClientConfig>,
+    req: http::Request<http_body_util::Full<bytes::Bytes>>,
+    inbound: &mut TcpStream,
+) -> Result<u16> {
+    use http_body_util::BodyExt;
+
+    let response = pool.send(tls_config, req).await?;
+    let status = response.status().as_u16();
+    let version = response.version();
+
+    debug!("pool: upstream responded {} via {:?}", status, version);
+
+    // Write HTTP/1.1 status line
+    let reason = response.status().canonical_reason().unwrap_or("OK");
+    let status_line = format!("HTTP/1.1 {} {}\r\n", status, reason);
+    inbound.write_all(status_line.as_bytes()).await?;
+
+    // Write response headers
+    for (name, value) in response.headers() {
+        // Skip h2-specific pseudo-headers and connection-level headers
+        let name_str = name.as_str();
+        if name_str == "transfer-encoding" || name_str == "connection" {
+            continue;
+        }
+        inbound
+            .write_all(format!("{}: {}\r\n", name, value.to_str().unwrap_or("")).as_bytes())
+            .await?;
+    }
+    inbound.write_all(b"\r\n").await?;
+
+    // Stream body frames without buffering
+    let mut body = response.into_body();
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Some(data) = frame.data_ref() {
+                    inbound.write_all(data).await?;
+                }
+            }
+            Some(Err(e)) => {
+                debug!("pool: response body read error: {}", e);
+                break;
+            }
+            None => break,
+        }
+    }
+    inbound.flush().await?;
+
+    Ok(status)
 }
 
 /// Parse an HTTP request line into (method, path, version).
@@ -1802,6 +1877,19 @@ fn strip_proxy_query_param(path: &str, param_name: &str) -> String {
 ///
 /// For header/basic_auth modes, adds the credential header.
 /// For url_path/query_param modes, the credential is already in the path.
+/// Inject credential into a structured `http::Request` builder.
+fn inject_credential_structured(
+    cred: &LoadedCredential,
+    builder: http::request::Builder,
+) -> http::request::Builder {
+    match cred.inject_mode {
+        InjectMode::Header | InjectMode::BasicAuth => {
+            builder.header(cred.header_name.as_str(), cred.header_value.as_str())
+        }
+        InjectMode::UrlPath | InjectMode::QueryParam => builder,
+    }
+}
+
 pub(crate) fn inject_credential_for_mode(cred: &LoadedCredential, request: &mut Zeroizing<String>) {
     match cred.inject_mode {
         InjectMode::Header | InjectMode::BasicAuth => {

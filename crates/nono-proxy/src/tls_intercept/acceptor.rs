@@ -30,14 +30,21 @@ use std::sync::Arc;
 ///   established caller identity at the TCP layer);
 /// * resolves server certs via the supplied [`CertCache`];
 /// * advertises `h2` and `http/1.1` in ALPN.
-pub fn build_server_config(cert_cache: Arc<CertCache>) -> Result<Arc<ServerConfig>> {
+pub fn build_server_config(
+    cert_cache: Arc<CertCache>,
+    enable_h2: bool,
+) -> Result<Arc<ServerConfig>> {
     let mut config =
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()
             .map_err(|e| ProxyError::Config(format!("tls_intercept TLS config error: {}", e)))?
             .with_no_client_auth()
             .with_cert_resolver(cert_cache);
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = if enable_h2 {
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    } else {
+        vec![b"http/1.1".to_vec()]
+    };
     Ok(Arc::new(config))
 }
 
@@ -54,7 +61,7 @@ mod tests {
     fn alpn_offers_h2_and_h1() {
         let ca = Arc::new(EphemeralCa::generate().unwrap());
         let cache = Arc::new(CertCache::new(ca));
-        let config = build_server_config(cache).unwrap();
+        let config = build_server_config(cache, true).unwrap();
         assert_eq!(
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()]
@@ -97,7 +104,7 @@ mod tests {
     async fn handshake_succeeds_when_client_trusts_ephemeral_ca() {
         let ca = Arc::new(EphemeralCa::generate().unwrap());
         let cache = Arc::new(CertCache::new(Arc::clone(&ca)));
-        let server_config = build_server_config(Arc::clone(&cache)).unwrap();
+        let server_config = build_server_config(Arc::clone(&cache), true).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -132,7 +139,7 @@ mod tests {
     async fn handshake_fails_when_client_pins_other_cert() {
         let ca = Arc::new(EphemeralCa::generate().unwrap());
         let cache = Arc::new(CertCache::new(Arc::clone(&ca)));
-        let server_config = build_server_config(Arc::clone(&cache)).unwrap();
+        let server_config = build_server_config(Arc::clone(&cache), true).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -181,7 +188,7 @@ mod tests {
     async fn alpn_negotiates_h2_when_client_prefers_h2() {
         let ca = Arc::new(EphemeralCa::generate().unwrap());
         let cache = Arc::new(CertCache::new(Arc::clone(&ca)));
-        let server_config = build_server_config(Arc::clone(&cache)).unwrap();
+        let server_config = build_server_config(Arc::clone(&cache), true).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -212,7 +219,7 @@ mod tests {
     async fn alpn_negotiates_h1_when_client_only_offers_h1() {
         let ca = Arc::new(EphemeralCa::generate().unwrap());
         let cache = Arc::new(CertCache::new(Arc::clone(&ca)));
-        let server_config = build_server_config(Arc::clone(&cache)).unwrap();
+        let server_config = build_server_config(Arc::clone(&cache), true).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -241,7 +248,7 @@ mod tests {
     async fn alpn_negotiates_h2_when_client_only_offers_h2() {
         let ca = Arc::new(EphemeralCa::generate().unwrap());
         let cache = Arc::new(CertCache::new(Arc::clone(&ca)));
-        let server_config = build_server_config(Arc::clone(&cache)).unwrap();
+        let server_config = build_server_config(Arc::clone(&cache), true).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
