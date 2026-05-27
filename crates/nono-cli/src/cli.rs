@@ -657,6 +657,10 @@ IN-BAND DETACH:
     /// Internal: open a URL via supervisor IPC
     #[command(hide = true)]
     OpenUrlHelper(OpenUrlHelperArgs),
+
+    /// Internal: refresh cached pack update hints out of process
+    #[command(hide = true)]
+    PackUpdateHintHelper(PackUpdateHintHelperArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -821,13 +825,24 @@ pub struct OutdatedArgs {
 /// Arguments for the hidden open-url-helper subcommand.
 ///
 /// Invoked as `BROWSER=nono open-url-helper` on Linux, or via the `open`
-/// PATH shim on macOS. Reads `NONO_SUPERVISOR_FD` from the environment,
-/// sends an `OpenUrl` IPC message to the unsandboxed supervisor, and
-/// waits for a response.
+/// PATH shim on macOS. Reads `NONO_SUPERVISOR_PATH` from the environment,
+/// connects to the supervisor's named Unix socket, sends an `OpenUrl` IPC
+/// message, and waits for a response.
 #[derive(Parser, Debug, Clone)]
 pub struct OpenUrlHelperArgs {
     /// The URL to open
     pub url: String,
+}
+
+/// Arguments for the hidden pack-update-hint-helper subcommand.
+///
+/// Invoked by `nono run` to refresh stale pack update hint cache entries in a
+/// child process, so the supervised parent does not gain an extra thread before
+/// fork.
+#[derive(Parser, Debug, Clone)]
+pub struct PackUpdateHintHelperArgs {
+    /// Alternating package reference and installed version values.
+    pub packs: Vec<String>,
 }
 
 /// Shell variant for completion generation.
@@ -1164,14 +1179,16 @@ pub struct SandboxArgs {
     )]
     pub network_profile: Option<String>,
 
-    /// Add a domain to the proxy allowlist (repeatable)
+    /// Add a domain to the proxy allowlist (repeatable).
+    /// Use a plain hostname for unrestricted access, or a URL with a path glob
+    /// to restrict to specific endpoints (e.g., https://github.com/org/**)
     /// ALIAS(canonical="--allow-domain", introduced="v0.0.0", remove_by="indefinite", issue="#415")
     #[arg(
         long = "allow-domain",
         alias = "allow-proxy",
         alias = "proxy-allow",
         env = "NONO_ALLOW_DOMAIN",
-        value_name = "DOMAIN",
+        value_name = "DOMAIN_OR_URL",
         help_heading = "NETWORK"
     )]
     pub allow_proxy: Vec<String>,
@@ -1630,6 +1647,17 @@ pub struct RunArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub detached: bool,
 
+    /// How long (seconds) to wait for a detached session to become attachable.
+    /// Only meaningful with --detached. Env: NONO_DETACH_STARTUP_TIMEOUT.
+    #[arg(
+        long = "detach-timeout",
+        value_name = "SECS",
+        requires = "detached",
+        env = "NONO_DETACH_STARTUP_TIMEOUT",
+        help_heading = "OPTIONS"
+    )]
+    pub detach_timeout_secs: Option<u64>,
+
     // ── Rollback ──────────────────────────────────────────────────────
     /// Enable atomic rollback snapshots for the session
     #[arg(long, conflicts_with = "no_rollback", help_heading = "ROLLBACK")]
@@ -1823,7 +1851,7 @@ pub struct WhyArgs {
     #[arg(long, value_enum, help_heading = "QUERY")]
     pub op: Option<WhyOp>,
 
-    /// Network host to check
+    /// Network host or URL to check (e.g. github.com or https://github.com/org/repo)
     #[arg(long, help_heading = "QUERY")]
     pub host: Option<String>,
 

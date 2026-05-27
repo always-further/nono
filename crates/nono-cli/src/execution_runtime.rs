@@ -1,8 +1,13 @@
 use crate::audit_attestation::prepare_audit_signer;
+#[cfg(unix)]
+use crate::hook_runtime;
 use crate::launch_runtime::{LaunchPlan, select_threading_context};
 use crate::proxy_runtime::start_proxy_runtime;
 use crate::supervised_runtime::{SupervisedRuntimeContext, execute_supervised_runtime};
-use crate::{command_blocking_deprecation, config, exec_strategy, output, sandbox_state};
+use crate::{
+    DETACHED_SESSION_ID_ENV, command_blocking_deprecation, config, exec_strategy, output,
+    sandbox_state, session,
+};
 use nono::undo::{ContentHash, ExecutableIdentity};
 use nono::{CapabilitySet, NonoError, Result, Sandbox};
 use sha2::{Digest, Sha256};
@@ -10,7 +15,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 fn apply_pre_fork_sandbox(
     strategy: exec_strategy::ExecStrategy,
@@ -177,10 +182,39 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     if let Some(profile) = recommended_profile {
         output::print_profile_hint(recommended_program_name, profile, flags.silent);
     }
+    let allowed_domain_strs: Vec<String> = flags
+        .proxy
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+    let domain_endpoints: Vec<sandbox_state::DomainEndpointState> = flags
+        .proxy
+        .allow_domain
+        .iter()
+        .filter_map(|e| match e {
+            crate::profile::AllowDomainEntry::WithEndpoints { domain, endpoints }
+                if !endpoints.is_empty() =>
+            {
+                Some(sandbox_state::DomainEndpointState {
+                    domain: domain.clone(),
+                    endpoints: endpoints
+                        .iter()
+                        .map(|r| sandbox_state::EndpointRuleState {
+                            method: r.method.clone(),
+                            path: r.path.clone(),
+                        })
+                        .collect(),
+                })
+            }
+            _ => None,
+        })
+        .collect();
     let cap_file = write_capability_state_file(
         &caps,
         &flags.bypass_protection_paths,
-        &flags.proxy.allow_domain,
+        &allowed_domain_strs,
+        &domain_endpoints,
         flags.silent,
     );
     let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
@@ -218,12 +252,57 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     }
     apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 
+    // Session id shared across before- and after-hook so paired setup/teardown
+    // scripts see the same NONO_SESSION_ID. Only allocated when at least one
+    // hook is configured.
+    let hook_session_id: Option<String> =
+        (flags.session_hooks.before.is_some() || flags.session_hooks.after.is_some()).then(|| {
+            std::env::var(DETACHED_SESSION_ID_ENV)
+                .ok()
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(session::generate_session_id)
+        });
+
+    // ---- Before-hook execution (Unix-only) ----
+    #[cfg(unix)]
+    let hook_env_vars_owned: Vec<(String, String)> = flags
+        .session_hooks
+        .before
+        .as_ref()
+        .zip(hook_session_id.as_deref())
+        .map(|(before, session_id)| {
+            match hook_runtime::execute_before_hook(before, session_id, &current_dir) {
+                Ok(env) => {
+                    if !env.is_empty() {
+                        info!(
+                            "Before-hook exported {} env vars (script: {})",
+                            env.len(),
+                            before.script.display()
+                        );
+                    }
+                    env
+                }
+                Err(e) => {
+                    warn!("Before-hook failed (continuing): {e}");
+                    Vec::new()
+                }
+            }
+        })
+        .unwrap_or_default();
+    #[cfg(not(unix))]
+    let hook_env_vars_owned: Vec<(String, String)> = Vec::new();
+
     let mut env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()
         .map(|secret| (secret.env_var.as_str(), secret.value.as_str()))
         .collect();
     for (key, value) in &proxy_env_vars {
         env_vars.push((key.as_str(), value.as_str()));
+    }
+
+    // Hook env vars have lowest priority: prepend so secrets and proxy override.
+    for (key, value) in hook_env_vars_owned.iter().rev() {
+        env_vars.insert(0, (key.as_str(), value.as_str()));
     }
 
     let threading = select_threading_context(
@@ -343,6 +422,17 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 silent: flags.silent,
             })?;
 
+            // ---- After-hook execution (Unix-only) ----
+            #[cfg(unix)]
+            if let (Some(after), Some(session_id)) = (
+                flags.session_hooks.after.as_ref(),
+                hook_session_id.as_deref(),
+            ) && let Err(e) =
+                hook_runtime::execute_after_hook(after, session_id, &current_dir, exit_code)
+            {
+                warn!("After-hook failed: {e}");
+            }
+
             cleanup_capability_state_file(&cap_file_path);
             drop(config);
             drop(loaded_secrets);
@@ -361,10 +451,15 @@ fn write_capability_state_file(
     caps: &CapabilitySet,
     bypass_protection_paths: &[std::path::PathBuf],
     allowed_domains: &[String],
+    domain_endpoints: &[sandbox_state::DomainEndpointState],
     silent: bool,
 ) -> Option<std::path::PathBuf> {
-    let state =
-        sandbox_state::SandboxState::from_caps(caps, bypass_protection_paths, allowed_domains);
+    let state = sandbox_state::SandboxState::from_caps(
+        caps,
+        bypass_protection_paths,
+        allowed_domains,
+        domain_endpoints,
+    );
 
     for _ in 0..8 {
         let cap_file = next_capability_state_file_path();

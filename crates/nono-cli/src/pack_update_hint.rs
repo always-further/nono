@@ -2,21 +2,22 @@
 //!
 //! After the capabilities block, checks whether any pack-provided profile in
 //! the active extends chain has a newer version available, and prints a one-line
-//! hint if so. Results are cached per pack for 24 hours in the state directory
-//! so the registry check never blocks startup. A background thread refreshes
-//! stale entries for the next run.
+//! hint if so. Results are cached per pack for 24 hours in the state directory.
+//! Stale entries are refreshed by a detached helper process so `nono run` does
+//! not add a thread before supervised mode forks.
 //!
-//! Respects the same opt-out as the CLI update check: `NONO_NO_UPDATE_CHECK=1`
-//! or `[updates] check = false` in `~/.config/nono/config.toml`.
+//! Respects `NONO_NO_PACK_UPDATE_HINTS=1`, plus the same opt-out as the CLI
+//! update check: `NONO_NO_UPDATE_CHECK=1` or `[updates] check = false` in
+//! `~/.config/nono/config.toml`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::process::{Command, Stdio};
 
 const HINTS_STATE_FILE: &str = "pack-update-hints.json";
 const CHECK_INTERVAL_SECS: i64 = 86400;
+const NO_PACK_UPDATE_HINTS_ENV: &str = "NONO_NO_PACK_UPDATE_HINTS";
 
 /// Per-pack cache entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,8 +44,8 @@ struct PackHintsState {
 /// Print update hints for every pack-provided profile in the active extends
 /// chain, reading from a 24-hour local cache.
 ///
-/// Silently no-ops on any error (network, I/O, parse). A background thread
-/// refreshes stale cache entries without blocking the current run.
+/// Silently no-ops on any error (network, I/O, parse). Stale cache entries are
+/// refreshed out of process without blocking the current run.
 pub fn show_pack_update_hints(profile_name: &str, silent: bool) {
     if silent || is_opted_out() {
         return;
@@ -97,14 +98,30 @@ pub fn show_pack_update_hints(profile_name: &str, silent: bool) {
                 }
             }
         } else {
-            // Cache exists but some entries are stale — refresh in background
-            // so startup latency is unaffected.
-            let shared = Arc::new(Mutex::new(state));
-            refresh_in_background(stale, shared);
+            // Cache exists but some entries are stale — refresh in a detached
+            // process so startup latency is unaffected and the supervised
+            // parent does not gain a thread before fork.
+            refresh_in_background_process(&stale);
         }
     }
 
     print_hints(&hints);
+}
+
+/// Refresh stale hint cache entries for the hidden helper subcommand.
+pub fn run_refresh_helper(args: crate::cli::PackUpdateHintHelperArgs) -> crate::Result<()> {
+    let Some(stale) = parse_refresh_helper_args(args.packs) else {
+        tracing::debug!("pack update hint helper received malformed pack/version arguments");
+        return Ok(());
+    };
+    if stale.is_empty() || is_opted_out() {
+        return Ok(());
+    }
+
+    let mut state = load_state();
+    refresh_synchronous(&stale, &mut state);
+    save_state(&state);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -178,39 +195,38 @@ fn refresh_synchronous(packs: &[(String, String)], state: &mut PackHintsState) {
     }
 }
 
-fn refresh_in_background(stale: Vec<(String, String)>, state: Arc<Mutex<PackHintsState>>) {
-    let registry_url = crate::registry_client::resolve_registry_url(None);
-    let _ = thread::spawn(move || {
-        let client = crate::registry_client::RegistryClient::new(registry_url);
-        let mut changed = false;
+fn refresh_in_background_process(stale: &[(String, String)]) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
 
-        for (pack_ref, installed) in stale {
-            let pkg_ref = match crate::package::parse_package_ref(&pack_ref) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let latest = client
-                .fetch_package_status(&pkg_ref, Some(&installed))
-                .ok()
-                .and_then(|s| s.latest);
+    let mut child = Command::new(exe);
+    child.arg("pack-update-hint-helper");
+    child.args(refresh_helper_args(stale));
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::null());
+    child.stderr(Stdio::null());
+    let _ = child.spawn();
+}
 
-            if let Ok(mut guard) = state.lock() {
-                guard.entries.insert(
-                    pack_ref,
-                    PackHintEntry {
-                        last_check: Utc::now(),
-                        installed_at_check: installed,
-                        latest,
-                    },
-                );
-                changed = true;
-            }
-        }
+fn refresh_helper_args(stale: &[(String, String)]) -> Vec<String> {
+    stale
+        .iter()
+        .flat_map(|(pack_ref, installed)| [pack_ref.clone(), installed.clone()])
+        .collect()
+}
 
-        if changed && let Ok(guard) = state.lock() {
-            save_state(&guard);
-        }
-    });
+fn parse_refresh_helper_args(args: Vec<String>) -> Option<Vec<(String, String)>> {
+    let mut chunks = args.chunks_exact(2);
+    let stale = chunks
+        .by_ref()
+        .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
+        .collect();
+    if chunks.remainder().is_empty() {
+        Some(stale)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +281,13 @@ fn save_state(state: &PackHintsState) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(&path, json);
+        let tmp_path =
+            path.with_file_name(format!(".{HINTS_STATE_FILE}.{}.tmp", std::process::id()));
+        let write_result = std::fs::write(&tmp_path, format!("{json}\n"))
+            .and_then(|()| std::fs::rename(&tmp_path, &path));
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
     }
 }
 
@@ -274,6 +296,9 @@ fn save_state(state: &PackHintsState) {
 // ---------------------------------------------------------------------------
 
 fn is_opted_out() -> bool {
+    if std::env::var(NO_PACK_UPDATE_HINTS_ENV).is_ok() {
+        return true;
+    }
     if std::env::var("NONO_NO_UPDATE_CHECK").is_ok() {
         return true;
     }
@@ -296,5 +321,38 @@ fn is_newer(installed: &str, latest: &str) -> bool {
         (Some(i), Some(l)) => l > i,
         (None, Some(_)) => true, // legacy non-semver installed, new semver release available
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_helper_args_round_trip() {
+        let stale = vec![
+            ("always-further/claude".to_string(), "1.0.0".to_string()),
+            ("always-further/codex".to_string(), "2.3.4".to_string()),
+        ];
+
+        let args = refresh_helper_args(&stale);
+
+        assert_eq!(parse_refresh_helper_args(args), Some(stale));
+    }
+
+    #[test]
+    fn refresh_helper_args_reject_odd_values() {
+        assert!(parse_refresh_helper_args(vec!["always-further/claude".to_string()]).is_none());
+    }
+
+    #[test]
+    fn pack_hint_env_var_opts_out() {
+        let _lock = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let _env = crate::test_env::EnvVarGuard::set_all(&[(NO_PACK_UPDATE_HINTS_ENV, "1")]);
+
+        assert!(is_opted_out());
     }
 }

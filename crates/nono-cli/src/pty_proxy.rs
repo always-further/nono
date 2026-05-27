@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+use crate::timeouts;
+
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
@@ -471,7 +473,7 @@ impl PtyProxy {
                     return false;
                 }
 
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let _ = stream.set_read_timeout(Some(timeouts::ATTACH_SOCKET_READ_TIMEOUT));
                 let mut request_kind = [0u8; 1];
                 match stream.read_exact(&mut request_kind) {
                     Ok(()) => {}
@@ -2093,7 +2095,7 @@ where
         Ok(()) => run_attach_loop(
             sock_fd,
             resize_socket.as_ref(),
-            Some(Duration::from_millis(250)),
+            Some(timeouts::ATTACH_STDIN_DELAY),
             &mut alt_screen_tracker,
         ),
         Err(e) => Err(e),
@@ -2189,12 +2191,12 @@ pub fn attach_to_session(session_id: &str) -> Result<()> {
             // The supervisor may have been mid-shutdown. Wait briefly and
             // retry once so we can distinguish "exited just now" from a
             // persistent problem.
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(timeouts::ATTACH_RETRY_DELAY);
             connect_to_session(session_id)?
         }
         other => other?,
     };
-    wait_for_attach_ready(stream.as_raw_fd(), 1000)?;
+    wait_for_attach_ready(stream.as_raw_fd(), timeouts::pty_attach_timeout_ms())?;
     attach_to_stream(stream, Some(session_id))
 }
 

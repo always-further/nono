@@ -224,6 +224,8 @@ async fn handle_h2_stream(
     let method_str = method.as_str().to_string();
     let mut matches: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
     let mut catch_all: Option<(&str, &crate::route::LoadedRoute)> = None;
+    let mut has_endpoint_only_route = false;
+    let mut endpoint_authorized = false;
     for (prefix, route) in &candidates {
         if route.endpoint_rules.is_empty() {
             if catch_all.is_none() {
@@ -231,11 +233,46 @@ async fn handle_h2_stream(
             }
         } else if route.endpoint_rules.is_allowed(&method_str, &path) {
             matches.push((prefix, route));
+            if !route.requires_managed_credential {
+                endpoint_authorized = true;
+            }
+        } else if !route.requires_managed_credential {
+            has_endpoint_only_route = true;
         }
     }
 
-    if matches.len() > 1 {
-        let names: Vec<_> = matches.iter().map(|(p, _)| *p).collect();
+    // Endpoint-only authorization layer: if any _ep_ route exists for this
+    // upstream, the request must match at least one of their endpoint rules.
+    // This gates access BEFORE credential selection — a credential catch-all
+    // cannot bypass endpoint restrictions.
+    if has_endpoint_only_route && !endpoint_authorized {
+        let reason = format!(
+            "endpoint rules denied {} {}: no rule matched on {}:{}",
+            method_str, path, ctx.host, ctx.port
+        );
+        warn!("h2_forward: {}", reason);
+        audit::log_denied(
+            ctx.audit_log.as_ref(),
+            audit::ProxyMode::ConnectIntercept,
+            &audit::EventContext {
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                ..audit::EventContext::default()
+            },
+            &ctx.host,
+            ctx.port,
+            &reason,
+        );
+        send_h2_error(&mut respond, 403)?;
+        return Ok(());
+    }
+
+    // Ambiguous route check only applies to credential-injection routes.
+    let credential_matches: Vec<_> = matches
+        .iter()
+        .filter(|(_, route)| route.requires_managed_credential)
+        .collect();
+    if credential_matches.len() > 1 {
+        let names: Vec<_> = credential_matches.iter().map(|(p, _)| *p).collect();
         warn!(
             "h2_forward: ambiguous route: {} {} matched {:?}",
             method_str, path, names
@@ -255,7 +292,13 @@ async fn handle_h2_stream(
         return Ok(());
     }
 
-    let selected = matches.into_iter().next().or(catch_all);
+    // Prefer the credential route over endpoint-only authorization routes.
+    let selected = matches
+        .iter()
+        .find(|(_, route)| route.requires_managed_credential)
+        .or(matches.first())
+        .copied()
+        .or(catch_all);
     let service: Option<&str> = selected.map(|(s, _)| s);
     let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
     let cred = service.and_then(|s| ctx.credential_store.get(s));
@@ -1047,7 +1090,11 @@ mod tests {
                 let (response_fut, _send_stream) = client_send.send_request(request, true).unwrap();
 
                 let response = response_fut.await.unwrap();
-                assert_eq!(response.status(), 403);
+                assert_eq!(
+                    response.status(),
+                    200,
+                    "multiple endpoint-only routes matching is allowed (not ambiguous)"
+                );
 
                 drop(client_send);
                 conn_handle.abort();
@@ -1061,7 +1108,7 @@ mod tests {
         use std::time::Duration;
 
         let ca = Arc::new(EphemeralCa::generate().unwrap());
-        let (upstream_port, rx) = spawn_mock_h2_upstream(&ca).await;
+        let (upstream_port, _rx) = spawn_mock_h2_upstream(&ca).await;
 
         let route_store = make_route_store(
             "localhost",
@@ -1117,13 +1164,10 @@ mod tests {
                         h2_client.send_request(request, true).unwrap();
 
                     let response = response_fut.await.unwrap();
-                    assert_eq!(response.status(), 200);
-
-                    let (method_path, headers) = rx.await.unwrap();
-                    assert_eq!(method_path, "GET /v1/unmatched-path");
-                    assert!(
-                        headers.get("authorization").is_none(),
-                        "credential should NOT be injected when endpoint rules don't match"
+                    assert_eq!(
+                        response.status(),
+                        403,
+                        "endpoint-only route must deny unmatched requests"
                     );
 
                     drop(h2_client);

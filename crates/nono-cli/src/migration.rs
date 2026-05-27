@@ -67,6 +67,13 @@ const OFFICIAL_PACKS: &[OfficialPack] = &[
         description: Some("OpenAI Codex CLI sandbox profile + plugin"),
         installs_summary: Some("sandbox profile + Codex plugin (hooks, skill)"),
     },
+    OfficialPack {
+        profile_name: "opencode",
+        namespace: "always-further",
+        pack_name: "opencode",
+        description: Some("OpenCode AI coding assistant sandbox profile + plugin"),
+        installs_summary: Some("sandbox profile + OpenCode plugin (hooks, skill)"),
+    },
 ];
 
 struct OfficialPack {
@@ -327,6 +334,7 @@ mod tests {
         assert!(official_pack_for("claude").is_some());
         assert!(official_pack_for("claude-code").is_some());
         assert!(official_pack_for("codex").is_some());
+        assert!(official_pack_for("opencode").is_some());
         assert!(official_pack_for("definitely-not-real").is_none());
     }
 

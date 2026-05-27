@@ -15,7 +15,11 @@ use std::process::{Child, Command, Stdio};
 pub(crate) fn allows_pre_exec_update_check(command: &Commands) -> bool {
     !matches!(
         command,
-        Commands::Run(_) | Commands::Shell(_) | Commands::Wrap(_) | Commands::Completions(_)
+        Commands::Run(_)
+            | Commands::Shell(_)
+            | Commands::Wrap(_)
+            | Commands::Completions(_)
+            | Commands::PackUpdateHintHelper(_)
     )
 }
 
@@ -53,7 +57,11 @@ pub(crate) fn run_detached_launch(args: RunArgs, silent: bool) -> Result<()> {
 
     let session_path = session::session_file_path(&session_id)?;
     let attach_path = session::session_socket_path(&session_id)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let detach_timeout = args
+        .detach_timeout_secs
+        .map(|secs| std::time::Duration::from_secs(secs.min(3600)))
+        .unwrap_or_else(crate::timeouts::detach_startup_timeout);
+    let deadline = std::time::Instant::now() + detach_timeout;
     while std::time::Instant::now() < deadline {
         if session_path.exists() && attach_path.exists() {
             cleanup_startup_log(&startup_log_path);
@@ -75,7 +83,7 @@ pub(crate) fn run_detached_launch(args: RunArgs, silent: bool) -> Result<()> {
             )));
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(crate::timeouts::SESSION_READY_POLL_INTERVAL);
     }
 
     terminate_detached_launch(&mut launched);
@@ -282,7 +290,7 @@ fn terminate_detached_launch(child: &mut Child) {
             if child.try_wait().ok().flatten().is_some() {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(crate::timeouts::TERMINATE_POLL_INTERVAL);
         }
         if pid > 0 {
             unsafe {

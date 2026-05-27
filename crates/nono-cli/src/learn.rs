@@ -565,7 +565,7 @@ fn run_fs_usage_and_nettop(
     // Wait for fs_usage to attach the kernel trace facility before
     // spawning the child. A fixed sleep is acceptable here: the previous
     // pipe+peek approach was unreliable due to stdout buffering.
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(crate::timeouts::FS_USAGE_SETTLE_TIME);
 
     // Now spawn the target command
     let mut child = Command::new(&command[0])
@@ -604,7 +604,7 @@ fn run_fs_usage_and_nettop(
                 nix::libc::kill(child_id as i32, nix::libc::SIGTERM);
             }
             // Grace period: if the child ignores SIGTERM, escalate to SIGKILL
-            std::thread::sleep(Duration::from_secs(3));
+            std::thread::sleep(crate::timeouts::SIGTERM_GRACE_PERIOD);
             unsafe {
                 nix::libc::kill(child_id as i32, nix::libc::SIGKILL);
             }

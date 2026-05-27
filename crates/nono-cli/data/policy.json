@@ -413,6 +413,18 @@
         ]
       }
     },
+    "java_runtime": {
+      "description": "Java runtime and build tool paths (SDKMAN, Maven, Gradle)",
+      "allow": {
+        "read": [
+          "~/.sdkman",
+          "~/.m2/repository",
+          "~/.m2/wrapper",
+          "~/.gradle/caches",
+          "~/.gradle/wrapper"
+        ]
+      }
+    },
     "homebrew_macos": {
       "description": "Homebrew installation paths on macOS",
       "platform": "macos",
@@ -684,38 +696,6 @@
       },
       "interactive": false
     },
-    "opencode": {
-      "extends": "default",
-      "meta": {
-        "name": "opencode",
-        "version": "1.0.0",
-        "description": "OpenCode AI coding assistant",
-        "author": "always-further"
-      },
-      "groups": {
-        "include": ["user_caches_macos", "user_caches_linux", "node_runtime", "opencode_linux", "linux_sysfs_read", "git_config", "unlink_protection"]
-      },
-      "security": {
-        "signal_mode": "isolated"
-      },
-      "filesystem": {
-        "allow": [
-          "$HOME/.opencode",
-          "$HOME/.config/opencode",
-          "$HOME/.cache/opencode",
-          "$HOME/.local/share/opencode",
-          "$HOME/.local/share/opentui",
-          "$HOME/.local/state/opencode",
-          "$TMPDIR"
-        ]
-      },
-      "network": { "block": false },
-      "workdir": { "access": "readwrite" },
-      "undo": {
-        "exclude_patterns": ["node_modules", ".next"]
-      },
-      "interactive": true
-    },
     "python-dev": {
       "extends": "default",
       "meta": {
@@ -769,6 +749,28 @@
       "security": {
         "signal_mode": "isolated"
       },
+      "filesystem": {},
+      "network": { "block": false, "network_profile": "developer" },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
+    },
+    "java-dev": {
+      "extends": "default",
+      "meta": {
+        "name": "java-dev",
+        "version": "1.0.0",
+        "description": "Java SDK development profile with SDKMAN, Maven, and Gradle support",
+        "author": "always-further"
+      },
+      "groups": {
+        "include": ["java_runtime"]
+      },
+      "security": {
+        "signal_mode": "isolated"
+      },
+      "unsafe_macos_seatbelt_rules": [
+        "(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))"
+      ],
       "filesystem": {},
       "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },

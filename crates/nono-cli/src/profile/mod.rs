@@ -966,6 +966,36 @@ where
     }
 }
 
+/// An entry in the `allow_domain` array.
+///
+/// Can be either a plain hostname string (backward compatible, CONNECT tunnel)
+/// or an object with a domain and endpoint rules (requires TLS interception
+/// for L7 method+path filtering).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AllowDomainEntry {
+    /// Plain hostname — allowed via CONNECT tunnel without L7 inspection.
+    Plain(String),
+    /// Domain with endpoint restrictions — requires TLS interception.
+    /// When `endpoints` is non-empty, only matching method+path combinations
+    /// are allowed (default-deny).
+    WithEndpoints {
+        domain: String,
+        #[serde(default)]
+        endpoints: Vec<nono_proxy::config::EndpointRule>,
+    },
+}
+
+impl AllowDomainEntry {
+    /// Extract the domain/hostname regardless of variant.
+    pub fn domain(&self) -> &str {
+        match self {
+            Self::Plain(s) => s,
+            Self::WithEndpoints { domain, .. } => domain,
+        }
+    }
+}
+
 /// Network configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -982,6 +1012,7 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "InheritableValue::is_inherit")]
     pub network_profile: InheritableValue<String>,
     /// Additional domains to allow through the proxy (on top of profile hosts).
+    /// Entries can be plain hostname strings or objects with endpoint rules.
     /// Canonical profile key: `allow_domain` (legacy `proxy_allow` and
     /// `allow_proxy` are also accepted).
     /// ALIAS(canonical="allow_domain", introduced="v0.0.0", remove_by="indefinite", issue="#415")
@@ -991,7 +1022,7 @@ pub struct NetworkConfig {
         alias = "proxy_allow",
         alias = "allow_proxy"
     )]
-    pub allow_domain: Vec<String>,
+    pub allow_domain: Vec<AllowDomainEntry>,
     /// Credential services to enable via reverse proxy.
     /// Canonical profile key: `credentials` (legacy `proxy_credentials` accepted).
     ///
@@ -1149,6 +1180,41 @@ pub struct HooksConfig {
     /// Map of target application -> hook configuration
     #[serde(flatten)]
     pub hooks: HashMap<String, HookConfig>,
+}
+
+/// A single session lifecycle hook configuration.
+///
+/// Defines a script to execute before or after the sandboxed session.
+/// Scripts run with the user's full host privileges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionHook {
+    /// Absolute path to the hook script.
+    /// Must be an executable regular file. Validated at execution time.
+    pub script: PathBuf,
+
+    /// Optional timeout in seconds.
+    /// If set, the hook is killed after this duration.
+    /// If absent, no timeout is enforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Session lifecycle hooks for a profile.
+///
+/// `before`: executed in the parent process before the sandboxed child is forked.
+///           Has host privileges. Can export env vars via NONO_ENV_FILE.
+///
+/// `after`: executed in the parent process after the sandboxed child exits.
+///          Has host privileges. Cleanup only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<SessionHook>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<SessionHook>,
 }
 
 /// Working directory access level for profiles
@@ -1480,6 +1546,11 @@ pub struct Profile {
     pub workdir: WorkdirConfig,
     #[serde(default)]
     pub hooks: HooksConfig,
+    /// Session lifecycle hooks (before/after sandbox).
+    /// Runs outside the sandbox with host privileges.
+    /// `before` can export env vars via NONO_ENV_FILE.
+    #[serde(default)]
+    pub session_hooks: SessionHooks,
     /// ALIAS(canonical="rollback", introduced="v0.0.0", remove_by="indefinite", issue="#124")
     #[serde(default, alias = "undo")]
     pub rollback: RollbackConfig,
@@ -1573,6 +1644,8 @@ struct ProfileDeserialize {
     workdir: WorkdirConfig,
     #[serde(default)]
     hooks: HooksConfig,
+    #[serde(default)]
+    session_hooks: SessionHooks,
     /// ALIAS(canonical="rollback", introduced="v0.0.0", remove_by="indefinite", issue="#124")
     #[serde(default, alias = "undo")]
     rollback: RollbackConfig,
@@ -1619,6 +1692,7 @@ impl From<ProfileDeserialize> for Profile {
             environment: raw.environment,
             workdir: raw.workdir,
             hooks: raw.hooks,
+            session_hooks: raw.session_hooks,
             rollback: raw.rollback,
             open_urls: raw.open_urls,
             allow_launch_services: raw.allow_launch_services,
@@ -2196,14 +2270,7 @@ pub(crate) fn parse_profile_bytes(content: &[u8]) -> Result<Profile> {
     let text = std::str::from_utf8(content)
         .map_err(|e| NonoError::ProfileParse(format!("invalid UTF-8: {e}")))?;
 
-    let parse_options = jsonc_parser::ParseOptions {
-        allow_comments: true,
-        allow_trailing_commas: true,
-        ..Default::default()
-    };
-
-    let profile: Profile = jsonc_parser::parse_to_serde_value(text, &parse_options)
-        .map_err(|e| NonoError::ProfileParse(e.to_string()))?;
+    let profile: Profile = crate::jsonc::parse(text).map_err(NonoError::ProfileParse)?;
 
     // Validate custom credentials for security issues
     validate_profile_custom_credentials(&profile)?;
@@ -2508,7 +2575,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 .network
                 .network_profile
                 .merge(base.network.network_profile),
-            allow_domain: dedup_append(&base.network.allow_domain, &child.network.allow_domain),
+            allow_domain: merge_allow_domain(
+                &base.network.allow_domain,
+                &child.network.allow_domain,
+            ),
             open_port: dedup_append(&base.network.open_port, &child.network.open_port),
             listen_port: dedup_append(&base.network.listen_port, &child.network.listen_port),
             connect_port: dedup_append(&base.network.connect_port, &child.network.connect_port),
@@ -2578,6 +2648,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 merged
             },
         },
+        session_hooks: SessionHooks {
+            before: child.session_hooks.before.or(base.session_hooks.before),
+            after: child.session_hooks.after.or(base.session_hooks.after),
+        },
         rollback: RollbackConfig {
             exclude_patterns: dedup_append(
                 &base.rollback.exclude_patterns,
@@ -2619,6 +2693,47 @@ pub(crate) fn dedup_append<T: Eq + std::hash::Hash + Clone>(base: &[T], child: &
         }
     }
     result
+}
+
+/// Merge `allow_domain` entries from base and child profiles.
+///
+/// For the same domain, endpoint rules are **appended** (child rules added to base).
+/// A plain entry upgraded with endpoints from the other side becomes `WithEndpoints`.
+/// Order: base domains first, then child-only domains.
+pub(crate) fn merge_allow_domain(
+    base: &[AllowDomainEntry],
+    child: &[AllowDomainEntry],
+) -> Vec<AllowDomainEntry> {
+    let mut domains: Vec<String> = Vec::new();
+    let mut rules: HashMap<String, Vec<nono_proxy::config::EndpointRule>> = HashMap::new();
+
+    for entry in base.iter().chain(child.iter()) {
+        let (domain, endpoints) = match entry {
+            AllowDomainEntry::Plain(d) => (d.clone(), &[][..]),
+            AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                (domain.clone(), endpoints.as_slice())
+            }
+        };
+        if !domains.contains(&domain) {
+            domains.push(domain.clone());
+        }
+        rules
+            .entry(domain)
+            .or_default()
+            .extend_from_slice(endpoints);
+    }
+
+    domains
+        .into_iter()
+        .map(|domain| {
+            let endpoints = rules.remove(&domain).unwrap_or_default();
+            if endpoints.is_empty() {
+                AllowDomainEntry::Plain(domain)
+            } else {
+                AllowDomainEntry::WithEndpoints { domain, endpoints }
+            }
+        })
+        .collect()
 }
 
 /// Get the path to a user profile (default `.json` extension, used for writes).
@@ -3157,8 +3272,8 @@ mod tests {
 
     #[test]
     fn test_load_builtin_profile() {
-        let profile = load_profile("opencode").expect("Failed to load profile");
-        assert_eq!(profile.meta.name, "opencode");
+        let profile = load_profile("openclaw").expect("Failed to load profile");
+        assert_eq!(profile.meta.name, "openclaw");
         assert!(!profile.network.block); // network allowed by default
     }
 
@@ -3204,13 +3319,25 @@ mod tests {
 
     #[test]
     fn test_list_profiles() {
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let dir = tempdir().expect("tmpdir");
+        let canonical = dir.path().canonicalize().expect("canonicalize tmpdir");
+        let canonical_str = canonical.to_str().expect("tmpdir is valid UTF-8");
+        let _env = crate::test_env::EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", canonical_str)]);
+
         let profiles = list_profiles();
         assert!(profiles.contains(&"openclaw".to_string()));
-        assert!(profiles.contains(&"opencode".to_string()));
-        // claude-code and codex were removed from the inbuilt profiles in
-        // v0.43.0; they ship via registry packs.
+        assert!(profiles.contains(&"swival".to_string()));
+        // These profiles were removed from built-ins; they ship via registry packs:
+        //   claude-code / claude → always-further/claude   (removed v0.43.0)
+        //   codex               → always-further/codex    (removed v0.43.0)
+        //   opencode            → always-further/opencode (removed)
         assert!(!profiles.contains(&"claude-code".to_string()));
         assert!(!profiles.contains(&"codex".to_string()));
+        assert!(!profiles.contains(&"opencode".to_string()));
     }
 
     #[test]
@@ -4473,7 +4600,7 @@ mod tests {
             network: NetworkConfig {
                 block: false,
                 network_profile: InheritableValue::Set("base-net".to_string()),
-                allow_domain: vec!["base.example.com".to_string()],
+                allow_domain: vec![AllowDomainEntry::Plain("base.example.com".to_string())],
                 open_port: vec![3000],
                 listen_port: vec![4000],
                 connect_port: vec![],
@@ -4497,6 +4624,7 @@ mod tests {
             hooks: HooksConfig {
                 hooks: HashMap::new(),
             },
+            session_hooks: SessionHooks::default(),
             rollback: RollbackConfig {
                 exclude_patterns: vec!["node_modules".to_string()],
                 exclude_globs: vec!["*.pyc".to_string()],
@@ -4552,7 +4680,7 @@ mod tests {
             network: NetworkConfig {
                 block: false,
                 network_profile: InheritableValue::Inherit,
-                allow_domain: vec!["child.example.com".to_string()],
+                allow_domain: vec![AllowDomainEntry::Plain("child.example.com".to_string())],
                 open_port: vec![3000, 5000],
                 listen_port: vec![4000, 6000],
                 connect_port: vec![],
@@ -4576,6 +4704,7 @@ mod tests {
             hooks: HooksConfig {
                 hooks: HashMap::new(),
             },
+            session_hooks: SessionHooks::default(),
             rollback: RollbackConfig {
                 exclude_patterns: vec![],
                 exclude_globs: vec![],
@@ -4674,6 +4803,126 @@ mod tests {
         let merged = merge_profiles(base_profile(), child_profile());
         assert_eq!(merged.meta.name, "child");
         assert_eq!(merged.meta.version, "2.0");
+    }
+
+    // ============================================================================
+    // session_hooks: type-level + merge semantics
+    // ============================================================================
+
+    #[test]
+    fn test_session_hook_deserializes() {
+        let json = r#"{
+            "meta": { "name": "p" },
+            "session_hooks": {
+                "before": { "script": "/usr/local/bin/setup.sh", "timeout_secs": 10 },
+                "after":  { "script": "/usr/local/bin/cleanup.sh" }
+            }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse session_hooks profile");
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before is set");
+        assert_eq!(before.script, PathBuf::from("/usr/local/bin/setup.sh"));
+        assert_eq!(before.timeout_secs, Some(10));
+        let after = profile.session_hooks.after.as_ref().expect("after is set");
+        assert_eq!(after.script, PathBuf::from("/usr/local/bin/cleanup.sh"));
+        assert_eq!(after.timeout_secs, None);
+    }
+
+    #[test]
+    fn test_session_hook_optional_timeout_omitted() {
+        let json = r#"{
+            "meta": { "name": "p" },
+            "session_hooks": { "before": { "script": "/x/y.sh" } }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse profile");
+        assert_eq!(profile.session_hooks.before.unwrap().timeout_secs, None);
+    }
+
+    #[test]
+    fn test_session_hook_rejects_unknown_field() {
+        let json = r#"{
+            "meta": { "name": "p" },
+            "session_hooks": {
+                "before": {
+                    "script": "/x/y.sh",
+                    "args": ["--foo"]
+                }
+            }
+        }"#;
+        let result = serde_json::from_str::<Profile>(json);
+        assert!(
+            result.is_err(),
+            "SessionHook should reject unknown fields, got: {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_session_hooks_rejects_unknown_field() {
+        // Catches typos like "befor" or "after_run".
+        let json = r#"{
+            "meta": { "name": "p" },
+            "session_hooks": { "befor": { "script": "/x/y.sh" } }
+        }"#;
+        let result = serde_json::from_str::<Profile>(json);
+        assert!(
+            result.is_err(),
+            "SessionHooks must reject unknown fields, got: {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_merge_profiles_session_hooks_child_overrides_per_field() {
+        let mut base = base_profile();
+        base.session_hooks = SessionHooks {
+            before: Some(SessionHook {
+                script: PathBuf::from("/base/before.sh"),
+                timeout_secs: Some(5),
+            }),
+            after: Some(SessionHook {
+                script: PathBuf::from("/base/after.sh"),
+                timeout_secs: None,
+            }),
+        };
+        let mut child = child_profile();
+        child.session_hooks = SessionHooks {
+            before: Some(SessionHook {
+                script: PathBuf::from("/child/before.sh"),
+                timeout_secs: None,
+            }),
+            after: None,
+        };
+
+        let merged = merge_profiles(base, child);
+        let merged_before = merged.session_hooks.before.expect("before present");
+        assert_eq!(merged_before.script, PathBuf::from("/child/before.sh"));
+        assert_eq!(merged_before.timeout_secs, None);
+        let merged_after = merged
+            .session_hooks
+            .after
+            .expect("after preserved from base");
+        assert_eq!(merged_after.script, PathBuf::from("/base/after.sh"));
+    }
+
+    #[test]
+    fn test_merge_profiles_session_hooks_child_inherits_when_absent() {
+        let mut base = base_profile();
+        base.session_hooks = SessionHooks {
+            before: Some(SessionHook {
+                script: PathBuf::from("/base/before.sh"),
+                timeout_secs: Some(7),
+            }),
+            after: None,
+        };
+        let merged = merge_profiles(base, child_profile());
+        let before = merged.session_hooks.before.expect("inherited from base");
+        assert_eq!(before.script, PathBuf::from("/base/before.sh"));
+        assert_eq!(before.timeout_secs, Some(7));
+        assert!(merged.session_hooks.after.is_none());
     }
 
     #[test]
@@ -4902,7 +5151,7 @@ mod tests {
         std::fs::write(
             &profile_path,
             r#"{
-                "extends": "opencode",
+                "extends": "openclaw",
                 "meta": { "name": "ext-test" },
                 "filesystem": { "allow": ["/tmp/ext-test"] }
             }"#,
@@ -4911,10 +5160,10 @@ mod tests {
 
         let profile = load_from_file(&profile_path).expect("load extended profile");
         assert_eq!(profile.meta.name, "ext-test");
-        // Should inherit codex's filesystem paths
+        // Should inherit openclaw's filesystem paths
         assert!(
             profile.filesystem.allow.len() > 1,
-            "Expected inherited paths from codex, got: {:?}",
+            "Expected inherited paths from openclaw, got: {:?}",
             profile.filesystem.allow
         );
         assert!(
@@ -4973,15 +5222,15 @@ mod tests {
 
     #[test]
     fn test_extends_chain_three_levels() {
-        // Test A -> B -> codex (built-in)
+        // Test A -> B -> openclaw (built-in)
         let dir = tempdir().expect("tmpdir");
 
-        // B extends codex
+        // B extends openclaw
         let b_path = dir.path().join("b.json");
         std::fs::write(
             &b_path,
             r#"{
-                "extends": "opencode",
+                "extends": "openclaw",
                 "meta": { "name": "b-profile" },
                 "filesystem": { "allow": ["/b/path"] }
             }"#,
@@ -5596,9 +5845,9 @@ mod tests {
 
     #[test]
     fn test_extends_duplicate_base_deduplicates() {
-        // extends: ["opencode", "opencode"] — duplicate is silently skipped
+        // extends: ["openclaw", "openclaw"] — duplicate is silently skipped
         let profile = Profile {
-            extends: Some(vec!["opencode".to_string(), "opencode".to_string()]),
+            extends: Some(vec!["openclaw".to_string(), "openclaw".to_string()]),
             ..Default::default()
         };
 
@@ -5644,7 +5893,7 @@ mod tests {
         std::fs::write(
             &profile_path,
             r#"{
-                "extends": ["opencode", "opencode"],
+                "extends": ["openclaw", "openclaw"],
                 "meta": { "name": "shared-base-test" }
             }"#,
         )
@@ -5830,7 +6079,10 @@ mod tests {
         .expect("parse profile with supported aliases");
 
         assert!(profile.network.block);
-        assert_eq!(profile.network.allow_domain, vec!["api.openai.com"]);
+        assert_eq!(
+            profile.network.allow_domain,
+            vec![AllowDomainEntry::Plain("api.openai.com".to_string())]
+        );
         assert_eq!(profile.network.open_port, vec![3000]);
         assert_eq!(
             profile.network.upstream_proxy.as_deref(),
@@ -5867,14 +6119,151 @@ mod tests {
     }
 
     #[test]
+    fn test_allow_domain_deserializes_plain_string() {
+        let profile: Profile = serde_json::from_str(
+            r#"{
+                "meta": { "name": "test" },
+                "network": {
+                    "allow_domain": ["api.openai.com", "*.googleapis.com"]
+                }
+            }"#,
+        )
+        .expect("parse profile with plain allow_domain");
+
+        assert_eq!(
+            profile.network.allow_domain,
+            vec![
+                AllowDomainEntry::Plain("api.openai.com".to_string()),
+                AllowDomainEntry::Plain("*.googleapis.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_allow_domain_deserializes_with_endpoints() {
+        let profile: Profile = serde_json::from_str(
+            r#"{
+                "meta": { "name": "test" },
+                "network": {
+                    "allow_domain": [
+                        "api.openai.com",
+                        {
+                            "domain": "api.github.com",
+                            "endpoints": [
+                                { "method": "GET", "path": "/repos/my-org/**" },
+                                { "method": "POST", "path": "/repos/my-org/*/issues" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("parse profile with endpoint-restricted domain");
+
+        assert_eq!(profile.network.allow_domain.len(), 2);
+        assert_eq!(
+            profile.network.allow_domain[0],
+            AllowDomainEntry::Plain("api.openai.com".to_string())
+        );
+        match &profile.network.allow_domain[1] {
+            AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                assert_eq!(domain, "api.github.com");
+                assert_eq!(endpoints.len(), 2);
+                assert_eq!(endpoints[0].method, "GET");
+                assert_eq!(endpoints[0].path, "/repos/my-org/**");
+                assert_eq!(endpoints[1].method, "POST");
+                assert_eq!(endpoints[1].path, "/repos/my-org/*/issues");
+            }
+            other => panic!("expected WithEndpoints, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_allow_domain_appends_endpoints_for_same_domain() {
+        let base = vec![AllowDomainEntry::WithEndpoints {
+            domain: "api.github.com".to_string(),
+            endpoints: vec![nono_proxy::config::EndpointRule {
+                method: "GET".to_string(),
+                path: "/repos/my-org/**".to_string(),
+            }],
+        }];
+        let child = vec![AllowDomainEntry::WithEndpoints {
+            domain: "api.github.com".to_string(),
+            endpoints: vec![nono_proxy::config::EndpointRule {
+                method: "POST".to_string(),
+                path: "/repos/my-org/*/issues".to_string(),
+            }],
+        }];
+
+        let merged = merge_allow_domain(&base, &child);
+
+        assert_eq!(merged.len(), 1);
+        match &merged[0] {
+            AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                assert_eq!(domain, "api.github.com");
+                assert_eq!(endpoints.len(), 2);
+                assert_eq!(endpoints[0].method, "GET");
+                assert_eq!(endpoints[1].method, "POST");
+            }
+            other => panic!("expected WithEndpoints, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_allow_domain_plain_plus_endpoints_becomes_with_endpoints() {
+        let base = vec![AllowDomainEntry::Plain("api.github.com".to_string())];
+        let child = vec![AllowDomainEntry::WithEndpoints {
+            domain: "api.github.com".to_string(),
+            endpoints: vec![nono_proxy::config::EndpointRule {
+                method: "GET".to_string(),
+                path: "/repos/**".to_string(),
+            }],
+        }];
+
+        let merged = merge_allow_domain(&base, &child);
+
+        assert_eq!(merged.len(), 1);
+        match &merged[0] {
+            AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                assert_eq!(domain, "api.github.com");
+                assert_eq!(endpoints.len(), 1);
+            }
+            other => panic!("expected WithEndpoints, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_allow_domain_preserves_distinct_domains() {
+        let base = vec![AllowDomainEntry::Plain("api.openai.com".to_string())];
+        let child = vec![AllowDomainEntry::WithEndpoints {
+            domain: "api.github.com".to_string(),
+            endpoints: vec![nono_proxy::config::EndpointRule {
+                method: "GET".to_string(),
+                path: "/repos/**".to_string(),
+            }],
+        }];
+
+        let merged = merge_allow_domain(&base, &child);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            merged[0],
+            AllowDomainEntry::Plain("api.openai.com".to_string())
+        );
+        assert!(
+            matches!(&merged[1], AllowDomainEntry::WithEndpoints { domain, .. } if domain == "api.github.com")
+        );
+    }
+
+    #[test]
     fn test_extends_can_clear_inherited_network_profile_with_null() {
         let dir = tempfile::tempdir().expect("tmpdir");
-        let profile_path = dir.path().join("codex-netopen.json");
+        let profile_path = dir.path().join("openclaw-netopen.json");
         std::fs::write(
             &profile_path,
             r#"{
-                "meta": { "name": "codex-netopen" },
-                "extends": "opencode",
+                "meta": { "name": "openclaw-netopen" },
+                "extends": "openclaw",
                 "network": { "network_profile": null }
             }"#,
         )
@@ -5888,8 +6277,8 @@ mod tests {
                 .filesystem
                 .allow
                 .iter()
-                .any(|path| path == "$HOME/.opencode"),
-            "expected filesystem grants from opencode to still be inherited",
+                .any(|path| path == "$HOME/.openclaw"),
+            "expected filesystem grants from openclaw to still be inherited",
         );
     }
 

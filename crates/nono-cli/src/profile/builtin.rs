@@ -30,6 +30,13 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_no_longer_inbuilt() {
+        // Removed: opencode is now shipped via the registry pack
+        // `always-further/opencode`, not embedded in policy.json.
+        assert!(get_builtin("opencode").is_none());
+    }
+
+    #[test]
     fn test_get_builtin_default() {
         let profile = get_builtin("default").expect("Profile not found");
         assert_eq!(profile.meta.name, "default");
@@ -48,26 +55,6 @@ mod tests {
                 .filesystem
                 .allow
                 .contains(&"$HOME/.openclaw".to_string())
-        );
-    }
-
-    #[test]
-    fn test_get_builtin_opencode() {
-        let profile = get_builtin("opencode").expect("Profile not found");
-        assert_eq!(profile.meta.name, "opencode");
-        assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
-        assert!(profile.interactive);
-        assert!(
-            profile
-                .filesystem
-                .allow
-                .contains(&"$HOME/.opencode".to_string())
-        );
-        assert!(
-            profile
-                .filesystem
-                .allow
-                .contains(&"$HOME/.local/share/opentui".to_string())
         );
     }
 
@@ -126,22 +113,23 @@ mod tests {
         assert!(profiles.contains(&"default".to_string()));
         assert!(profiles.contains(&"linux-host-compat".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
-        assert!(profiles.contains(&"opencode".to_string()));
         assert!(profiles.contains(&"swival".to_string()));
         // Profiles that ship via registry packs instead of as built-ins:
-        //   claude-code → always-further/claude (removed v0.43.0)
-        //   codex       → always-further/codex  (removed v0.43.0)
+        //   claude-code → always-further/claude   (removed v0.43.0)
+        //   codex       → always-further/codex    (removed v0.43.0)
+        //   opencode    → always-further/opencode (removed)
         assert!(!profiles.contains(&"claude-code".to_string()));
         assert!(!profiles.contains(&"claude-no-kc".to_string()));
         assert!(!profiles.contains(&"codex".to_string()));
+        assert!(!profiles.contains(&"opencode".to_string()));
     }
 
     #[test]
     fn test_profile_group_merging() {
-        // Use opencode as a representative inbuilt profile that extends
-        // `default` and adds its own groups (codex moved to a registry pack
-        // in v0.43.0 alongside claude-code).
-        let profile = get_builtin("opencode").expect("Profile not found");
+        // Use swival as a representative inbuilt profile that extends
+        // `default` and adds its own groups (opencode, codex, and claude-code
+        // moved to registry packs).
+        let profile = get_builtin("swival").expect("Profile not found");
         // Should have default profile groups (inherited via extends).
         assert!(
             profile
@@ -245,49 +233,27 @@ mod tests {
 
     #[test]
     fn test_linux_interactive_profiles_include_sysfs_but_not_runtime_state_or_temp() {
-        for name in ["opencode", "swival"] {
-            let profile = get_builtin(name).expect("Profile not found");
-            assert!(
-                !profile
-                    .groups
-                    .include
-                    .contains(&"linux_runtime_state".to_string()),
-                "{} should not include linux_runtime_state",
-                name
-            );
-            assert!(
-                profile
-                    .groups
-                    .include
-                    .contains(&"linux_sysfs_read".to_string()),
-                "{} should include linux_sysfs_read",
-                name
-            );
-            assert!(
-                !profile
-                    .groups
-                    .include
-                    .contains(&"linux_temp_read".to_string()),
-                "{} should not include linux_temp_read",
-                name
-            );
-        }
-    }
-
-    #[test]
-    fn test_opencode_profile_includes_tmpdir_and_state_dir() {
-        let policy = crate::policy::load_embedded_policy().expect("load embedded policy");
-        let opencode = policy.profiles.get("opencode").expect("opencode profile");
+        let profile = get_builtin("swival").expect("Profile not found");
         assert!(
-            opencode.filesystem.allow.contains(&"$TMPDIR".to_string()),
-            "opencode profile should allow $TMPDIR for Bun TUI runtime extraction"
+            !profile
+                .groups
+                .include
+                .contains(&"linux_runtime_state".to_string()),
+            "swival should not include linux_runtime_state"
         );
         assert!(
-            opencode
-                .filesystem
-                .allow
-                .contains(&"$HOME/.local/state/opencode".to_string()),
-            "opencode profile should allow $HOME/.local/state/opencode"
+            profile
+                .groups
+                .include
+                .contains(&"linux_sysfs_read".to_string()),
+            "swival should include linux_sysfs_read"
+        );
+        assert!(
+            !profile
+                .groups
+                .include
+                .contains(&"linux_temp_read".to_string()),
+            "swival should not include linux_temp_read"
         );
     }
 

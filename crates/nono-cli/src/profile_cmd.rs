@@ -1039,10 +1039,20 @@ pub(crate) fn cmd_show(args: ProfileShowArgs) -> Result<()> {
             );
         }
         if !net.allow_domain.is_empty() {
+            let display: Vec<String> = net
+                .allow_domain
+                .iter()
+                .map(|e| match e {
+                    profile::AllowDomainEntry::Plain(s) => s.clone(),
+                    profile::AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                        format!("{} ({} endpoint rules)", domain, endpoints.len())
+                    }
+                })
+                .collect();
             println!(
                 "    {}: {}",
                 theme::fg("allow_domain", t.subtext),
-                net.allow_domain.join(", ")
+                display.join(", ")
             );
         }
         if !net.resolved_credentials().is_empty() {
@@ -1489,12 +1499,20 @@ pub(crate) fn cmd_diff(args: ProfileDiffArgs) -> Result<()> {
         }
     }
 
+    let p1_allow_domain_strs: Vec<String> = p1
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+    let p2_allow_domain_strs: Vec<String> = p2
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
     let net_vec_diffs = diff_string_vecs(&[
-        (
-            "allow_domain",
-            &p1.network.allow_domain,
-            &p2.network.allow_domain,
-        ),
+        ("allow_domain", &p1_allow_domain_strs, &p2_allow_domain_strs),
         (
             "credentials",
             p1.network.resolved_credentials(),
@@ -1949,6 +1967,19 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
         serde_json::json!({ "added": added, "removed": removed })
     };
 
+    let p1_allow_domain_strs: Vec<String> = p1
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+    let p2_allow_domain_strs: Vec<String> = p2
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+
     let ou1 = p1.open_urls.as_ref();
     let ou2 = p2.open_urls.as_ref();
 
@@ -1997,7 +2028,7 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
                 "profile2": p2.network.resolved_network_profile(),
                 "changed": p1.network.resolved_network_profile() != p2.network.resolved_network_profile(),
             },
-            "allow_domain": diff_vec(&p1.network.allow_domain, &p2.network.allow_domain),
+            "allow_domain": diff_vec(&p1_allow_domain_strs, &p2_allow_domain_strs),
             "credentials": diff_vec(p1.network.resolved_credentials(), p2.network.resolved_credentials()),
             "open_port": {
                 "profile1": p1.network.open_port,
@@ -2939,10 +2970,39 @@ fn resolve_to_manifest(
         manifest::NetworkMode::Unrestricted
     };
 
+    let manifest_endpoints: Vec<manifest::NetworkEndpoint> = prof
+        .network
+        .allow_domain
+        .iter()
+        .filter_map(|e| match e {
+            profile::AllowDomainEntry::WithEndpoints { domain, endpoints }
+                if !endpoints.is_empty() =>
+            {
+                let host: manifest::NetworkEndpointHost = domain.as_str().try_into().ok()?;
+                let rules = endpoints
+                    .iter()
+                    .filter_map(|r| {
+                        let method: manifest::EndpointRuleMethod =
+                            r.method.as_str().try_into().ok()?;
+                        let path: manifest::EndpointRulePath = r.path.as_str().try_into().ok()?;
+                        Some(manifest::EndpointRule { method, path })
+                    })
+                    .collect();
+                Some(manifest::NetworkEndpoint { host, rules })
+            }
+            _ => None,
+        })
+        .collect();
+
     let network = Some(manifest::Network {
         mode: network_mode,
-        allow_domains: prof.network.allow_domain.clone(),
-        endpoints: Vec::new(),
+        allow_domains: prof
+            .network
+            .allow_domain
+            .iter()
+            .map(|e| e.domain().to_string())
+            .collect(),
+        endpoints: manifest_endpoints,
         dns: true,
         ports: if prof.network.listen_port.is_empty() && prof.network.open_port.is_empty() {
             None
@@ -3291,9 +3351,9 @@ mod tests {
         let xdg_str = xdg.to_str().expect("utf8 xdg");
         let _env = crate::test_env::EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", xdg_str)]);
 
-        // `opencode` is a known built-in profile; init to the default path must be blocked.
+        // `openclaw` is a known built-in profile; init to the default path must be blocked.
         let result = cmd_init(ProfileInitArgs {
-            name: "opencode".to_string(),
+            name: "openclaw".to_string(),
             extends: None,
             groups: vec![],
             description: None,
@@ -3321,10 +3381,10 @@ mod tests {
         let xdg_str = xdg.to_str().expect("utf8 xdg");
         let _env = crate::test_env::EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", xdg_str)]);
 
-        let out = dir.path().join("opencode-draft.json");
+        let out = dir.path().join("openclaw-draft.json");
         // Shadow check applies even when --output points to a custom path.
         let result = cmd_init(ProfileInitArgs {
-            name: "opencode".to_string(),
+            name: "openclaw".to_string(),
             extends: None,
             groups: vec![],
             description: None,
@@ -3683,27 +3743,27 @@ mod tests {
             "expected 'default' in profiles"
         );
         assert!(
-            profiles.contains(&"opencode".to_string()),
-            "expected 'codex' in profiles"
+            profiles.contains(&"openclaw".to_string()),
+            "expected 'openclaw' in profiles"
         );
     }
 
     #[test]
     fn test_show_resolves_inheritance() {
-        let profile = profile::load_profile("opencode").expect("opencode profile should load");
+        let profile = profile::load_profile("openclaw").expect("openclaw profile should load");
         assert!(
             !profile.groups.include.is_empty(),
-            "opencode should have groups"
+            "openclaw should have groups"
         );
-        // opencode extends default, so it should have default's base groups
+        // openclaw extends default, so it should have default's base groups
         let has_deny = profile.groups.include.iter().any(|g| g.contains("deny"));
-        assert!(has_deny, "opencode should inherit deny groups");
+        assert!(has_deny, "openclaw should inherit deny groups");
     }
 
     #[test]
     fn test_diff_shows_differences() {
         let p1 = profile::load_profile("default").expect("default should load");
-        let p2 = profile::load_profile("opencode").expect("opencode should load");
+        let p2 = profile::load_profile("openclaw").expect("openclaw should load");
 
         let g1: BTreeSet<&str> = p1.groups.include.iter().map(|s| s.as_str()).collect();
         let g2: BTreeSet<&str> = p2.groups.include.iter().map(|s| s.as_str()).collect();
@@ -3711,7 +3771,7 @@ mod tests {
         let added: BTreeSet<&&str> = g2.difference(&g1).collect();
         assert!(
             !added.is_empty(),
-            "codex should have additional groups over default"
+            "openclaw should have additional groups over default"
         );
     }
 
