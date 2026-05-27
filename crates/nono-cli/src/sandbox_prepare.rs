@@ -421,7 +421,7 @@ pub(crate) struct PreparedSandbox {
     pub(crate) rollback_exclude_patterns: Vec<String>,
     pub(crate) rollback_exclude_globs: Vec<String>,
     pub(crate) network_profile: Option<String>,
-    pub(crate) allow_domain: Vec<String>,
+    pub(crate) allow_domain: Vec<profile::AllowDomainEntry>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
     pub(crate) upstream_proxy: Option<String>,
@@ -1021,12 +1021,20 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 (Vec::new(), Vec::new())
             };
 
-        let allow_domain = manifest
+        let manifest_allow_domain_strs: Vec<String> = manifest
             .network
             .as_ref()
             .map(|network| network.allow_domains.clone())
             .unwrap_or_default();
-        print_allow_domain_port_warnings(&allow_domain, "manifest allow_domain", silent);
+        print_allow_domain_port_warnings(
+            &manifest_allow_domain_strs,
+            "manifest allow_domain",
+            silent,
+        );
+        let allow_domain: Vec<profile::AllowDomainEntry> = manifest_allow_domain_strs
+            .into_iter()
+            .map(profile::AllowDomainEntry::Plain)
+            .collect();
         let credentials = manifest
             .credentials
             .iter()
@@ -1104,7 +1112,11 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         let profile_warnings = command_blocking_deprecation::collect_profile_warnings(profile);
         command_blocking_deprecation::print_warnings(&profile_warnings, silent);
     }
-    print_allow_domain_port_warnings(&profile_allow_domain, "profile allow_domain", silent);
+    let profile_allow_domain_strs: Vec<String> = profile_allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+    print_allow_domain_port_warnings(&profile_allow_domain_strs, "profile allow_domain", silent);
     print_allow_domain_port_warnings(&args.allow_proxy, "--allow-domain", silent);
 
     #[cfg(unix)]

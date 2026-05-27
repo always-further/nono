@@ -182,10 +182,39 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     if let Some(profile) = recommended_profile {
         output::print_profile_hint(recommended_program_name, profile, flags.silent);
     }
+    let allowed_domain_strs: Vec<String> = flags
+        .proxy
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+    let domain_endpoints: Vec<sandbox_state::DomainEndpointState> = flags
+        .proxy
+        .allow_domain
+        .iter()
+        .filter_map(|e| match e {
+            crate::profile::AllowDomainEntry::WithEndpoints { domain, endpoints }
+                if !endpoints.is_empty() =>
+            {
+                Some(sandbox_state::DomainEndpointState {
+                    domain: domain.clone(),
+                    endpoints: endpoints
+                        .iter()
+                        .map(|r| sandbox_state::EndpointRuleState {
+                            method: r.method.clone(),
+                            path: r.path.clone(),
+                        })
+                        .collect(),
+                })
+            }
+            _ => None,
+        })
+        .collect();
     let cap_file = write_capability_state_file(
         &caps,
         &flags.bypass_protection_paths,
-        &flags.proxy.allow_domain,
+        &allowed_domain_strs,
+        &domain_endpoints,
         flags.silent,
     );
     let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
@@ -422,10 +451,15 @@ fn write_capability_state_file(
     caps: &CapabilitySet,
     bypass_protection_paths: &[std::path::PathBuf],
     allowed_domains: &[String],
+    domain_endpoints: &[sandbox_state::DomainEndpointState],
     silent: bool,
 ) -> Option<std::path::PathBuf> {
-    let state =
-        sandbox_state::SandboxState::from_caps(caps, bypass_protection_paths, allowed_domains);
+    let state = sandbox_state::SandboxState::from_caps(
+        caps,
+        bypass_protection_paths,
+        allowed_domains,
+        domain_endpoints,
+    );
 
     for _ in 0..8 {
         let cap_file = next_capability_state_file_path();

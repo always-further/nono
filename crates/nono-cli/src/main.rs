@@ -262,7 +262,9 @@ mod tests {
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
-            allow_domain: vec!["docs.python.org".to_string()],
+            allow_domain: vec![profile::AllowDomainEntry::Plain(
+                "docs.python.org".to_string(),
+            )],
             credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
             upstream_proxy: None,
@@ -310,7 +312,9 @@ mod tests {
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
-            allow_domain: vec!["docs.python.org".to_string()],
+            allow_domain: vec![profile::AllowDomainEntry::Plain(
+                "docs.python.org".to_string(),
+            )],
             credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
             upstream_proxy: None,
@@ -337,7 +341,10 @@ mod tests {
             effective,
             EffectiveProxySettings {
                 network_profile: Some("minimal".to_string()),
-                allow_domain: vec!["docs.python.org".to_string(), "example.com".to_string()],
+                allow_domain: vec![
+                    profile::AllowDomainEntry::Plain("docs.python.org".to_string()),
+                    profile::AllowDomainEntry::Plain("example.com".to_string()),
+                ],
                 credentials: vec!["github".to_string(), "openai".to_string()],
             }
         );

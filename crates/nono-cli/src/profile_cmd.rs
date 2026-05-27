@@ -1039,10 +1039,20 @@ pub(crate) fn cmd_show(args: ProfileShowArgs) -> Result<()> {
             );
         }
         if !net.allow_domain.is_empty() {
+            let display: Vec<String> = net
+                .allow_domain
+                .iter()
+                .map(|e| match e {
+                    profile::AllowDomainEntry::Plain(s) => s.clone(),
+                    profile::AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                        format!("{} ({} endpoint rules)", domain, endpoints.len())
+                    }
+                })
+                .collect();
             println!(
                 "    {}: {}",
                 theme::fg("allow_domain", t.subtext),
-                net.allow_domain.join(", ")
+                display.join(", ")
             );
         }
         if !net.resolved_credentials().is_empty() {
@@ -1489,12 +1499,20 @@ pub(crate) fn cmd_diff(args: ProfileDiffArgs) -> Result<()> {
         }
     }
 
+    let p1_allow_domain_strs: Vec<String> = p1
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+    let p2_allow_domain_strs: Vec<String> = p2
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
     let net_vec_diffs = diff_string_vecs(&[
-        (
-            "allow_domain",
-            &p1.network.allow_domain,
-            &p2.network.allow_domain,
-        ),
+        ("allow_domain", &p1_allow_domain_strs, &p2_allow_domain_strs),
         (
             "credentials",
             p1.network.resolved_credentials(),
@@ -1949,6 +1967,19 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
         serde_json::json!({ "added": added, "removed": removed })
     };
 
+    let p1_allow_domain_strs: Vec<String> = p1
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+    let p2_allow_domain_strs: Vec<String> = p2
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
+
     let ou1 = p1.open_urls.as_ref();
     let ou2 = p2.open_urls.as_ref();
 
@@ -1997,7 +2028,7 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
                 "profile2": p2.network.resolved_network_profile(),
                 "changed": p1.network.resolved_network_profile() != p2.network.resolved_network_profile(),
             },
-            "allow_domain": diff_vec(&p1.network.allow_domain, &p2.network.allow_domain),
+            "allow_domain": diff_vec(&p1_allow_domain_strs, &p2_allow_domain_strs),
             "credentials": diff_vec(p1.network.resolved_credentials(), p2.network.resolved_credentials()),
             "open_port": {
                 "profile1": p1.network.open_port,
@@ -2939,10 +2970,39 @@ fn resolve_to_manifest(
         manifest::NetworkMode::Unrestricted
     };
 
+    let manifest_endpoints: Vec<manifest::NetworkEndpoint> = prof
+        .network
+        .allow_domain
+        .iter()
+        .filter_map(|e| match e {
+            profile::AllowDomainEntry::WithEndpoints { domain, endpoints }
+                if !endpoints.is_empty() =>
+            {
+                let host: manifest::NetworkEndpointHost = domain.as_str().try_into().ok()?;
+                let rules = endpoints
+                    .iter()
+                    .filter_map(|r| {
+                        let method: manifest::EndpointRuleMethod =
+                            r.method.as_str().try_into().ok()?;
+                        let path: manifest::EndpointRulePath = r.path.as_str().try_into().ok()?;
+                        Some(manifest::EndpointRule { method, path })
+                    })
+                    .collect();
+                Some(manifest::NetworkEndpoint { host, rules })
+            }
+            _ => None,
+        })
+        .collect();
+
     let network = Some(manifest::Network {
         mode: network_mode,
-        allow_domains: prof.network.allow_domain.clone(),
-        endpoints: Vec::new(),
+        allow_domains: prof
+            .network
+            .allow_domain
+            .iter()
+            .map(|e| e.domain().to_string())
+            .collect(),
+        endpoints: manifest_endpoints,
         dns: true,
         ports: if prof.network.listen_port.is_empty() && prof.network.open_port.is_empty() {
             None

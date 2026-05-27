@@ -966,6 +966,36 @@ where
     }
 }
 
+/// An entry in the `allow_domain` array.
+///
+/// Can be either a plain hostname string (backward compatible, CONNECT tunnel)
+/// or an object with a domain and endpoint rules (requires TLS interception
+/// for L7 method+path filtering).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AllowDomainEntry {
+    /// Plain hostname — allowed via CONNECT tunnel without L7 inspection.
+    Plain(String),
+    /// Domain with endpoint restrictions — requires TLS interception.
+    /// When `endpoints` is non-empty, only matching method+path combinations
+    /// are allowed (default-deny).
+    WithEndpoints {
+        domain: String,
+        #[serde(default)]
+        endpoints: Vec<nono_proxy::config::EndpointRule>,
+    },
+}
+
+impl AllowDomainEntry {
+    /// Extract the domain/hostname regardless of variant.
+    pub fn domain(&self) -> &str {
+        match self {
+            Self::Plain(s) => s,
+            Self::WithEndpoints { domain, .. } => domain,
+        }
+    }
+}
+
 /// Network configuration in a profile
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -982,6 +1012,7 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "InheritableValue::is_inherit")]
     pub network_profile: InheritableValue<String>,
     /// Additional domains to allow through the proxy (on top of profile hosts).
+    /// Entries can be plain hostname strings or objects with endpoint rules.
     /// Canonical profile key: `allow_domain` (legacy `proxy_allow` and
     /// `allow_proxy` are also accepted).
     /// ALIAS(canonical="allow_domain", introduced="v0.0.0", remove_by="indefinite", issue="#415")
@@ -991,7 +1022,7 @@ pub struct NetworkConfig {
         alias = "proxy_allow",
         alias = "allow_proxy"
     )]
-    pub allow_domain: Vec<String>,
+    pub allow_domain: Vec<AllowDomainEntry>,
     /// Credential services to enable via reverse proxy.
     /// Canonical profile key: `credentials` (legacy `proxy_credentials` accepted).
     ///
@@ -2551,7 +2582,10 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
                 .network
                 .network_profile
                 .merge(base.network.network_profile),
-            allow_domain: dedup_append(&base.network.allow_domain, &child.network.allow_domain),
+            allow_domain: merge_allow_domain(
+                &base.network.allow_domain,
+                &child.network.allow_domain,
+            ),
             open_port: dedup_append(&base.network.open_port, &child.network.open_port),
             listen_port: dedup_append(&base.network.listen_port, &child.network.listen_port),
             connect_port: dedup_append(&base.network.connect_port, &child.network.connect_port),
@@ -2666,6 +2700,47 @@ pub(crate) fn dedup_append<T: Eq + std::hash::Hash + Clone>(base: &[T], child: &
         }
     }
     result
+}
+
+/// Merge `allow_domain` entries from base and child profiles.
+///
+/// For the same domain, endpoint rules are **appended** (child rules added to base).
+/// A plain entry upgraded with endpoints from the other side becomes `WithEndpoints`.
+/// Order: base domains first, then child-only domains.
+pub(crate) fn merge_allow_domain(
+    base: &[AllowDomainEntry],
+    child: &[AllowDomainEntry],
+) -> Vec<AllowDomainEntry> {
+    let mut domains: Vec<String> = Vec::new();
+    let mut rules: HashMap<String, Vec<nono_proxy::config::EndpointRule>> = HashMap::new();
+
+    for entry in base.iter().chain(child.iter()) {
+        let (domain, endpoints) = match entry {
+            AllowDomainEntry::Plain(d) => (d.clone(), &[][..]),
+            AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                (domain.clone(), endpoints.as_slice())
+            }
+        };
+        if !domains.contains(&domain) {
+            domains.push(domain.clone());
+        }
+        rules
+            .entry(domain)
+            .or_default()
+            .extend_from_slice(endpoints);
+    }
+
+    domains
+        .into_iter()
+        .map(|domain| {
+            let endpoints = rules.remove(&domain).unwrap_or_default();
+            if endpoints.is_empty() {
+                AllowDomainEntry::Plain(domain)
+            } else {
+                AllowDomainEntry::WithEndpoints { domain, endpoints }
+            }
+        })
+        .collect()
 }
 
 /// Get the path to a user profile (default `.json` extension, used for writes).
@@ -4532,7 +4607,7 @@ mod tests {
             network: NetworkConfig {
                 block: false,
                 network_profile: InheritableValue::Set("base-net".to_string()),
-                allow_domain: vec!["base.example.com".to_string()],
+                allow_domain: vec![AllowDomainEntry::Plain("base.example.com".to_string())],
                 open_port: vec![3000],
                 listen_port: vec![4000],
                 connect_port: vec![],
@@ -4612,7 +4687,7 @@ mod tests {
             network: NetworkConfig {
                 block: false,
                 network_profile: InheritableValue::Inherit,
-                allow_domain: vec!["child.example.com".to_string()],
+                allow_domain: vec![AllowDomainEntry::Plain("child.example.com".to_string())],
                 open_port: vec![3000, 5000],
                 listen_port: vec![4000, 6000],
                 connect_port: vec![],
@@ -6011,7 +6086,10 @@ mod tests {
         .expect("parse profile with supported aliases");
 
         assert!(profile.network.block);
-        assert_eq!(profile.network.allow_domain, vec!["api.openai.com"]);
+        assert_eq!(
+            profile.network.allow_domain,
+            vec![AllowDomainEntry::Plain("api.openai.com".to_string())]
+        );
         assert_eq!(profile.network.open_port, vec![3000]);
         assert_eq!(
             profile.network.upstream_proxy.as_deref(),
@@ -6045,6 +6123,143 @@ mod tests {
         assert!(network.contains_key("listen_port"));
         assert!(network.contains_key("upstream_proxy"));
         assert!(network.contains_key("upstream_bypass"));
+    }
+
+    #[test]
+    fn test_allow_domain_deserializes_plain_string() {
+        let profile: Profile = serde_json::from_str(
+            r#"{
+                "meta": { "name": "test" },
+                "network": {
+                    "allow_domain": ["api.openai.com", "*.googleapis.com"]
+                }
+            }"#,
+        )
+        .expect("parse profile with plain allow_domain");
+
+        assert_eq!(
+            profile.network.allow_domain,
+            vec![
+                AllowDomainEntry::Plain("api.openai.com".to_string()),
+                AllowDomainEntry::Plain("*.googleapis.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_allow_domain_deserializes_with_endpoints() {
+        let profile: Profile = serde_json::from_str(
+            r#"{
+                "meta": { "name": "test" },
+                "network": {
+                    "allow_domain": [
+                        "api.openai.com",
+                        {
+                            "domain": "api.github.com",
+                            "endpoints": [
+                                { "method": "GET", "path": "/repos/my-org/**" },
+                                { "method": "POST", "path": "/repos/my-org/*/issues" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("parse profile with endpoint-restricted domain");
+
+        assert_eq!(profile.network.allow_domain.len(), 2);
+        assert_eq!(
+            profile.network.allow_domain[0],
+            AllowDomainEntry::Plain("api.openai.com".to_string())
+        );
+        match &profile.network.allow_domain[1] {
+            AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                assert_eq!(domain, "api.github.com");
+                assert_eq!(endpoints.len(), 2);
+                assert_eq!(endpoints[0].method, "GET");
+                assert_eq!(endpoints[0].path, "/repos/my-org/**");
+                assert_eq!(endpoints[1].method, "POST");
+                assert_eq!(endpoints[1].path, "/repos/my-org/*/issues");
+            }
+            other => panic!("expected WithEndpoints, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_allow_domain_appends_endpoints_for_same_domain() {
+        let base = vec![AllowDomainEntry::WithEndpoints {
+            domain: "api.github.com".to_string(),
+            endpoints: vec![nono_proxy::config::EndpointRule {
+                method: "GET".to_string(),
+                path: "/repos/my-org/**".to_string(),
+            }],
+        }];
+        let child = vec![AllowDomainEntry::WithEndpoints {
+            domain: "api.github.com".to_string(),
+            endpoints: vec![nono_proxy::config::EndpointRule {
+                method: "POST".to_string(),
+                path: "/repos/my-org/*/issues".to_string(),
+            }],
+        }];
+
+        let merged = merge_allow_domain(&base, &child);
+
+        assert_eq!(merged.len(), 1);
+        match &merged[0] {
+            AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                assert_eq!(domain, "api.github.com");
+                assert_eq!(endpoints.len(), 2);
+                assert_eq!(endpoints[0].method, "GET");
+                assert_eq!(endpoints[1].method, "POST");
+            }
+            other => panic!("expected WithEndpoints, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_allow_domain_plain_plus_endpoints_becomes_with_endpoints() {
+        let base = vec![AllowDomainEntry::Plain("api.github.com".to_string())];
+        let child = vec![AllowDomainEntry::WithEndpoints {
+            domain: "api.github.com".to_string(),
+            endpoints: vec![nono_proxy::config::EndpointRule {
+                method: "GET".to_string(),
+                path: "/repos/**".to_string(),
+            }],
+        }];
+
+        let merged = merge_allow_domain(&base, &child);
+
+        assert_eq!(merged.len(), 1);
+        match &merged[0] {
+            AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                assert_eq!(domain, "api.github.com");
+                assert_eq!(endpoints.len(), 1);
+            }
+            other => panic!("expected WithEndpoints, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_allow_domain_preserves_distinct_domains() {
+        let base = vec![AllowDomainEntry::Plain("api.openai.com".to_string())];
+        let child = vec![AllowDomainEntry::WithEndpoints {
+            domain: "api.github.com".to_string(),
+            endpoints: vec![nono_proxy::config::EndpointRule {
+                method: "GET".to_string(),
+                path: "/repos/**".to_string(),
+            }],
+        }];
+
+        let merged = merge_allow_domain(&base, &child);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            merged[0],
+            AllowDomainEntry::Plain("api.openai.com".to_string())
+        );
+        assert!(
+            matches!(&merged[1], AllowDomainEntry::WithEndpoints { domain, .. } if domain == "api.github.com")
+        );
     }
 
     #[test]

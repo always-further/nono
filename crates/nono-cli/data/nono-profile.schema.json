@@ -401,8 +401,13 @@
         },
         "allow_domain": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Additional domains to allow through the proxy on top of the network profile hosts."
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/$defs/AllowDomainWithEndpoints" }
+            ]
+          },
+          "description": "Additional domains to allow through the proxy. Entries can be plain hostname strings (CONNECT tunnel, no L7 filtering) or objects with endpoint rules (TLS-intercepted method+path filtering). When endpoints are present, only matching requests are allowed (default-deny)."
         },
         "proxy_allow": {
           "type": "array",
@@ -591,6 +596,23 @@
         "path": {
           "type": "string",
           "description": "URL path glob pattern. Uses standard glob syntax: \"*\" matches one path segment, \"**\" matches zero or more segments."
+        }
+      }
+    },
+    "AllowDomainWithEndpoints": {
+      "type": "object",
+      "description": "Domain with fine-grained method+path endpoint restrictions. Requires TLS interception for L7 filtering. When endpoints is non-empty, only matching method+path combinations are allowed (default-deny).",
+      "additionalProperties": false,
+      "required": ["domain", "endpoints"],
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Domain hostname to allow (e.g., \"api.github.com\")."
+        },
+        "endpoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRule" },
+          "description": "L7 method+path rules. Only requests matching at least one rule are allowed."
         }
       }
     },

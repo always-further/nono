@@ -42,12 +42,22 @@ The CONNECT tunnel is the most common proxy mode. It validates outbound hostname
 `--allow-domain` is an HTTP(S) proxy allowlist, not a generic raw TCP `host:port` allow. When domain filtering is active, direct outbound connections are blocked and traffic must go through the proxy.
 
 ```bash
-# Allow specific domains
+# Allow specific domains (unrestricted access)
 nono run --allow-cwd --allow-domain api.openai.com --allow-domain api.anthropic.com -- my-agent
+
+# Restrict a domain to specific path patterns
+nono run --allow-cwd \
+  --allow-domain 'https://github.com/my-org/**' \
+  --allow-domain 'https://github.com/my-other-org/**' \
+  -- my-agent
 
 # Use a predefined network profile
 nono run --allow-cwd --network-profile claude-code -- claude
 ```
+
+When `--allow-domain` is given a URL with a path (e.g., `https://github.com/org/**`), only requests matching that path pattern are allowed for that domain. Requests to other paths on the same domain receive `403 Forbidden`. A plain hostname (e.g., `api.openai.com`) allows all paths on the domain.
+
+Use `nono why --self --host https://github.com/some/path` inside the sandbox to check whether a specific URL is permitted and see the configured endpoint rules.
 
 ![Proxy architecture flow](/assets/proxy-flow.png)
 

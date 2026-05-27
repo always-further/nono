@@ -77,6 +77,8 @@ serde_yaml_ng = "0.10.0"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
+globset = "0.4"
+urlencoding = "2"
 tempfile.workspace = true
 vt100 = "0.16.2"
 shlex = "2"

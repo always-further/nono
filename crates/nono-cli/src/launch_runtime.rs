@@ -74,7 +74,7 @@ pub(crate) struct TrustLaunchOptions {
 pub(crate) struct ProxyLaunchOptions {
     pub(crate) active: bool,
     pub(crate) network_profile: Option<String>,
-    pub(crate) allow_domain: Vec<String>,
+    pub(crate) allow_domain: Vec<profile::AllowDomainEntry>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
     pub(crate) upstream_proxy: Option<String>,

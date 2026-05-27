@@ -1179,14 +1179,16 @@ pub struct SandboxArgs {
     )]
     pub network_profile: Option<String>,
 
-    /// Add a domain to the proxy allowlist (repeatable)
+    /// Add a domain to the proxy allowlist (repeatable).
+    /// Use a plain hostname for unrestricted access, or a URL with a path glob
+    /// to restrict to specific endpoints (e.g., https://github.com/org/**)
     /// ALIAS(canonical="--allow-domain", introduced="v0.0.0", remove_by="indefinite", issue="#415")
     #[arg(
         long = "allow-domain",
         alias = "allow-proxy",
         alias = "proxy-allow",
         env = "NONO_ALLOW_DOMAIN",
-        value_name = "DOMAIN",
+        value_name = "DOMAIN_OR_URL",
         help_heading = "NETWORK"
     )]
     pub allow_proxy: Vec<String>,
@@ -1833,7 +1835,7 @@ pub struct WhyArgs {
     #[arg(long, value_enum, help_heading = "QUERY")]
     pub op: Option<WhyOp>,
 
-    /// Network host to check
+    /// Network host or URL to check (e.g. github.com or https://github.com/org/repo)
     #[arg(long, help_heading = "QUERY")]
     pub host: Option<String>,
 
