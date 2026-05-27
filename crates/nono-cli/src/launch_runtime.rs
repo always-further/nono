@@ -103,6 +103,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) rollback: RollbackLaunchOptions,
     pub(crate) trust: TrustLaunchOptions,
     pub(crate) proxy: ProxyLaunchOptions,
+    pub(crate) credential_access: Vec<profile::CredentialAccessGrant>,
     pub(crate) redaction_policy: nono::ScrubPolicy,
     pub(crate) session_hooks: profile::SessionHooks,
     pub(crate) allowed_env_vars: Option<Vec<String>>,
@@ -133,6 +134,7 @@ impl ExecutionFlags {
                 ..TrustLaunchOptions::default()
             },
             proxy: ProxyLaunchOptions::default(),
+            credential_access: Vec::new(),
             redaction_policy: nono::ScrubPolicy::secure_default(),
             session_hooks: profile::SessionHooks::default(),
             allowed_env_vars: None,
@@ -269,6 +271,7 @@ pub(crate) fn prepare_run_launch_plan(
             },
             trust,
             proxy,
+            credential_access: prepared.credential_access,
             redaction_policy,
             session_hooks: prepared.session_hooks,
             allowed_env_vars: prepared.allowed_env_vars,
