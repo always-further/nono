@@ -42,6 +42,7 @@ hyper-rustls = { version = "0.27", features = ["http1", "http2", "ring", "webpki
 h2 = "0.4"
 bytes = "1"
 http = "1"
+tower-service = "0.3"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "1"
@@ -50,7 +51,7 @@ webpki-roots = "1"
 # ephemeral session CA + per-host leaf certificate generation. `ring` matches
 # the rustls crypto provider used elsewhere; `aws_lc_rs` is disabled to avoid
 # a second, redundant crypto stack in the dependency tree.
-rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 # Read the host's system trust store (used to compose the trust bundle that
 # the sandboxed child consumes via SSL_CERT_FILE / REQUESTS_CA_BUNDLE / etc.).
 # We need full DER certs for PEM emission; webpki-roots only ships parsed

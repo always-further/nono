@@ -92,6 +92,7 @@ pub(crate) fn prepare_proxy_launch_options(
         open_url_origins: prepared.open_url_origins.clone(),
         open_url_allow_localhost: prepared.open_url_allow_localhost,
         allow_launch_services_active: prepared.allow_launch_services_active,
+        enable_h2: args.allow_http2,
     })
 }
 
@@ -177,6 +178,8 @@ pub(crate) fn build_proxy_config_from_flags(
     if let Some(port) = proxy.proxy_port {
         proxy_config.bind_port = port;
     }
+
+    proxy_config.enable_h2 = proxy.enable_h2;
 
     Ok(proxy_config)
 }

@@ -52,9 +52,16 @@ where
     let mut server_conn = h2::server::Builder::new()
         .max_send_buffer_size(1024 * 1024)
         .max_concurrent_streams(128)
+        .initial_window_size(2 * 1024 * 1024)
+        .initial_connection_window_size(16 * 1024 * 1024)
         .handshake(io)
         .await
         .map_err(|e| ProxyError::HttpParse(format!("h2 server handshake failed: {}", e)))?;
+
+    debug!(
+        "h2_forward: server connection established for {}:{} (window=2MiB, conn_window=16MiB)",
+        ctx.host, ctx.port
+    );
 
     // Resolve upstream addresses (DNS-rebind-safe via filter).
     let check = ctx.filter.check_host(ctx.host, ctx.port).await?;
@@ -69,6 +76,8 @@ where
 
     let (h2_client, h2_conn) = h2::client::Builder::new()
         .max_send_buffer_size(1024 * 1024)
+        .initial_window_size(2 * 1024 * 1024)
+        .initial_connection_window_size(16 * 1024 * 1024)
         .handshake(upstream_tls)
         .await
         .map_err(|e| ProxyError::UpstreamConnect {
@@ -539,9 +548,7 @@ mod tests {
         params.not_after = OffsetDateTime::now_utc() + time::Duration::hours(1);
 
         let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let cert = params
-            .signed_by(&key_pair, ca.ca_cert(), ca.key_pair())
-            .unwrap();
+        let cert = params.signed_by(&key_pair, ca.issuer()).unwrap();
 
         let cert_der = cert.der().clone();
         let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
@@ -727,6 +734,7 @@ mod tests {
             tls_connector_h2: &tls_connector,
             filter: &filter,
             audit_log: None,
+            enable_h2: true,
         };
 
         let (client_io, server_io) = tokio::io::duplex(65536);
@@ -810,6 +818,7 @@ mod tests {
             tls_connector_h2: &tls_connector,
             filter: &filter,
             audit_log: None,
+            enable_h2: true,
         };
 
         let (client_io, server_io) = tokio::io::duplex(65536);
@@ -910,6 +919,7 @@ mod tests {
             tls_connector_h2: &tls_connector,
             filter: &filter,
             audit_log: None,
+            enable_h2: true,
         };
 
         let (client_io, server_io) = tokio::io::duplex(65536);
@@ -1010,6 +1020,7 @@ mod tests {
             tls_connector_h2: &tls_connector,
             filter: &filter,
             audit_log: None,
+            enable_h2: true,
         };
 
         let (client_io, server_io) = tokio::io::duplex(65536);
@@ -1078,6 +1089,7 @@ mod tests {
             tls_connector_h2: &tls_connector,
             filter: &filter,
             audit_log: None,
+            enable_h2: true,
         };
 
         let (client_io, server_io) = tokio::io::duplex(65536);
@@ -1112,6 +1124,317 @@ mod tests {
                     assert!(
                         headers.get("authorization").is_none(),
                         "credential should NOT be injected when endpoint rules don't match"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    /// Build a RouteStore modeling an endpoint-only restriction route (no
+    /// credential_key), as produced by `_ep_` routes from allow_domain.
+    fn make_endpoint_only_route_store(
+        host: &str,
+        port: u16,
+        rules: Vec<EndpointRule>,
+    ) -> RouteStore {
+        let routes = vec![RouteConfig {
+            prefix: "_ep_test".to_string(),
+            upstream: format!("https://{}:{}", host, port),
+            credential_key: None,
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: None,
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: rules,
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+        }];
+        RouteStore::load(&routes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn h2_forward_returns_403_for_endpoint_only_route_when_no_rule_matches() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, _rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let route_store = make_endpoint_only_route_store(
+            "localhost",
+            upstream_port,
+            vec![EndpointRule {
+                method: "GET".to_string(),
+                path: "/repos/my-org/**".to_string(),
+            }],
+        );
+        let credential_store = CredentialStore::empty();
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let ctx = InterceptCtx {
+            route_id: Some("_ep_test"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    // This path is NOT in the endpoint rules
+                    let request = http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "https://localhost:{}/repos/evil-org/exploit",
+                            upstream_port
+                        ))
+                        .body(())
+                        .unwrap();
+                    let (response_fut, _send_stream) =
+                        h2_client.send_request(request, true).unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        403,
+                        "endpoint-only route must deny unmatched requests"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    #[tokio::test]
+    async fn h2_forward_allows_matching_request_on_endpoint_only_route() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let route_store = make_endpoint_only_route_store(
+            "localhost",
+            upstream_port,
+            vec![EndpointRule {
+                method: "GET".to_string(),
+                path: "/repos/my-org/**".to_string(),
+            }],
+        );
+        let credential_store = CredentialStore::empty();
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let ctx = InterceptCtx {
+            route_id: Some("_ep_test"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    // This path IS in the endpoint rules
+                    let request = http::Request::builder()
+                        .method("GET")
+                        .uri(format!(
+                            "https://localhost:{}/repos/my-org/some-repo",
+                            upstream_port
+                        ))
+                        .body(())
+                        .unwrap();
+                    let (response_fut, _send_stream) =
+                        h2_client.send_request(request, true).unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        200,
+                        "endpoint-only route must allow matching requests"
+                    );
+
+                    let (method_path, _headers) = rx.await.unwrap();
+                    assert_eq!(method_path, "GET /repos/my-org/some-repo");
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    #[tokio::test]
+    async fn h2_forward_endpoint_only_denies_even_with_credential_catchall() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, _rx) = spawn_mock_h2_upstream(&ca).await;
+
+        // Scenario: credential catch-all + endpoint-only restriction for same
+        // upstream. The _ep_ route gates authorization; the credential route
+        // injects a secret. A request not matching endpoint rules must be denied
+        // even though the credential catch-all would otherwise forward it.
+        let routes = vec![
+            // Credential catch-all (no endpoint_rules)
+            RouteConfig {
+                prefix: "github-cred".to_string(),
+                upstream: format!("https://localhost:{}", upstream_port),
+                credential_key: Some("gh-token".to_string()),
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy: None,
+                env_var: None,
+                endpoint_rules: vec![],
+                tls_ca: None,
+                tls_client_cert: None,
+                tls_client_key: None,
+                oauth2: None,
+            },
+            // Endpoint-only restriction (_ep_ route)
+            RouteConfig {
+                prefix: "_ep_localhost".to_string(),
+                upstream: format!("https://localhost:{}", upstream_port),
+                credential_key: None,
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: None,
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy: None,
+                env_var: None,
+                endpoint_rules: vec![
+                    EndpointRule {
+                        method: "*".to_string(),
+                        path: "/repos/my-org/**".to_string(),
+                    },
+                    EndpointRule {
+                        method: "*".to_string(),
+                        path: "/graphql".to_string(),
+                    },
+                ],
+                tls_ca: None,
+                tls_client_cert: None,
+                tls_client_key: None,
+                oauth2: None,
+            },
+        ];
+        let route_store = RouteStore::load(&routes).unwrap();
+        let credential_store = make_credential_store("gh-secret");
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let ctx = InterceptCtx {
+            route_id: None,
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    // Path NOT in endpoint rules — must be denied
+                    let request = http::Request::builder()
+                        .method("GET")
+                        .uri(format!(
+                            "https://localhost:{}/repos/evil-org/exploit",
+                            upstream_port
+                        ))
+                        .body(())
+                        .unwrap();
+                    let (response_fut, _send_stream) =
+                        h2_client.send_request(request, true).unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        403,
+                        "endpoint restriction must deny even with credential catch-all present"
                     );
 
                     drop(h2_client);

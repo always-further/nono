@@ -808,6 +808,18 @@ nono run --allow-gpu -- llama-cli -m ./model.gguf -p "hello"
   When used with a profile, the profile must opt into `allow_gpu`; otherwise nono fails closed with an error. Without a profile, the CLI flag alone is sufficient.
 </Note>
 
+#### `--allow-http2`
+
+Enable HTTP/2 multiplexing for upstream proxy connections. When set, the proxy negotiates h2 via ALPN with upstreams that support it, and the CONNECT intercept advertises both `h2` and `http/1.1`.
+
+```bash
+nono run --profile claude-code --allow-http2 -- claude
+```
+
+Without this flag, the proxy uses HTTP/1.1 with keep-alive connection pooling. This is the conservative default since some upstream servers may not handle HTTP/2 correctly.
+
+See [Networking — HTTP/2 Support](/cli/features/networking#http2-support---allow-http2) for details on connection pooling and profile configuration.
+
 ### Execution Mode Flags
 
 #### `--detached`

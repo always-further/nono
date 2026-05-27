@@ -14,6 +14,7 @@ use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
 use crate::external;
 use crate::filter::ProxyFilter;
+use crate::pool::UpstreamPool;
 use crate::reverse;
 use crate::route::RouteStore;
 use crate::tls_intercept::{self, CertCache, EphemeralCa};
@@ -312,6 +313,11 @@ struct ProxyState {
     /// Shared TLS connector for upstream connections (reverse proxy mode).
     /// Created once at startup to avoid rebuilding the root cert store per request.
     tls_connector: tokio_rustls::TlsConnector,
+    /// Default TLS client config (system roots). Used as the pool key for
+    /// routes without a custom CA.
+    default_tls_config: Arc<rustls::ClientConfig>,
+    /// Upstream connection pool (HTTP/1.1 keep-alive + HTTP/2 multiplexing).
+    upstream_pool: Arc<UpstreamPool>,
     /// TLS connector with h2 ALPN for upstream HTTP/2 connections (gRPC).
     tls_connector_h2: tokio_rustls::TlsConnector,
     /// Active connection count for connection limiting.
@@ -326,6 +332,8 @@ struct ProxyState {
     /// CONNECT branch (CONNECTs fall through to the existing 403/tunnel
     /// dispatch even for routes that would otherwise require L7).
     cert_cache: Option<Arc<CertCache>>,
+    /// Whether HTTP/2 is enabled for upstream connections and intercept ALPN.
+    enable_h2: bool,
 }
 
 /// Start the proxy server.
@@ -393,7 +401,12 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     .map_err(|e| ProxyError::Config(format!("TLS config error: {}", e)))?
     .with_root_certificates(root_store)
     .with_no_client_auth();
-    let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config.clone()));
+    let tls_config_arc = Arc::new(tls_config.clone());
+    let tls_connector = tokio_rustls::TlsConnector::from(Arc::clone(&tls_config_arc));
+    let upstream_pool = Arc::new(UpstreamPool::new(
+        Arc::clone(&tls_config_arc),
+        config.enable_h2,
+    ));
 
     let mut tls_config_h2 = tls_config;
     tls_config_h2.alpn_protocols = vec![b"h2".to_vec()];
@@ -533,6 +546,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         (None, _) => (None, None),
     };
 
+    let enable_h2 = config.enable_h2;
     let state = Arc::new(ProxyState {
         filter,
         session_token: session_token.clone(),
@@ -540,11 +554,14 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         credential_store: Arc::new(credential_store),
         config,
         tls_connector,
+        default_tls_config: tls_config_arc,
+        upstream_pool,
         tls_connector_h2,
         active_connections: AtomicUsize::new(0),
         audit_log: Arc::clone(&audit_log),
         bypass_matcher,
         cert_cache,
+        enable_h2,
     });
 
     // Spawn accept loop as a task within the current runtime.
@@ -751,6 +768,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             tls_connector_h2: &state.tls_connector_h2,
                             filter: &state.filter,
                             audit_log: Some(&state.audit_log),
+                            enable_h2: state.enable_h2,
                         };
                         return tls_intercept::handle_intercept_connect(&mut stream, ctx).await;
                     }
@@ -856,6 +874,8 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             session_token: &state.session_token,
             filter: &state.filter,
             tls_connector: &state.tls_connector,
+            default_tls_config: &state.default_tls_config,
+            upstream_pool: &state.upstream_pool,
             audit_log: Some(&state.audit_log),
         };
         reverse::handle_reverse_proxy(first_line, &mut stream, &header_bytes, &ctx, &buffered).await

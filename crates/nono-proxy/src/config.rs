@@ -87,6 +87,12 @@ pub struct ProxyConfig {
     /// (de)serialisation: it's not part of any user-authored config file.
     #[serde(default, skip)]
     pub intercept_parent_ca_pems: Option<Vec<u8>>,
+
+    /// Enable HTTP/2 negotiation for upstream connections.
+    /// When false (default), the reverse proxy pool uses HTTP/1.1 with
+    /// keep-alive and the CONNECT intercept only advertises HTTP/1.1 ALPN.
+    #[serde(default)]
+    pub enable_h2: bool,
 }
 
 impl Default for ProxyConfig {
@@ -101,6 +107,7 @@ impl Default for ProxyConfig {
             max_connections: 256,
             intercept_ca_dir: None,
             intercept_parent_ca_pems: None,
+            enable_h2: false,
         }
     }
 }

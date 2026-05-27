@@ -84,6 +84,7 @@ pub(crate) struct ProxyLaunchOptions {
     pub(crate) open_url_origins: Vec<String>,
     pub(crate) open_url_allow_localhost: bool,
     pub(crate) allow_launch_services_active: bool,
+    pub(crate) enable_h2: bool,
 }
 
 #[derive(Clone)]

@@ -45,6 +45,7 @@ pub struct InterceptCtx<'a> {
     pub tls_connector_h2: &'a tokio_rustls::TlsConnector,
     pub filter: &'a ProxyFilter,
     pub audit_log: Option<&'a audit::SharedAuditLog>,
+    pub enable_h2: bool,
 }
 
 /// Handle a CONNECT request that matched a route requiring L7 visibility.
@@ -63,7 +64,7 @@ pub async fn handle_intercept_connect(stream: &mut TcpStream, ctx: InterceptCtx<
     stream.write_all(response).await?;
     stream.flush().await?;
 
-    let server_config = acceptor::build_server_config(Arc::clone(&ctx.cert_cache))?;
+    let server_config = acceptor::build_server_config(Arc::clone(&ctx.cert_cache), ctx.enable_h2)?;
     let tls_acceptor = TlsAcceptor::from(server_config);
 
     let mut tls_stream = match tls_acceptor.accept(&mut *stream).await {
