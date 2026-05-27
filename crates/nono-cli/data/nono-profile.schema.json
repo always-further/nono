@@ -72,6 +72,10 @@
       "$ref": "#/$defs/HooksConfig",
       "description": "Hook configurations for target applications. Maps application names to their hook definitions."
     },
+    "session_hooks": {
+      "$ref": "#/$defs/SessionHooks",
+      "description": "Session lifecycle hooks. Scripts run outside the sandbox with host privileges before and after the sandboxed process."
+    },
     "rollback": {
       "$ref": "#/$defs/RollbackConfig",
       "description": "Rollback snapshot configuration controlling which files are excluded from undo snapshots."
@@ -436,8 +440,13 @@
         },
         "allow_domain": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Additional domains to allow through the proxy on top of the network profile hosts."
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/$defs/AllowDomainWithEndpoints" }
+            ]
+          },
+          "description": "Additional domains to allow through the proxy. Entries can be plain hostname strings (CONNECT tunnel, no L7 filtering) or objects with endpoint rules (TLS-intercepted method+path filtering). When endpoints are present, only matching requests are allowed (default-deny)."
         },
         "proxy_allow": {
           "type": "array",
@@ -629,6 +638,23 @@
         }
       }
     },
+    "AllowDomainWithEndpoints": {
+      "type": "object",
+      "description": "Domain with fine-grained method+path endpoint restrictions. Requires TLS interception for L7 filtering. When endpoints is non-empty, only matching method+path combinations are allowed (default-deny).",
+      "additionalProperties": false,
+      "required": ["domain", "endpoints"],
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Domain hostname to allow (e.g., \"api.github.com\")."
+        },
+        "endpoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRule" },
+          "description": "L7 method+path rules. Only requests matching at least one rule are allowed."
+        }
+      }
+    },
     "InjectMode": {
       "type": "string",
       "enum": ["header", "url_path", "query_param", "basic_auth"],
@@ -791,6 +817,38 @@
         "script": {
           "type": "string",
           "description": "Script filename from data/hooks/ to install."
+        }
+      }
+    },
+    "SessionHooks": {
+      "type": "object",
+      "description": "Session lifecycle hooks. before runs before the sandboxed child is forked; after runs after it exits. Both run outside the sandbox with host privileges.",
+      "additionalProperties": false,
+      "properties": {
+        "before": {
+          "$ref": "#/$defs/SessionHook",
+          "description": "Hook executed before the sandboxed process starts. May export environment variables to the sandboxed child via NONO_ENV_FILE."
+        },
+        "after": {
+          "$ref": "#/$defs/SessionHook",
+          "description": "Hook executed after the sandboxed process exits. Receives the child exit code via NONO_EXIT_CODE."
+        }
+      }
+    },
+    "SessionHook": {
+      "type": "object",
+      "description": "A single session lifecycle hook configuration.",
+      "additionalProperties": false,
+      "required": ["script"],
+      "properties": {
+        "script": {
+          "type": "string",
+          "description": "Absolute path to the hook script. Must be an executable regular file owned by the current user or root, not located in a world-writable directory. Validated at execution time."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional timeout in seconds. If set, the hook is killed (SIGTERM then SIGKILL) after this duration. If absent, no timeout is enforced."
         }
       }
     },

@@ -29,7 +29,7 @@
 pub mod socket;
 pub mod types;
 
-pub use socket::SupervisorSocket;
+pub use socket::{SupervisorListener, SupervisorSocket};
 pub use types::{
     ApprovalDecision, AuditEntry, CapabilityRequest, CredentialCaptureRequest, SupervisorMessage,
     SupervisorResponse, UrlOpenRequest,

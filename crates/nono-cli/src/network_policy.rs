@@ -350,6 +350,79 @@ pub fn expand_proxy_allow(policy: &NetworkPolicy, entries: &[String]) -> Vec<Str
     result
 }
 
+/// Check if a domain is a loopback address (localhost, 127.x.x.x, ::1).
+fn is_loopback_domain(domain: &str) -> bool {
+    domain == "localhost"
+        || domain
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+        || domain
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Partition `allow_domain` entries into plain hostnames (for CONNECT tunnel)
+/// and endpoint-restricted routes (for TLS-intercepted L7 filtering).
+///
+/// Plain entries are expanded through the network policy (group resolution,
+/// port stripping). Entries with endpoint rules produce `RouteConfig` objects
+/// that the proxy will TLS-intercept.
+pub fn partition_allow_domain(
+    policy: &NetworkPolicy,
+    entries: &[crate::profile::AllowDomainEntry],
+) -> Result<(Vec<String>, Vec<RouteConfig>)> {
+    let mut plain_hosts = Vec::new();
+    let mut endpoint_routes = Vec::new();
+
+    for entry in entries {
+        match entry {
+            crate::profile::AllowDomainEntry::Plain(host) => {
+                let expanded = expand_proxy_allow(policy, std::slice::from_ref(host));
+                plain_hosts.extend(expanded);
+            }
+            crate::profile::AllowDomainEntry::WithEndpoints { domain, endpoints } => {
+                if endpoints.is_empty() {
+                    let expanded = expand_proxy_allow(policy, std::slice::from_ref(domain));
+                    plain_hosts.extend(expanded);
+                } else {
+                    if domain.is_empty() {
+                        return Err(NonoError::ConfigParse(
+                            "allow_domain entry with endpoints must have a non-empty domain"
+                                .to_string(),
+                        ));
+                    }
+                    let prefix = format!("_ep_{}", domain);
+                    let scheme = if is_loopback_domain(domain) {
+                        "http"
+                    } else {
+                        "https"
+                    };
+                    endpoint_routes.push(RouteConfig {
+                        prefix,
+                        upstream: format!("{}://{}", scheme, domain),
+                        credential_key: None,
+                        inject_mode: InjectMode::default(),
+                        inject_header: "Authorization".to_string(),
+                        credential_format: None,
+                        path_pattern: None,
+                        path_replacement: None,
+                        query_param_name: None,
+                        proxy: None,
+                        env_var: None,
+                        endpoint_rules: endpoints.clone(),
+                        tls_ca: None,
+                        tls_client_cert: None,
+                        tls_client_key: None,
+                        oauth2: None,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok((plain_hosts, endpoint_routes))
+}
+
 pub fn collect_allow_domain_port_warnings(entries: &[String], source: &str) -> Vec<String> {
     entries
         .iter()
@@ -1108,5 +1181,92 @@ mod tests {
         );
 
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_partition_allow_domain_plain_entries() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).unwrap();
+
+        let entries = vec![
+            crate::profile::AllowDomainEntry::Plain("api.example.com".to_string()),
+            crate::profile::AllowDomainEntry::Plain("other.example.com".to_string()),
+        ];
+
+        let (plain_hosts, endpoint_routes) = partition_allow_domain(&policy, &entries).unwrap();
+
+        assert_eq!(plain_hosts, vec!["api.example.com", "other.example.com"]);
+        assert!(endpoint_routes.is_empty());
+    }
+
+    #[test]
+    fn test_partition_allow_domain_with_endpoints() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).unwrap();
+
+        let entries = vec![
+            crate::profile::AllowDomainEntry::Plain("api.openai.com".to_string()),
+            crate::profile::AllowDomainEntry::WithEndpoints {
+                domain: "api.github.com".to_string(),
+                endpoints: vec![
+                    EndpointRule {
+                        method: "GET".to_string(),
+                        path: "/repos/my-org/**".to_string(),
+                    },
+                    EndpointRule {
+                        method: "POST".to_string(),
+                        path: "/repos/my-org/*/issues".to_string(),
+                    },
+                ],
+            },
+        ];
+
+        let (plain_hosts, endpoint_routes) = partition_allow_domain(&policy, &entries).unwrap();
+
+        assert_eq!(plain_hosts, vec!["api.openai.com"]);
+        assert_eq!(endpoint_routes.len(), 1);
+
+        let route = &endpoint_routes[0];
+        assert_eq!(route.prefix, "_ep_api.github.com");
+        assert_eq!(route.upstream, "https://api.github.com");
+        assert!(route.credential_key.is_none());
+        assert_eq!(route.endpoint_rules.len(), 2);
+        assert_eq!(route.endpoint_rules[0].method, "GET");
+        assert_eq!(route.endpoint_rules[0].path, "/repos/my-org/**");
+        assert_eq!(route.endpoint_rules[1].method, "POST");
+        assert_eq!(route.endpoint_rules[1].path, "/repos/my-org/*/issues");
+    }
+
+    #[test]
+    fn test_partition_allow_domain_empty_endpoints_treated_as_plain() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).unwrap();
+
+        let entries = vec![crate::profile::AllowDomainEntry::WithEndpoints {
+            domain: "api.example.com".to_string(),
+            endpoints: vec![],
+        }];
+
+        let (plain_hosts, endpoint_routes) = partition_allow_domain(&policy, &entries).unwrap();
+
+        assert_eq!(plain_hosts, vec!["api.example.com"]);
+        assert!(endpoint_routes.is_empty());
+    }
+
+    #[test]
+    fn test_partition_allow_domain_rejects_empty_domain() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).unwrap();
+
+        let entries = vec![crate::profile::AllowDomainEntry::WithEndpoints {
+            domain: String::new(),
+            endpoints: vec![EndpointRule {
+                method: "GET".to_string(),
+                path: "/**".to_string(),
+            }],
+        }];
+
+        let result = partition_allow_domain(&policy, &entries);
+        assert!(result.is_err());
     }
 }

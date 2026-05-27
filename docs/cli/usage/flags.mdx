@@ -427,13 +427,23 @@ Add a domain to the proxy allowlist. Can be specified multiple times. Activates 
 
 This flag only permits HTTP(S) traffic routed through nono's proxy. It does not grant direct raw TCP access to the destination port.
 
+Accepts either a plain hostname (unrestricted access to all paths) or a URL with a path glob pattern (restricts to matching paths only):
+
 ```bash
-# Allow specific domains
+# Allow specific domains (all paths)
 nono run --allow-cwd --allow-domain api.openai.com --allow-domain api.anthropic.com -- my-agent
+
+# Restrict to specific paths on a domain
+nono run --allow-cwd \
+  --allow-domain 'https://github.com/my-org/**' \
+  --allow-domain 'https://github.com/other-org/**' \
+  -- my-agent
 
 # Combine with a network profile for additional domains
 nono run --allow-cwd --network-profile minimal --allow-domain custom-api.example.com -- my-agent
 ```
+
+When a URL with a path is provided, only requests matching that path pattern are permitted. Requests to other paths on the same domain are denied with `403 Forbidden`. Pattern syntax: `*` matches one path segment, `**` matches zero or more.
 
 #### `--credential`
 
@@ -824,6 +834,22 @@ nono run --detached --name gold-core --allow-cwd -- my-agent
 
 Detached launches print the generated session ID and the attach command once the session becomes ready.
 
+#### `--detach-timeout`
+
+How long (in seconds) to wait for a detached session to become attachable before giving up. Defaults to 30 seconds. Increase this for programs with slow startup (e.g. npm/network initialisation phases).
+
+| Environment Variable | `NONO_DETACH_STARTUP_TIMEOUT` |
+|---------------------|-------------------------------|
+| Example | `NONO_DETACH_STARTUP_TIMEOUT=60` |
+
+```bash
+# Give a slow app 60 seconds to initialise
+nono run --detached --detach-timeout 60 --allow-cwd -- opencode
+
+# Via environment variable
+NONO_DETACH_STARTUP_TIMEOUT=60 nono run --detached --allow-cwd -- opencode
+```
+
 #### `--name`
 
 Assign a human-friendly name to the supervised session. The name is shown in `nono ps` and can be used to recognize the session in later `attach`, `stop`, `logs`, and `inspect` workflows.
@@ -1171,10 +1197,11 @@ nono why --path ./data --op readwrite
 
 ### `--host`
 
-Network host to check (instead of `--path`).
+Network host or URL to check (instead of `--path`). Accepts a bare hostname or a full URL with a path to check endpoint rule matching.
 
 ```bash
 nono why --host api.openai.com --port 443
+nono why --self --host https://github.com/my-org/repo
 ```
 
 ### `--port`
@@ -1446,6 +1473,7 @@ CLI flags always take precedence over environment variables.
 | `--env-credential` | `NONO_ENV_CREDENTIAL` | `NONO_ENV_CREDENTIAL=key1,key2` |
 | `--capability-elevation` | `NONO_CAPABILITY_ELEVATION` | `NONO_CAPABILITY_ELEVATION=true` |
 | `--startup-timeout` | `NONO_STARTUP_TIMEOUT` | `NONO_STARTUP_TIMEOUT=10` |
+| `--detach-timeout` | `NONO_DETACH_STARTUP_TIMEOUT` | `NONO_DETACH_STARTUP_TIMEOUT=60` |
 | `--upstream-proxy` | `NONO_UPSTREAM_PROXY` | `NONO_UPSTREAM_PROXY=squid.corp:3128` |
 | `--upstream-bypass` | `NONO_UPSTREAM_BYPASS` | `NONO_UPSTREAM_BYPASS=internal.corp,*.private.net` (comma-separated) |
 
@@ -1466,7 +1494,19 @@ nono run -- cargo build
 | Variable | Description |
 |----------|-------------|
 | `NONO_NO_UPDATE_CHECK` | Disable automatic update checks |
+| `NONO_NO_PACK_UPDATE_HINTS` | Disable pack update hints during `nono run` |
 | `NONO_UPDATE_URL` | Custom update service URL |
+
+### Timeout tuning
+
+These environment variables override internal timing defaults. They have no CLI flag equivalents and are only needed when the defaults cause problems for specific workloads.
+
+| Variable | Unit | Default | Description |
+|----------|------|---------|-------------|
+| `NONO_PTY_DRAIN_TIMEOUT` | ms | `100` | Quiet period to drain PTY output after child exit |
+| `NONO_PTY_ATTACH_TIMEOUT` | ms | `1000` | How long `nono attach` waits for supervisor readiness |
+
+Invalid values are ignored with a warning and the default is used.
 
 ## Examples
 

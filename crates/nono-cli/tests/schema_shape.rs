@@ -113,6 +113,54 @@ fn test_schema_does_not_advertise_legacy_policy_namespace() {
 }
 
 #[test]
+fn test_schema_has_session_hooks_property_and_defs() {
+    let schema = load_schema();
+    assert!(
+        schema.pointer("/properties/session_hooks").is_some(),
+        "schema is missing canonical /properties/session_hooks"
+    );
+
+    let hooks_props = schema
+        .pointer("/$defs/SessionHooks/properties")
+        .and_then(Value::as_object)
+        .expect("SessionHooks.properties is an object");
+    assert!(
+        hooks_props.contains_key("before"),
+        "SessionHooks.before missing"
+    );
+    assert!(
+        hooks_props.contains_key("after"),
+        "SessionHooks.after missing"
+    );
+
+    let hook_props = schema
+        .pointer("/$defs/SessionHook/properties")
+        .and_then(Value::as_object)
+        .expect("SessionHook.properties is an object");
+    assert!(
+        hook_props.contains_key("script"),
+        "SessionHook.script missing"
+    );
+    assert!(
+        hook_props.contains_key("timeout_secs"),
+        "SessionHook.timeout_secs missing"
+    );
+
+    // Both objects must reject unknown fields to match the Rust struct's
+    // #[serde(deny_unknown_fields)] guarantee.
+    assert_eq!(
+        schema.pointer("/$defs/SessionHooks/additionalProperties"),
+        Some(&Value::Bool(false)),
+        "SessionHooks must set additionalProperties: false"
+    );
+    assert_eq!(
+        schema.pointer("/$defs/SessionHook/additionalProperties"),
+        Some(&Value::Bool(false)),
+        "SessionHook must set additionalProperties: false"
+    );
+}
+
+#[test]
 fn test_schema_security_has_no_legacy_groups_or_allowed_commands() {
     let schema = load_schema();
     let props = schema

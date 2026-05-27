@@ -62,7 +62,7 @@ Other options in the [Installation Guide](https://docs.nono.sh/cli/getting_start
 `nono pull` agent packages from the [registry](https://registry.nono.sh) for all popular agents — Claude Code, Codex, Pi, Hermes, OpenCode, OpenClaw, and more — or [build your own](https://nono.sh/docs/cli/features/package-publishing) and securely share plugins, SKILLS, and hooks with the community or your team.
 
 ```bash
-nono run --profile always-further/claude-code -- claude
+nono run --profile always-further/claude -- claude
 ```
 
 ## Libraries and Bindings

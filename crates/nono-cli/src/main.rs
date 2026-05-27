@@ -23,6 +23,8 @@ mod deprecated_schema;
 mod deprecation_warnings;
 mod exec_strategy;
 mod execution_runtime;
+#[cfg(unix)]
+mod hook_runtime;
 mod instruction_deny;
 mod launch_runtime;
 mod learn;
@@ -64,6 +66,7 @@ mod startup_runtime;
 mod supervised_runtime;
 mod terminal_approval;
 mod theme;
+mod timeouts;
 mod trust_cmd;
 mod trust_intercept;
 mod trust_keystore;
@@ -256,10 +259,13 @@ mod tests {
         let prepared = PreparedSandbox {
             caps: CapabilitySet::new(),
             secrets: Vec::new(),
+            session_hooks: crate::profile::SessionHooks::default(),
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
-            allow_domain: vec!["docs.python.org".to_string()],
+            allow_domain: vec![profile::AllowDomainEntry::Plain(
+                "docs.python.org".to_string(),
+            )],
             credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
             credential_capture: std::collections::HashMap::new(),
@@ -304,10 +310,13 @@ mod tests {
         let prepared = PreparedSandbox {
             caps: CapabilitySet::new(),
             secrets: Vec::new(),
+            session_hooks: crate::profile::SessionHooks::default(),
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
-            allow_domain: vec!["docs.python.org".to_string()],
+            allow_domain: vec![profile::AllowDomainEntry::Plain(
+                "docs.python.org".to_string(),
+            )],
             credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
             credential_capture: std::collections::HashMap::new(),
@@ -335,7 +344,10 @@ mod tests {
             effective,
             EffectiveProxySettings {
                 network_profile: Some("minimal".to_string()),
-                allow_domain: vec!["docs.python.org".to_string(), "example.com".to_string()],
+                allow_domain: vec![
+                    profile::AllowDomainEntry::Plain("docs.python.org".to_string()),
+                    profile::AllowDomainEntry::Plain("example.com".to_string()),
+                ],
                 credentials: vec!["github".to_string(), "openai".to_string()],
             }
         );
@@ -427,6 +439,17 @@ mod tests {
         // thread would incur network I/O with no benefit.
         let completions = Cli::parse_from(["nono", "completion", "zsh"]);
         assert!(!allows_pre_exec_update_check(&completions.command));
+    }
+
+    #[test]
+    fn test_pre_exec_update_check_disabled_for_pack_update_hint_helper() {
+        let helper = Cli::parse_from([
+            "nono",
+            "pack-update-hint-helper",
+            "always-further/claude",
+            "1.0.0",
+        ]);
+        assert!(!allows_pre_exec_update_check(&helper.command));
     }
 
     #[test]

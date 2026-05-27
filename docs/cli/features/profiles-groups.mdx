@@ -80,8 +80,56 @@ Profiles use JSON format:
   },
   "network": {
     "block": false
+  },
+  "session_hooks": {
+    "before": {
+      "script": "/path/to/setup.sh",
+      "timeout_secs": 30
+    },
+    "after": {
+      "script": "/path/to/cleanup.sh",
+      "timeout_secs": 10
+    }
   }
 }
+
+## Session Hooks
+
+Session hooks are scripts that run before or after the sandboxed process, outside the sandbox with host privileges. Useful for setup and cleanup tasks the sandboxed process should not have access to -- for example, creating a private TMPDIR per session.
+
+### Configuration
+
+Both `before` and `after` are optional. Each hook specifies a script path and an optional timeout:
+
+```json
+{
+  "session_hooks": {
+    "before": { "script": "/path/to/setup.sh", "timeout_secs": 30 },
+    "after":  { "script": "/path/to/cleanup.sh", "timeout_secs": 10 }
+  }
+}
+```
+
+- `script` (required): absolute path to an executable script.
+- `timeout_secs` (optional): kills the script if it exceeds this duration.
+
+### Before hook
+
+Runs before the sandboxed process starts. The script receives `NONO_SESSION_ID`, `NONO_WORKDIR`, and `NONO_ENV_FILE` -- a temporary file where `KEY=VALUE` lines can be written to export environment variables to the sandboxed process.
+
+```sh
+#!/bin/sh
+mkdir -p "/tmp/$NONO_SESSION_ID"
+echo "TMPDIR=/tmp/$NONO_SESSION_ID" >> "$NONO_ENV_FILE"
+```
+
+### After hook
+
+Runs after the sandboxed process exits. Receives `NONO_SESSION_ID`, `NONO_WORKDIR`, and `NONO_EXIT_CODE`. Cleanup only -- does not export environment variables.
+
+```sh
+#!/bin/sh
+rm -rf "/tmp/$NONO_SESSION_ID"
 ```
 
 ### AF_UNIX Socket Grants
@@ -278,7 +326,8 @@ you do not want nono to keep offering it as a profile addition:
 
 `filesystem.suppress_save_prompt` only suppresses the save-profile suggestion
 for matching denials. The sandbox still denies the path, and the diagnostic
-footer can still show the denial if the run fails.
+footer still shows the denial, annotated with `[save skipped]` so it is clear
+why the path does not appear in the save prompt.
 
 The interactive save prompt applies this to every listed path suggestion when
 you choose `suppress`; it does not create any allow/read/write grants.

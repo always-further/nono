@@ -1,4 +1,5 @@
 use crate::command_display::format_command_line;
+use crate::theme;
 use crate::{profile, query_ext};
 use colored::Colorize;
 use nono::SandboxViolation;
@@ -559,14 +560,27 @@ pub(crate) fn print_patch_preview(patch: &profile::Profile) {
     }
 
     if has_entries {
-        prompt_println("[nono] Paths to be saved as grants:");
+        let t = theme::current();
+        prompt_println(&format!(
+            "{}",
+            theme::fg("[nono] Paths to be saved as grants:", t.brand).bold()
+        ));
         for (label, paths) in sections {
             for path in *paths {
                 let is_override = patch.filesystem.bypass_protection.contains(path);
                 if is_override {
-                    prompt_println(&format!("  {}  {} ({})", "⚠".red(), path, label));
+                    prompt_println(&format!(
+                        "  {}  {} ({})",
+                        "⚠".red(),
+                        theme::fg(path, t.text).bold(),
+                        label
+                    ));
                 } else {
-                    prompt_println(&format!("  {}  ({})", path, label));
+                    prompt_println(&format!(
+                        "  {}  ({})",
+                        theme::fg(path, t.text).bold(),
+                        label
+                    ));
                 }
             }
         }
@@ -1418,7 +1432,7 @@ mod tests {
             ),
         ]);
 
-        assert_eq!(suggested_run_profile_name(None, "opencode"), None);
+        assert_eq!(suggested_run_profile_name(None, "openclaw"), None);
     }
 
     #[test]
@@ -1595,8 +1609,8 @@ mod tests {
             ),
         ]);
 
-        // `opencode` is a known built-in; writing to that user path would shadow it.
-        assert!(would_shadow_existing_profile("opencode"));
+        // `openclaw` is a known built-in; writing to that user path would shadow it.
+        assert!(would_shadow_existing_profile("openclaw"));
         // Names that don't exist as built-ins or pack profiles are fine.
         assert!(!would_shadow_existing_profile("my-unique-saved-profile"));
     }
@@ -1658,15 +1672,15 @@ mod tests {
 
         // Pre-create a user override of a built-in. A subsequent save to the
         // same name is an update, not a new shadow, and must be allowed.
-        let path = profile::get_user_profile_path("opencode").expect("profile path");
+        let path = profile::get_user_profile_path("openclaw").expect("profile path");
         std::fs::create_dir_all(path.parent().expect("dir")).expect("mkdir");
         std::fs::write(
             &path,
-            "{\"meta\":{\"name\":\"opencode\",\"version\":\"1.0.0\"}}\n",
+            "{\"meta\":{\"name\":\"openclaw\",\"version\":\"1.0.0\"}}\n",
         )
         .expect("write");
 
-        assert!(!would_shadow_existing_profile("opencode"));
+        assert!(!would_shadow_existing_profile("openclaw"));
     }
 
     #[test]

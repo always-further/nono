@@ -619,7 +619,16 @@ fn render_diagnostic_line(idx: usize, line: &str, t: &theme::Theme) -> String {
     }
 
     if line.starts_with("  /") || line.starts_with("  ~/") {
-        return format!("  {}", fg(line.trim_start(), t.text).bold());
+        let content = line.trim_start();
+        return if let Some(idx) = content.rfind(" (") {
+            format!(
+                "  {} {}",
+                fg(&content[..idx], t.text).bold(),
+                &content[idx + 1..],
+            )
+        } else {
+            format!("  {}", fg(content, t.text).bold())
+        };
     }
 
     if line.starts_with("    + ") {
@@ -917,6 +926,23 @@ mod tests {
         let footer = "nono diagnostic\n────────\nThe command failed.\n  Learn: nono learn";
         let rendered = render_diagnostic_footer(footer);
         assert_eq!(rendered.lines().count(), 4);
+    }
+
+    #[test]
+    fn render_diagnostic_footer_splits_path_on_last_paren_group() {
+        // Path contains " (" in the directory name — rfind ensures we split on
+        // the *last* parenthesised group (the access type), not the one
+        // embedded in the path.
+        let footer = "  /home/user/my (project)/file (read)";
+        let rendered = render_diagnostic_footer(footer);
+        assert!(
+            rendered.contains("/home/user/my (project)/file"),
+            "path with embedded parens should be preserved: {rendered}"
+        );
+        assert!(
+            rendered.contains("(read)"),
+            "access type should be preserved: {rendered}"
+        );
     }
 
     #[test]

@@ -520,6 +520,117 @@ impl Drop for SupervisorSocket {
     }
 }
 
+/// A non-blocking Unix socket listener for accepting URL open connections.
+///
+/// The supervisor binds this before fork. The helper connects fresh each time
+/// via `NONO_SUPERVISOR_PATH`, avoiding fd-inheritance issues when intermediate
+/// processes close fds > 2.
+///
+/// Each accepted connection handles exactly one request then closes.
+pub struct SupervisorListener {
+    listener: std::os::unix::net::UnixListener,
+    socket_path: PathBuf,
+}
+
+impl SupervisorListener {
+    /// Bind a non-blocking listener at `path` with owner-only permissions.
+    pub fn bind(path: &Path) -> Result<Self> {
+        let listener = bind_socket_owner_only(path)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o700);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
+                let _ = std::fs::remove_file(path);
+                return Err(NonoError::SandboxInit(format!(
+                    "Failed to set supervisor listener permissions: {e}"
+                )));
+            }
+        }
+
+        if let Err(e) = listener.set_nonblocking(true) {
+            let _ = std::fs::remove_file(path);
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to set supervisor listener to non-blocking: {e}"
+            )));
+        }
+
+        Ok(Self {
+            listener,
+            socket_path: path.to_path_buf(),
+        })
+    }
+
+    /// Get the raw fd for poll integration.
+    #[must_use]
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.listener.as_raw_fd()
+    }
+
+    /// Accept a connection from the listener.
+    ///
+    /// Returns `None` if no connection is pending (non-blocking).
+    /// On success, validates peer credentials (UID must match current user),
+    /// sets a read timeout to prevent a malicious client from stalling the
+    /// supervisor poll loop, and returns a `SupervisorSocket` ready for one
+    /// request/response cycle.
+    pub fn accept(&self) -> Result<Option<SupervisorSocket>> {
+        let (stream, _addr) = match self.listener.accept() {
+            Ok(conn) => conn,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(e) => {
+                return Err(NonoError::SandboxInit(format!(
+                    "Failed to accept URL open connection: {e}"
+                )));
+            }
+        };
+
+        stream.set_nonblocking(false).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to set accepted connection to blocking mode: {e}"
+            ))
+        })?;
+
+        let peer = peer_credentials(stream.as_raw_fd())?;
+        // SAFETY: getuid() is always safe to call.
+        let our_uid = unsafe { libc::getuid() };
+        if peer.uid != our_uid {
+            return Err(NonoError::SandboxInit(format!(
+                "Rejected URL open connection from uid {} (expected {})",
+                peer.uid, our_uid
+            )));
+        }
+
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Failed to set read timeout on accepted connection: {e}"
+                ))
+            })?;
+
+        Ok(Some(SupervisorSocket {
+            stream,
+            socket_path: None,
+        }))
+    }
+}
+
+impl Drop for SupervisorListener {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.socket_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                "Failed to remove supervisor listener socket {}: {}",
+                self.socket_path.display(),
+                e
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,5 +782,119 @@ mod tests {
         // For a socketpair in the same process, peer_pid should return our own PID
         let pid = supervisor.peer_pid().expect("Failed to get peer PID");
         assert_eq!(pid, std::process::id());
+    }
+
+    /// Create a temp directory inside the cargo target dir for socket tests.
+    /// This avoids macOS Seatbelt denials when running tests inside a sandbox
+    /// (Seatbelt's `deny network*` blocks Unix socket connect on /var/folders).
+    fn socket_test_dir() -> tempfile::TempDir {
+        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&target).ok();
+        tempfile::Builder::new()
+            .prefix("sock-test-")
+            .tempdir_in(&target)
+            .expect("create test tmpdir in target/")
+    }
+
+    #[test]
+    fn test_supervisor_listener_bind_accept_roundtrip() {
+        use crate::supervisor::types::UrlOpenRequest;
+
+        let dir = socket_test_dir();
+        let sock_path = dir.path().join("test.sock");
+
+        // Skip if running inside a sandbox that blocks Unix socket connect().
+        // Seatbelt's (deny network*) blocks connect() on AF_UNIX sockets.
+        let probe = std::os::unix::net::UnixListener::bind(dir.path().join("probe.sock"));
+        if let Ok(listener) = probe {
+            let probe_path = dir.path().join("probe.sock");
+            let connect_result = std::os::unix::net::UnixStream::connect(&probe_path);
+            drop(listener);
+            let _ = std::fs::remove_file(&probe_path);
+            if connect_result.is_err() {
+                eprintln!("Skipping: Unix socket connect() blocked by sandbox");
+                return;
+            }
+        }
+
+        let listener = SupervisorListener::bind(&sock_path).expect("bind listener");
+        assert!(sock_path.exists(), "socket file should exist after bind");
+
+        // Connect from a client thread
+        let sock_path_clone = sock_path.clone();
+        let handle = std::thread::spawn(move || {
+            let mut client =
+                SupervisorSocket::connect(&sock_path_clone).expect("connect to listener");
+            let request = UrlOpenRequest {
+                request_id: "url-test".to_string(),
+                url: "https://example.com".to_string(),
+                child_pid: std::process::id(),
+                session_id: String::new(),
+            };
+            client
+                .send_message(&SupervisorMessage::OpenUrl(request))
+                .expect("send request");
+            client.recv_response().expect("recv response")
+        });
+
+        // Accept on the listener side
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut server_sock = listener
+            .accept()
+            .expect("accept should not error")
+            .expect("accept should return a connection");
+
+        let msg = server_sock.recv_message().expect("recv message");
+        match msg {
+            SupervisorMessage::OpenUrl(req) => {
+                assert_eq!(req.url, "https://example.com");
+                assert_eq!(req.request_id, "url-test");
+            }
+            other => panic!("Expected OpenUrl, got {:?}", other),
+        }
+
+        let response = SupervisorResponse::UrlOpened {
+            request_id: "url-test".to_string(),
+            success: true,
+            error: None,
+        };
+        server_sock.send_response(&response).expect("send response");
+
+        let client_response = handle.join().expect("client thread");
+        match client_response {
+            SupervisorResponse::UrlOpened {
+                success,
+                request_id,
+                ..
+            } => {
+                assert!(success);
+                assert_eq!(request_id, "url-test");
+            }
+            other => panic!("Expected UrlOpened, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_supervisor_listener_drop_removes_socket() {
+        let dir = socket_test_dir();
+        let sock_path = dir.path().join("drop-test.sock");
+
+        let listener = SupervisorListener::bind(&sock_path).expect("bind listener");
+        assert!(sock_path.exists());
+        drop(listener);
+        assert!(!sock_path.exists(), "socket should be removed on drop");
+    }
+
+    #[test]
+    fn test_supervisor_listener_accept_returns_none_when_no_connection() {
+        let dir = socket_test_dir();
+        let sock_path = dir.path().join("empty.sock");
+
+        let listener = SupervisorListener::bind(&sock_path).expect("bind listener");
+        let result = listener.accept().expect("accept should not error");
+        assert!(
+            result.is_none(),
+            "accept should return None with no pending connections"
+        );
     }
 }

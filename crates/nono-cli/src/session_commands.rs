@@ -277,7 +277,7 @@ pub fn run_stop(args: &StopArgs) -> Result<()> {
                 eprintln!("Stopped session {} (forced).", record.session_id);
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(crate::timeouts::STOP_POLL_INTERVAL);
         }
     }
 
@@ -593,7 +593,7 @@ fn follow_event_log(path: &Path, tail: Option<usize>, as_json: bool) -> Result<(
                 source: e,
             })?;
         if bytes == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            std::thread::sleep(crate::timeouts::LOG_TAIL_POLL_INTERVAL);
             continue;
         }
         print!("{}", line);

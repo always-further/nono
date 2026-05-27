@@ -53,7 +53,7 @@ Inherit from another profile by name:
 
 - Inheritance chain max depth: 10.
 - Scalar fields: child overrides base.
-- Array fields (`groups.include`, `groups.exclude`, `commands.allow`, `commands.deny`, `filesystem.*`, `allow_domain`, `open_port`, `listen_port`, `rollback.*`, `upstream_bypass`): child values are appended to base values and deduplicated. To remove inherited entries, use `groups.exclude` for groups; there is no mechanism to remove inherited filesystem paths.
+- Array fields (`groups.include`, `groups.exclude`, `commands.allow`, `commands.deny`, `filesystem.*`, `allow_domain`, `open_port`, `listen_port`, `rollback.*`, `upstream_bypass`): child values are appended to base values and deduplicated. To remove inherited entries, use `groups.exclude` for groups; there is no mechanism to remove inherited filesystem paths. For `allow_domain` entries with endpoint rules, rules for the same domain are merged (appended) rather than replaced.
 - Map fields (`env_credentials`, `hooks`, `custom_credentials`): child entries are merged into base; child keys override matching base keys.
 - `network_profile` supports three-state inheritance via `InheritableValue`: absent = inherit base value, `null` = explicitly clear, string = override. This is the only field that supports null-clearing.
 - `open_urls`: if the child provides the field (even as `{}`), it replaces the base entirely. If absent, the base value is inherited. Setting to `null` in JSON is equivalent to omitting it (both inherit the base).
@@ -117,13 +117,43 @@ All path fields support variable expansion (see Section 6).
 |-------------------------|-----------------------------------|----------|-------------|
 | `block`                 | boolean                           | `false`  | Block all network access. |
 | `network_profile`       | string or null                    | inherit  | Name from `network-policy.json` for proxy filtering. Set to `null` to clear inherited value. |
-| `allow_domain`          | array of string                   | `[]`     | Additional domains to allow through the proxy. Aliases: `proxy_allow`, `allow_proxy`. |
+| `allow_domain`          | array of string or object         | `[]`     | Additional domains to allow through the proxy. Entries can be plain strings (CONNECT tunnel) or objects with endpoint rules (TLS-intercepted L7 filtering). Aliases: `proxy_allow`, `allow_proxy`. |
 | `credentials`           | array of string                   | `[]`     | Credential services to enable via reverse proxy. Alias: `proxy_credentials`. |
 | `open_port`             | array of integer                  | `[]`     | Localhost TCP IPC. Aliases: `port_allow`, `allow_port`. Port **0**: macOS only (`localhost:*` outbound); Linux: explicit ports. |
 | `listen_port`           | array of integer                  | `[]`     | TCP ports the sandboxed child may listen on. |
 | `custom_credentials`    | map of string to credential def   | `{}`     | Custom credential route definitions (see below). |
 | `upstream_proxy`        | string                            | `null`   | Enterprise proxy address (`host:port`). Alias: `external_proxy`. |
 | `upstream_bypass`       | array of string                   | `[]`     | Hosts to bypass the upstream proxy. Supports `*.` wildcard suffixes. Alias: `external_proxy_bypass`. |
+
+#### allow_domain with endpoint restrictions
+
+When an `allow_domain` entry is an object with `endpoints`, the proxy performs TLS interception to enforce method+path restrictions (default-deny). This is useful for restricting access to specific API endpoints without credential injection:
+
+```json
+{
+  "network": {
+    "allow_domain": [
+      "api.openai.com",
+      {
+        "domain": "api.github.com",
+        "endpoints": [
+          { "method": "GET", "path": "/repos/my-org/**" },
+          { "method": "POST", "path": "/repos/my-org/*/issues" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+| Field       | Type   | Required | Description |
+|-------------|--------|----------|-------------|
+| `domain`    | string | yes      | Domain hostname (e.g., `"api.github.com"`). |
+| `endpoints` | array  | yes      | L7 method+path rules. Only requests matching at least one rule are allowed. |
+
+Each endpoint rule has `method` (HTTP method or `"*"` for any) and `path` (glob pattern: `*` = one segment, `**` = zero or more segments).
+
+When profiles extend each other, endpoint rules for the same domain are **appended** (merged), not replaced. Proxy mode is automatically enabled when endpoint rules are present.
 
 #### custom_credentials entry
 

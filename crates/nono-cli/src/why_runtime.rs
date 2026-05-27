@@ -8,6 +8,7 @@ struct WhyContext {
     caps: CapabilitySet,
     overridden_paths: Vec<std::path::PathBuf>,
     allowed_domains: Vec<String>,
+    domain_endpoints: Vec<sandbox_state::DomainEndpointState>,
 }
 
 /// Resolve the proxy domain allowlist from a profile's network config.
@@ -15,7 +16,14 @@ fn resolve_allowed_domains(profile: &profile::Profile) -> Vec<String> {
     let policy_json = crate::config::embedded::embedded_network_policy_json();
     let net_policy = match network_policy::load_network_policy(policy_json) {
         Ok(p) => p,
-        Err(_) => return profile.network.allow_domain.clone(),
+        Err(_) => {
+            return profile
+                .network
+                .allow_domain
+                .iter()
+                .map(|e| e.domain().to_string())
+                .collect();
+        }
     };
 
     let mut domains = Vec::new();
@@ -34,12 +42,44 @@ fn resolve_allowed_domains(profile: &profile::Profile) -> Vec<String> {
         }
     }
 
+    let plain_entries: Vec<String> = profile
+        .network
+        .allow_domain
+        .iter()
+        .map(|e| e.domain().to_string())
+        .collect();
     domains.extend(network_policy::expand_proxy_allow(
         &net_policy,
-        &profile.network.allow_domain,
+        &plain_entries,
     ));
 
     domains
+}
+
+/// Extract domain endpoint restrictions from a profile's allow_domain entries.
+fn resolve_domain_endpoints(profile: &profile::Profile) -> Vec<sandbox_state::DomainEndpointState> {
+    profile
+        .network
+        .allow_domain
+        .iter()
+        .filter_map(|e| match e {
+            profile::AllowDomainEntry::WithEndpoints { domain, endpoints }
+                if !endpoints.is_empty() =>
+            {
+                Some(sandbox_state::DomainEndpointState {
+                    domain: domain.clone(),
+                    endpoints: endpoints
+                        .iter()
+                        .map(|r| sandbox_state::EndpointRuleState {
+                            method: r.method.clone(),
+                            path: r.path.clone(),
+                        })
+                        .collect(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn run_why(args: WhyArgs) -> Result<()> {
@@ -50,10 +90,12 @@ pub(crate) fn run_why(args: WhyArgs) -> Result<()> {
         match load_sandbox_state() {
             Some(state) => {
                 let paths = state.bypass_protection_as_paths();
+                let domain_endpoints = state.domain_endpoints.clone();
                 WhyContext {
                     caps: state.to_caps()?,
                     overridden_paths: paths,
                     allowed_domains: state.allowed_domains.clone(),
+                    domain_endpoints,
                 }
             }
             None => {
@@ -104,6 +146,7 @@ pub(crate) fn run_why(args: WhyArgs) -> Result<()> {
         }
 
         let allowed_domains = resolve_allowed_domains(&profile);
+        let domain_endpoints = resolve_domain_endpoints(&profile);
 
         let prepared = CapabilitySet::from_profile(&profile, &workdir, &sandbox_args)?;
         let mut caps = prepared.caps;
@@ -114,6 +157,7 @@ pub(crate) fn run_why(args: WhyArgs) -> Result<()> {
             caps,
             overridden_paths: override_paths,
             allowed_domains,
+            domain_endpoints,
         }
     } else {
         let sandbox_args = SandboxArgs {
@@ -137,6 +181,7 @@ pub(crate) fn run_why(args: WhyArgs) -> Result<()> {
             caps,
             overridden_paths: vec![],
             allowed_domains: vec![],
+            domain_endpoints: vec![],
         }
     };
 
@@ -149,7 +194,13 @@ pub(crate) fn run_why(args: WhyArgs) -> Result<()> {
         };
         query_path(path, op, &ctx.caps, &ctx.overridden_paths)?
     } else if let Some(ref host) = args.host {
-        query_network(host, args.port, &ctx.caps, &ctx.allowed_domains)
+        query_network(
+            host,
+            args.port,
+            &ctx.caps,
+            &ctx.allowed_domains,
+            &ctx.domain_endpoints,
+        )
     } else if let Some(ref scope) = args.scope {
         query_scope(scope_query(scope), &ctx.caps)
     } else {

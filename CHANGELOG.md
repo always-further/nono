@@ -1,5 +1,120 @@
 # Changelog
 
+## [0.58.0] - 2026-05-26
+
+### Bug Fixes
+
+- Set accepted listener connections to blocking mode
+
+- Include URL listener in supervisor loop keep-alive conditions
+
+- Keep supervisor loop alive when child closes direct IPC socket
+
+- Increase supervisor listener read timeout to 5s for URL open
+
+- Address review comments on supervisor socket IPC
+
+- Add read timeout on accepted listener connections
+
+- Grant UnixSocketCapability for supervisor socket in child sandbox
+
+- Replace fd-based IPC with named socket for URL open helpers (#959)
+
+- *(proxy)* Preserve upstream error and sanitise 502 reason line
+
+- *(proxy)* Return 502 with audit entry on upstream connect failure
+
+- *(pack-update-hint)* Make state file writes atomic
+
+- *(policy)* Address review comments on java_runtime group
+
+- *(keystore)* Use Zeroizing<String> for Bitwarden item fields and in-place truncation
+
+- Review fixes
+
+- *(macos)* Emit platform rules after user write allows
+
+- Add user docs for *.json/*.jsonc
+
+- *(sandbox)* Use \$PWD to capture symlink CWD without --workdir
+
+- *(sandbox)* Preserve symlink path when adding CWD capability on macOS
+
+
+### CI/CD
+
+- *(release)* Reorder artifact attestation job
+
+- *(attestation)* Add release artifact attestation
+
+- *(pr-summary)* Apply automatic pr and size labels
+
+- *(pr-summary)* Add pull request summary workflow
+
+
+### Dependencies
+
+- *(deps)* Bump rcgen from 0.13.2 to 0.14.8
+
+- *(deps)* Bump docker/build-push-action from 7.1.0 to 7.2.0
+
+- *(deps)* Bump actions/attest-build-provenance
+
+- *(deps)* Bump docker/login-action from 4.1.0 to 4.2.0
+
+- *(deps)* Bump docker/setup-buildx-action from 4.0.0 to 4.1.0
+
+- *(deps)* Bump similar from 3.1.0 to 3.1.1
+
+- *(deps)* Bump serde_json from 1.0.149 to 1.0.150
+
+- *(deps)* Bump landlock from 0.4.4 to 0.4.5
+
+- *(deps)* Update sigstore crates to 0.8.0
+
+
+### Documentation
+
+- Add session_hooks to profiles-groups page
+
+- Update profile authoring with binary path
+
+- *(readme)* Remove terminal demo gif
+
+- *(readme)* Refine project description and quick start
+
+
+### Features
+
+- Session lifecycle hooks (#954)
+
+- *(policy)* Add java_runtime group and java-dev profile
+
+- Add Bitwarden credential source (bw:// URI scheme)
+
+- *(profile)* Allow profiles to specify a target binary
+
+- *(profile)* Add JSONC support for profile files
+
+
+### Refactoring
+
+- *(pack-hints)* Refresh in detached process to avoid threads
+
+- *(hook_runtime)* Gate module unix-only, drop dead non-unix branches
+
+- Use chained if let for conditional statements
+
+
+### Testing
+
+- Lock ENV_LOCK in test_all_groups_no_deny_within_allow_overlap
+
+
+### Style
+
+- Format debug message for line length
+
 ## [0.57.0] - 2026-05-19
 
 ### Bug Fixes

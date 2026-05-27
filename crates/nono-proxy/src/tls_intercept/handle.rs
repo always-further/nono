@@ -179,6 +179,8 @@ where
 
     let mut matches: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
     let mut catch_all: Option<(&str, &crate::route::LoadedRoute)> = None;
+    let mut has_endpoint_only_route = false;
+    let mut endpoint_authorized = false;
     for (prefix, route) in &candidates {
         if route.endpoint_rules.is_empty() {
             if catch_all.is_none() {
@@ -186,17 +188,55 @@ where
             }
         } else if route.endpoint_rules.is_allowed(&method, &path) {
             matches.push((prefix, route));
+            if !route.requires_managed_credential {
+                endpoint_authorized = true;
+            }
+        } else if !route.requires_managed_credential {
+            has_endpoint_only_route = true;
         }
     }
 
-    if matches.len() > 1 {
-        let names: Vec<_> = matches.iter().map(|(p, _)| *p).collect();
+    // Endpoint-only authorization layer (from allow_domain with endpoints):
+    // if any _ep_ route exists for this upstream, the request must match at
+    // least one of their endpoint rules. This gates access BEFORE credential
+    // selection — a credential catch-all cannot bypass endpoint restrictions.
+    if has_endpoint_only_route && !endpoint_authorized {
         let reason = format!(
-            "ambiguous route: {} {} matched {} routes: {:?}. \
+            "endpoint rules denied {} {}: no rule matched on {}:{}",
+            method, path, ctx.host, ctx.port
+        );
+        warn!("tls_intercept: {}", reason);
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::ConnectIntercept,
+            &audit::EventContext {
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                ..audit::EventContext::default()
+            },
+            ctx.host,
+            ctx.port,
+            &reason,
+        );
+        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
+        return Ok(());
+    }
+
+    // Ambiguous route check only applies to credential-injection routes.
+    // Multiple endpoint-only authorization routes matching the same request
+    // is fine (they all just allow it); ambiguity is a problem only when the
+    // proxy must choose which credential to inject.
+    let credential_matches: Vec<_> = matches
+        .iter()
+        .filter(|(_, route)| route.requires_managed_credential)
+        .collect();
+    if credential_matches.len() > 1 {
+        let names: Vec<_> = credential_matches.iter().map(|(p, _)| *p).collect();
+        let reason = format!(
+            "ambiguous route: {} {} matched {} credential routes: {:?}. \
              Narrow endpoint_rules so each request matches exactly one route.",
             method,
             path,
-            matches.len(),
+            credential_matches.len(),
             names
         );
         warn!("tls_intercept: {}", reason);
@@ -215,8 +255,13 @@ where
         return Ok(());
     }
 
-    // Exactly one match → inject credential. No match → passthrough.
-    let selected = matches.into_iter().next().or(catch_all);
+    // Prefer the credential route over endpoint-only authorization routes.
+    let selected = matches
+        .iter()
+        .find(|(_, route)| route.requires_managed_credential)
+        .or(matches.first())
+        .copied()
+        .or(catch_all);
     let service: Option<&str> = selected.map(|(s, _)| s);
     let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
     match service {

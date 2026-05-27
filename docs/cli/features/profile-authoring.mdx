@@ -402,7 +402,9 @@ to grant, but also do not want to see in the save-profile prompt on every run:
 }
 ```
 
-This does not grant access and does not hide diagnostics. It only suppresses
+This does not grant access and does not hide diagnostics. Suppressed denials
+still appear in the diagnostic footer annotated with `[save skipped]`, making
+it clear why they are absent from the save prompt. It only suppresses
 matching save-profile suggestions. `filesystem.ignore` is accepted as an alias,
 but the canonical name is deliberately explicit so it is not mistaken for
 allowing the denied path.
