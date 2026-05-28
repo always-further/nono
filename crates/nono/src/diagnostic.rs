@@ -3523,7 +3523,10 @@ mod tests {
         // The "Closest grant" hint moved out of the consolidated footer;
         // users can recover it with `nono why` if they want the detail.
         assert!(!output.contains("Closest grant:"));
-        assert!(output.contains(&format!("Fix flags: --write-file {}", denied_path.display())));
+        assert!(output.contains(&format!(
+            "Fix flags: --write-file {}",
+            denied_path.display()
+        )));
         assert!(!output.contains("Denied paths during this session:"));
     }
 

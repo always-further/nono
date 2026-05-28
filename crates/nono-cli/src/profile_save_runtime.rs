@@ -288,12 +288,8 @@ fn offer_save_text_prompt(
         return Ok(());
     };
 
-    let prepared = prepare_profile_save_from_patch(
-        selected_patch,
-        cmd_name,
-        &profile_name,
-        compared_profile,
-    )?;
+    let prepared =
+        prepare_profile_save_from_patch(selected_patch, cmd_name, &profile_name, compared_profile)?;
     write_profile(&prepared)?;
     print_profile_save(&prepared, command);
     if choice == ProfileSaveChoice::Suppress {
@@ -1062,7 +1058,10 @@ fn render_denial_selector(
         }};
     }
 
-    tty_ln!("{}", theme::fg(" [nono] Review denied paths", t.brand).bold());
+    tty_ln!(
+        "{}",
+        theme::fg(" [nono] Review denied paths", t.brand).bold()
+    );
     tty_ln!(
         "  {}",
         "↑/↓ move  ·  Space cycle  ·  a grant-all  ·  d deny-all  ·  Enter confirm  ·  Esc cancel"
@@ -1080,10 +1079,9 @@ fn render_denial_selector(
         };
 
         let action_str = match item.action {
-            ItemAction::Grant => format!(
-                "{}",
-                theme::fg(item.action.padded_label(), t.green).bold()
-            ),
+            ItemAction::Grant => {
+                format!("{}", theme::fg(item.action.padded_label(), t.green).bold())
+            }
             ItemAction::Suppress => {
                 format!("{}", theme::fg(item.action.padded_label(), t.yellow))
             }
@@ -1104,14 +1102,15 @@ fn render_denial_selector(
             format!("{}", theme::fg(&item.path, t.subtext))
         };
 
-        let label_str = format!(
-            "  ({})",
-            theme::fg(item.section.display_label(), t.overlay)
-        );
+        let label_str = format!("  ({})", theme::fg(item.section.display_label(), t.overlay));
 
         tty_ln!(
             "  {}  {}  {}{}{}",
-            cursor_glyph, action_str, bypass_prefix, path_str, label_str
+            cursor_glyph,
+            action_str,
+            bypass_prefix,
+            path_str,
+            label_str
         );
     }
 
@@ -1130,8 +1129,7 @@ fn erase_selector(tty: &mut std::fs::File, line_count: usize) -> Result<()> {
     write!(tty, "\x1b[{}A", line_count)
         .map_err(|e| NonoError::LearnError(format!("tty write: {e}")))?;
     for _ in 0..line_count {
-        write!(tty, "\x1b[2K\r\n")
-            .map_err(|e| NonoError::LearnError(format!("tty write: {e}")))?;
+        write!(tty, "\x1b[2K\r\n").map_err(|e| NonoError::LearnError(format!("tty write: {e}")))?;
     }
     write!(tty, "\x1b[{}A", line_count)
         .map_err(|e| NonoError::LearnError(format!("tty write: {e}")))?;
@@ -1179,14 +1177,13 @@ fn interactive_denial_selector(patch: &profile::Profile) -> Result<Option<Vec<De
             Key::Space => {
                 let next = items[cursor].action.cycle();
                 // UnsafeSeatbelt items have no suppress mechanism — skip that state
-                items[cursor].action =
-                    if items[cursor].section == ProfileSection::UnsafeSeatbelt
-                        && next == ItemAction::Suppress
-                    {
-                        next.cycle()
-                    } else {
-                        next
-                    };
+                items[cursor].action = if items[cursor].section == ProfileSection::UnsafeSeatbelt
+                    && next == ItemAction::Suppress
+                {
+                    next.cycle()
+                } else {
+                    next
+                };
             }
             Key::Char('a') => {
                 for item in &mut items {
@@ -1221,9 +1218,9 @@ fn interactive_denial_selector(patch: &profile::Profile) -> Result<Option<Vec<De
 
 fn build_combined_patch_from_items(items: &[DenialItem]) -> Option<profile::Profile> {
     let has_grants = items.iter().any(|i| i.action == ItemAction::Grant);
-    let has_suppresses = items.iter().any(|i| {
-        i.action == ItemAction::Suppress && i.section != ProfileSection::UnsafeSeatbelt
-    });
+    let has_suppresses = items
+        .iter()
+        .any(|i| i.action == ItemAction::Suppress && i.section != ProfileSection::UnsafeSeatbelt);
 
     if !has_grants && !has_suppresses {
         return None;
@@ -1241,9 +1238,7 @@ fn build_combined_patch_from_items(items: &[DenialItem]) -> Option<profile::Prof
                     ProfileSection::AllowFile => {
                         patch.filesystem.allow_file.push(item.path.clone())
                     }
-                    ProfileSection::ReadFile => {
-                        patch.filesystem.read_file.push(item.path.clone())
-                    }
+                    ProfileSection::ReadFile => patch.filesystem.read_file.push(item.path.clone()),
                     ProfileSection::WriteFile => {
                         patch.filesystem.write_file.push(item.path.clone())
                     }
