@@ -30,6 +30,8 @@ mod launch_runtime;
 mod learn;
 mod learn_runtime;
 mod legacy_cleanup;
+#[cfg(target_os = "macos")]
+mod macos_trust;
 mod migration;
 mod network_policy;
 mod open_url_runtime;

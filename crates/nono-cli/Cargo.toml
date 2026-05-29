@@ -94,6 +94,8 @@ keyring = { version = "3", features = ["sync-secret-service"], optional = true }
 nix = { workspace = true, features = ["process", "signal", "fs", "user", "term"] }
 dns-lookup = "2"
 keyring = { version = "3", features = ["apple-native"], optional = true }
+security-framework = "3"
+x509-parser = "0.16"
 
 [build-dependencies]
 toml.workspace = true
