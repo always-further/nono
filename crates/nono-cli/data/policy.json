@@ -556,7 +556,6 @@
           "su",
           "doas",
           "pip",
-          "npm",
           "kill",
           "killall",
           "pkill",
