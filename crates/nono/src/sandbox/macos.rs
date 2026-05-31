@@ -476,6 +476,48 @@ fn push_localhost_tcp_outbound_seatbelt_rules(profile: &mut String, localhost_po
     }
 }
 
+/// The running macOS major version (e.g. `13` for Ventura) from `kern.osproductversion`,
+/// or `None` if it cannot be read. Cached: the version is fixed for the process lifetime.
+fn macos_major_version() -> Option<u32> {
+    static MAJOR: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *MAJOR.get_or_init(|| {
+        let name = c"kern.osproductversion";
+        let mut size: libc::size_t = 0;
+        // First query the length of the version string.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 || size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size];
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&buf);
+        s.trim_end_matches(['\0', '\n'])
+            .split('.')
+            .next()?
+            .parse()
+            .ok()
+    })
+}
+
 /// Generate a Seatbelt profile from capabilities
 ///
 /// This is a pure primitive - it generates rules ONLY for paths in the CapabilitySet.
@@ -530,8 +572,13 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // Mach IPC, bypassing file-level deny rules in profiles that do NOT opt in.
     profile.push_str("(allow mach-lookup)\n");
     if !has_explicit_keychain_db_access(caps) {
-        // Legacy keychain daemon names (macOS < 13)
-        profile.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");
+        // SecurityServer is needed by Secure Transport for TLS, but on macOS < 13 it is
+        // also a keychain daemon. Allow it on 13+ (keychain stays behind keychaind/secd,
+        // denied below); deny on older — and fail closed (deny) if the version is
+        // unknown. Version is checked at runtime, not via cfg.
+        if macos_major_version().is_none_or(|v| v < 13) {
+            profile.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");
+        }
         profile.push_str("(deny mach-lookup (global-name \"com.apple.securityd\"))\n");
         // Modern keychain daemon (macOS 13 Ventura+). Legacy SecKeychain APIs
         // route here on Ventura and later, bypassing the legacy service denies above.
@@ -1271,7 +1318,13 @@ mod tests {
         let caps = CapabilitySet::new();
         let profile = generate_profile(&caps).unwrap();
 
-        assert!(profile.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"));
+        // SecurityServer is denied on macOS < 13 and when the version is unknown.
+        let securityserver_denied =
+            profile.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))");
+        assert_eq!(
+            securityserver_denied,
+            macos_major_version().is_none_or(|v| v < 13)
+        );
         assert!(profile.contains("(deny mach-lookup (global-name \"com.apple.securityd\"))"));
         // Modern keychain daemon (macOS 13 Ventura+)
         assert!(
