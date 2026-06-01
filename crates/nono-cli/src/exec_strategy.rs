@@ -1334,7 +1334,7 @@ pub fn execute_supervised(
                 exit_code,
                 &prompt_policy_explanations,
                 &prompt_error_observation,
-                &sandbox_violations,
+                &visible_sandbox_violations,
             ) {
                 // Clear the forwarding target before prompting. The child is
                 // already dead; keeping CHILD_PID set would cause forward_signal
@@ -3658,6 +3658,27 @@ mod tests {
             &explanations,
             &observation,
             &violations,
+        ));
+    }
+
+    #[test]
+    fn test_suppressed_system_service_violations_do_not_offer_profile_save() {
+        let explanations = Vec::new();
+        let observation = nono::diagnostic::ErrorObservation::default();
+        let violations = vec![nono::SandboxViolation {
+            operation: "forbidden-exec-sugid".to_string(),
+            target: None,
+        }];
+        let suppressed = vec!["forbidden-exec-sugid".to_string()];
+        let visible = filter_suppressed_system_service_violations(&violations, &suppressed);
+
+        assert!(visible.is_empty());
+        assert!(!should_offer_profile_save(
+            false,
+            0,
+            &explanations,
+            &observation,
+            &visible,
         ));
     }
 
