@@ -177,18 +177,29 @@ where
         return Ok(());
     }
 
-    let mut matches: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
-    let mut catch_all: Option<(&str, &crate::route::LoadedRoute)> = None;
+    // Partition the (already most-specific-tier) candidates:
+    //   *_cred        — routes that inject a managed credential
+    //   *_passthrough — endpoint-only authorization routes (no credential)
+    //   matched_*     — routes whose endpoint rules matched this request
+    //   catchall_*    — routes with no endpoint rules (apply to every path)
+    let mut matched_cred: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
+    let mut matched_passthrough: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
+    let mut catchall_cred: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
+    let mut catchall_passthrough: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
     let mut has_endpoint_only_route = false;
     let mut endpoint_authorized = false;
     for (prefix, route) in &candidates {
         if route.endpoint_rules.is_empty() {
-            if catch_all.is_none() {
-                catch_all = Some((prefix, route));
+            if route.requires_managed_credential {
+                catchall_cred.push((prefix, route));
+            } else {
+                catchall_passthrough.push((prefix, route));
             }
         } else if route.endpoint_rules.is_allowed(&method, &path) {
-            matches.push((prefix, route));
-            if !route.requires_managed_credential {
+            if route.requires_managed_credential {
+                matched_cred.push((prefix, route));
+            } else {
+                matched_passthrough.push((prefix, route));
                 endpoint_authorized = true;
             }
         } else if !route.requires_managed_credential {
@@ -221,22 +232,28 @@ where
         return Ok(());
     }
 
-    // Ambiguous route check only applies to credential-injection routes.
-    // Multiple endpoint-only authorization routes matching the same request
-    // is fine (they all just allow it); ambiguity is a problem only when the
-    // proxy must choose which credential to inject.
-    let credential_matches: Vec<_> = matches
-        .iter()
-        .filter(|(_, route)| route.requires_managed_credential)
-        .collect();
-    if credential_matches.len() > 1 {
-        let names: Vec<_> = credential_matches.iter().map(|(p, _)| *p).collect();
+    // Endpoint-rule matches are more specific than catch-all routes (no rules)
+    // and shadow them: a catch-all credential acts only as a fallback for paths
+    // no endpoint route covers. Within whichever layer is active, a credential
+    // route is preferred, and two credential routes in the same layer are
+    // ambiguous — the proxy must not silently pick one. This catches both
+    // overlapping endpoint credential routes and overlapping catch-all
+    // credential routes (e.g. two equally-specific wildcard upstreams).
+    let endpoint_layer_active = !matched_cred.is_empty() || !matched_passthrough.is_empty();
+    let credential_layer: &[(&str, &crate::route::LoadedRoute)] = if endpoint_layer_active {
+        &matched_cred
+    } else {
+        &catchall_cred
+    };
+
+    if credential_layer.len() > 1 {
+        let names: Vec<_> = credential_layer.iter().map(|(p, _)| *p).collect();
         let reason = format!(
             "ambiguous route: {} {} matched {} credential routes: {:?}. \
-             Narrow endpoint_rules so each request matches exactly one route.",
+             Give each a distinct upstream or non-overlapping endpoint_rules.",
             method,
             path,
-            credential_matches.len(),
+            credential_layer.len(),
             names
         );
         warn!("tls_intercept: {}", reason);
@@ -255,13 +272,19 @@ where
         return Ok(());
     }
 
-    // Prefer the credential route over endpoint-only authorization routes.
-    let selected = matches
-        .iter()
-        .find(|(_, route)| route.requires_managed_credential)
-        .or(matches.first())
-        .copied()
-        .or(catch_all);
+    // Prefer the credential route over endpoint-only authorization routes,
+    // staying within the active (endpoint vs catch-all) layer.
+    let selected = if endpoint_layer_active {
+        matched_cred
+            .first()
+            .or(matched_passthrough.first())
+            .copied()
+    } else {
+        catchall_cred
+            .first()
+            .or(catchall_passthrough.first())
+            .copied()
+    };
     let service: Option<&str> = selected.map(|(s, _)| s);
     let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
     match service {

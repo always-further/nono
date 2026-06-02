@@ -58,6 +58,24 @@ impl UpstreamHostMatcher {
         }
     }
 
+    /// If `host_port` matches, return a specificity score (higher = more
+    /// specific): an exact match outranks every wildcard, and among wildcards a
+    /// longer suffix outranks a shorter one. `None` when it does not match.
+    ///
+    /// Used so the most specific route wins when several match the same host —
+    /// e.g. an exact `api.admin.dev.example.com` shadows a wildcard
+    /// `*.dev.example.com`, which in turn shadows `*.example.com`.
+    #[must_use]
+    pub fn match_specificity(&self, host_port: &str) -> Option<usize> {
+        if !self.matches(host_port) {
+            return None;
+        }
+        Some(match self {
+            UpstreamHostMatcher::Exact(_) => usize::MAX,
+            UpstreamHostMatcher::Wildcard { suffix, .. } => suffix.len(),
+        })
+    }
+
     /// The concrete `host:port` for an `Exact` matcher, or `None` for a
     /// `Wildcard` (which has no single concrete host).
     #[must_use]
@@ -306,32 +324,62 @@ impl RouteStore {
             .any(|route| route.upstream_host_matcher.matches(host_port))
     }
 
-    /// Return the first route matching `host:port`, or `None`.
+    /// Return the *most specific* route matching `host:port`, or `None`.
     ///
-    /// Prefer [`lookup_all_by_upstream`](Self::lookup_all_by_upstream)
-    /// when multiple routes may share the same upstream.
+    /// When several routes match (e.g. an exact upstream and a covering
+    /// wildcard), the highest [`match_specificity`](UpstreamHostMatcher::match_specificity)
+    /// wins; ties break by prefix for determinism. Prefer
+    /// [`lookup_all_by_upstream`](Self::lookup_all_by_upstream) when multiple
+    /// routes may legitimately share the same upstream tier.
     #[must_use]
     pub fn lookup_by_upstream(&self, host_port: &str) -> Option<(&str, &LoadedRoute)> {
-        self.routes.iter().find_map(|(prefix, route)| {
-            route
-                .upstream_host_matcher
-                .matches(host_port)
-                .then_some((prefix.as_str(), route))
-        })
+        self.routes
+            .iter()
+            .filter_map(|(prefix, route)| {
+                route
+                    .upstream_host_matcher
+                    .match_specificity(host_port)
+                    .map(|score| (score, prefix.as_str(), route))
+            })
+            // Max specificity wins; on a tie, the lexicographically smaller
+            // prefix wins so the result is deterministic.
+            .min_by(|(a_score, a_prefix, _), (b_score, b_prefix, _)| {
+                b_score.cmp(a_score).then_with(|| a_prefix.cmp(b_prefix))
+            })
+            .map(|(_, prefix, route)| (prefix, route))
     }
 
-    /// Return all routes whose upstream matches `host:port`, sorted by
-    /// prefix for deterministic iteration.
+    /// Return the routes that match `host:port` at the **most specific** tier,
+    /// sorted by prefix for deterministic iteration.
+    ///
+    /// Routes are ranked by [`match_specificity`](UpstreamHostMatcher::match_specificity):
+    /// an exact upstream shadows a wildcard, and a longer wildcard suffix
+    /// shadows a shorter one. Only routes at the single best tier are returned,
+    /// so a host with its own exact route never also sees a covering wildcard.
+    /// Multiple routes sharing the same exact upstream (e.g. several org-scoped
+    /// GitHub routes) all sit at `usize::MAX` and are all returned.
     #[must_use]
     pub fn lookup_all_by_upstream(&self, host_port: &str) -> Vec<(&str, &LoadedRoute)> {
-        let mut matches: Vec<_> = self
+        let mut scored: Vec<_> = self
             .routes
             .iter()
-            .filter(|(_, route)| route.upstream_host_matcher.matches(host_port))
-            .map(|(prefix, route)| (prefix.as_str(), route))
+            .filter_map(|(prefix, route)| {
+                route
+                    .upstream_host_matcher
+                    .match_specificity(host_port)
+                    .map(|score| (score, prefix.as_str(), route))
+            })
             .collect();
-        matches.sort_by_key(|(prefix, _)| *prefix);
-        matches
+
+        let Some(best) = scored.iter().map(|(score, _, _)| *score).max() else {
+            return Vec::new();
+        };
+        scored.retain(|(score, _, _)| *score == best);
+        scored.sort_by_key(|(_, prefix, _)| *prefix);
+        scored
+            .into_iter()
+            .map(|(_, prefix, route)| (prefix, route))
+            .collect()
     }
 
     /// Whether any route for `host:port` requires TLS interception.
@@ -1216,6 +1264,95 @@ mod tests {
         assert!(RouteStore::load(&routes).is_err());
     }
 
+    #[test]
+    fn test_match_specificity_ranking() {
+        let exact = UpstreamHostMatcher::Exact("api.admin.dev.example.com:443".to_string());
+        let wide = UpstreamHostMatcher::Wildcard {
+            suffix: ".example.com".to_string(),
+            port: 443,
+        };
+        let narrow = UpstreamHostMatcher::Wildcard {
+            suffix: ".dev.example.com".to_string(),
+            port: 443,
+        };
+        let host = "api.admin.dev.example.com:443";
+
+        // Exact outranks every wildcard; longer suffix outranks shorter.
+        assert_eq!(exact.match_specificity(host), Some(usize::MAX));
+        assert!(narrow.match_specificity(host) > wide.match_specificity(host));
+        // Non-match → None.
+        assert_eq!(wide.match_specificity("api.other.net:443"), None);
+    }
+
+    #[test]
+    fn test_exact_upstream_shadows_covering_wildcard() {
+        // Reproduces the reported layer0 config: an exact route fully covered
+        // by a wildcard must win for its own host, while the wildcard still
+        // serves every other host under the parent domain.
+        let routes = vec![
+            route_with_upstream(
+                "layer0_dev",
+                "https://api.admin.dev.a0core.net",
+                Some("cmd://layer0_dev"),
+            ),
+            route_with_upstream(
+                "k8s_admin_dev",
+                "https://*.dev.a0core.net",
+                Some("cmd://k8s_admin_dev"),
+            ),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+
+        // Exact host → only the exact route, despite the wildcard also matching.
+        let exact = store.lookup_all_by_upstream("api.admin.dev.a0core.net:443");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].0, "layer0_dev");
+        assert_eq!(
+            store
+                .lookup_by_upstream("api.admin.dev.a0core.net:443")
+                .unwrap()
+                .0,
+            "layer0_dev"
+        );
+
+        // Any other subdomain → the wildcard fallback.
+        let wild = store.lookup_all_by_upstream("foo.dev.a0core.net:443");
+        assert_eq!(wild.len(), 1);
+        assert_eq!(wild[0].0, "k8s_admin_dev");
+    }
+
+    #[test]
+    fn test_longer_wildcard_suffix_shadows_shorter() {
+        let routes = vec![
+            route_with_upstream("broad", "https://*.a0core.net", Some("cmd://broad")),
+            route_with_upstream("narrow", "https://*.dev.a0core.net", Some("cmd://narrow")),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+
+        // Host under the narrower suffix → only the narrower route.
+        let narrowed = store.lookup_all_by_upstream("x.dev.a0core.net:443");
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].0, "narrow");
+
+        // Host only under the broad suffix → the broad route.
+        let broadened = store.lookup_all_by_upstream("x.prod.a0core.net:443");
+        assert_eq!(broadened.len(), 1);
+        assert_eq!(broadened[0].0, "broad");
+    }
+
+    #[test]
+    fn test_same_tier_wildcards_both_returned() {
+        // Two equally-specific wildcard upstreams both match → both returned,
+        // so the selection layer can flag the ambiguity (runtime 403).
+        let routes = vec![
+            route_with_upstream("a", "https://*.dev.a0core.net", Some("cmd://a")),
+            route_with_upstream("b", "https://*.dev.a0core.net", Some("cmd://b")),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+        let hits = store.lookup_all_by_upstream("x.dev.a0core.net:443");
+        assert_eq!(hits.len(), 2);
+    }
+
     /// Models a real multi-org GitHub profile. Mirrors the selection
     /// loop in `tls_intercept::handle`:
     ///   1 match  → inject that route's credential
@@ -1255,25 +1392,47 @@ mod tests {
             Ambiguous(Vec<&'a str>),
         }
 
+        // Mirror of the layered selection in `tls_intercept::handle`:
+        // endpoint-rule matches shadow catch-all routes; within the active
+        // layer a credential route is preferred and two credential routes are
+        // ambiguous.
         fn select<'a>(
             candidates: &'a [(&'a str, &'a LoadedRoute)],
             method: &str,
             path: &str,
         ) -> Selection<'a> {
-            let mut matches: Vec<&str> = Vec::new();
-            let mut catch_all: Option<&str> = None;
+            let mut matched_cred: Vec<&str> = Vec::new();
+            let mut matched_pass: Vec<&str> = Vec::new();
+            let mut catchall_cred: Vec<&str> = Vec::new();
+            let mut catchall_pass: Vec<&str> = Vec::new();
             for (prefix, route) in candidates {
                 if route.endpoint_rules.is_empty() {
-                    if catch_all.is_none() {
-                        catch_all = Some(*prefix);
+                    if route.requires_managed_credential {
+                        catchall_cred.push(prefix);
+                    } else {
+                        catchall_pass.push(prefix);
                     }
                 } else if route.endpoint_rules.is_allowed(method, path) {
-                    matches.push(prefix);
+                    if route.requires_managed_credential {
+                        matched_cred.push(prefix);
+                    } else {
+                        matched_pass.push(prefix);
+                    }
                 }
             }
-            if matches.len() > 1 {
-                Selection::Ambiguous(matches)
-            } else if let Some(svc) = matches.into_iter().next().or(catch_all) {
+            let endpoint_layer_active = !matched_cred.is_empty() || !matched_pass.is_empty();
+            let (cred_layer, pass_layer) = if endpoint_layer_active {
+                (matched_cred, matched_pass)
+            } else {
+                (catchall_cred, catchall_pass)
+            };
+            if cred_layer.len() > 1 {
+                Selection::Ambiguous(cred_layer)
+            } else if let Some(svc) = cred_layer
+                .into_iter()
+                .next()
+                .or_else(|| pass_layer.into_iter().next())
+            {
                 Selection::Route(svc)
             } else {
                 Selection::Passthrough
@@ -1333,6 +1492,28 @@ mod tests {
         assert_eq!(
             select(&candidates2, "GET", "/always-further/nono.git/info/refs"),
             Selection::Route("github_https_all")
+        );
+
+        // --- Catch-all credential routes (no endpoint_rules) on a shared
+        // upstream: a lone one is selected; two are ambiguous. ---
+        let single_catchall = vec![route_with_upstream(
+            "solo",
+            "https://shared.example.com",
+            Some("cmd://solo"),
+        )];
+        let store3 = RouteStore::load(&single_catchall).unwrap();
+        let c3 = store3.lookup_all_by_upstream("shared.example.com:443");
+        assert_eq!(select(&c3, "GET", "/anything"), Selection::Route("solo"));
+
+        let two_catchall = vec![
+            route_with_upstream("one", "https://shared.example.com", Some("cmd://one")),
+            route_with_upstream("two", "https://shared.example.com", Some("cmd://two")),
+        ];
+        let store4 = RouteStore::load(&two_catchall).unwrap();
+        let c4 = store4.lookup_all_by_upstream("shared.example.com:443");
+        assert_eq!(
+            select(&c4, "GET", "/anything"),
+            Selection::Ambiguous(vec!["one", "two"])
         );
     }
 
