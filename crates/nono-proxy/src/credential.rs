@@ -340,6 +340,8 @@ fn redact_credential_ref(key: &str) -> String {
         nono::keystore::redact_apple_password_uri(key)
     } else if nono::keystore::is_keyring_uri(key) {
         nono::keystore::redact_keyring_uri(key)
+    } else if nono::keystore::is_bw_uri(key) {
+        nono::keystore::redact_bw_uri(key)
     } else if nono::keystore::is_file_uri(key) {
         nono::keystore::redact_file_uri(key)
     } else {
