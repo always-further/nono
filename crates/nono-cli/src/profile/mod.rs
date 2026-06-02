@@ -2126,6 +2126,41 @@ pub(crate) fn is_file_path_ref(s: &str) -> bool {
     !is_registry_ref(s) && (s.contains('/') || s.ends_with(".json") || s.ends_with(".jsonc"))
 }
 
+/// Stamp store provenance onto a profile's session hooks, and expand $PACK_DIR vars
+/// This function adds provenance data for the session_hooks, so that as any profiles are extended,
+/// the origination of the session hook can be traced back to the registry pack that added it
+/// Additionally, if the hook path starts with $PACK_DIR, the prefix is replaced with the full path to the file
+fn resolve_store_pack_session_hooks(profile: &mut Profile, pack_key: &str) -> Result<()> {
+    let install_dir = {
+        let parts: Vec<&str> = pack_key.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return Err(NonoError::ProfileParse(format!(
+                "invalid pack key '{}': expected 'namespace/name'",
+                pack_key
+            )));
+        }
+        crate::package::package_install_dir(parts[0], parts[1])?
+    };
+
+    if let Some(ref mut hook) = profile.session_hooks.before {
+        if hook.source_pack.is_none() {
+            hook.source_pack = Some(pack_key.to_string());
+            if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
+                hook.script = install_dir.join(rest);
+            }
+        }
+    }
+    if let Some(ref mut hook) = profile.session_hooks.after {
+        if hook.source_pack.is_none() {
+            hook.source_pack = Some(pack_key.to_string());
+            if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
+                hook.script = install_dir.join(rest);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Load a profile from a registry pack. If the pack isn't installed locally,
 /// pull it first (Docker-style auto-pull with Sigstore verification).
 fn load_registry_profile(name_or_path: &str) -> Result<Profile> {
@@ -2184,18 +2219,7 @@ fn load_registry_profile(name_or_path: &str) -> Result<Profile> {
             if profile_path.exists() {
                 tracing::info!("Loading registry profile from: {}", profile_path.display());
                 let mut profile = load_from_file(&profile_path)?;
-                if let Some(ref mut before_hook) = profile.session_hooks.before {
-                    before_hook.source_pack = Some(package_ref.key());
-                    if let Ok(rest) = before_hook.script.strip_prefix("$PACK_DIR") {
-                        before_hook.script = install_dir.join(rest)
-                    }
-                }
-                if let Some(ref mut after_hook) = profile.session_hooks.after {
-                    after_hook.source_pack = Some(package_ref.key());
-                    if let Ok(rest) = after_hook.script.strip_prefix("$PACK_DIR") {
-                        after_hook.script = install_dir.join(rest)
-                    }
-                }
+                resolve_store_pack_session_hooks(&mut profile, &package_ref.key())?;
                 return finalize_profile(profile);
             }
         }
@@ -2485,8 +2509,9 @@ fn load_base_profile_raw(
     // doesn't declare its own pack.
     if let Some((profile_path, pack_key)) = find_pack_store_profile(name) {
         let mut base = parse_profile_file(&profile_path)?;
+        resolve_store_pack_session_hooks(&mut base, &pack_key)?;
         if !base.packs.contains(&pack_key) {
-            base.packs.push(pack_key);
+            base.packs.push(pack_key.clone());
         }
         return Ok(ResolvedBase::Global(base));
     }
@@ -2514,8 +2539,9 @@ fn load_base_profile_raw(
                 if let Some((profile_path, pack_key)) = find_pack_store_profile(name) {
                     let mut base = parse_profile_file(&profile_path)?;
                     if !base.packs.contains(&pack_key) {
-                        base.packs.push(pack_key);
+                        base.packs.push(pack_key.clone());
                     }
+                    resolve_store_pack_session_hooks(&mut base, &pack_key)?;
                     return Ok(ResolvedBase::Global(base));
                 }
             }
