@@ -7052,33 +7052,36 @@ mod tests {
     /// is expanded to the full path `<install_dir>/<rest>`.
     #[test]
     fn test_registry_pack_pack_dir_in_hook_script_is_expanded() {
-        let _guard = match crate::test_env::ENV_LOCK.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let tmp = tempdir().expect("tmpdir");
-        let config_dir = tmp.path().canonicalize().expect("canonicalize");
-        let _env = crate::test_env::EnvVarGuard::set_all(&[(
-            "XDG_CONFIG_HOME",
-            config_dir.to_str().expect("utf8"),
-        )]);
+        let (profile, install_dir) = {
+            let _guard = match crate::test_env::ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let tmp = tempdir().expect("tmpdir");
+            let config_dir = tmp.path().canonicalize().expect("canonicalize");
+            let _env = crate::test_env::EnvVarGuard::set_all(&[(
+                "XDG_CONFIG_HOME",
+                config_dir.to_str().expect("utf8"),
+            )]);
 
-        let install_dir = build_fake_pack_store(
-            &config_dir,
-            "test-ns",
-            "mypk",
-            "mypk",
-            r#"{
-                "meta": { "name": "mypk" },
-                "session_hooks": {
-                    "before": { "script": "$PACK_DIR/hooks/setup.sh" },
-                    "after":  { "script": "$PACK_DIR/hooks/teardown.sh" }
-                }
-            }"#,
-            None,
-        );
+            let install_dir = build_fake_pack_store(
+                &config_dir,
+                "test-ns",
+                "mypk",
+                "mypk",
+                r#"{
+                    "meta": { "name": "mypk" },
+                    "session_hooks": {
+                        "before": { "script": "$PACK_DIR/hooks/setup.sh" },
+                        "after":  { "script": "$PACK_DIR/hooks/teardown.sh" }
+                    }
+                }"#,
+                None,
+            );
 
-        let profile = load_profile("test-ns/mypk").expect("load registry profile");
+            let profile = load_profile("test-ns/mypk").expect("load registry profile");
+            (profile, install_dir)
+        }; // _guard and _env dropped here — lock released before any assertion can panic
 
         let before = profile.session_hooks.before.as_ref().expect("before hook");
         assert_eq!(
@@ -7100,33 +7103,35 @@ mod tests {
     /// not contain `$PACK_DIR`.
     #[test]
     fn test_registry_pack_hooks_have_source_pack_set() {
-        let _guard = match crate::test_env::ENV_LOCK.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let tmp = tempdir().expect("tmpdir");
-        let config_dir = tmp.path().canonicalize().expect("canonicalize");
-        let _env = crate::test_env::EnvVarGuard::set_all(&[(
-            "XDG_CONFIG_HOME",
-            config_dir.to_str().expect("utf8"),
-        )]);
+        let profile = {
+            let _guard = match crate::test_env::ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let tmp = tempdir().expect("tmpdir");
+            let config_dir = tmp.path().canonicalize().expect("canonicalize");
+            let _env = crate::test_env::EnvVarGuard::set_all(&[(
+                "XDG_CONFIG_HOME",
+                config_dir.to_str().expect("utf8"),
+            )]);
 
-        build_fake_pack_store(
-            &config_dir,
-            "acme",
-            "widget",
-            "widget",
-            r#"{
-                "meta": { "name": "widget" },
-                "session_hooks": {
-                    "before": { "script": "/absolute/path/before.sh" },
-                    "after":  { "script": "/absolute/path/after.sh" }
-                }
-            }"#,
-            None,
-        );
+            build_fake_pack_store(
+                &config_dir,
+                "acme",
+                "widget",
+                "widget",
+                r#"{
+                    "meta": { "name": "widget" },
+                    "session_hooks": {
+                        "before": { "script": "/absolute/path/before.sh" },
+                        "after":  { "script": "/absolute/path/after.sh" }
+                    }
+                }"#,
+                None,
+            );
 
-        let profile = load_profile("acme/widget").expect("load registry profile");
+            load_profile("acme/widget").expect("load registry profile")
+        }; // _guard and _env dropped here
 
         let before = profile.session_hooks.before.as_ref().expect("before hook");
         assert_eq!(
@@ -7174,6 +7179,105 @@ mod tests {
         assert!(
             after.source_pack.is_none(),
             "non-registry after hook must not have source_pack set"
+        );
+    }
+
+    /// Test: a local profile that `extends: "acme/widget"` (a registry pack).
+    ///
+    /// acme/widget has only a `before` hook (uses `$PACK_DIR`).
+    /// The local profile has only an `after` hook (plain absolute path).
+    ///
+    /// After resolution the merged profile must satisfy:
+    /// 1. `before` — inherited from acme/widget, `$PACK_DIR` expanded to the
+    ///    pack install directory, `source_pack` == `"acme/widget"`.
+    /// 2. `after`  — from the local profile, script unchanged (no `$PACK_DIR`
+    ///    expansion), `source_pack` is `None`.
+    #[test]
+    fn test_extends_registry_pack_before_hook_pack_dir_and_source_pack_propagate() {
+        let (profile, install_dir) = {
+            let _guard = match crate::test_env::ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let tmp = tempdir().expect("tmpdir");
+            let config_dir = tmp.path().canonicalize().expect("canonicalize");
+            let _env = crate::test_env::EnvVarGuard::set_all(&[(
+                "XDG_CONFIG_HOME",
+                config_dir.to_str().expect("utf8"),
+            )]);
+
+            // Install acme/widget into the fake pack store.
+            // It has a before hook using $PACK_DIR; no after hook.
+            let install_dir = build_fake_pack_store(
+                &config_dir,
+                "acme",
+                "widget",
+                "widget",
+                r#"{
+                    "meta": { "name": "widget" },
+                    "session_hooks": {
+                        "before": { "script": "$PACK_DIR/hooks/setup.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            // Write the local profile that extends acme/widget and adds an after hook.
+            // The after script is a plain absolute path — no $PACK_DIR — to confirm
+            // that local profiles don't receive any $PACK_DIR expansion.
+            let local_profile_path = tmp.path().join("local.json");
+            std::fs::write(
+                &local_profile_path,
+                r#"{
+                    "meta": { "name": "local" },
+                    "extends": "acme/widget",
+                    "session_hooks": {
+                        "after": { "script": "/local/hooks/teardown.sh" }
+                    }
+                }"#,
+            )
+            .expect("write local profile");
+
+            let profile =
+                load_profile_from_path(&local_profile_path).expect("load local profile");
+            (profile, install_dir)
+        }; // _guard and _env dropped here — lock released before any assertion can panic
+
+        // 1. before hook: inherited from acme/widget
+        //    - script: $PACK_DIR expanded to the pack install directory
+        //    - source_pack: "acme/widget"
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before hook should be inherited from acme/widget");
+        assert_eq!(
+            before.script,
+            install_dir.join("hooks").join("setup.sh"),
+            "before hook $PACK_DIR must be expanded to the pack install directory"
+        );
+        assert_eq!(
+            before.source_pack.as_deref(),
+            Some("acme/widget"),
+            "before hook source_pack must be set to the registry pack key"
+        );
+
+        // 2. after hook: defined locally
+        //    - script: unchanged absolute path (no $PACK_DIR substitution)
+        //    - source_pack: None (local profile, not a registry pack)
+        let after = profile
+            .session_hooks
+            .after
+            .as_ref()
+            .expect("after hook should come from the local profile");
+        assert_eq!(
+            after.script,
+            PathBuf::from("/local/hooks/teardown.sh"),
+            "after hook script must be the local path unchanged"
+        );
+        assert!(
+            after.source_pack.is_none(),
+            "after hook source_pack must be None for a local (non-registry) profile"
         );
     }
 
