@@ -3272,10 +3272,7 @@ mod tests {
         caps.add_localhost_port(0);
         let err = apply_with_abi(&caps, &detected).expect_err("port 0 wildcard must be rejected");
         let msg = format!("{err}");
-        assert!(
-            msg.contains("ProxyOnly mode"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("ProxyOnly mode"), "unexpected error: {msg}");
     }
 
     /// Accepts `open_port: [0]` in ProxyOnly mode on Linux (Landlock v4+) — the proxy
@@ -3314,10 +3311,7 @@ mod tests {
         // SAFETY: child_pid is the PID returned by fork() in the parent branch.
         let waited = unsafe { libc::waitpid(child_pid, &mut child_status, 0) };
         assert_eq!(waited, child_pid, "waitpid() failed");
-        assert!(
-            libc::WIFEXITED(child_status),
-            "child did not exit normally"
-        );
+        assert!(libc::WIFEXITED(child_status), "child did not exit normally");
         assert_eq!(
             libc::WEXITSTATUS(child_status),
             0,
