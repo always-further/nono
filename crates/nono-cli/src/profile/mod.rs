@@ -7307,6 +7307,253 @@ mod tests {
         );
     }
 
+    /// Test: a store pack (`acme/top`) that `extends: "acme/base"` (another store pack).
+    ///
+    /// `acme/base` has only a `before` hook (uses `$PACK_DIR`).
+    /// `acme/top`  has only an `after`  hook (uses `$PACK_DIR`).
+    ///
+    /// After loading `acme/top` the merged profile must satisfy:
+    /// 1. `before` — inherited from `acme/base`, `$PACK_DIR` expanded to base's
+    ///    install directory, `source_pack` == `"acme/base"`.  The `is_none()`
+    ///    guard in `resolve_pack_store_session_hooks` must prevent `acme/top`'s
+    ///    post-merge call from overwriting the already-correct provenance.
+    /// 2. `after`  — defined directly in `acme/top`, `$PACK_DIR` expanded to
+    ///    top's install directory, `source_pack` == `"acme/top"`.
+    #[test]
+    fn test_store_pack_extends_store_pack_hooks_carry_correct_source_pack() {
+        let (profile, base_install_dir, top_install_dir) = {
+            let _guard = match crate::test_env::ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let tmp = tempdir().expect("tmpdir");
+            let config_dir = tmp.path().canonicalize().expect("canonicalize");
+            let _env = crate::test_env::EnvVarGuard::set_all(&[(
+                "XDG_CONFIG_HOME",
+                config_dir.to_str().expect("utf8"),
+            )]);
+
+            // acme/base: before hook only, uses $PACK_DIR
+            let base_install_dir = build_fake_pack_store(
+                &config_dir,
+                "acme",
+                "base",
+                "base",
+                r#"{
+                    "meta": { "name": "base" },
+                    "session_hooks": {
+                        "before": { "script": "$PACK_DIR/hooks/setup.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            // acme/top: extends acme/base, after hook only, uses $PACK_DIR
+            let top_install_dir = build_fake_pack_store(
+                &config_dir,
+                "acme",
+                "top",
+                "top",
+                r#"{
+                    "meta": { "name": "top" },
+                    "extends": "acme/base",
+                    "session_hooks": {
+                        "after": { "script": "$PACK_DIR/hooks/teardown.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            let profile = load_profile("acme/top").expect("load acme/top");
+            (profile, base_install_dir, top_install_dir)
+        }; // lock released before assertions
+
+        // 1. before hook: inherited from acme/base
+        //    - $PACK_DIR expanded to base's install dir (not top's)
+        //    - source_pack: "acme/base" (not overwritten by acme/top)
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before hook should be inherited from acme/base");
+        assert_eq!(
+            before.script,
+            base_install_dir.join("hooks").join("setup.sh"),
+            "before hook $PACK_DIR must expand to acme/base's install dir, not acme/top's"
+        );
+        assert_eq!(
+            before.source_pack.as_deref(),
+            Some("acme/base"),
+            "before hook source_pack must be acme/base, not overwritten by acme/top"
+        );
+
+        // 2. after hook: defined in acme/top
+        //    - $PACK_DIR expanded to top's install dir
+        //    - source_pack: "acme/top"
+        let after = profile
+            .session_hooks
+            .after
+            .as_ref()
+            .expect("after hook should come from acme/top");
+        assert_eq!(
+            after.script,
+            top_install_dir.join("hooks").join("teardown.sh"),
+            "after hook $PACK_DIR must expand to acme/top's install dir"
+        );
+        assert_eq!(
+            after.source_pack.as_deref(),
+            Some("acme/top"),
+            "after hook source_pack must be acme/top"
+        );
+    }
+
+    /// `$PACK_DIRmyscript.sh` must NOT be expanded — only `$PACK_DIR/…` (with a
+    /// trailing slash) is a valid pack-dir reference.  A bare `$PACK_DIR` used as
+    /// a variable-name prefix is an author mistake and must be left untouched so
+    /// the error surfaces clearly rather than silently producing a wrong path.
+    #[test]
+    fn test_pack_dir_without_slash_separator_is_not_expanded() {
+        let (profile, _install_dir) = {
+            let _guard = match crate::test_env::ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let tmp = tempdir().expect("tmpdir");
+            let config_dir = tmp.path().canonicalize().expect("canonicalize");
+            let _env = crate::test_env::EnvVarGuard::set_all(&[(
+                "XDG_CONFIG_HOME",
+                config_dir.to_str().expect("utf8"),
+            )]);
+
+            let install_dir = build_fake_pack_store(
+                &config_dir,
+                "acme",
+                "widget",
+                "default",
+                r#"{
+                    "meta": { "name": "widget" },
+                    "session_hooks": {
+                        "before": { "script": "$PACK_DIRmyscript.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            let profile = load_profile("acme/widget").expect("load acme/widget");
+            (profile, install_dir)
+        }; // lock released before assertions
+
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before hook must be present");
+
+        assert_eq!(
+            before.script.to_str().expect("utf8"),
+            "$PACK_DIRmyscript.sh",
+            "$PACK_DIR without a trailing slash must not be expanded"
+        );
+    }
+
+    /// `$pack_dir/hooks/setup.sh` (all-lowercase) must NOT be expanded.
+    ///
+    /// `$PACK_DIR` is matched case-sensitively, consistent with the `expand_vars`
+    /// convention in `wiring.rs` where `$lowercase` passes through literally.
+    /// Wrong-case variants produce no substitution and no error — the literal
+    /// string is preserved so authors can see and fix the mistake at runtime.
+    #[test]
+    fn test_pack_dir_lowercase_is_not_expanded() {
+        let (profile, _install_dir) = {
+            let _guard = match crate::test_env::ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let tmp = tempdir().expect("tmpdir");
+            let config_dir = tmp.path().canonicalize().expect("canonicalize");
+            let _env = crate::test_env::EnvVarGuard::set_all(&[(
+                "XDG_CONFIG_HOME",
+                config_dir.to_str().expect("utf8"),
+            )]);
+
+            let install_dir = build_fake_pack_store(
+                &config_dir,
+                "acme",
+                "widget",
+                "default",
+                r#"{
+                    "meta": { "name": "widget" },
+                    "session_hooks": {
+                        "before": { "script": "$pack_dir/hooks/setup.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            let profile = load_profile("acme/widget").expect("load acme/widget");
+            (profile, install_dir)
+        }; // lock released before assertions
+
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before hook must be present");
+        assert_eq!(
+            before.script.to_str().expect("utf8"),
+            "$pack_dir/hooks/setup.sh",
+            "$pack_dir (lowercase) must not be expanded — only $PACK_DIR is recognised"
+        );
+    }
+
+    /// `$Pack_Dir/hooks/setup.sh` (mixed case) must NOT be expanded.
+    ///
+    /// Same case-sensitivity rule as above: only the exact token `$PACK_DIR` is
+    /// recognised; any other casing is passed through as a literal string.
+    #[test]
+    fn test_pack_dir_mixed_case_is_not_expanded() {
+        let (profile, _install_dir) = {
+            let _guard = match crate::test_env::ENV_LOCK.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let tmp = tempdir().expect("tmpdir");
+            let config_dir = tmp.path().canonicalize().expect("canonicalize");
+            let _env = crate::test_env::EnvVarGuard::set_all(&[(
+                "XDG_CONFIG_HOME",
+                config_dir.to_str().expect("utf8"),
+            )]);
+
+            let install_dir = build_fake_pack_store(
+                &config_dir,
+                "acme",
+                "widget",
+                "default",
+                r#"{
+                    "meta": { "name": "widget" },
+                    "session_hooks": {
+                        "before": { "script": "$Pack_Dir/hooks/setup.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            let profile = load_profile("acme/widget").expect("load acme/widget");
+            (profile, install_dir)
+        }; // lock released before assertions
+
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before hook must be present");
+        assert_eq!(
+            before.script.to_str().expect("utf8"),
+            "$Pack_Dir/hooks/setup.sh",
+            "$Pack_Dir (mixed case) must not be expanded — only $PACK_DIR is recognised"
+        );
+    }
+
     #[test]
     fn profile_binary_field_parses_and_inherits() {
         let base = br#"{
