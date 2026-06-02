@@ -693,13 +693,38 @@ async fn handle_cmd_credential(
         return Ok(());
     }
 
+    // A wildcard upstream has no concrete forward target and is intercept-only.
+    // It must never be served via the reverse-proxy path: the upstream URL
+    // (`https://*.domain`) cannot be parsed into a host to forward to. Reject
+    // before resolving the credential so we don't run the capture command with
+    // an empty `NONO_REQUEST_HOST` and poison the per-host cache.
+    let Some(upstream_host) = route.upstream_host_matcher.as_exact() else {
+        let reason = format!(
+            "wildcard upstream for service '{}' cannot be served via the reverse proxy; \
+             it is only reachable through TLS interception (CONNECT)",
+            service
+        );
+        warn!("{}", reason);
+        let deny_ctx = audit::EventContext {
+            route_id: Some(service),
+            denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+            ..audit::EventContext::default()
+        };
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            &deny_ctx,
+            service,
+            0,
+            &reason,
+        );
+        send_error(stream, 502, "Bad Gateway").await?;
+        return Ok(());
+    };
+
     // Resolve the credential via the supervisor capture channel
     let request_context = CaptureRequestContext {
-        host: route
-            .upstream_host_matcher
-            .as_exact()
-            .unwrap_or("")
-            .to_string(),
+        host: upstream_host.to_string(),
         path: upstream_path.to_string(),
         method: method.to_string(),
     };

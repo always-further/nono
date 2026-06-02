@@ -6,8 +6,10 @@
 //! ## Design
 //!
 //! - **Cache-then-execute**: The broker checks an in-memory cache keyed by
-//!   `(session_id, credential_name)` before spawning a subprocess. Cache hits
-//!   avoid redundant CLI invocations for slow commands (e.g., `aws sts`).
+//!   `(session_id, credential_name, request_host, path_suffix)` before spawning
+//!   a subprocess. Cache hits avoid redundant CLI invocations for slow commands
+//!   (e.g., `aws sts`). Including the host keeps credentials isolated per
+//!   upstream when one credential serves many hosts (e.g. a wildcard upstream).
 //!
 //! - **Timeout enforcement**: The executor polls `child.try_wait()` in a loop
 //!   with 10ms sleeps. If elapsed time exceeds the configured timeout, the
