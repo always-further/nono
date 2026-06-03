@@ -64,7 +64,24 @@ fn install_profile_hooks(_profile_name: Option<&str>, profile: &profile::Profile
 /// 1. Check the pack directory exists
 /// 2. Verify artifact SHA-256 digests against the lockfile
 /// 3. Re-verify Sigstore bundles from the stored `.nono-trust.bundle` file
-fn verify_profile_packs(packs: &[String], _session_hooks: &profile::SessionHooks) -> crate::Result<()> {
+fn verify_profile_packs(packs: &[String], profile: &profile::Profile) -> crate::Result<()> {
+    if let Some(hook) = [&profile.session_hooks.before, &profile.session_hooks.after]
+        .into_iter()
+        .flatten()
+        .find(|hook| {
+            hook.source_pack
+                .as_deref()
+                .is_some_and(|sp| !packs.iter().any(|p| p == sp))
+        })
+    {
+        // This indicates an internal logic error where the Profile was parsed, but the source_pack
+        // the session hook references is not present in packs_to check
+        return Err(nono::NonoError::PackageInstall(format!(
+            "session_hook {} unexpectedly is not part of the packs to verify",
+            hook.script.display()
+        )));
+    }
+
     if packs.is_empty() {
         return Ok(());
     }
@@ -121,6 +138,31 @@ fn verify_profile_packs(packs: &[String], _session_hooks: &profile::SessionHooks
                          Found:    {}\n\
                          Reinstall with: nono pull {} --force",
                         pack_ref, artifact_name, locked_artifact.sha256, hash, pack_ref
+                    )));
+                }
+            }
+            for script_path in [&profile.session_hooks.before, &profile.session_hooks.after]
+                .into_iter()
+                .flatten()
+                .filter(|hook| hook.source_pack.as_deref() == Some(pack_ref))
+                .map(|hook| hook.script.as_path())
+            {
+                let relative_path = script_path
+                    .strip_prefix(&install_dir)
+                    .map_err(|_| {
+                        nono::NonoError::PackageInstall(format!(
+                            "session_hook with path {} is not within the pack",
+                            script_path.display()
+                        ))
+                    })?
+                    .to_str()
+                    .ok_or_else(|| {
+                        nono::NonoError::PackageInstall(format!("Invalid script_path characters"))
+                    })?;
+                if !locked_pkg.artifacts.contains_key(relative_path) {
+                    return Err(nono::NonoError::PackageInstall(format!(
+                        "session_hook with path {} is not within the pack",
+                        script_path.display()
                     )));
                 }
             }
@@ -468,7 +510,7 @@ fn prepare_profile_with_options(
             }
         }
 
-        verify_profile_packs(&packs_to_verify, &profile.session_hooks)?;
+        verify_profile_packs(&packs_to_verify, &profile)?;
 
         if !packs_to_verify.is_empty() && !options.hook_output_silent {
             eprintln!("  Verified {} pack(s)", packs_to_verify.len());
@@ -673,7 +715,10 @@ mod tests {
             fs::write(&full_path, content.as_bytes()).expect("write script");
 
             let digest = Sha256::digest(content.as_bytes());
-            let sha256 = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            let sha256 = digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
 
             artifacts.insert(
                 rel_path.to_string(),
@@ -733,6 +778,43 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Test 0: source_pack is set but not present in the packs list
+    //
+    // This guards against a future regression where a call site of
+    // resolve_store_pack_session_hooks forgets to push the pack key into
+    // profile.packs.  verify_profile_packs must catch this and hard-error
+    // rather than silently skipping the containment check.
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_verify_source_pack_not_in_packs_list_is_an_error() {
+        // No env/disk setup needed: the guard fires before the lockfile is read.
+        let hooks = SessionHooks {
+            before: Some(make_hook(
+                PathBuf::from("/some/path/script.sh"),
+                Some("acme/widget"), // source_pack set …
+            )),
+            after: None,
+        };
+        let p = profile::Profile {
+            session_hooks: hooks,
+            ..profile::Profile::default()
+        };
+
+        // … but "acme/widget" is absent from the packs list.
+        let result = verify_profile_packs(&[], &p);
+
+        assert!(
+            result.is_err(),
+            "source_pack not in packs list must be a hard error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("/some/path/script.sh"),
+            "error must reference the offending hook script: {msg}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test 1: local profile with an absolute-path hook
     //
     // A local (non-store) profile has source_pack = None on its hooks.
@@ -763,9 +845,13 @@ mod tests {
                 )),
                 after: None,
             };
+            let p = profile::Profile {
+                session_hooks: hooks,
+                ..profile::Profile::default()
+            };
 
             // No packs: verify_profile_packs returns Ok(()) immediately.
-            verify_profile_packs(&[], &hooks)
+            verify_profile_packs(&[], &p)
         };
 
         assert!(
@@ -809,8 +895,12 @@ mod tests {
                 )),
                 after: None,
             };
+            let p = profile::Profile {
+                session_hooks: hooks,
+                ..profile::Profile::default()
+            };
 
-            verify_profile_packs(&["acme/widget".to_string()], &hooks)
+            verify_profile_packs(&["acme/widget".to_string()], &p)
         };
 
         assert!(
@@ -862,8 +952,12 @@ mod tests {
                 )),
                 after: None,
             };
+            let p = profile::Profile {
+                session_hooks: hooks,
+                ..profile::Profile::default()
+            };
 
-            verify_profile_packs(&["acme/widget".to_string()], &hooks)
+            verify_profile_packs(&["acme/widget".to_string()], &p)
         };
 
         assert!(
@@ -907,10 +1001,7 @@ mod tests {
             );
             write_test_lockfile(
                 &config_dir,
-                &[
-                    ("acme/base", base_artifacts),
-                    ("acme/top", top_artifacts),
-                ],
+                &[("acme/base", base_artifacts), ("acme/top", top_artifacts)],
             );
 
             let hooks = SessionHooks {
@@ -923,11 +1014,12 @@ mod tests {
                     Some("acme/top"),
                 )),
             };
+            let p = profile::Profile {
+                session_hooks: hooks,
+                ..profile::Profile::default()
+            };
 
-            verify_profile_packs(
-                &["acme/base".to_string(), "acme/top".to_string()],
-                &hooks,
-            )
+            verify_profile_packs(&["acme/base".to_string(), "acme/top".to_string()], &p)
         };
 
         assert!(
@@ -972,10 +1064,7 @@ mod tests {
             );
             write_test_lockfile(
                 &config_dir,
-                &[
-                    ("acme/base", base_artifacts),
-                    ("acme/top", top_artifacts),
-                ],
+                &[("acme/base", base_artifacts), ("acme/top", top_artifacts)],
             );
 
             // Confusion: the script lives in acme/base but source_pack claims
@@ -987,11 +1076,12 @@ mod tests {
                 )),
                 after: None,
             };
+            let p = profile::Profile {
+                session_hooks: hooks,
+                ..profile::Profile::default()
+            };
 
-            verify_profile_packs(
-                &["acme/base".to_string(), "acme/top".to_string()],
-                &hooks,
-            )
+            verify_profile_packs(&["acme/base".to_string(), "acme/top".to_string()], &p)
         };
 
         assert!(
