@@ -2136,20 +2136,18 @@ fn resolve_store_pack_session_hooks(profile: &mut Profile, pack_key: &str) -> Re
     let pack_ref = crate::package::parse_package_ref(pack_key)?;
     let install_dir = crate::package::package_install_dir(&pack_ref.namespace, &pack_ref.name)?;
 
-    if let Some(ref mut hook) = profile.session_hooks.before
-        && hook.source_pack.is_none()
+    for hook in [
+        &mut profile.session_hooks.before,
+        &mut profile.session_hooks.after,
+    ]
+    .into_iter()
+    .flatten()
     {
-        hook.source_pack = Some(pack_ref.clone());
-        if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
-            hook.script = install_dir.join(rest);
-        }
-    }
-    if let Some(ref mut hook) = profile.session_hooks.after
-        && hook.source_pack.is_none()
-    {
-        hook.source_pack = Some(pack_ref);
-        if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
-            hook.script = install_dir.join(rest);
+        if hook.source_pack.is_none() {
+            hook.source_pack = Some(pack_ref.clone());
+            if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
+                hook.script = install_dir.join(rest);
+            }
         }
     }
     Ok(())
