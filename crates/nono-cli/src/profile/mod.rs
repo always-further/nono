@@ -1952,7 +1952,9 @@ fn load_profile_inner(name_or_path: &str) -> Result<Option<Profile>> {
             "Loading pack-store profile from: {}",
             profile_path.display()
         );
-        let mut profile = finalize_profile(load_from_file(&profile_path)?)?;
+        let mut profile = load_from_file(&profile_path)?;
+        resolve_store_pack_session_hooks(&mut profile, &pack_key)?;
+        let mut profile = finalize_profile(profile)?;
         // Inject the source pack ref so it's always present in the
         // verification list, even if the profile JSON doesn't declare it.
         if !profile.packs.contains(&pack_key) {
