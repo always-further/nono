@@ -7057,11 +7057,12 @@ mod tests {
               }}]
             }}"#
         );
-        std::fs::write(install_dir.join("package.json"), &manifest)
-            .expect("write package.json");
+        std::fs::write(install_dir.join("package.json"), &manifest).expect("write package.json");
         // Write profile JSON
         std::fs::write(
-            install_dir.join("profiles").join(format!("{install_as}.json")),
+            install_dir
+                .join("profiles")
+                .join(format!("{install_as}.json")),
             profile_json,
         )
         .expect("write profile json");
@@ -7186,8 +7187,7 @@ mod tests {
         )
         .expect("write profile");
 
-        let profile =
-            load_profile_from_path(&profile_path).expect("load profile from path");
+        let profile = load_profile_from_path(&profile_path).expect("load profile from path");
 
         let before = profile.session_hooks.before.as_ref().expect("before hook");
         assert!(
@@ -7258,8 +7258,7 @@ mod tests {
             )
             .expect("write local profile");
 
-            let profile =
-                load_profile_from_path(&local_profile_path).expect("load local profile");
+            let profile = load_profile_from_path(&local_profile_path).expect("load local profile");
             (profile, install_dir)
         }; // _guard and _env dropped here — lock released before any assertion can panic
 
