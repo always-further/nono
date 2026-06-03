@@ -71,7 +71,7 @@ fn verify_profile_packs(packs: &[String], profile: &profile::Profile) -> crate::
         .find(|hook| {
             hook.source_pack
                 .as_ref()
-                .is_some_and(|sp| !packs.iter().any(|p| p == &sp.key()))
+                .is_some_and(|sp| !packs.contains(&sp.key()))
         })
     {
         // This indicates an internal logic error where the Profile was parsed, but the source_pack
