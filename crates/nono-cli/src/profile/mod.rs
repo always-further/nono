@@ -7018,6 +7018,29 @@ mod tests {
     // Registry pack: $PACK_DIR expansion and source_pack assignment
     // ============================================================================
 
+    /// Run `f` inside a temporary directory that is set as `XDG_CONFIG_HOME`.
+    ///
+    /// Acquires `ENV_LOCK`, creates a canonicalized temp dir, sets the env var,
+    /// and calls `f(config_dir)`.  The lock and env guard are dropped *after*
+    /// `f` returns, so the caller can return owned values and assert outside
+    /// the locked region.
+    fn with_config_env<F, R>(f: F) -> R
+    where
+        F: FnOnce(&Path) -> R,
+    {
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let tmp = tempdir().expect("tmpdir");
+        let config_dir = tmp.path().canonicalize().expect("canonicalize");
+        let _env = crate::test_env::EnvVarGuard::set_all(&[(
+            "XDG_CONFIG_HOME",
+            config_dir.to_str().expect("utf8"),
+        )]);
+        f(&config_dir)
+    }
+
     /// Build a minimal pack store under `config_dir` (used as XDG_CONFIG_HOME).
     ///
     /// Creates:
@@ -7073,20 +7096,9 @@ mod tests {
     /// is expanded to the full path `<install_dir>/<rest>`.
     #[test]
     fn test_registry_pack_pack_dir_in_hook_script_is_expanded() {
-        let (profile, install_dir) = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+        let (profile, install_dir) = with_config_env(|config_dir| {
             let install_dir = build_fake_pack_store(
-                &config_dir,
+                config_dir,
                 "test-ns",
                 "mypk",
                 "mypk",
@@ -7099,10 +7111,9 @@ mod tests {
                 }"#,
                 None,
             );
-
             let profile = load_profile("test-ns/mypk").expect("load registry profile");
             (profile, install_dir)
-        }; // _guard and _env dropped here — lock released before any assertion can panic
+        }); // lock released before assertions
 
         let before = profile.session_hooks.before.as_ref().expect("before hook");
         assert_eq!(
@@ -7124,20 +7135,9 @@ mod tests {
     /// not contain `$PACK_DIR`.
     #[test]
     fn test_registry_pack_hooks_have_source_pack_set() {
-        let profile = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+        let profile = with_config_env(|config_dir| {
             build_fake_pack_store(
-                &config_dir,
+                config_dir,
                 "acme",
                 "widget",
                 "widget",
@@ -7150,9 +7150,8 @@ mod tests {
                 }"#,
                 None,
             );
-
             load_profile("acme/widget").expect("load registry profile")
-        }; // _guard and _env dropped here
+        }); // lock released before assertions
 
         let before = profile.session_hooks.before.as_ref().expect("before hook");
         assert_eq!(
@@ -7214,22 +7213,11 @@ mod tests {
     ///    expansion), `source_pack` is `None`.
     #[test]
     fn test_extends_registry_pack_before_hook_pack_dir_and_source_pack_propagate() {
-        let (profile, install_dir) = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+        let (profile, install_dir) = with_config_env(|config_dir| {
             // Install acme/widget into the fake pack store.
             // It has a before hook using $PACK_DIR; no after hook.
             let install_dir = build_fake_pack_store(
-                &config_dir,
+                config_dir,
                 "acme",
                 "widget",
                 "widget",
@@ -7245,7 +7233,7 @@ mod tests {
             // Write the local profile that extends acme/widget and adds an after hook.
             // The after script is a plain absolute path — no $PACK_DIR — to confirm
             // that local profiles don't receive any $PACK_DIR expansion.
-            let local_profile_path = tmp.path().join("local.json");
+            let local_profile_path = config_dir.join("local.json");
             std::fs::write(
                 &local_profile_path,
                 r#"{
@@ -7260,7 +7248,7 @@ mod tests {
 
             let profile = load_profile_from_path(&local_profile_path).expect("load local profile");
             (profile, install_dir)
-        }; // _guard and _env dropped here — lock released before any assertion can panic
+        }); // lock released before assertions
 
         // 1. before hook: inherited from acme/widget
         //    - script: $PACK_DIR expanded to the pack install directory
@@ -7314,21 +7302,10 @@ mod tests {
     ///    top's install directory, `source_pack` == `"acme/top"`.
     #[test]
     fn test_store_pack_extends_store_pack_hooks_carry_correct_source_pack() {
-        let (profile, base_install_dir, top_install_dir) = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+        let (profile, base_install_dir, top_install_dir) = with_config_env(|config_dir| {
             // acme/base: before hook only, uses $PACK_DIR
             let base_install_dir = build_fake_pack_store(
-                &config_dir,
+                config_dir,
                 "acme",
                 "base",
                 "base",
@@ -7343,7 +7320,7 @@ mod tests {
 
             // acme/top: extends acme/base, after hook only, uses $PACK_DIR
             let top_install_dir = build_fake_pack_store(
-                &config_dir,
+                config_dir,
                 "acme",
                 "top",
                 "top",
@@ -7359,7 +7336,7 @@ mod tests {
 
             let profile = load_profile("acme/top").expect("load acme/top");
             (profile, base_install_dir, top_install_dir)
-        }; // lock released before assertions
+        }); // lock released before assertions
 
         // 1. before hook: inherited from acme/base
         //    - $PACK_DIR expanded to base's install dir (not top's)
@@ -7400,156 +7377,52 @@ mod tests {
         );
     }
 
-    /// `$PACK_DIRmyscript.sh` must NOT be expanded — only `$PACK_DIR/…` (with a
-    /// trailing slash) is a valid pack-dir reference.  A bare `$PACK_DIR` used as
-    /// a variable-name prefix is an author mistake and must be left untouched so
-    /// the error surfaces clearly rather than silently producing a wrong path.
+    /// Only the exact token `$PACK_DIR` followed by `/` is expanded.  Variants
+    /// that are missing the separator, use all-lowercase, or use mixed case must
+    /// all be passed through as literal strings so authors can see and fix the
+    /// mistake at runtime rather than silently getting a wrong path.
     #[test]
-    fn test_pack_dir_without_slash_separator_is_not_expanded() {
-        let (profile, _install_dir) = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
+    fn test_pack_dir_non_canonical_variants_are_not_expanded() {
+        for (label, script) in [
+            ("no slash separator", "$PACK_DIRmyscript.sh"),
+            ("lowercase", "$pack_dir/hooks/setup.sh"),
+            ("mixed case", "$Pack_Dir/hooks/setup.sh"),
+        ] {
+            let profile = with_config_env(|config_dir| {
+                build_fake_pack_store(
+                    config_dir,
+                    "acme",
+                    "widget",
+                    "default",
+                    &format!(
+                        r#"{{
+                            "meta": {{ "name": "widget" }},
+                            "session_hooks": {{
+                                "before": {{ "script": "{script}" }}
+                            }}
+                        }}"#
+                    ),
+                    None,
+                );
+                load_profile("acme/widget").expect("load acme/widget")
+            });
 
-            let install_dir = build_fake_pack_store(
-                &config_dir,
-                "acme",
-                "widget",
-                "default",
-                r#"{
-                    "meta": { "name": "widget" },
-                    "session_hooks": {
-                        "before": { "script": "$PACK_DIRmyscript.sh" }
-                    }
-                }"#,
-                None,
+            let before = profile
+                .session_hooks
+                .before
+                .as_ref()
+                .expect("before hook must be present");
+            assert_eq!(
+                before.script.to_str().expect("utf8"),
+                script,
+                "{label}: non-canonical $PACK_DIR variant must not be expanded"
             );
-
-            let profile = load_profile("acme/widget").expect("load acme/widget");
-            (profile, install_dir)
-        }; // lock released before assertions
-
-        let before = profile
-            .session_hooks
-            .before
-            .as_ref()
-            .expect("before hook must be present");
-
-        assert_eq!(
-            before.script.to_str().expect("utf8"),
-            "$PACK_DIRmyscript.sh",
-            "$PACK_DIR without a trailing slash must not be expanded"
-        );
-    }
-
-    /// `$pack_dir/hooks/setup.sh` (all-lowercase) must NOT be expanded.
-    ///
-    /// `$PACK_DIR` is matched case-sensitively, consistent with the `expand_vars`
-    /// convention in `wiring.rs` where `$lowercase` passes through literally.
-    /// Wrong-case variants produce no substitution and no error — the literal
-    /// string is preserved so authors can see and fix the mistake at runtime.
-    #[test]
-    fn test_pack_dir_lowercase_is_not_expanded() {
-        let (profile, _install_dir) = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
-            let install_dir = build_fake_pack_store(
-                &config_dir,
-                "acme",
-                "widget",
-                "default",
-                r#"{
-                    "meta": { "name": "widget" },
-                    "session_hooks": {
-                        "before": { "script": "$pack_dir/hooks/setup.sh" }
-                    }
-                }"#,
-                None,
-            );
-
-            let profile = load_profile("acme/widget").expect("load acme/widget");
-            (profile, install_dir)
-        }; // lock released before assertions
-
-        let before = profile
-            .session_hooks
-            .before
-            .as_ref()
-            .expect("before hook must be present");
-        assert_eq!(
-            before.script.to_str().expect("utf8"),
-            "$pack_dir/hooks/setup.sh",
-            "$pack_dir (lowercase) must not be expanded — only $PACK_DIR is recognised"
-        );
-    }
-
-    /// `$Pack_Dir/hooks/setup.sh` (mixed case) must NOT be expanded.
-    ///
-    /// Same case-sensitivity rule as above: only the exact token `$PACK_DIR` is
-    /// recognised; any other casing is passed through as a literal string.
-    #[test]
-    fn test_pack_dir_mixed_case_is_not_expanded() {
-        let (profile, _install_dir) = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
-            let install_dir = build_fake_pack_store(
-                &config_dir,
-                "acme",
-                "widget",
-                "default",
-                r#"{
-                    "meta": { "name": "widget" },
-                    "session_hooks": {
-                        "before": { "script": "$Pack_Dir/hooks/setup.sh" }
-                    }
-                }"#,
-                None,
-            );
-
-            let profile = load_profile("acme/widget").expect("load acme/widget");
-            (profile, install_dir)
-        }; // lock released before assertions
-
-        let before = profile
-            .session_hooks
-            .before
-            .as_ref()
-            .expect("before hook must be present");
-        assert_eq!(
-            before.script.to_str().expect("utf8"),
-            "$Pack_Dir/hooks/setup.sh",
-            "$Pack_Dir (mixed case) must not be expanded — only $PACK_DIR is recognised"
-        );
+        }
     }
 
     /// Loading a pack-store profile by its `install_as` short name (e.g. "claude-code")
-    /// must expand `$PACK_DIR` in session hook scripts, just as loading by the full
-    /// registry ref (`namespace/pack`) does.
+    /// must both expand `$PACK_DIR` in session hook scripts and stamp `source_pack`
+    /// provenance, just as loading by the full registry ref (`namespace/pack`) does.
     ///
     /// The code path under test is the `find_pack_store_profile` branch inside
     /// `load_profile_inner`, reached when:
@@ -7560,28 +7433,21 @@ mod tests {
     ///
     /// This is exactly the user scenario for `--profile claude-code` or
     /// `--profile widget` when those names are shipped by a registry pack.
+    ///
+    /// Two cases are verified in a loop:
+    /// - hooks using `$PACK_DIR` (expansion + provenance)
+    /// - hooks using absolute paths (provenance only — no `$PACK_DIR` expansion)
     #[test]
-    fn test_pack_store_short_name_pack_dir_is_expanded() {
-        let (profile, install_dir) = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+    fn test_pack_store_short_name_expands_pack_dir_and_sets_source_pack() {
+        // Case 1: $PACK_DIR hooks — expansion AND source_pack.
+        let (profile, install_dir) = with_config_env(|config_dir| {
             // The pack registry key is "acme/my-tools" but its profile artifact
             // is installed under the short name "claude-code".  Loading by
             // "claude-code" (no slash) bypasses load_registry_profile entirely
             // and hits the find_pack_store_profile slow-path scanner in
-            // load_profile_inner — the path that was missing the
-            // resolve_store_pack_session_hooks call.
+            // load_profile_inner.
             let install_dir = build_fake_pack_store(
-                &config_dir,
+                config_dir,
                 "acme",
                 "my-tools",
                 "claude-code",
@@ -7598,13 +7464,18 @@ mod tests {
             // Load by the short install_as name, NOT the registry ref.
             let profile = load_profile("claude-code").expect("load by short name");
             (profile, install_dir)
-        }; // _guard and _env dropped here — lock released before assertions
+        }); // lock released before assertions
 
         let before = profile.session_hooks.before.as_ref().expect("before hook");
         assert_eq!(
             before.script,
             install_dir.join("hooks").join("setup.sh"),
             "before hook $PACK_DIR must be expanded when loading by install_as short name"
+        );
+        assert_eq!(
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/my-tools"),
+            "before hook source_pack must be set when loading by install_as short name"
         );
 
         let after = profile.session_hooks.after.as_ref().expect("after hook");
@@ -7613,34 +7484,17 @@ mod tests {
             install_dir.join("hooks").join("teardown.sh"),
             "after hook $PACK_DIR must be expanded when loading by install_as short name"
         );
-    }
+        assert_eq!(
+            after.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/my-tools"),
+            "after hook source_pack must be set when loading by install_as short name"
+        );
 
-    /// Loading a pack-store profile by its `install_as` short name must also
-    /// stamp `source_pack` provenance on session hooks, enabling verification
-    /// at sandbox start time.
-    ///
-    /// Mirrors `test_registry_pack_hooks_have_source_pack_set` but exercises
-    /// the `find_pack_store_profile` branch in `load_profile_inner` (reached
-    /// when the user supplies a bare name like `--profile widget`) rather than
-    /// the `load_registry_profile` branch (reached for `--profile acme/widget`).
-    #[test]
-    fn test_pack_store_short_name_source_pack_is_set() {
-        let profile = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
-            // Pack "acme/widget-pack" installs its profile under install_as "widget".
-            // The user will invoke `--profile widget` (no namespace prefix).
+        // Case 2: absolute-path hooks — source_pack set even when strip_prefix("$PACK_DIR")
+        // returns Err (i.e. the expansion branch is not taken).
+        let profile = with_config_env(|config_dir| {
             build_fake_pack_store(
-                &config_dir,
+                config_dir,
                 "acme",
                 "widget-pack",
                 "widget",
@@ -7653,22 +7507,20 @@ mod tests {
                 }"#,
                 None,
             );
-
             load_profile("widget").expect("load by short name")
-        }; // _guard and _env dropped here
+        });
 
         let before = profile.session_hooks.before.as_ref().expect("before hook");
         assert_eq!(
             before.source_pack.as_ref().map(PackageRef::key).as_deref(),
             Some("acme/widget-pack"),
-            "before hook source_pack must be set when loading by install_as short name"
+            "absolute-path before hook must still have source_pack set"
         );
-
         let after = profile.session_hooks.after.as_ref().expect("after hook");
         assert_eq!(
             after.source_pack.as_ref().map(PackageRef::key).as_deref(),
             Some("acme/widget-pack"),
-            "after hook source_pack must be set when loading by install_as short name"
+            "absolute-path after hook must still have source_pack set"
         );
     }
 

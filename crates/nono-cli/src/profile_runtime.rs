@@ -692,6 +692,29 @@ mod tests {
     // Test helpers
     // -------------------------------------------------------------------------
 
+    /// Run `f` inside a temporary directory that is set as `XDG_CONFIG_HOME`.
+    ///
+    /// Acquires `ENV_LOCK`, creates a canonicalized temp dir, sets the env var,
+    /// and calls `f(config_dir)`.  The lock and env guard are dropped *after*
+    /// `f` returns so the caller can return owned values and assert outside
+    /// the locked region.
+    fn with_config_env<F, R>(f: F) -> R
+    where
+        F: FnOnce(&std::path::Path) -> R,
+    {
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let tmp = tempdir().expect("tmpdir");
+        let config_dir = tmp.path().canonicalize().expect("canonicalize");
+        let _env = crate::test_env::EnvVarGuard::set_all(&[(
+            "XDG_CONFIG_HOME",
+            config_dir.to_str().expect("utf8"),
+        )]);
+        f(&config_dir)
+    }
+
     /// Build a minimal pack on disk under `<config_dir>/nono/packages/<ns>/<name>/`
     /// and return the install directory.
     ///
@@ -832,37 +855,22 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_verify_local_profile_hook_not_checked() {
-        let result = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
-            // Local hook pointing at an absolute path that is not in any pack.
-            let hooks = SessionHooks {
-                before: Some(make_hook(
-                    PathBuf::from("/usr/local/bin/my-setup.sh"),
-                    None, // source_pack = None → local hook
-                )),
-                after: None,
-            };
-            let p = profile::Profile {
-                session_hooks: hooks,
-                ..profile::Profile::default()
-            };
-
-            // No packs: verify_profile_packs returns Ok(()) immediately.
-            verify_profile_packs(&[], &p)
+        // No env/disk setup needed: packs_to_verify is empty so
+        // verify_profile_packs returns Ok(()) before reading anything from disk.
+        let hooks = SessionHooks {
+            before: Some(make_hook(
+                PathBuf::from("/usr/local/bin/my-setup.sh"),
+                None, // source_pack = None → local hook
+            )),
+            after: None,
+        };
+        let p = profile::Profile {
+            session_hooks: hooks,
+            ..profile::Profile::default()
         };
 
         assert!(
-            result.is_ok(),
+            verify_profile_packs(&[], &p).is_ok(),
             "local profile hooks must not be checked by verify_profile_packs"
         );
     }
@@ -875,25 +883,14 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_verify_store_pack_hook_in_artifacts_passes() {
-        let result = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+        let result = with_config_env(|config_dir| {
             let (install_dir, artifacts) = build_pack_with_scripts(
-                &config_dir,
+                config_dir,
                 "acme",
                 "widget",
                 &[("scripts/before.sh", "#!/bin/sh\necho before\n")],
             );
-            write_test_lockfile(&config_dir, &[("acme/widget", artifacts)]);
+            write_test_lockfile(config_dir, &[("acme/widget", artifacts)]);
 
             let hooks = SessionHooks {
                 before: Some(make_hook(
@@ -906,9 +903,8 @@ mod tests {
                 session_hooks: hooks,
                 ..profile::Profile::default()
             };
-
             verify_profile_packs(&["acme/widget".to_string()], &p)
-        };
+        });
 
         assert!(
             result.is_ok(),
@@ -925,22 +921,11 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_verify_store_pack_hook_not_in_artifacts_fails() {
-        let result = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+        let result = with_config_env(|config_dir| {
             // Lockfile only declares "scripts/real.sh"; the profile hook
             // points at "scripts/non-existing.sh" which is not locked.
             let (install_dir, artifacts) = build_pack_with_scripts(
-                &config_dir,
+                config_dir,
                 "acme",
                 "widget",
                 &[("scripts/real.sh", "#!/bin/sh\necho real\n")],
@@ -950,7 +935,7 @@ mod tests {
             let unlocked = install_dir.join("scripts/non-existing.sh");
             fs::write(&unlocked, "#!/bin/sh\necho unlocked\n").expect("write unlocked");
 
-            write_test_lockfile(&config_dir, &[("acme/widget", artifacts)]);
+            write_test_lockfile(config_dir, &[("acme/widget", artifacts)]);
 
             let hooks = SessionHooks {
                 before: Some(make_hook(
@@ -963,9 +948,8 @@ mod tests {
                 session_hooks: hooks,
                 ..profile::Profile::default()
             };
-
             verify_profile_packs(&["acme/widget".to_string()], &p)
-        };
+        });
 
         assert!(
             result.is_err(),
@@ -982,32 +966,21 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_verify_store_extends_store_hooks_in_correct_packs_passes() {
-        let result = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+        let result = with_config_env(|config_dir| {
             let (base_install_dir, base_artifacts) = build_pack_with_scripts(
-                &config_dir,
+                config_dir,
                 "acme",
                 "base",
                 &[("hooks/setup.sh", "#!/bin/sh\necho setup\n")],
             );
             let (top_install_dir, top_artifacts) = build_pack_with_scripts(
-                &config_dir,
+                config_dir,
                 "acme",
                 "top",
                 &[("hooks/teardown.sh", "#!/bin/sh\necho teardown\n")],
             );
             write_test_lockfile(
-                &config_dir,
+                config_dir,
                 &[("acme/base", base_artifacts), ("acme/top", top_artifacts)],
             );
 
@@ -1025,9 +998,8 @@ mod tests {
                 session_hooks: hooks,
                 ..profile::Profile::default()
             };
-
             verify_profile_packs(&["acme/base".to_string(), "acme/top".to_string()], &p)
-        };
+        });
 
         assert!(
             result.is_ok(),
@@ -1045,32 +1017,21 @@ mod tests {
     // -------------------------------------------------------------------------
     #[test]
     fn test_verify_store_extends_store_pack_confusion_fails() {
-        let result = {
-            let _guard = match crate::test_env::ENV_LOCK.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let tmp = tempdir().expect("tmpdir");
-            let config_dir = tmp.path().canonicalize().expect("canonicalize");
-            let _env = crate::test_env::EnvVarGuard::set_all(&[(
-                "XDG_CONFIG_HOME",
-                config_dir.to_str().expect("utf8"),
-            )]);
-
+        let result = with_config_env(|config_dir| {
             let (base_install_dir, base_artifacts) = build_pack_with_scripts(
-                &config_dir,
+                config_dir,
                 "acme",
                 "base",
                 &[("hooks/setup.sh", "#!/bin/sh\necho setup\n")],
             );
             let (_top_install_dir, top_artifacts) = build_pack_with_scripts(
-                &config_dir,
+                config_dir,
                 "acme",
                 "top",
                 &[("hooks/teardown.sh", "#!/bin/sh\necho teardown\n")],
             );
             write_test_lockfile(
-                &config_dir,
+                config_dir,
                 &[("acme/base", base_artifacts), ("acme/top", top_artifacts)],
             );
 
@@ -1087,9 +1048,8 @@ mod tests {
                 session_hooks: hooks,
                 ..profile::Profile::default()
             };
-
             verify_profile_packs(&["acme/base".to_string(), "acme/top".to_string()], &p)
-        };
+        });
 
         assert!(
             result.is_err(),
