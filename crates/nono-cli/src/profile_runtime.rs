@@ -70,8 +70,8 @@ fn verify_profile_packs(packs: &[String], profile: &profile::Profile) -> crate::
         .flatten()
         .find(|hook| {
             hook.source_pack
-                .as_deref()
-                .is_some_and(|sp| !packs.iter().any(|p| p == sp))
+                .as_ref()
+                .is_some_and(|sp| !packs.iter().any(|p| p == &sp.key()))
         })
     {
         // This indicates an internal logic error where the Profile was parsed, but the source_pack
@@ -144,7 +144,7 @@ fn verify_profile_packs(packs: &[String], profile: &profile::Profile) -> crate::
             for script_path in [&profile.session_hooks.before, &profile.session_hooks.after]
                 .into_iter()
                 .flatten()
-                .filter(|hook| hook.source_pack.as_deref() == Some(pack_ref))
+                .filter(|hook| hook.source_pack.as_ref().is_some_and(|sp| sp.key() == *pack_ref))
                 .map(|hook| hook.script.as_path())
             {
                 let relative_path = script_path
@@ -773,7 +773,8 @@ mod tests {
         SessionHook {
             script,
             timeout_secs: None,
-            source_pack: source_pack.map(str::to_string),
+            source_pack: source_pack
+                .map(|s| crate::package::parse_package_ref(s).expect("valid pack ref in test")),
         }
     }
 

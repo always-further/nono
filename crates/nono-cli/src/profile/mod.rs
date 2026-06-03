@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 // Re-export InjectMode and OAuth2Config from nono-proxy for use in profiles
 pub use nono_proxy::config::{InjectMode, OAuth2Config};
 
+use crate::package::PackageRef;
+
 /// Profile metadata
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1205,7 +1207,7 @@ pub struct SessionHook {
     /// This needs to be tracked per-hook, because a profile extending another profile can override
     /// a key. The originating source pack is used to track provenance and $PACK_DIR substitution
     #[serde(skip)]
-    pub(crate) source_pack: Option<String>,
+    pub(crate) source_pack: Option<PackageRef>,
 }
 
 /// Session lifecycle hooks for a profile.
@@ -2131,31 +2133,23 @@ pub(crate) fn is_file_path_ref(s: &str) -> bool {
 /// the origination of the session hook can be traced back to the registry pack that added it
 /// Additionally, if the hook path starts with $PACK_DIR, the prefix is replaced with the full path to the file
 fn resolve_store_pack_session_hooks(profile: &mut Profile, pack_key: &str) -> Result<()> {
-    let install_dir = {
-        let parts: Vec<&str> = pack_key.splitn(2, '/').collect();
-        if parts.len() != 2 {
-            return Err(NonoError::ProfileParse(format!(
-                "invalid pack key '{}': expected 'namespace/name'",
-                pack_key
-            )));
-        }
-        crate::package::package_install_dir(parts[0], parts[1])?
-    };
+    let pack_ref = crate::package::parse_package_ref(pack_key)?;
+    let install_dir = crate::package::package_install_dir(&pack_ref.namespace, &pack_ref.name)?;
 
-    if let Some(ref mut hook) = profile.session_hooks.before {
-        if hook.source_pack.is_none() {
-            hook.source_pack = Some(pack_key.to_string());
-            if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
-                hook.script = install_dir.join(rest);
-            }
+    if let Some(ref mut hook) = profile.session_hooks.before
+        && hook.source_pack.is_none()
+    {
+        hook.source_pack = Some(pack_ref.clone());
+        if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
+            hook.script = install_dir.join(rest);
         }
     }
-    if let Some(ref mut hook) = profile.session_hooks.after {
-        if hook.source_pack.is_none() {
-            hook.source_pack = Some(pack_key.to_string());
-            if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
-                hook.script = install_dir.join(rest);
-            }
+    if let Some(ref mut hook) = profile.session_hooks.after
+        && hook.source_pack.is_none()
+    {
+        hook.source_pack = Some(pack_ref);
+        if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
+            hook.script = install_dir.join(rest);
         }
     }
     Ok(())
@@ -7161,14 +7155,14 @@ mod tests {
 
         let before = profile.session_hooks.before.as_ref().expect("before hook");
         assert_eq!(
-            before.source_pack.as_deref(),
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
             Some("acme/widget"),
             "before hook source_pack should be set to the registry pack key"
         );
 
         let after = profile.session_hooks.after.as_ref().expect("after hook");
         assert_eq!(
-            after.source_pack.as_deref(),
+            after.source_pack.as_ref().map(PackageRef::key).as_deref(),
             Some("acme/widget"),
             "after hook source_pack should be set to the registry pack key"
         );
@@ -7283,7 +7277,7 @@ mod tests {
             "before hook $PACK_DIR must be expanded to the pack install directory"
         );
         assert_eq!(
-            before.source_pack.as_deref(),
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
             Some("acme/widget"),
             "before hook source_pack must be set to the registry pack key"
         );
@@ -7382,7 +7376,7 @@ mod tests {
             "before hook $PACK_DIR must expand to acme/base's install dir, not acme/top's"
         );
         assert_eq!(
-            before.source_pack.as_deref(),
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
             Some("acme/base"),
             "before hook source_pack must be acme/base, not overwritten by acme/top"
         );
@@ -7401,7 +7395,7 @@ mod tests {
             "after hook $PACK_DIR must expand to acme/top's install dir"
         );
         assert_eq!(
-            after.source_pack.as_deref(),
+            after.source_pack.as_ref().map(PackageRef::key).as_deref(),
             Some("acme/top"),
             "after hook source_pack must be acme/top"
         );
