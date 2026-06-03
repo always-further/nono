@@ -38,14 +38,11 @@ const MAX_HEADER_SIZE: usize = 64 * 1024;
 /// Example: `GET http://google.com/ HTTP/1.1` -> ("google.com", 80)
 ///          `GET http://google.com:8080/path HTTP/1.1` -> ("google.com", 8080)
 fn parse_non_connect_target(line: &str) -> Result<(String, u16)> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Err(ProxyError::HttpParse(format!(
-            "malformed request line: {}",
-            line
-        )));
-    }
-    let url = parts[1];
+    let mut parts = line.split_whitespace();
+    let _method = parts.next();
+    let url = parts
+        .next()
+        .ok_or_else(|| ProxyError::HttpParse(format!("malformed request line: {}", line)))?;
     let parsed = Url::parse(url)
         .map_err(|e| ProxyError::HttpParse(format!("invalid URL in request: {}: {}", url, e)))?;
     let host = parsed
