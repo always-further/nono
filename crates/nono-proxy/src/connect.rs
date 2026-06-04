@@ -113,6 +113,7 @@ pub async fn handle_connect_with_approval(
     if matches!(
         primary_check.result,
         nono::net_filter::FilterResult::DenyHost { .. }
+            | nono::net_filter::FilterResult::DenyLinkLocal { .. }
     ) {
         let reason = primary_check.result.reason();
         debug!(
@@ -170,6 +171,7 @@ pub async fn handle_connect_with_approval(
     if matches!(
         runtime_check.result,
         nono::net_filter::FilterResult::DenyHost { .. }
+            | nono::net_filter::FilterResult::DenyLinkLocal { .. }
     ) {
         let reason = runtime_check.result.reason();
         debug!(
@@ -255,8 +257,21 @@ pub async fn handle_connect_with_approval(
             );
 
             let resolved = if scope == ApprovalScope::Once {
-                let addrs = ctx.runtime_filter.resolve_host(&host, port).await?;
-                if addrs.is_empty() {
+                let once_check = ctx.runtime_filter.check_host(&host, port).await?;
+                if !once_check.result.is_allowed() {
+                    let reason = once_check.result.reason();
+                    audit::log_denied(
+                        ctx.audit_log,
+                        audit::ProxyMode::Connect,
+                        &audit::EventContext::default(),
+                        &host,
+                        port,
+                        &reason,
+                    );
+                    send_response(stream, 403, &format!("Forbidden: {}", reason)).await?;
+                    return Err(ProxyError::HostDenied { host, reason });
+                }
+                if once_check.resolved_addrs.is_empty() {
                     let reason = "Could not resolve host after approval";
                     audit::log_denied(
                         ctx.audit_log,
@@ -272,7 +287,7 @@ pub async fn handle_connect_with_approval(
                         reason: reason.to_string(),
                     });
                 }
-                addrs
+                once_check.resolved_addrs
             } else {
                 let runtime_check = ctx.runtime_filter.check_host(&host, port).await?;
                 let resolved = &runtime_check.resolved_addrs;

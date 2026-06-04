@@ -265,13 +265,14 @@ impl NetworkApprovalBackend {
         let host = request.host.clone();
         tracing::info!("Network approval requested for host: {host}");
 
-        if self.runtime_filter.check_host(&host, &[]).is_allowed() {
+        let filter_result = self.runtime_filter.check_host(&host, &[]);
+        if filter_result.is_allowed() {
             tracing::info!("Host {host} already allowed by runtime filter — skipping dialog");
             return NetworkApprovalDecision::Granted(ApprovalScope::Session);
         }
 
         if matches!(
-            self.runtime_filter.check_host(&host, &[]),
+            filter_result,
             nono::net_filter::FilterResult::DenyHost { .. }
                 | nono::net_filter::FilterResult::DenyLinkLocal { .. }
         ) {
@@ -421,13 +422,14 @@ impl ApprovalBackend for NetworkApprovalBackend {
     ) -> Result<NetworkApprovalDecision> {
         let host = request.host.clone();
 
-        if self.runtime_filter.check_host(&host, &[]).is_allowed() {
+        let filter_result = self.runtime_filter.check_host(&host, &[]);
+        if filter_result.is_allowed() {
             tracing::info!("Host {host} already allowed by runtime filter — skipping dialog");
             return Ok(NetworkApprovalDecision::Granted(ApprovalScope::Session));
         }
 
         if matches!(
-            self.runtime_filter.check_host(&host, &[]),
+            filter_result,
             nono::net_filter::FilterResult::DenyHost { .. }
                 | nono::net_filter::FilterResult::DenyLinkLocal { .. }
         ) {

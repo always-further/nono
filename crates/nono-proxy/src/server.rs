@@ -842,16 +842,38 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
         };
 
         if let Some(ext_config) = use_external {
-            external::handle_external_proxy(
-                first_line,
-                &mut stream,
-                &header_bytes,
-                &state.filter,
-                &state.session_token,
-                ext_config,
-                Some(&state.audit_log),
-            )
-            .await
+            if let (Some(rf), Some(tx)) =
+                (state.runtime_filter.as_ref(), state.approval_tx.as_ref())
+            {
+                let approval_ctx = connect::ApprovalContext {
+                    primary_filter: &state.filter,
+                    runtime_filter: rf,
+                    session_token: &state.session_token,
+                    audit_log: Some(&state.audit_log),
+                    approval_tx: tx,
+                    child_pid: state.child_pid,
+                    session_id: &state.session_id,
+                    approval_timeout: state.approval_timeout,
+                };
+                connect::handle_connect_with_approval(
+                    first_line,
+                    &mut stream,
+                    &header_bytes,
+                    &approval_ctx,
+                )
+                .await
+            } else {
+                external::handle_external_proxy(
+                    first_line,
+                    &mut stream,
+                    &header_bytes,
+                    &state.filter,
+                    &state.session_token,
+                    ext_config,
+                    Some(&state.audit_log),
+                )
+                .await
+            }
         } else if state.config.external_proxy.is_some() {
             token::validate_proxy_auth(&header_bytes, &state.session_token)?;
 
