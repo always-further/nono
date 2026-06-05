@@ -26,7 +26,13 @@ pub(crate) struct PreparedProfileSave {
 struct PatchGrant {
     access: AccessMode,
     is_file: bool,
+    is_socket: bool,
     bypass_protection: bool,
+}
+
+fn is_socket_path(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +77,8 @@ enum ProfileSection {
     AllowFile,
     ReadFile,
     WriteFile,
+    UnixSocket,
+    UnixSocketBind,
     UnsafeSeatbelt,
 }
 
@@ -83,6 +91,8 @@ impl ProfileSection {
             Self::AllowFile => "read+write files",
             Self::ReadFile => "read files",
             Self::WriteFile => "write files",
+            Self::UnixSocket => "unix socket (connect)",
+            Self::UnixSocketBind => "unix socket (bind)",
             Self::UnsafeSeatbelt => "unsafe seatbelt rule",
         }
     }
@@ -130,6 +140,8 @@ fn extract_denial_items(patch: &profile::Profile) -> Vec<DenialItem> {
         (&fs.allow_file, ProfileSection::AllowFile),
         (&fs.read_file, ProfileSection::ReadFile),
         (&fs.write_file, ProfileSection::WriteFile),
+        (&fs.unix_socket, ProfileSection::UnixSocket),
+        (&fs.unix_socket_bind, ProfileSection::UnixSocketBind),
     ];
 
     for (paths, section) in sections {
@@ -734,6 +746,8 @@ pub(crate) fn print_patch_preview(patch: &profile::Profile) {
         ("read+write files", &patch.filesystem.allow_file),
         ("read files", &patch.filesystem.read_file),
         ("write files", &patch.filesystem.write_file),
+        ("unix socket (connect)", &patch.filesystem.unix_socket),
+        ("unix socket (bind)", &patch.filesystem.unix_socket_bind),
     ];
 
     let has_entries = sections.iter().any(|(_, paths)| !paths.is_empty());
@@ -1284,6 +1298,12 @@ fn build_combined_patch_from_items(items: &[DenialItem]) -> Option<profile::Prof
                     ProfileSection::WriteFile => {
                         patch.filesystem.write_file.push(item.path.clone())
                     }
+                    ProfileSection::UnixSocket => {
+                        patch.filesystem.unix_socket.push(item.path.clone())
+                    }
+                    ProfileSection::UnixSocketBind => {
+                        patch.filesystem.unix_socket_bind.push(item.path.clone())
+                    }
                     ProfileSection::UnsafeSeatbelt => {
                         patch.unsafe_macos_seatbelt_rules.push(item.path.clone())
                     }
@@ -1451,6 +1471,8 @@ fn build_run_profile_patch(
     let mut allow_file = BTreeSet::new();
     let mut read_file = BTreeSet::new();
     let mut write_file = BTreeSet::new();
+    let mut unix_socket = BTreeSet::new();
+    let mut unix_socket_bind = BTreeSet::new();
     let mut bypass_protection = BTreeSet::new();
 
     if !grants.is_empty() {
@@ -1461,6 +1483,22 @@ fn build_run_profile_patch(
             let shortened = shorten_path_for_profile(&path, home_path);
             if grant.bypass_protection {
                 bypass_protection.insert(shortened.clone());
+            }
+
+            if grant.is_socket {
+                // Sockets are not regular files, so OS-level read/write grants do
+                // not lift the seccomp connect/bind block. Route them to the
+                // dedicated unix_socket fields instead. Connect implies read,
+                // bind implies write.
+                match grant.access {
+                    AccessMode::Read => {
+                        unix_socket.insert(shortened);
+                    }
+                    AccessMode::Write | AccessMode::ReadWrite => {
+                        unix_socket_bind.insert(shortened);
+                    }
+                }
+                continue;
             }
 
             match (grant.access, grant.is_file) {
@@ -1493,6 +1531,8 @@ fn build_run_profile_patch(
     patch.filesystem.allow_file = allow_file.into_iter().collect();
     patch.filesystem.read_file = read_file.into_iter().collect();
     patch.filesystem.write_file = write_file.into_iter().collect();
+    patch.filesystem.unix_socket = unix_socket.into_iter().collect();
+    patch.filesystem.unix_socket_bind = unix_socket_bind.into_iter().collect();
     patch.filesystem.bypass_protection = bypass_protection.into_iter().collect();
     patch.unsafe_macos_seatbelt_rules = unsafe_rules.into_iter().collect();
 
@@ -1507,6 +1547,8 @@ fn patch_is_suppression_only(patch: &profile::Profile) -> bool {
         && patch.filesystem.allow_file.is_empty()
         && patch.filesystem.read_file.is_empty()
         && patch.filesystem.write_file.is_empty()
+        && patch.filesystem.unix_socket.is_empty()
+        && patch.filesystem.unix_socket_bind.is_empty()
         && patch.filesystem.bypass_protection.is_empty()
         && patch.unsafe_macos_seatbelt_rules.is_empty()
 }
@@ -1530,6 +1572,8 @@ fn grant_patch_path_suggestions(patch: &profile::Profile) -> BTreeSet<String> {
         &patch.filesystem.allow_file,
         &patch.filesystem.read_file,
         &patch.filesystem.write_file,
+        &patch.filesystem.unix_socket,
+        &patch.filesystem.unix_socket_bind,
     ];
 
     sections
@@ -1578,11 +1622,13 @@ fn add_patch_grant(
     }
 
     let is_file = matches!(flag, "--read-file" | "--write-file" | "--allow-file");
+    let is_socket = is_socket_path(path) || is_socket_path(&target);
 
     match grants.get_mut(&target) {
         Some(existing) => {
             existing.access = merge_access(existing.access, access);
             existing.is_file |= is_file;
+            existing.is_socket |= is_socket;
             existing.bypass_protection |= reason == "sensitive_path";
         }
         None => {
@@ -1591,6 +1637,7 @@ fn add_patch_grant(
                 PatchGrant {
                     access,
                     is_file,
+                    is_socket,
                     bypass_protection: reason == "sensitive_path",
                 },
             );
@@ -1630,6 +1677,28 @@ pub(crate) fn merge_profile_patch(profile: &mut profile::Profile, patch: &profil
         profile::dedup_append(&profile.filesystem.read_file, &patch.filesystem.read_file);
     profile.filesystem.write_file =
         profile::dedup_append(&profile.filesystem.write_file, &patch.filesystem.write_file);
+    profile.filesystem.unix_socket =
+        profile::dedup_append(&profile.filesystem.unix_socket, &patch.filesystem.unix_socket);
+    profile.filesystem.unix_socket_bind = profile::dedup_append(
+        &profile.filesystem.unix_socket_bind,
+        &patch.filesystem.unix_socket_bind,
+    );
+    profile.filesystem.unix_socket_dir = profile::dedup_append(
+        &profile.filesystem.unix_socket_dir,
+        &patch.filesystem.unix_socket_dir,
+    );
+    profile.filesystem.unix_socket_dir_bind = profile::dedup_append(
+        &profile.filesystem.unix_socket_dir_bind,
+        &patch.filesystem.unix_socket_dir_bind,
+    );
+    profile.filesystem.unix_socket_subtree = profile::dedup_append(
+        &profile.filesystem.unix_socket_subtree,
+        &patch.filesystem.unix_socket_subtree,
+    );
+    profile.filesystem.unix_socket_subtree_bind = profile::dedup_append(
+        &profile.filesystem.unix_socket_subtree_bind,
+        &patch.filesystem.unix_socket_subtree_bind,
+    );
     profile.filesystem.bypass_protection = profile::dedup_append(
         &profile.filesystem.bypass_protection,
         &patch.filesystem.bypass_protection,
@@ -1809,6 +1878,106 @@ mod tests {
         .expect("build patch");
 
         assert!(patch.is_none());
+    }
+
+    #[test]
+    fn build_run_profile_patch_routes_socket_read_to_unix_socket_field() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp_home = TempDir::new().expect("temp home");
+        let _env = EnvVarGuard::set_all(&[("HOME", temp_home.path().to_str().expect("home path"))]);
+
+        let socket_path = temp_home.path().join("agent.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let explanation = PolicyExplanation {
+            path: socket_path,
+            access: AccessMode::Read,
+            reason: "path_not_granted".to_string(),
+            details: None,
+            policy_source: None,
+            suggested_flag: None,
+        };
+
+        let patch = build_run_profile_patch(
+            &[explanation],
+            &ErrorObservation::default(),
+            &CapabilitySet::new(),
+            &[],
+            &[],
+        )
+        .expect("build patch")
+        .expect("patch");
+
+        assert_eq!(patch.filesystem.unix_socket, vec!["~/agent.sock"]);
+        assert!(patch.filesystem.unix_socket_bind.is_empty());
+        assert!(patch.filesystem.read.is_empty());
+        assert!(patch.filesystem.read_file.is_empty());
+    }
+
+    #[test]
+    fn build_run_profile_patch_routes_socket_write_to_unix_socket_bind_field() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp_home = TempDir::new().expect("temp home");
+        let _env = EnvVarGuard::set_all(&[("HOME", temp_home.path().to_str().expect("home path"))]);
+
+        let socket_path = temp_home.path().join("bind.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let explanation = PolicyExplanation {
+            path: socket_path,
+            access: AccessMode::Write,
+            reason: "path_not_granted".to_string(),
+            details: None,
+            policy_source: None,
+            suggested_flag: None,
+        };
+
+        let patch = build_run_profile_patch(
+            &[explanation],
+            &ErrorObservation::default(),
+            &CapabilitySet::new(),
+            &[],
+            &[],
+        )
+        .expect("build patch")
+        .expect("patch");
+
+        assert_eq!(patch.filesystem.unix_socket_bind, vec!["~/bind.sock"]);
+        assert!(patch.filesystem.unix_socket.is_empty());
+        assert!(patch.filesystem.write.is_empty());
+        assert!(patch.filesystem.write_file.is_empty());
+    }
+
+    #[test]
+    fn interactive_selector_roundtrip_preserves_socket_grants() {
+        let patch = profile::Profile {
+            filesystem: profile::FilesystemConfig {
+                unix_socket: vec!["~/agent.sock".to_string()],
+                unix_socket_bind: vec!["~/bind.sock".to_string()],
+                read_file: vec!["~/config.json".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let items = extract_denial_items(&patch);
+        assert!(
+            items
+                .iter()
+                .any(|i| i.path == "~/agent.sock" && i.section == ProfileSection::UnixSocket)
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| i.path == "~/bind.sock" && i.section == ProfileSection::UnixSocketBind)
+        );
+
+        let combined = build_combined_patch_from_items(&items).expect("combined patch");
+        assert_eq!(combined.filesystem.unix_socket, vec!["~/agent.sock"]);
+        assert_eq!(combined.filesystem.unix_socket_bind, vec!["~/bind.sock"]);
+        assert_eq!(combined.filesystem.read_file, vec!["~/config.json"]);
     }
 
     #[test]
@@ -2126,6 +2295,51 @@ mod tests {
         assert_eq!(
             prepared.profile.unsafe_macos_seatbelt_rules,
             vec![USER_PREFERENCES_SEATBELT_RULE.to_string()]
+        );
+    }
+
+    #[test]
+    fn prepare_profile_save_from_patch_merges_socket_grants_into_existing_profile() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp_home = TempDir::new().expect("temp home");
+        let temp_config = TempDir::new().expect("temp config");
+        let _env = EnvVarGuard::set_all(&[
+            ("HOME", temp_home.path().to_str().expect("home path")),
+            (
+                "XDG_CONFIG_HOME",
+                temp_config.path().to_str().expect("config path"),
+            ),
+        ]);
+
+        let existing_path =
+            profile::get_user_profile_path("claude-code-local").expect("profile path");
+        std::fs::create_dir_all(existing_path.parent().expect("profile dir")).expect("mkdir");
+        std::fs::write(
+            &existing_path,
+            "{\n  \"meta\": {\n    \"name\": \"claude-code-local\",\n    \"version\": \"1.0.0\"\n  },\n  \"filesystem\": {\n    \"unix_socket\": [\"~/old.sock\"]\n  }\n}\n",
+        )
+        .expect("write profile");
+
+        let mut patch = profile::Profile::default();
+        patch.filesystem.unix_socket = vec!["~/agent.sock".to_string()];
+        patch.filesystem.unix_socket_bind = vec!["~/bind.sock".to_string()];
+
+        let prepared = prepare_profile_save_from_patch(
+            &patch,
+            "claude",
+            "claude-code-local",
+            Some("claude-code"),
+        )
+        .expect("prepare");
+
+        assert!(matches!(prepared.action, SaveAction::Updated));
+        assert_eq!(
+            prepared.profile.filesystem.unix_socket,
+            vec!["~/old.sock".to_string(), "~/agent.sock".to_string()]
+        );
+        assert_eq!(
+            prepared.profile.filesystem.unix_socket_bind,
+            vec!["~/bind.sock".to_string()]
         );
     }
 
