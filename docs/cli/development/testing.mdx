@@ -1,0 +1,235 @@
+---
+title: Testing
+description: nono integration test suites, running tests, and CI pipeline
+---
+
+nono includes comprehensive integration tests that verify the sandbox enforcement works correctly across different scenarios and platforms.
+
+## Running Tests
+
+### Full Test Suite
+
+Run all integration tests with:
+
+```bash
+./tests/run_integration_tests.sh
+```
+
+This script:
+1. Builds nono in release mode
+2. Runs all integration test suites
+3. Reports results with pass/fail/skip counts
+4. Exits with non-zero status if any tests fail
+
+### Individual Test Suites
+
+Run a specific test suite:
+
+```bash
+# Build first
+cargo build --release
+
+# Export binary location
+export NONO_BIN="$(pwd)/target/release/nono"
+
+# Run a specific suite
+./tests/integration/test_fs_access.sh
+```
+
+## Test Suites
+
+The integration tests are organized into 7 focused suites:
+
+### 1. Filesystem Access (`test_fs_access.sh`)
+
+Tests that nono correctly enforces read/write permissions on directories and files.
+
+| Test Category | What It Verifies |
+|---------------|------------------|
+| Directory Read | Files can be read in granted directories |
+| Directory Write | Files can be written in granted directories |
+| Nested Access | Permissions apply to subdirectories |
+| Read-only Mode | `--read` flag allows reads but not writes |
+| Write-only Mode | `--write` flag allows writes but not reads |
+| Single File Access | `--read-file` and `--write-file` grant file-level permissions |
+| Multiple Grants | Multiple `--allow`, `--read`, `--write` flags work together |
+
+### 2. Sensitive Paths (`test_sensitive_paths.sh`)
+
+Verifies that credential and configuration files are protected by default.
+
+Protected paths include:
+- `~/.ssh/` - SSH keys
+- `~/.aws/` - AWS credentials
+- `~/.gnupg/` - GPG keys
+- `~/.kube/` - Kubernetes config
+- `~/.docker/` - Docker credentials
+- `~/.npmrc` - npm auth tokens
+- `~/.netrc` - Network credentials
+- `~/.bash_history`, `~/.zsh_history` - Command history
+- `~/.bashrc`, `~/.zshrc` - Shell configs
+
+These paths are blocked even if a parent directory is explicitly allowed.
+
+### 3. System Paths (`test_system_paths.sh`)
+
+Tests protection of system directories.
+
+| Test Category | What It Verifies |
+|---------------|------------------|
+| System Reads | Can read from `/usr/bin`, `/etc` (needed for executables) |
+| System Writes | Cannot write to system directories |
+| Root Protection | Cannot write to `/`, `/tmp/..` escapes |
+| macOS Specifics | `/System/Library` is readable but not writable |
+
+### 4. Binary Execution (`test_binary_exec.sh`)
+
+Verifies that various binaries execute correctly under the sandbox.
+
+| Category | Commands Tested |
+|----------|-----------------|
+| Basic | `echo`, `true`, `false`, exit codes |
+| File Operations | `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `find`, `touch`, `mkdir` |
+| Shells | `sh`, `bash`, `zsh`, `env`, `printenv` |
+| Text Processing | `sort`, `uniq`, `cut`, `sed`, `awk` |
+| Language Runtimes | `python3`, `node`, `ruby`, `perl`, `gofmt` |
+| Output Verification | Correct output from commands |
+
+<Note>
+Language runtime tests (Python, Node, Ruby) may be skipped if the runtime is installed via Homebrew, as `/opt/homebrew` isn't in the sandbox allowlist by default.
+</Note>
+
+### 5. Network (`test_network.sh`)
+
+Tests network blocking functionality.
+
+| Test | What It Verifies |
+|------|------------------|
+| `--block-net` | `curl`, `wget`, `nc`, `ping` are blocked |
+| Default (allowed) | Network access works without `--block-net` |
+| DNS Resolution | `host`, `nslookup`, `dig` work when network is allowed |
+
+### 6. Dangerous Commands (`test_commands.sh`)
+
+Verifies the current startup-only command-blocking compatibility behavior.
+
+| Category | Commands Blocked |
+|----------|------------------|
+| Destructive | `rm`, `rmdir`, `mv` |
+| Permissions | `chmod`, `chown`, `chgrp` |
+| Privilege | `sudo`, `su`, `doas` |
+| Package Managers | `pip`, `npm`, `gem`, `cargo install` |
+| System | `shutdown`, `reboot`, `kill`, `killall` |
+
+Also tests:
+- `--allow-command` flag to permit specific blocked commands
+- `--block-command` flag to block additional commands
+- documented child-process bypass behavior while the feature is deprecated in `v0.33.x`
+
+### 7. Edge Cases (`test_edge_cases.sh`)
+
+Tests unusual scenarios and boundary conditions.
+
+| Test Category | What It Verifies |
+|---------------|------------------|
+| Symlinks | Symlink traversal within allowed paths |
+| Symlink Escapes | Symlinks to sensitive paths are blocked |
+| Path Variations | Relative paths, `..` references, spaces, special characters |
+| Capability Queries | `nono why --self` for sandbox introspection, `NONO_CAP_FILE` env var |
+| Non-existent Paths | Proper error handling for missing paths |
+| Dry Run Mode | `--dry-run` shows sandbox info without executing |
+| Mixed Permissions | Combining `--read` and `--write` directories |
+
+## Test Framework
+
+Tests use a shared helper library (`tests/lib/test_helpers.sh`) providing:
+
+```bash
+# Run a test expecting success (exit 0)
+expect_success "test name" command args...
+
+# Run a test expecting failure (non-zero exit)
+expect_failure "test name" command args...
+
+# Check command output contains a string
+expect_output_contains "test name" "expected string" command args...
+
+# Skip a test with a reason
+skip_test "test name" "reason"
+
+# Platform checks
+is_macos    # Returns true on macOS
+is_linux    # Returns true on Linux
+
+# Check if a command is available
+command_exists curl
+```
+
+## CI Pipeline
+
+Integration tests run automatically in GitHub Actions on:
+- Pull requests to `main`
+- Pushes to `main`
+
+The CI runs tests on both Ubuntu and macOS:
+
+```yaml
+integration:
+  name: Integration Tests
+  runs-on: ${{ matrix.os }}
+  strategy:
+    matrix:
+      os: [ubuntu-latest, macos-latest]
+  steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build release binary
+      run: cargo build --release
+    - name: Run integration tests
+      run: ./tests/run_integration_tests.sh
+```
+
+## Platform-Specific Behavior
+
+### macOS Notes
+
+- **TMPDIR**: On macOS, `/var/folders` (where `TMPDIR` points) is a system-writable path. Tests that expect write denial within TMPDIR won't work. Write denial is instead verified via system paths (`/usr/bin`, `/etc`).
+
+- **Homebrew runtimes**: Language runtimes installed via Homebrew at `/opt/homebrew/` aren't in the sandbox allowlist. Tests for Python, Node, Ruby gracefully skip if the runtime isn't accessible.
+
+### Linux Notes
+
+- **Landlock ABI**: Tests should work on any Landlock-enabled kernel (5.13+). Network filtering requires ABI v4+ (kernel 6.7+).
+
+## Adding New Tests
+
+1. Create a new test file in `tests/integration/`:
+   ```bash
+   #!/bin/bash
+   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+   source "$SCRIPT_DIR/../lib/test_helpers.sh"
+
+   echo ""
+   echo -e "${BLUE}=== My New Tests ===${NC}"
+
+   verify_nono_binary
+
+   TMPDIR=$(setup_test_dir)
+   trap 'cleanup_test_dir "$TMPDIR"' EXIT
+
+   # Your tests here
+   expect_success "my test" "$NONO_BIN" run --allow "$TMPDIR" -- echo "hello"
+
+   print_summary
+   ```
+
+2. Add the suite to `tests/run_integration_tests.sh`:
+   ```bash
+   run_suite "$SCRIPT_DIR/integration/test_my_new.sh" "My New Tests"
+   ```
+
+3. Make the script executable:
+   ```bash
+   chmod +x tests/integration/test_my_new.sh
+   ```

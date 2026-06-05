@@ -1,0 +1,192 @@
+---
+title: Environment Variable Filtering
+description: Restrict which environment variables are passed to sandboxed processes with an explicit allow-list, preventing credential leaks and reducing the attack surface
+---
+
+By default, sandboxed processes inherit **all** environment variables from the parent process. This means API keys, tokens, and other secrets present in the shell environment are visible inside the sandbox — even if the profile blocks network access or filesystem paths.
+
+Environment variable filtering lets you explicitly control which variables are passed through, so only the variables your agent needs are available.
+
+## How It Works
+
+When `environment.allow_vars` is set in a profile, nono:
+
+1. Clears the inherited environment
+2. Passes through only variables matching the allow-list
+3. Adds back nono-injected credentials (from `env_credentials`) on top
+
+If the `environment` section is omitted entirely, all variables are passed through (backward compatible). Setting `allow_vars` to an empty array `[]` restricts the environment to only nono-injected credentials — no inherited variables are passed.
+
+## Configuration
+
+Add the `environment` section to your profile:
+
+```json
+{
+  "environment": {
+    "allow_vars": ["PATH", "HOME", "TERM", "LANG"]
+  }
+}
+```
+
+### Prefix Patterns
+
+Use a trailing `*` to match all variables with a given prefix:
+
+```json
+{
+  "environment": {
+    "allow_vars": ["PATH", "HOME", "AWS_*", "MYAPP_*"]
+  }
+}
+```
+
+This passes through `AWS_REGION`, `AWS_SECRET_ACCESS_KEY`, and any variable starting with `MYAPP_`, while blocking everything else.
+
+A bare `"*"` matches all variables (equivalent to not setting the `environment` section at all). The `*` wildcard is only valid as a trailing suffix — patterns like `"A*B"` or `"*X"` are rejected at profile load time.
+
+### Inheritance
+
+`allow_vars` is additive across profile inheritance. A child profile appends its entries to the base profile's list, and duplicates are removed:
+
+```json
+// base.json
+{
+  "environment": {
+    "allow_vars": ["PATH", "HOME"]
+  }
+}
+
+// child.json
+{
+  "extends": "base",
+  "environment": {
+    "allow_vars": ["AWS_*"]
+  }
+}
+// Result: ["PATH", "HOME", "AWS_*"]
+```
+
+## Interaction with Credential Injection
+
+Variables injected by nono — via `env_credentials` or `--env-credential` — **always** bypass the allow-list. They are explicitly configured by the user and must reach the child process regardless of filtering rules.
+
+```json
+{
+  "environment": {
+    "allow_vars": ["PATH"]
+  },
+  "env_credentials": {
+    "openai": "OPENAI_API_KEY"
+  }
+}
+```
+
+In this case, `OPENAI_API_KEY` is passed through even though it's not in `allow_vars`, because it was explicitly injected via `env_credentials`.
+
+<Warning>
+  If you inject a secret via `env_credentials` and also list it in `allow_vars`, it will be present once (deduplicated). There is no conflict.
+</Warning>
+
+## Operator-configured deny-list
+
+Use `deny_vars` to strip specific variables while keeping everything else inherited — without having to enumerate an explicit allow-list:
+
+```json
+{
+  "environment": {
+    "deny_vars": ["GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY"]
+  }
+}
+```
+
+Prefix patterns work the same as in `allow_vars` — only trailing `*` is supported:
+
+```json
+{
+  "environment": {
+    "deny_vars": ["GITHUB_*", "ANTHROPIC_*", "OPENAI_*"]
+  }
+}
+```
+
+This strips `GITHUB_TOKEN`, `GITHUB_ACTIONS`, any var starting with `ANTHROPIC_` or `OPENAI_`, etc. Patterns like `*_TOKEN` (leading wildcard) are **not** supported — nono will print a warning and ignore them.
+
+**Precedence:** `deny_vars` wins over `allow_vars`. If a variable appears in both, it is stripped:
+
+```json
+{
+  "environment": {
+    "allow_vars": ["AWS_*"],
+    "deny_vars": ["AWS_SECRET_ACCESS_KEY"]
+  }
+}
+```
+
+`AWS_REGION` passes through; `AWS_SECRET_ACCESS_KEY` is stripped.
+
+**Inheritance:** like `allow_vars`, `deny_vars` is additive across profile inheritance — a child profile appends to the base's list, and duplicates are removed.
+
+## Interaction with the Built-in Deny-List
+
+nono maintains a built-in deny-list of dangerous environment variables (e.g., `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `PYTHONPATH`, `NODE_OPTIONS`). These variables are **always blocked**, even if they appear in `allow_vars`. This prevents a compromised profile from disabling sandbox protections.
+
+```json
+{
+  "environment": {
+    "allow_vars": ["LD_PRELOAD"]
+  }
+}
+```
+
+`LD_PRELOAD` will **not** be passed through, despite being in the allow-list.
+
+## Security Properties
+
+- **Default-allow**: Without the `environment` section, all variables are passed through (no regression)
+- **Empty allow-list restricts all**: `"allow_vars": []` passes zero inherited variables — only nono-injected credentials reach the child
+- **Explicit allow-list**: When `allow_vars` has entries, only matching variables reach the child process
+- **Operator deny-list**: `deny_vars` strips named variables even when `allow_vars` would otherwise pass them through
+- **Injected credentials bypass both lists**: `env_credentials` variables always pass through, regardless of `allow_vars` or `deny_vars`
+- **Built-in deny-list is non-overridable**: Dangerous variables like `LD_PRELOAD` are always blocked and cannot be re-allowed
+- **Precedence**: built-in blocklist > `deny_vars` > `allow_vars`
+- **Prefix patterns reduce misconfiguration**: Only `*` suffix is supported (no regex), reducing risk of accidental over-permission
+- **Bare `*` matches everything**: Use as an escape hatch, but prefer explicit lists
+
+## Example: Minimal Agent Environment
+
+A typical profile for an AI agent that only needs basic shell environment and cloud credentials:
+
+```json
+{
+  "meta": {
+    "name": "secure-agent"
+  },
+  "filesystem": {
+    "allow": ["/usr", "/project"]
+  },
+  "network": {
+    "block": false
+  },
+  "environment": {
+    "allow_vars": [
+      "PATH",
+      "HOME",
+      "TERM",
+      "LANG",
+      "LC_ALL",
+      "USER",
+      "AWS_*"
+    ]
+  },
+  "env_credentials": {
+    "openai": "OPENAI_API_KEY"
+  }
+}
+```
+
+This ensures the agent sees `AWS_*` variables and the injected `OPENAI_API_KEY`, but no other secrets accidentally present in the parent environment.
+
+---
+
+Next: [Credential Injection](/cli/features/credential-injection) | [Profile Authoring](/cli/features/profile-authoring)

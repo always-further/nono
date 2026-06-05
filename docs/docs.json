@@ -1,0 +1,132 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "nono CLI",
+  "logo": {
+    "dark": "/assets/logo.png",
+    "light": "/assets/logo.png"
+  },
+  "favicon": "/assets/logo.png",
+  "colors": {
+    "primary": "#e8724a",
+    "light": "#e8724a",
+    "dark": "#e8724a"
+  },
+  "appearance": {
+    "default": "dark"
+  },
+  "navbar": {
+    "links": [
+      { "label": "GitHub", "href": "https://github.com/always-further/nono" }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Discord",
+      "href": "https://discord.gg/pPcjYzGvbS"
+    }
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": [
+          "cli/getting_started/installation",
+          "cli/getting_started/quickstart",
+          "cli/clients/quickstart",
+          "cli/usage/developer-workflows",
+          "cli/usage/examples",
+          "cli/usage/troubleshooting"
+        ]
+      },
+      {
+        "group": "Policy",
+        "pages": [
+          "cli/features/profiles-groups",
+          "cli/features/profile-authoring",
+          "cli/features/profile-introspection",
+          "cli/features/environment"
+        ]
+      },
+      {
+        "group": "Sessions",
+        "pages": [
+          "cli/features/session-lifecycle"
+        ]
+      },
+      {
+        "group": "Packaging",
+        "pages": [
+          "cli/features/managing-packs",
+          "cli/features/package-publishing"
+        ]
+      },
+      {
+        "group": "Networking",
+        "pages": [
+          "cli/features/networking"
+        ]
+      },
+      {
+        "group": "Secrets",
+        "pages": [
+          "cli/features/credential-injection"
+        ]
+      },
+      {
+        "group": "Audit",
+        "pages": [
+          "cli/features/audit"
+        ]
+      },
+      {
+        "group": "Supply Chain Security",
+        "pages": [
+          "cli/features/trust",
+          "cli/internals/signing"
+        ]
+      },
+      {
+        "group": "Rollback",
+        "pages": [
+          "cli/features/atomic-rollbacks"
+        ]
+      },
+      {
+        "group": "Architecture",
+        "pages": [
+          "cli/internals/overview",
+          "cli/features/execution-modes",
+          "cli/features/supervisor",
+          "cli/internals/security-model",
+          "cli/internals/landlock",
+          "cli/internals/seatbelt",
+          "cli/internals/wsl2",
+          "cli/internals/wsl2-feature-matrix",
+          "cli/internals/application",
+          "cli/internals/capability-manifest",
+          "cli/internals/containers"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "cli/usage/flags",
+          "cli/clients/claude-code",
+          "cli/clients/codex",
+          "cli/clients/opencode",
+          "cli/clients/openclaw"
+        ]
+      },
+      {
+        "group": "Development",
+        "pages": ["cli/development/index", "cli/development/testing"]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/always-further/nono",
+      "discord": "https://discord.gg/pPcjYzGvbS"
+    }
+  }
+}

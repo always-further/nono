@@ -1,0 +1,18 @@
+# Default: LF for all text files
+* text=auto eol=lf
+
+# Force LF line endings for shell scripts (required for WSL2/Linux execution)
+*.sh text eol=lf
+
+# Source and doc files — LF everywhere for consistency
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.mdx text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Keep Windows batch files as CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

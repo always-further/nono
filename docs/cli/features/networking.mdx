@@ -1,0 +1,339 @@
+---
+title: Networking
+description: Network access control — proxy modes, domain filtering, credential injection, and localhost IPC
+---
+
+By default the sandboxed process has unrestricted network access. When you restrict networking, nono routes traffic through an HTTP proxy running in the unsandboxed supervisor process. The sandboxed child can only reach `localhost:<proxy-port>` — all other outbound TCP is blocked at the kernel level.
+
+## Proxy Modes
+
+The proxy supports three modes that can be combined in a single session:
+
+| Mode | What it does | Activated by |
+|------|-------------|--------------|
+| **CONNECT tunnel** | Domain-filtered HTTPS tunneling. Validates the target host against an allowlist, then relays raw TCP bytes. TLS is end-to-end — the proxy never sees plaintext. | `--allow-domain`, `--network-profile` |
+| **Reverse proxy** | Credential injection for API calls. Requests arrive at `http://localhost:<port>/<service>/...`, the proxy injects the real API key and forwards to the upstream over TLS. | `--credential` |
+| **External proxy** | Enterprise proxy passthrough. CONNECT requests are chained through a corporate proxy. Cloud metadata endpoints are still denied. | `--upstream-proxy` |
+
+When domain filtering or credential injection is active, the proxy starts automatically. `HTTP_PROXY` and `HTTPS_PROXY` are set in the child environment. For Node.js 26+, nono also sets `NODE_USE_ENV_PROXY=1` so built-in `fetch()` reads `HTTPS_PROXY`.
+
+A 256-bit session token is generated for each proxy session. The child must include it in every request (`Proxy-Authorization` header for CONNECT, `X-Nono-Token` for reverse proxy), preventing other localhost processes from using the proxy.
+
+## Blocking All Network
+
+```bash
+nono run --allow-cwd --block-net -- cargo build
+```
+
+No outbound connections are permitted. See [Localhost IPC](#localhost-ipc) for allowing specific ports as exceptions.
+
+In a profile, set `network.block` to `true`:
+
+```json
+{
+  "network": { "block": true }
+}
+```
+
+## CONNECT Tunnel (Domain Filtering)
+
+The CONNECT tunnel is the most common proxy mode. It validates outbound hostnames against an allowlist, then relays raw TCP bytes. TLS is end-to-end between the sandboxed process and the upstream server — the proxy never sees plaintext.
+
+`--allow-domain` is an HTTP(S) proxy allowlist, not a generic raw TCP `host:port` allow. When domain filtering is active, direct outbound connections are blocked and traffic must go through the proxy.
+
+```bash
+# Allow specific domains (unrestricted access)
+nono run --allow-cwd --allow-domain api.openai.com --allow-domain api.anthropic.com -- my-agent
+
+# Restrict a domain to specific path patterns
+nono run --allow-cwd \
+  --allow-domain 'https://github.com/my-org/**' \
+  --allow-domain 'https://github.com/my-other-org/**' \
+  -- my-agent
+
+# Use a predefined network profile
+nono run --allow-cwd --network-profile claude-code -- claude
+```
+
+When `--allow-domain` is given a URL with a path (e.g., `https://github.com/org/**`), only requests matching that path pattern are allowed for that domain. Requests to other paths on the same domain receive `403 Forbidden`. A plain hostname (e.g., `api.openai.com`) allows all paths on the domain.
+
+Use `nono why --self --host https://github.com/some/path` inside the sandbox to check whether a specific URL is permitted and see the configured endpoint rules.
+
+![Proxy architecture flow](/assets/proxy-flow.png)
+
+### DNS Rebinding Protection
+
+The proxy resolves DNS itself and checks all resolved IPs against the deny list before connecting. This prevents DNS rebinding attacks where a malicious DNS server maps an allowed hostname to an internal IP.
+
+### Proxy Port
+
+By default the proxy binds to an OS-assigned ephemeral port. Use `--proxy-port` to fix it when the application requires a known port:
+
+```bash
+nono run --profile openclaw --proxy-port 19999 --listen-port 18789 -- openclaw gateway
+```
+
+Applications that read `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, etc. from the environment don't need `--proxy-port` — nono sets these automatically.
+
+### Network Profiles
+
+Network profiles are named sets of allowed domains composed from groups. They are defined in `network-policy.json` (embedded in the binary) and activated with `--network-profile` or via a profile's `network.network_profile` field.
+
+#### Preset Network Profiles
+
+| Profile | Groups | Use Case |
+|---------|--------|----------|
+| `minimal` | `llm_apis` | LLM API access only |
+| `developer` | `llm_apis`, `package_registries`, `github`, `sigstore`, `documentation` | General development |
+| `claude-code` | `llm_apis`, `package_registries`, `github`, `sigstore`, `documentation` | Claude Code agent |
+| `codex` | Same as `developer` + bundled `openai` credential | Codex agent |
+| `opencode` | Same as `developer` + bundled `google-ai` credential | OpenCode agent |
+| `enterprise` | All groups + `google_cloud`, `azure`, `aws_bedrock` | Corporate environments |
+
+#### Groups
+
+Each group maps to a set of allowed hostnames and wildcard suffixes:
+
+| Group | Hosts |
+|-------|-------|
+| `llm_apis` | api.openai.com, api.anthropic.com, generativelanguage.googleapis.com, ... |
+| `package_registries` | registry.npmjs.org, pypi.org, crates.io, ... |
+| `github` | github.com, api.github.com, raw.githubusercontent.com, ... |
+| `sigstore` | fulcio.sigstore.dev, rekor.sigstore.dev, tuf-repo-cdn.sigstore.dev |
+| `documentation` | docs.python.org, developer.mozilla.org, doc.rust-lang.org, ... |
+| `google_cloud` | *.googleapis.com |
+| `azure` | *.openai.azure.com, *.cognitiveservices.azure.com |
+| `aws_bedrock` | *.bedrock.amazonaws.com, *.bedrock-runtime.amazonaws.com |
+
+### Adding Domains
+
+Use `--allow-domain` on the command line or `allow_domain` in a profile to add domains on top of the network profile:
+
+```json
+{
+  "meta": { "name": "my-agent" },
+  "filesystem": { "allow": ["$WORKDIR"] },
+  "network": {
+    "network_profile": "developer",
+    "allow_domain": ["my-internal-api.example.com"]
+  }
+}
+```
+
+```bash
+nono run --allow-cwd --network-profile developer --allow-domain my-internal-api.example.com -- my-agent
+```
+
+## Reverse Proxy (Credential Injection)
+
+When `--credential` is active, the proxy runs a reverse proxy alongside the CONNECT tunnel. The sandboxed process sends plain HTTP requests to `http://localhost:<port>/<service>/...`, and the proxy injects the real API key and forwards to the upstream over TLS.
+
+```bash
+nono run --allow-cwd --credential openai -- my-agent
+```
+
+The agent never sees the real credential. A phantom session token is placed in the sandbox environment; the proxy swaps it for the real key at the HTTP header level. See [Credential Injection](/cli/features/credential-injection) for full details on credential sources, custom credentials, and endpoint filtering.
+
+## External Proxy (Enterprise Passthrough)
+
+For corporate environments with a mandatory outbound proxy, chain domain-filtered traffic through it with `--upstream-proxy`. This is typically paired with the `enterprise` network profile:
+
+```bash
+nono run --allow-cwd --network-profile enterprise \
+  --upstream-proxy squid.corp:3128 -- my-agent
+```
+
+CONNECT requests are chained through the corporate proxy. Cloud metadata endpoints are still denied regardless.
+
+### Bypassing the External Proxy
+
+Some domains may need to bypass the upstream proxy and connect directly:
+
+```bash
+nono run --allow-cwd --network-profile enterprise \
+  --upstream-proxy squid.corp:3128 \
+  --upstream-bypass git.internal.corp \
+  --upstream-bypass "*.dev.local" \
+  -- my-agent
+```
+
+Bypass patterns support exact hostnames and `*.` wildcard suffixes (case-insensitive). Matching hosts route directly; everything else goes through the upstream proxy.
+
+This can also be configured in a profile:
+
+```json
+{
+  "network": {
+    "network_profile": "enterprise",
+    "upstream_proxy": "squid.corp:3128",
+    "upstream_bypass": ["git.internal.corp", "*.dev.local"]
+  }
+}
+```
+
+Or via environment variables:
+
+```bash
+export NONO_UPSTREAM_PROXY=squid.corp:3128
+export NONO_UPSTREAM_BYPASS=git.internal.corp,*.dev.local
+nono run --allow-cwd --network-profile enterprise -- my-agent
+```
+
+## Endpoint Filtering
+
+When credential injection routes traffic through the reverse proxy, you can further restrict which HTTP method+path combinations are allowed on a per-service basis. This enforces least-privilege at the API level — the agent can reach an allowed domain but only use specific endpoints.
+
+### CLI Usage
+
+Use `--allow-endpoint` to restrict a credential service to specific patterns:
+
+```bash
+# Allow only chat completions through OpenAI
+nono run --allow-cwd --credential openai \
+  --allow-endpoint 'openai:POST:/v1/chat/completions' \
+  -- my-agent
+
+# Allow GitHub issue reads and comment writes, block everything else
+nono run --allow-cwd --credential github \
+  --allow-endpoint 'github:GET:/repos/*/issues/**' \
+  --allow-endpoint 'github:POST:/repos/*/issues/*/comments' \
+  -- my-agent
+```
+
+When any endpoint rules are configured for a service, requests that don't match receive `403 Forbidden` and are logged in the audit trail.
+
+### Profile Configuration
+
+Endpoint rules can also be defined on custom credentials within profiles:
+
+```json
+{
+  "network": {
+    "custom_credentials": {
+      "gitlab": {
+        "upstream": "https://gitlab.example.com",
+        "credential_key": "gitlab_token",
+        "endpoint_rules": [
+          { "method": "GET", "path": "/api/v4/projects/*/merge_requests/**" },
+          { "method": "POST", "path": "/api/v4/projects/*/merge_requests/*/notes" }
+        ]
+      }
+    }
+  }
+}
+```
+
+See [Credential Injection — Custom Credential Definitions](/cli/features/credential-injection#custom-credential-definitions) for the full `custom_credentials` schema.
+
+### Pattern Syntax
+
+Path patterns use standard glob syntax (same as `.gitignore` and nono profile `include` patterns):
+
+| Pattern | Matches |
+|---------|---------|
+| `/v1/chat/completions` | Exact path only |
+| `/repos/*/issues` | One segment wildcard (e.g., `/repos/myrepo/issues`) |
+| `/api/**` | Zero or more segments (e.g., `/api/v1/data/export`) |
+| `*` | Any method (when used as the method field) |
+
+## Localhost IPC
+
+Use `--open-port` to allow bidirectional localhost TCP on a specific port (connect + listen). This enables IPC between sandboxed processes — for example, an MCP server in one sandbox and an AI agent in another.
+
+```bash
+# Terminal 1: MCP server listening on port 3000
+nono run --block-net --open-port 3000 --allow ./mcp-server -- node server.js
+
+# Terminal 2: Agent connecting to the MCP server
+nono run --block-net --open-port 3000 --allow ./client -- claude
+```
+
+`--open-port` works alongside domain filtering. Outbound to allowed hosts goes through the proxy; IPC stays on localhost:
+
+```bash
+nono run --network-profile claude-code --open-port 3000 --allow-cwd -- claude
+```
+
+This generates Seatbelt rules (macOS) or Landlock rules (Linux) that allow both `connect()` and `bind()` on the specified port, in addition to the proxy port.
+
+See [CLI Reference](/cli/usage/flags#--open-port) for full details and platform limitations.
+
+### Listen-Only Ports
+
+Use `--listen-port` when a sandboxed process needs to accept inbound connections but does not need to initiate outbound connections on that port (e.g., a server or gateway):
+
+```bash
+nono run --allow-cwd --network-profile developer --listen-port 3000 -- npm run dev
+```
+
+See [CLI Reference](/cli/usage/flags#--listen-port) for platform limitations.
+
+## Always-Denied Destinations
+
+The following destinations are always blocked by the proxy, regardless of configuration. These cannot be overridden.
+
+| Destination | Why |
+|-------------|-----|
+| `169.254.169.254` | AWS/GCP/Azure instance metadata |
+| `metadata.google.internal` | GCP metadata alias |
+| `metadata.azure.internal` | Azure metadata alias |
+| `169.254.0.0/16` (resolved IP) | IPv4 link-local — DNS rebinding protection |
+| `fe80::/10` (resolved IP) | IPv6 link-local — DNS rebinding protection |
+
+Private network addresses (RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are allowed to support enterprise environments.
+
+## Platform Behavior
+
+### Linux
+
+Network filtering uses Landlock V4+ per-port TCP rules. The sandbox restricts `connect()` to only the proxy port. All other outbound TCP is blocked at the kernel level.
+
+**Requirements:** Landlock ABI v4+ (Linux 6.7+)
+
+### macOS
+
+Network filtering uses Seatbelt rules. The sandbox allows only `(remote tcp "localhost:PORT")` and denies all other network operations.
+
+```scheme
+(deny network*)
+(allow network-outbound (remote tcp "localhost:PORT"))
+(allow system-socket (socket-domain AF_INET) (socket-type SOCK_STREAM))
+(allow system-socket (socket-domain AF_INET6) (socket-type SOCK_STREAM))
+```
+
+### WSL2
+
+The WSL2 kernel (6.6) ships with Landlock V3, which does not include TCP network filtering (V4 requires kernel 6.7+). Additionally, the seccomp-based proxy fallback is unavailable due to [WSL2's own seccomp notify listener](https://github.com/microsoft/WSL/issues/9548).
+
+**What works:** `--block-net` (blocks all networking via `SECCOMP_RET_ERRNO`).
+
+**What doesn't work:** Per-port filtering (`--open-port`, `--listen-port`) and proxy-based domain filtering (`--allow-domain`, `--network-profile`, `--credential`). Domain filtering is blocked by default on WSL2 — set `wsl2_proxy_policy: "insecure_proxy"` in your profile's security config to opt in to degraded execution. See [Credential Proxy on WSL2](/cli/internals/wsl2#credential-proxy-on-wsl2) for details.
+
+When Microsoft upgrades the WSL2 kernel to 6.7+, per-port filtering will activate automatically. See [WSL2 Support](/cli/internals/wsl2) for full details.
+
+## Audit Logging
+
+All proxy decisions are logged via `tracing`:
+
+```
+ALLOW CONNECT api.openai.com:443
+DENY  CONNECT 169.254.169.254:80 reason=denied_cidr
+```
+
+Enable verbose logging to see proxy decisions:
+
+```bash
+nono run -vv --network-profile claude-code --allow-cwd -- my-agent
+```
+
+## Limitations
+
+- **HTTP/1.1 only** — The CONNECT tunnel passes raw bytes (HTTP/2 works end-to-end), but the reverse proxy mode speaks HTTP/1.1 to upstream
+- **No per-port filtering on macOS** — Seatbelt cannot filter outbound by destination port
+- **Domain filtering requires supervised execution** — The proxy runs in the unsandboxed parent process, so `nono wrap` (Direct mode) is incompatible. Use `nono run` instead.
+- **WSL2: no per-port filtering or domain filtering by default** — See [WSL2 section](#wsl2) above
+
+## Next Steps
+
+- [Credential Injection](/cli/features/credential-injection) — Keep API keys out of the sandbox
+- [CLI Reference](/cli/usage/flags) — Complete flag documentation

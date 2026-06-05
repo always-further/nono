@@ -1,0 +1,1548 @@
+---
+title: CLI Reference
+description: Complete reference for all nono command-line flags
+---
+
+## Global Options
+
+These options work with all commands.
+
+### `--silent`, `-s`
+
+Suppress all nono output (banner, summary, status messages). Only the executed command's output will be shown.
+
+```bash
+nono -s run --allow-cwd -- my-agent
+nono --silent why --path ~/.ssh/id_rsa --op read
+```
+
+### `--theme`
+
+Select the CLI color theme for banners, summaries, warnings, and other styled output.
+
+Available themes:
+- `mocha`
+- `latte`
+- `frappe`
+- `macchiato`
+- `tokyo-night`
+- `minimal`
+
+Resolution order:
+- `--theme <NAME>`
+- `NONO_THEME`
+- `[ui] theme = "<NAME>"` in `~/.config/nono/config.toml`
+- default: `mocha`
+
+```bash
+# Per invocation
+nono --theme tokyo-night run --allow-cwd -- claude
+
+# Via environment variable
+NONO_THEME=latte nono run --allow-cwd -- codex
+
+# Config file
+# ~/.config/nono/config.toml
+# [ui]
+# theme = "frappe"
+```
+
+If an unknown theme is supplied, nono falls back to `mocha`.
+
+### Redaction Policy
+
+Command arguments persisted in sessions, audit logs, rollback metadata, and audit attestations are redacted with a secure default policy. You can extend the policy in `~/.config/nono/config.toml`:
+
+```toml
+[redaction]
+extra_flags = ["--private-token", "--pat"]
+extra_headers = ["Private-Token"]
+extra_query_keys = ["sig", "signature"]
+```
+
+To stop redacting a built-in default for debugging, you must opt in explicitly:
+
+```toml
+[redaction]
+unsafe_redaction_overrides = true
+allow_unredacted_defaults = ["state"]
+```
+
+Non-default redaction policies are recorded as a diff in audit event logs and audit attestations.
+
+## Commands
+
+### `nono run`
+
+Run a command inside the sandbox.
+
+```bash
+nono run [OPTIONS] -- <COMMAND> [ARGS...]
+```
+
+### `nono shell`
+
+Start an interactive shell inside the sandbox.
+
+```bash
+nono shell [OPTIONS]
+```
+
+### `nono wrap`
+
+Apply sandbox and exec into command. nono disappears from the process tree — no parent process remains. For scripts, piping, and embedding where no parent process is wanted.
+
+```bash
+nono wrap [OPTIONS] -- <COMMAND> [ARGS...]
+```
+
+<Note>
+  `nono wrap` does not support proxy flags (`--network-profile`, `--allow-domain`, `--credential`, `--upstream-proxy`, `--upstream-bypass`). The network proxy requires a parent process. Use `nono run` instead.
+</Note>
+
+### `nono why`
+
+Check why a path or network operation would be allowed or denied. Designed for both human debugging and programmatic use by AI agents.
+
+```bash
+nono why --path <PATH> --op <OP> [OPTIONS]
+nono why --host <HOST> [--port <PORT>] [OPTIONS]
+nono why --scope <SCOPE> [OPTIONS]
+nono why --self --path <PATH> --op <OP> [OPTIONS]  # Inside sandbox
+```
+
+### `nono learn`
+
+Discover required filesystem paths and network activity. On Linux, `nono learn` uses `strace`. On macOS, use `nono run --profile <name> -- <command>` for sandboxed profile learning; legacy unsandboxed tracing is available with `nono learn --trace`.
+
+```bash
+nono learn [OPTIONS] -- <COMMAND> [ARGS...]
+```
+
+### `nono setup`
+
+Set up nono on this system. Verifies installation, tests sandbox support, and optionally generates example profiles.
+
+```bash
+nono setup [OPTIONS]
+```
+
+### `nono profile`
+
+Create, inspect, and compare nono profiles.
+
+```bash
+nono profile <SUBCOMMAND>
+```
+
+Subcommands:
+- `init` - Generate a skeleton profile JSON file
+- `list` - List all available profiles (preset, pack, and user)
+- `show` - Show a fully resolved profile
+- `diff` - Diff two profiles
+- `validate` - Validate a profile JSON file
+- `groups` - List policy groups or show details for a specific group
+- `schema` - Print the profile JSON Schema
+- `guide` - Print the profile authoring guide
+
+See [Profile Introspection](/cli/features/profile-introspection) for full documentation of the inspection subcommands.
+
+### `nono trust`
+
+Manage file attestation. Sign, verify, and manage trust for files consumed by AI agents.
+
+```bash
+nono trust <SUBCOMMAND>
+```
+
+Subcommands:
+- `init` - Create a trust-policy.json in the current directory
+- `sign` - Sign files
+- `sign-policy` - Sign a trust policy file
+- `verify` - Verify files against the trust policy
+- `list` - List files and their verification status
+- `keygen` - Generate a new signing key pair
+- `export-key` - Export the public key for a signing key
+
+## `nono learn` Options
+
+<Note>
+  On Linux, `nono learn` runs WITHOUT sandbox restrictions using `strace` (install with `apt install strace`). On macOS, profile learning happens through sandboxed `nono run`; use `nono learn --trace` only when you explicitly want the legacy unsandboxed `fs_usage` + `nettop` tracer.
+</Note>
+
+### `--profile`, `-p`
+
+Compare against an existing profile to show only missing paths.
+
+```bash
+nono learn --profile opencode -- opencode
+```
+
+### `--json`
+
+Output discovered paths as a JSON fragment suitable for a profile.
+
+```bash
+nono learn --json -- my-app > paths.json
+```
+
+### `--timeout`
+
+Limit trace duration in seconds.
+
+```bash
+nono learn --timeout 30 -- my-long-running-app
+```
+
+### `--all`
+
+Show all accessed paths, not just those that would be blocked by the sandbox.
+
+```bash
+nono learn --all -- my-app
+```
+
+### `--trace`
+
+On macOS, use the legacy unsandboxed `fs_usage` + `nettop` tracer.
+
+```bash
+nono learn --trace -- my-app
+```
+
+### `--verbose`, `-v`
+
+Enable verbose output. Can be specified multiple times.
+
+```bash
+nono learn -vv -- my-app
+```
+
+## `nono run` Options
+
+### Directory Permissions
+
+These flags grant recursive access to directories and all their contents.
+
+#### `--allow`, `-a`
+
+Grant read and write access to a directory.
+
+```bash
+nono run --allow ./project -- command
+nono run -a ./src -a ./tests -- command
+```
+
+Can be specified multiple times to allow multiple directories.
+
+#### `--read`, `-r`
+
+Grant read-only access to a directory.
+
+```bash
+nono run --read ./config -- command
+nono run -r /etc/myapp -- command
+```
+
+Useful for source code directories that shouldn't be modified.
+
+#### `--write`, `-w`
+
+Grant write-only access to a directory.
+
+```bash
+nono run --write ./output -- command
+nono run -w ./logs -- command
+```
+
+Useful for output directories where reading existing content isn't needed.
+
+### File Permissions
+
+These flags grant access to individual files only (non-recursive).
+
+#### `--allow-file`
+
+Grant read and write access to a single file.
+
+```bash
+nono run --allow-file ./database.sqlite -- command
+```
+
+#### `--read-file`
+
+Grant read-only access to a single file.
+
+```bash
+nono run --read-file ./config.toml -- command
+nono run --read-file ~/.gitconfig -- command
+```
+
+#### `--write-file`
+
+Grant write-only access to a single file.
+
+```bash
+nono run --write-file ./output.log -- command
+```
+
+### Denial Prompt Control
+
+#### `--suppress-save-prompt`
+
+Suppress the post-run save-profile prompt for denials under a path. This does
+not grant access and does not remove the diagnostic footer; it only prevents
+the same denied path from being offered as a profile addition repeatedly.
+
+```bash
+nono run --profile claude-code \
+  --suppress-save-prompt ~/.copilot/settings.json \
+  -- claude
+```
+
+For persistent behavior, put the same path in
+`filesystem.suppress_save_prompt` in a user profile. The older
+`--ignore-denied` spelling is accepted as an alias, but the suppress wording is
+preferred because this flag never turns a denial into an allow rule.
+
+When nono offers to save denied paths after a run, choosing `suppress` writes
+all listed path suggestions to `filesystem.suppress_save_prompt` instead of
+adding them as filesystem grants.
+
+### AF_UNIX Socket Permissions
+
+These flags grant `connect(2)` (and optionally `bind(2)`) on pathname AF_UNIX
+sockets. Abstract-namespace and unnamed sockets are never grantable — only
+filesystem-backed socket paths are supported.
+
+Under restricted network modes (`--block-net` or `--network-profile`),
+explicit socket grants are required. A plain `--allow-file`/`--allow` grant
+no longer implicitly permits socket access.
+
+#### `--allow-unix-socket`
+
+Allow `connect(2)` to an existing AF_UNIX socket file. Implies read access on
+the socket path.
+
+```bash
+# Connect to a running Postgres dev server via Unix socket
+nono run --block-net --allow-unix-socket /tmp/.s.PGSQL.5432 -- psql
+```
+
+#### `--allow-unix-socket-bind`
+
+Allow `connect(2)` and `bind(2)` on an AF_UNIX socket at this path. Use when
+the sandboxed program creates the socket itself. If the path doesn't exist
+yet (the typical `bind(2)` case), the CLI auto-grants write on the parent
+directory so the kernel can create the socket file.
+
+```bash
+# Server that binds its own IPC socket
+nono run --block-net --allow-unix-socket-bind /run/myapp.sock -- myapp
+```
+
+Prefer `--allow-unix-socket-dir-bind` for runtime-generated filenames (e.g.
+PID-suffixed paths) so the implied fs grant stays scoped.
+
+#### `--allow-unix-socket-dir`
+
+Allow `connect(2)` to any AF_UNIX socket **directly** within this directory
+(non-recursive — grandchildren are not covered). Implies read access on the
+directory.
+
+```bash
+# Connect to any Unix socket directly in /run/user/1000
+nono run --block-net --allow-unix-socket-dir /run/user/$UID -- my-client
+```
+
+#### `--allow-unix-socket-dir-bind`
+
+Allow `connect(2)` and `bind(2)` on any AF_UNIX socket directly within this
+directory. Non-recursive. Use for runtime-generated socket filenames.
+
+```bash
+# tsx creates /tmp/tsx-<uid>/<pid>.pipe on every invocation
+nono run --block-net --allow-unix-socket-dir-bind $TMPDIR/tsx-$UID -- tsx app.ts
+```
+
+<Note>
+  On macOS, `--allow-unix-socket-dir*` is enforced as direct-child-only socket
+  access. On current Linux, pathname AF_UNIX grants are enforced through the
+  implied Landlock filesystem directory grant, which is recursive. The
+  direct-child distinction becomes enforceable on Linux when the seccomp
+  AF_UNIX allowlist path is active.
+</Note>
+
+#### `--allow-unix-socket-subtree`
+
+Allow `connect(2)` to any AF_UNIX socket within this directory subtree
+(recursive — nested subdirectories are covered). Implies read access on the
+directory.
+
+```bash
+nono run --block-net --allow-unix-socket-subtree $TMPDIR/nx -- nx serve
+```
+
+#### `--allow-unix-socket-subtree-bind`
+
+Allow `connect(2)` and `bind(2)` on any AF_UNIX socket within this directory
+subtree. Implies read/write access on the directory.
+
+```bash
+nono run --block-net --allow-unix-socket-subtree-bind $TMPDIR/nx -- nx serve
+```
+
+### Network Control
+
+#### `--block-net`
+
+Block all network access. Network is **allowed by default**.
+
+```bash
+# Block network for a build process that should be offline
+nono run --allow . --block-net -- cargo build
+```
+
+#### `--network-profile`
+
+Use a predefined network profile for host-level filtering. When set, outbound traffic is routed through a localhost proxy that only allows connections to hosts in the profile.
+
+```bash
+# Use the claude-code network profile
+nono run --allow-cwd --network-profile claude-code -- claude
+
+# Use minimal profile (LLM APIs only)
+nono run --allow-cwd --network-profile minimal -- my-agent
+```
+
+Available profiles: `minimal`, `developer`, `claude-code`, `codex`, `opencode`, `enterprise`. See [Networking](/cli/features/networking) for details.
+
+<Note>
+  `--network-profile` and `--allow-domain` activate proxy mode, which forces supervised execution. The proxy runs in the unsandboxed parent process.
+</Note>
+
+#### `--allow-domain`
+
+Add a domain to the proxy allowlist. Can be specified multiple times. Activates proxy mode if not already active.
+
+This flag only permits HTTP(S) traffic routed through nono's proxy. It does not grant direct raw TCP access to the destination port.
+
+Accepts either a plain hostname (unrestricted access to all paths) or a URL with a path glob pattern (restricts to matching paths only):
+
+```bash
+# Allow specific domains (all paths)
+nono run --allow-cwd --allow-domain api.openai.com --allow-domain api.anthropic.com -- my-agent
+
+# Restrict to specific paths on a domain
+nono run --allow-cwd \
+  --allow-domain 'https://github.com/my-org/**' \
+  --allow-domain 'https://github.com/other-org/**' \
+  -- my-agent
+
+# Combine with a network profile for additional domains
+nono run --allow-cwd --network-profile minimal --allow-domain custom-api.example.com -- my-agent
+```
+
+When a URL with a path is provided, only requests matching that path pattern are permitted. Requests to other paths on the same domain are denied with `403 Forbidden`. Pattern syntax: `*` matches one path segment, `**` matches zero or more.
+
+#### `--credential`
+
+Enable credential injection for a named service via the reverse proxy. The service must be either a preset service (`openai`, `anthropic`, `gemini`, `google-ai`) or defined as a custom credential in your profile. Credentials are loaded from the system keyring under the `nono` service name, from 1Password when `credential_key` is an `op://` URI, from Apple Passwords on macOS when `credential_key` is an `apple-password://` URI, from a file when `credential_key` is a `file://` URI, or from the host environment when `credential_key` is an `env://` URI.
+
+```bash
+# Inject OpenAI credentials (loads from keyring account "openai_api_key")
+nono run --allow-cwd --network-profile claude-code --credential openai -- my-agent
+
+# Multiple credentials
+nono run --allow-cwd --network-profile claude-code \
+  --credential openai --credential anthropic -- my-agent
+```
+
+The proxy sets `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, etc. in the child environment so SDKs route through the proxy automatically.
+
+Custom credentials can be defined in profiles for APIs not covered by the preset services:
+
+```json
+{
+  "network": {
+    "custom_credentials": {
+      "my-api": {
+        "upstream": "https://api.example.com",
+        "credential_key": "my_api_key"
+      }
+    }
+  }
+}
+```
+
+See [Credential Injection](/cli/features/credential-injection) for complete documentation including custom credential definitions.
+
+#### `--allow-endpoint`
+
+Restrict a credential service to specific HTTP method+path patterns. When set, only requests matching at least one rule are proxied; all others receive 403 Forbidden. Can be specified multiple times.
+
+Format: `SERVICE:METHOD:PATH`
+
+- **SERVICE**: credential service name (e.g., `openai`, `github`)
+- **METHOD**: HTTP method (`GET`, `POST`, etc.) or `*` for any method
+- **PATH**: URL path glob pattern (`*` matches one segment, `**` matches zero or more)
+
+```bash
+# Allow only chat completions through OpenAI
+nono run --allow-cwd --credential openai \
+  --allow-endpoint 'openai:POST:/v1/chat/completions' \
+  -- my-agent
+
+# Allow GitHub issue reads and comment writes, block everything else
+nono run --allow-cwd --credential github \
+  --allow-endpoint 'github:GET:/repos/*/issues/**' \
+  --allow-endpoint 'github:POST:/repos/*/issues/*/comments' \
+  -- my-agent
+```
+
+Endpoint rules can also be defined in profiles via `endpoint_rules` on custom credentials. See [Networking — Endpoint Filtering](/cli/features/networking#endpoint-filtering) for details.
+
+#### `--upstream-proxy`
+
+Chain outbound connections through an upstream (enterprise) proxy. Cloud metadata endpoints are still denied.
+
+```bash
+nono run --allow-cwd --network-profile enterprise --upstream-proxy squid.corp:3128 -- my-agent
+```
+
+#### `--upstream-bypass`
+
+Route specific domains directly instead of through the upstream proxy. Supports exact hostnames and `*.` wildcard suffixes (case-insensitive). Requires `--upstream-proxy`.
+
+```bash
+# Bypass the upstream proxy for internal services
+nono run --allow-cwd --network-profile enterprise \
+  --upstream-proxy squid.corp:3128 \
+  --upstream-bypass internal.corp \
+  --upstream-bypass "*.private.net" \
+  -- my-agent
+
+# Multiple bypass patterns
+nono run --allow-cwd \
+  --upstream-proxy squid.corp:3128 \
+  --upstream-bypass git.internal.corp \
+  --upstream-bypass "*.dev.local" \
+  -- my-agent
+```
+
+Bypass hosts are checked before routing. Matching hosts use a direct CONNECT tunnel; non-matching hosts chain through the upstream proxy.
+
+Can be specified multiple times.
+
+#### `--proxy-port`
+
+Set a fixed port for the credential injection proxy (default: OS-assigned ephemeral port). Use this when the sandboxed application requires a known proxy port that can't be configured via environment variables.
+
+```bash
+# Use a fixed proxy port for applications that need base URL configuration
+nono run --profile openclaw --proxy-port 19999 --listen-port 18789 -- openclaw gateway
+
+# The credential proxy will always be at http://127.0.0.1:19999
+# Configure the application to use this base URL for API calls
+```
+
+<Note>
+Without `--proxy-port`, nono uses an OS-assigned ephemeral port and sets environment variables like `GEMINI_BASE_URL=http://127.0.0.1:PORT/gemini`. Applications that read these env vars don't need `--proxy-port`. Use it only when the application requires manual base URL configuration.
+</Note>
+
+#### `--trust-proxy-ca`
+
+*macOS only.* Add the proxy's TLS interception CA to the macOS user trust store via Keychain. This enables Go CLI tools (`gh`, `terraform`) that ignore `SSL_CERT_FILE` and only verify certificates via the system trust store (`com.apple.trustd`).
+
+```bash
+nono run --allow-cwd --credential github --trust-proxy-ca -- gh api /user
+```
+
+The CA is persisted in macOS Keychain and shared across sessions. It regenerates automatically when expired (default: 1 day, configurable via `--proxy-ca-validity`):
+
+- **First run**: Generates a new ECDSA P-256 CA, stores it in Keychain, and adds it to the user trust store (one biometric/password prompt)
+- **Subsequent runs**: Loads from Keychain with zero prompts
+- **After expiry**: Removes the expired CA and regenerates
+
+<Note>
+This flag has no effect without `--credential` (or another TLS-intercepting route). If no credential routes are configured, nono warns and skips CA generation.
+</Note>
+
+Environment variable: `NONO_TRUST_PROXY_CA=1`
+
+#### `--proxy-ca-validity`
+
+Set the ephemeral proxy CA certificate validity in days (1–365, default: 1). Leaf certificates minted for intercepted hosts share the same expiry as the CA.
+
+```bash
+# CA valid for 7 days (useful for long-running sessions)
+nono run --credential github --proxy-ca-validity 7 -- gh api /user
+```
+
+<Note>
+When used with `--trust-proxy-ca`, the validity only applies when generating a new CA. An existing Keychain CA that is still valid will be reused regardless of this setting.
+</Note>
+
+Environment variable: `NONO_PROXY_CA_VALIDITY=<days>`
+
+#### `--listen-port`
+
+Allow the sandboxed process to listen on a TCP port. Required when running server applications (like AI gateways) in proxy mode.
+
+```bash
+# Allow OpenClaw gateway to listen on its default port
+nono run --profile openclaw --listen-port 18789 \
+  --credential openai -- openclaw gateway
+
+# Allow a development server
+nono run --allow-cwd --network-profile developer --listen-port 3000 -- npm run dev
+```
+
+<Warning>
+**macOS limitation:** Seatbelt cannot filter by port number. When `--listen-port` is specified on macOS, the sandbox permits binding to **any** port and accepting inbound connections from any source.
+
+This is a broader permission than intended, but the security impact is limited:
+- Outbound connections are still restricted to allowed hosts via the proxy
+- Filesystem access is still limited to granted paths
+- An attacker would need to know the machine's IP and which port the agent opened
+- Even if they connect, they can only send data in — the agent cannot exfiltrate responses to arbitrary hosts
+
+On Linux with Landlock ABI v4+, per-port filtering is enforced and only the specified ports can be bound.
+</Warning>
+
+<Note>
+`--listen-port` only has effect in proxy mode (when `--network-profile` or `--allow-domain` is active). Without proxy mode, network operations use the default OS-level allow/deny and bind is not restricted.
+</Note>
+
+#### `--open-port`
+
+Allow bidirectional localhost TCP on a specific port. The sandboxed process can both **connect to** and **bind/listen on** `127.0.0.1:<PORT>`. Use this for IPC between sandboxed processes (e.g., MCP servers, dev tools, AI agents running in separate sandboxes).
+
+```bash
+# MCP server in one sandbox, client in another — both can use port 3000
+nono run --block-net --open-port 3000 --allow ./mcp-server -- node server.js
+nono run --block-net --open-port 3000 --allow ./client -- claude
+
+# Multiple IPC ports
+nono run --block-net --open-port 3000 --open-port 5000 --allow-cwd -- my-agent
+
+# Combine with proxy mode — outbound filtered + localhost IPC on port 4000
+nono run --network-profile claude-code --open-port 4000 --allow-cwd -- claude
+```
+
+Works across all network modes:
+- **`--block-net`**: The port becomes an exception to the block (localhost only)
+- **Proxy mode**: The port is allowed in addition to the proxy port
+- **Default (AllowAll)**: No-op — all ports are already reachable
+
+Can be specified multiple times for multiple ports.
+
+<Warning>
+**macOS limitation:** Seatbelt cannot filter bind/inbound by port number. When `--open-port` is specified on macOS, the sandbox permits binding to **any** port (same tradeoff as `--listen-port`). Outbound connections are still restricted to only the specified localhost ports.
+
+**Linux limitation:** Landlock ABI v4+ enforces both connect and bind per-port, but **cannot filter by destination IP**. The ConnectTcp rule allows connecting to the specified port on any IP, not just localhost. In practice this is mitigated by using `--block-net` (which blocks all outbound except the allowed ports) or proxy mode (which routes outbound through the localhost proxy). Only the `--open-port` + default AllowAll combination (a no-op) would theoretically permit non-localhost connections on the port.
+</Warning>
+
+## `nono shell` Options
+
+`nono shell` supports the same permission, profile, credential, and dry-run flags as `nono run`, plus:
+
+### `--shell`
+
+Override the shell binary.
+
+```bash
+nono shell --allow-cwd --shell /bin/zsh
+```
+
+### Command Blocking
+
+#### `--allow-command`
+
+Deprecated in `v0.33.0`. Allows a normally-blocked startup command, but only for
+the directly-invoked executable. Child processes can bypass this check, so it
+should not be treated as a sandbox security boundary.
+
+```bash
+# Allow rm (blocked by default)
+nono run --allow-cwd --allow-command rm -- rm ./temp-file.txt
+
+# Allow multiple commands
+nono run --allow-cwd --allow-command rm --allow-command mv -- my-script.sh
+```
+
+<Note>
+  `--allow-command` and the default command blocklist are startup-only checks.
+  They do not prevent child processes, interpreters, language runtimes, shell
+  built-ins, renamed binaries, or equivalent APIs from performing the same
+  operation. For hard protection, rely on kernel-enforced path and network
+  controls such as `deny.access`, `deny.unlink`, narrower filesystem grants,
+  and network policy.
+</Note>
+
+Commands can also be allowed temporarily via the deprecated `commands.allow`
+field (the older `security` placement is also accepted with a deprecation
+warning, see issue #594):
+
+```json
+{
+  "meta": { "name": "my-profile" },
+  "filesystem": { "allow": ["/tmp"] },
+  "commands": { "allow": ["rm", "chmod"] }
+}
+```
+
+```bash
+nono run --profile my-profile -- rm /tmp/old-file.txt
+```
+
+#### `--block-command`
+
+Deprecated in `v0.33.0`. Adds a startup-only command denylist entry for the
+directly-invoked executable. Child processes can bypass this check.
+
+```bash
+# Block a custom tool in addition to defaults
+nono run --allow-cwd --block-command my-dangerous-tool -- my-script.sh
+```
+
+### Deny Group Overrides
+
+#### `--bypass-protection`
+
+Bypass a deny group rule for a specific path. Required groups like `deny_credentials` block access to paths such as `~/.aws`, `~/.config/gcloud`, etc. This flag punches a targeted hole through the deny without removing the entire group.
+
+The bypass path must also be explicitly granted via `--allow`, `--read`, `--write`, or their file equivalents. `--bypass-protection` only removes the deny rule — it does not implicitly grant access.
+
+```bash
+# Allow an AWS agent to access credentials
+nono run --bypass-protection ~/.aws --allow ~/.aws -- my-aws-agent
+
+# Allow read-only access to GCP config
+nono run --bypass-protection ~/.config/gcloud --read ~/.config/gcloud -- gcloud-agent
+
+# Multiple bypasses
+nono run \
+  --bypass-protection ~/.aws \
+  --bypass-protection ~/.config/gcloud \
+  --allow ~/.aws \
+  --read ~/.config/gcloud \
+  -- multi-cloud-agent
+```
+
+Can be specified multiple times.
+
+<Warning>
+**Security guardrails:**
+
+- A warning is printed to stderr for each bypass applied, making security relaxations visible in logs.
+- On macOS, Seatbelt allow rules more specific than the deny are emitted. On Linux, the deny path is removed from validation so Landlock allow rules take effect.
+</Warning>
+
+<Note>
+  `--bypass-protection` without a matching grant (`--allow`, `--read`, `--write`, etc.) is a hard error. This prevents silent no-ops on Linux and unintended implicit grants on macOS.
+</Note>
+
+<Note>
+  **Renamed in issue #594.** This flag was renamed from its former deny-override name. The legacy name is still accepted as a deprecated alias and emits a warning on use; it will be removed in v1.0.0.
+</Note>
+
+### Credential Options
+
+#### `--env-credential`
+
+Load credentials from the system keystore (macOS Keychain / Linux Secret Service) by account name and inject them as environment variables. The sandboxed process can read these credentials directly.
+
+```bash
+# Load specific credentials by account name
+nono run --allow-cwd --env-credential openai_api_key,anthropic_api_key -- my-agent
+
+# Use with a profile that defines env_credentials
+nono run --profile my-agent -- my-agent
+```
+
+#### `--env-credential-map`
+
+Map an explicit credential reference to a destination environment variable.
+Repeatable as `--env-credential-map <CREDENTIAL_REF> <ENV_VAR>`.
+
+```bash
+# Load from 1Password
+nono run --allow-cwd --env-credential-map 'op://Development/OpenAI/credential' OPENAI_API_KEY -- my-agent
+
+# Load from Apple Passwords on macOS
+nono run --allow-cwd --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD -- my-agent
+
+# Load and rename from parent env
+nono run --allow-cwd --env-credential-map 'env://GITHUB_TOKEN' GH_TOKEN -- my-agent
+
+# Multiple mappings
+nono run --allow-cwd \
+  --env-credential-map 'op://Development/OpenAI/credential' OPENAI_API_KEY \
+  --env-credential-map 'apple-password://github.com/alice@example.com' GITHUB_PASSWORD \
+  -- my-agent
+```
+
+Credentials are:
+
+- Loaded **before** the sandbox is applied (keystore access blocked after)
+- Auto-named by uppercasing for keyring names: `openai_api_key` becomes `$OPENAI_API_KEY`
+- `--env-credential-map` validates URI references (`op://`, `apple-password://`, `env://`) and target env var names
+- `--env-credential` URI suffix form remains supported for 1Password compatibility (`op://...=VAR`)
+- Zeroized from memory after `exec()`
+
+For network API keys, prefer `--credential` instead for credential isolation — the agent never sees the real API key.
+
+See [Credential Injection](/cli/features/credential-injection) for full documentation on storing and using credentials.
+
+### Profile Options
+
+#### `--profile`, `-p`
+
+Use a named profile (from installed packs or `~/.config/nono/profiles/`).
+
+```bash
+nono run --profile claude-code -- claude
+nono run -p openclaw -- openclaw gateway
+```
+
+#### `--workdir`
+
+Working directory for `$WORKDIR` expansion in profiles (defaults to current directory).
+
+```bash
+nono run --profile claude-code --workdir ./my-project -- claude
+```
+
+#### `--allow-cwd`
+
+Allow access to the current working directory without prompting. By default, nono prompts interactively for CWD sharing. The access level is determined by the profile's `[workdir]` config or defaults to read-only.
+
+```bash
+# Non-interactive mode (e.g., CI/CD)
+nono run --profile claude-code --allow-cwd -- claude
+
+# Silent mode requires --allow-cwd (cannot prompt)
+nono -s run --profile claude-code --allow-cwd -- claude
+```
+
+#### `--allow-launch-services`
+
+Allow direct LaunchServices opens on macOS for this session. This is intended for temporary login or setup flows that need to open a browser from inside the sandbox.
+
+```bash
+nono run --profile claude-code --allow-launch-services -- claude
+```
+
+<Note>
+  `--allow-launch-services` is only supported on macOS. It requires the selected profile to opt into `allow_launch_services` and configure `open_urls`; otherwise nono fails closed with an error.
+</Note>
+
+#### `--allow-gpu`
+
+Allow GPU compute access for workloads like ML inference and shader compilation.
+
+- **macOS (Apple Silicon):** Grants scoped IOKit access for Metal GPU compute (IOGPU, AGX, IOSurface). Intel Macs are not yet supported.
+- **Linux:** Grants access to DRM render nodes (`/dev/dri/renderD*`), NVIDIA compute devices (`nvidia[0-N]`, `nvidiactl`, `nvidia-uvm`), NVIDIA MIG caps, AMD KFD (`/dev/kfd`), and WSL2 DirectX passthrough (`/dev/dxg`). Also grants read-only access to Vulkan ICD manifests and GPU sysfs.
+
+```bash
+nono run --allow-gpu -- llama-cli -m ./model.gguf -p "hello"
+```
+
+<Note>
+  When used with a profile, the profile must opt into `allow_gpu`; otherwise nono fails closed with an error. Without a profile, the CLI flag alone is sufficient.
+</Note>
+
+### Execution Mode Flags
+
+#### `--detached`
+
+Start the supervised session without attaching the current terminal. The command keeps running in the background and can be resumed later with `nono attach <session>`.
+
+```bash
+# Start in the background, then attach later
+nono run --detached --profile claude-code --allow-cwd -- claude
+
+# Detached launch with an explicit session name
+nono run --detached --name gold-core --allow-cwd -- my-agent
+```
+
+Detached launches print the generated session ID and the attach command once the session becomes ready.
+
+#### `--detach-timeout`
+
+How long (in seconds) to wait for a detached session to become attachable before giving up. Defaults to 30 seconds. Increase this for programs with slow startup (e.g. npm/network initialisation phases).
+
+| Environment Variable | `NONO_DETACH_STARTUP_TIMEOUT` |
+|---------------------|-------------------------------|
+| Example | `NONO_DETACH_STARTUP_TIMEOUT=60` |
+
+```bash
+# Give a slow app 60 seconds to initialise
+nono run --detached --detach-timeout 60 --allow-cwd -- opencode
+
+# Via environment variable
+NONO_DETACH_STARTUP_TIMEOUT=60 nono run --detached --allow-cwd -- opencode
+```
+
+#### `--name`
+
+Assign a human-friendly name to the supervised session. The name is shown in `nono ps` and can be used to recognize the session in later `attach`, `stop`, `logs`, and `inspect` workflows.
+
+```bash
+# Name a foreground supervised session
+nono run --name gold-core --allow-cwd -- my-agent
+
+# Combine with detached startup
+nono run --detached --name nightly-indexer --allow ./workspace -- indexer
+```
+
+Session names must be unique among live sessions. If you omit `--name`, nono generates a unique name automatically.
+
+#### `--rollback`
+
+Enable [atomic rollback snapshots](/cli/features/atomic-rollbacks) for the session. Takes content-addressable snapshots of writable directories so you can restore to the pre-session state after the command exits. Automatically selects supervised execution.
+
+```bash
+nono run --rollback --profile claude-code -- claude
+nono run --rollback --allow-cwd -- my-agent
+```
+
+#### `--no-rollback-prompt`
+
+Suppress the interactive post-exit review when using `--rollback`. Snapshots are still taken but the user is not prompted to review or restore changes. Useful for scripting.
+
+```bash
+nono run --rollback --no-rollback-prompt --allow-cwd -- my-agent
+```
+
+#### `--no-rollback`
+
+Disable rollback entirely for this session. No snapshots are taken and no restore is offered. Useful when rollback overhead is not needed.
+
+```bash
+nono run --no-rollback --allow . -- npm test
+```
+
+#### `--no-audit`
+
+Disable the audit trail for this session. By default, every supervised execution records session metadata and audit events (command, timestamps, exit code, capability decisions, URL opens, network events) to `~/.nono/audit/`. Use this flag to suppress audit recording entirely.
+
+```bash
+nono run --no-audit --allow-cwd -- my-command
+```
+
+<Note>
+  `--no-audit` conflicts with `--audit-integrity`. Integrity metadata is computed from the audit event stream.
+</Note>
+
+#### `--audit-integrity`
+
+Enable append-only integrity metadata for the audit log. nono writes an `audit-events.ndjson` stream in session order, hashes each event into a leaf, maintains a running chain head, and stores a final Merkle root in the session metadata. This provides tamper evidence for the recorded audit log without enabling filesystem snapshots.
+
+Audit flags control three different layers:
+
+- **Session audit**
+  Record what happened during one `nono run`.
+
+- **Audit-log integrity**
+  Make the recorded audit event log tamper-evident with a hash chain and Merkle root.
+
+- **Filesystem integrity**
+  Hash the tracked writable filesystem state before and after the run.
+
+The modes are:
+
+- **Default**
+  Session audit + audit-log integrity
+
+- **`--no-audit`**
+  Disable audit recording completely
+
+- **`--no-audit-integrity`**
+  Keep the session audit, but disable the event-log integrity layer
+
+- **`--audit-integrity`**
+  Keep the default audit behavior and also add filesystem-state hashing
+
+- **`--rollback`**
+  Keep all of the above and also store rollback snapshots for restore
+
+```bash
+# Default: session audit + tamper-evident event log
+nono run --allow-cwd -- my-agent
+
+# Session audit only, without the integrity layer
+nono run --no-audit-integrity --allow-cwd -- my-agent
+
+# Add filesystem-state hashing over tracked writable paths
+nono run --audit-integrity --allow-cwd -- my-agent
+
+# Strongest mode: audit + filesystem integrity + restoreable rollback snapshots
+nono run --audit-integrity --rollback --profile claude-code -- claude
+```
+
+<Note>
+  `--audit-integrity` adds filesystem-state hashing for the tracked writable paths. `--rollback` is still the feature that stores full restoreable snapshots.
+</Note>
+
+#### `--audit-sign-key`
+
+Sign the completed session audit record with a keyed signing key loaded by the supervisor.
+
+This happens **once per session**, after the run ends. It does **not** sign every event individually.
+
+The supervisor:
+
+1. records audit events during the session
+2. computes the session's final audit Merkle root
+3. signs that final root plus redacted session context
+4. writes the resulting keyed DSSE attestation to `audit-attestation.bundle`
+
+A summary is also recorded in `session.json`.
+
+Accepted secret references:
+- bare trust key IDs, for example `default`
+- `keystore://name`
+- `file:///absolute/path`
+- `op://vault/item/field`
+- `apple-password://server/account`
+- `keyring://service/account`
+- `env://VAR_NAME`
+
+```bash
+# Sign with the default trust key from the keystore
+nono run --audit-sign-key default --allow-cwd -- my-agent
+
+# Sign with an explicit file-backed key
+nono run --audit-sign-key file:///tmp/nono-audit-key.pem --allow-cwd -- my-agent
+
+# Sign with a 1Password-backed key
+nono run --audit-sign-key op://Development/Nono/audit-key --profile claude-code -- claude
+```
+
+The corresponding attestation can be pinned during verification:
+
+```bash
+nono audit verify <session-id> --public-key-file ./audit-signing-key.pub
+```
+
+<Note>
+  `--audit-sign-key` signs the session audit Merkle root and session context once, after the session completes. Command arguments in that context are best-effort redacted for common secret-bearing flags, headers, and URLs. This does not, by itself, add an external timestamp, Rekor entry, or full runtime-closure attestation.
+</Note>
+
+#### `--rollback-exclude`
+
+Exclude from rollback snapshots. Repeatable. Values containing glob characters (`*`, `?`, `[`) are matched against filenames. Plain names match exact path components; names with `/` match as path substrings. Does NOT affect sandbox permissions — excluded directories are still sandboxed.
+
+```bash
+# Exclude a custom directory from rollback
+nono run --rollback --rollback-exclude vendor -- go test ./...
+
+# Exclude multiple directories
+nono run --rollback --rollback-exclude vendor --rollback-exclude .terraform -- terraform plan
+
+# Exclude log files from rollback (glob pattern)
+nono run --rollback --rollback-exclude "*.log" -- my-agent
+```
+
+#### `--rollback-include`
+
+Force-include a directory in rollback snapshots that would otherwise be auto-excluded. Repeatable. Accepts directory names (e.g., `target`, `node_modules`), not full paths. Use when you need rollback coverage on build artifacts or dependencies.
+
+```bash
+# Include target/ in rollback (normally auto-excluded)
+nono run --rollback --rollback-include target -- cargo build
+
+# Include multiple directories
+nono run --rollback --rollback-include target --rollback-include dist -- make build
+```
+
+<Note>
+  nono automatically excludes known regenerable directories (`.git`, `target`, `node_modules`, etc.) and any directory with more than 10,000 files from rollback snapshots. This prevents rollback from hanging on large projects. Use `--rollback-include` to override for specific directories or `--rollback-all` to disable all auto-exclusions.
+</Note>
+
+#### `--rollback-all`
+
+Include ALL directories in rollback snapshots, overriding all auto-exclusions. This may be very slow on large projects with build artifacts.
+
+```bash
+# Full rollback coverage (may be slow)
+nono run --rollback --rollback-all -- cargo test
+```
+
+#### `--skip-dir`
+
+Skip a directory name during pre-exec trust scanning and rollback preflight. Repeatable. Matches exact path components, not full paths. This is useful for large generated trees that are safe to exclude in your workflow.
+
+```bash
+# Skip a generated docs tree for this run
+nono run --skip-dir docs-build --allow-cwd -- my-agent
+
+# Skip multiple large trees
+nono run --skip-dir vendor-cache --skip-dir generated --allow-cwd -- my-agent
+```
+
+<Note>
+  `--skip-dir` does not change sandbox permissions. It only prunes trust discovery and rollback preflight traversal. Hidden directories are still scanned unless they are in the built-in heavy-dir list or explicitly named here.
+</Note>
+
+#### `--startup-timeout`
+
+Set a startup timeout in seconds for the sandboxed process. If the process does not enter alt-screen mode within the given time, nono prints a warning and terminates it. Startup banners or log lines printed before the TUI initialises do not count as interactive — only entering alt-screen (the escape sequence used by full-screen TUIs) satisfies the check. Set to `0` to disable entirely.
+
+Applies to `nono run` and `nono shell`. Not available on `nono wrap` (which uses direct exec with no supervisor).
+
+| Environment Variable | `NONO_STARTUP_TIMEOUT` |
+|---------------------|------------------------|
+| Example | `NONO_STARTUP_TIMEOUT=10` |
+
+```bash
+# Kill the process if it hasn't become interactive after 10 seconds
+nono run --startup-timeout 10 --allow-cwd -- opencode
+
+# Disable the timeout entirely
+nono run --startup-timeout 0 --allow-cwd -- opencode
+
+# Via environment variable
+NONO_STARTUP_TIMEOUT=10 nono run --allow-cwd -- opencode
+```
+
+No timeout is applied by default. When a known built-in profile exists for the binary (e.g. `opencode`, `claude`), the warning message also suggests the recommended profile.
+
+#### `--no-diagnostics`
+
+Suppress the diagnostic footer when the command exits non-zero. Useful for scripts that parse stderr and need stable output.
+
+```bash
+nono run --no-diagnostics --allow-cwd -- my-command
+```
+
+#### `--capability-elevation`
+
+Enable runtime capability elevation for this session. When active, the sandbox installs a seccomp-notify filter (Linux) and a PTY multiplexer so that file access beyond the initial capability set can be approved interactively at runtime.
+
+```bash
+nono run --capability-elevation --allow-cwd -- my-agent
+```
+
+Without this flag (the default), the sandbox runs with static capabilities only — no interactive approval prompts, no seccomp interception, and no PTY mux. The supervisor still runs for trust interception and rollback support.
+
+Profiles can set this via `capability_elevation` in their security config. The CLI flag overrides the profile setting.
+
+| Environment Variable | `NONO_CAPABILITY_ELEVATION` |
+|---------------------|---------------------------|
+| Example | `NONO_CAPABILITY_ELEVATION=true` |
+
+### Operational Flags
+
+#### `--dry-run`
+
+Show what capabilities would be granted without actually executing the command or applying the sandbox.
+
+```bash
+nono run --allow-cwd --read /etc --dry-run -- my-agent
+```
+
+Output:
+```
+Capabilities that would be granted:
+  [rw] /Users/luke/project
+  [r-] /etc
+  [net] allowed
+
+Would execute: my-agent
+```
+
+On Linux, combine `--dry-run` with `-v` to include detected Landlock ABI details and requested/enforced scope state:
+
+```bash
+nono run --dry-run -v --profile claude-code -- claude
+```
+
+#### `--verbose`, `-v`
+
+Increase logging verbosity. Can be specified multiple times.
+
+| Flag | Level | Output |
+|------|-------|--------|
+| (none) | Error | Only errors |
+| `-v` | Info | Informational messages |
+| `-vv` | Debug | Detailed debug output |
+| `-vvv` | Trace | Full trace output |
+
+```bash
+nono run -vvv --allow-cwd -- command
+```
+
+#### `--trust-override`
+
+Disable trust verification for instruction files. Skips the pre-exec trust scan that verifies cryptographic signatures on instruction files (SKILLS*, CLAUDE*, AGENT*, .claude/**/*.md). For development and testing only.
+
+```bash
+nono run --trust-override --allow-cwd -- my-agent
+```
+
+<Note>
+  Using `--trust-override` in production is not recommended. It disables the entire instruction file attestation pipeline, allowing unsigned or tampered instruction files to be read by the sandboxed process.
+</Note>
+
+#### `--config`, `-c`
+
+Specify a configuration file path.
+
+```bash
+nono run --config ./nono.toml -- command
+```
+
+<Note>
+  Configuration file support is planned for a future release.
+</Note>
+
+#### `--help`, `-h`
+
+Print help information for the command.
+
+```bash
+nono run --help
+```
+
+## `nono why` Options
+
+The `why` command checks why a path or network operation would be allowed or denied. It's designed for both human debugging and programmatic use by AI agents.
+
+### `--path`
+
+The filesystem path to check.
+
+```bash
+nono why --path ~/.ssh/id_rsa --op read
+nono why --path ./my-project --op write
+```
+
+### `--op`
+
+The operation to check: `read`, `write`, or `readwrite`. Defaults to `read` if not specified.
+
+```bash
+nono why --path ./src --op read
+nono why --path ./output --op write
+nono why --path ./data --op readwrite
+```
+
+### `--host`
+
+Network host or URL to check (instead of `--path`). Accepts a bare hostname or a full URL with a path to check endpoint rule matching.
+
+```bash
+nono why --host api.openai.com --port 443
+nono why --self --host https://github.com/my-org/repo
+```
+
+### `--port`
+
+Network port (default: 443). Used with `--host`.
+
+```bash
+nono why --host example.com --port 8080
+```
+
+### `--scope`
+
+Landlock scope to check. Supported values are `signal` and `abstract-unix-socket`.
+
+```bash
+nono why --scope signal --profile claude-code
+nono why --scope abstract-unix-socket --profile claude-code
+```
+
+On Linux, scope queries report whether the effective capability set requested the scope, whether the detected Landlock ABI can support it, and whether nono will enforce it. On non-Linux platforms, scope queries return `not_applicable`.
+
+### `--json`
+
+Output JSON instead of human-readable format. Useful for programmatic use by AI agents.
+
+```bash
+nono why --json --path ~/.ssh --op read
+# {"status":"denied","reason":"sensitive_path","category":"SSH keys and config",...}
+```
+
+### `--self`
+
+Query current sandbox state from inside a sandboxed process. This allows agents to introspect their own capabilities.
+
+```bash
+# Inside a sandbox:
+nono why --self --path /tmp --op write --json
+```
+
+### Capability Context Options
+
+When checking paths outside a sandbox, you can simulate a capability context:
+
+```bash
+# Check if ./src would be writable with --allow .
+nono why --path ./src --op write --allow .
+
+# Check against a profile
+nono why --path ~/.config --op read --profile claude-code
+```
+
+Available context flags:
+- `--allow`, `-a` - Directories with read+write access
+- `--read`, `-r` - Directories with read-only access
+- `--write`, `-w` - Directories with write-only access
+- `--allow-file` - Single files with read+write access
+- `--read-file` - Single files with read-only access
+- `--write-file` - Single files with write-only access
+- `--block-net` - Block network access
+- `--allow-net` - Force unrestricted network access for this run
+- `--profile`, `-p` - Use a named profile
+- `--workdir` - Working directory for `$WORKDIR` expansion
+
+## `nono trust` Options
+
+### `nono trust init`
+
+Create a `trust-policy.json` in the current directory. Scans for files and auto-populates patterns and publisher.
+
+```bash
+nono trust init                            # Scan root directory only
+nono trust init -r                         # Scan recursively
+nono trust init -r --exclude-dirs tmp logs # Exclude extra directories
+nono trust init --key my-key --force       # Specific key, overwrite existing
+nono trust init --keyref file:///path/to/key.pem  # File-backed key
+```
+
+| Option | Description |
+|--------|-------------|
+| `-r`, `--recursive` | Scan subdirectories recursively |
+| `--exclude-dirs <DIR...>` | Additional directories to exclude (on top of `.gitignore` and built-in list) |
+| `--key <KEY_ID>` | Key ID to include as publisher (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--key` |
+| `--force` | Overwrite existing `trust-policy.json` |
+
+<Note>
+  File discovery for `init` respects `.gitignore` to keep the generated policy clean. Hidden directories like `.claude/` and `.github/` are included. Common build artifact directories (`node_modules`, `target`, `.venv`, etc.) are skipped by default. Note: the pre-exec trust scan and `sign --all`/`verify --all` do **not** respect `.gitignore` — adding a file to `.gitignore` cannot bypass trust verification.
+</Note>
+
+### `nono trust sign`
+
+Sign files, producing bundles for verification.
+
+```bash
+nono trust sign <FILES...>                 # Sign specific files
+nono trust sign --all                      # Sign all instruction files in CWD
+nono trust sign SKILLS.md --key my-key     # Use a specific key
+nono trust sign SKILLS.md --keyref file:///path/to/key.pem  # File-backed key
+```
+
+| Option | Description |
+|--------|-------------|
+| `--all` | Sign all instruction files matching trust policy patterns |
+| `--key <KEY_ID>` | Key ID from system keystore (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--key` and `--keyless` |
+| `--keyless` | Use Sigstore keyless signing (CI environments only) |
+| `--policy <FILE>` | Trust policy file (default: auto-discover) |
+
+<Note>
+  When signing multiple files, a single `.nono-trust.bundle` multi-subject bundle is created. Single-file signing creates per-file `.bundle` sidecars.
+</Note>
+
+### `nono trust sign-policy`
+
+Sign a trust policy file.
+
+```bash
+nono trust sign-policy                     # Sign trust-policy.json in CWD
+nono trust sign-policy --user              # Sign user-level trust policy (~/.config/nono/)
+nono trust sign-policy path/to/policy.json # Sign specific file
+nono trust sign-policy --key my-key        # Use a specific key
+nono trust sign-policy --keyref file:///path/to/key.pem  # File-backed key
+```
+
+| Option | Description |
+|--------|-------------|
+| `--user` | Sign the user-level trust policy at `~/.config/nono/trust-policy.json`. The user-level policy anchors trust — without it, project-level policies are not authoritative |
+| `--key <KEY_ID>` | Key ID from system keystore (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--key` |
+
+### `nono trust verify`
+
+Verify instruction files against the trust policy.
+
+```bash
+nono trust verify <FILES...>               # Verify specific files
+nono trust verify --all                    # Verify all instruction files in CWD
+nono trust verify --policy path/to/policy  # Use specific trust policy
+```
+
+### `nono trust list`
+
+List instruction files and their verification status.
+
+```bash
+nono trust list                            # Human-readable output
+nono trust list --json                     # JSON output
+```
+
+### `nono trust keygen`
+
+Generate an ECDSA P-256 signing key pair.
+
+```bash
+nono trust keygen                          # Default key ID ("default") in system keystore
+nono trust keygen --id my-signing-key      # Named key in system keystore
+nono trust keygen --keyref file:///path/to/key.pem  # File-backed key
+```
+
+| Option | Description |
+|--------|-------------|
+| `--id <NAME>` | Key identifier in system keystore (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--id` |
+| `--force` | Overwrite existing key |
+
+### `nono trust export-key`
+
+Export the public key for use in trust policy `public_key` fields.
+
+```bash
+nono trust export-key                      # Export default key (base64 DER)
+nono trust export-key --id my-key          # Export named key
+nono trust export-key --keyref file:///path/to/key.pem  # Export from file-backed key
+nono trust export-key --pem                # Output as PEM format
+```
+
+| Option | Description |
+|--------|-------------|
+| `--id <NAME>` | Key identifier in system keystore (default: "default") |
+| `--keyref <URI>` | Key reference URI (`keystore://name` or `file:///path`). Conflicts with `--id` |
+| `--pem` | Output as PEM instead of base64 DER |
+
+## `nono setup` Options
+
+### `--check-only`
+
+Only verify installation and sandbox support, don't create any files.
+
+```bash
+nono setup --check-only
+```
+
+### `--profiles`
+
+Generate example user profiles in `~/.config/nono/profiles/`.
+
+```bash
+nono setup --profiles
+```
+
+### `--shell-integration`
+
+Show shell integration instructions (aliases, etc.).
+
+```bash
+nono setup --shell-integration
+```
+
+### `--verbose`, `-v`
+
+Show detailed information during setup. Can be specified multiple times.
+
+```bash
+nono setup -v --profiles
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Command executed successfully |
+| 1 | nono error (invalid arguments, sandbox failure) |
+| * | Exit code from the executed command |
+
+## Path Resolution
+
+All paths are canonicalized before the sandbox is applied:
+
+- Relative paths are resolved to absolute paths
+- Symlinks are followed and resolved
+- Parent directory references (`..`) are resolved
+
+This prevents symlink escape attacks where a malicious agent creates a symlink pointing outside the allowed directory.
+
+```bash
+# These are equivalent if ./project resolves to /home/user/project
+nono run --allow ./project -- command
+nono run --allow /home/user/project -- command
+```
+
+## Combining Flags
+
+Flags can be combined freely:
+
+```bash
+nono run \
+  --allow ./project \
+  --read ~/.config/myapp \
+  --write ./logs \
+  --read-file ~/.gitconfig \
+  -vv \
+  -- my-agent --arg1 --arg2
+```
+
+## Environment Variables
+
+Several CLI flags can be set via environment variables. This is useful in CI/CD pipelines, container entrypoints, and wrapper scripts where setting env vars is more natural than modifying command arguments.
+
+CLI flags always take precedence over environment variables.
+
+| Flag | Environment Variable | Example |
+|------|---------------------|---------|
+| `--allow` | `NONO_ALLOW` | `NONO_ALLOW=/tmp/a,/tmp/b` (comma-separated) |
+| `--block-net` | `NONO_BLOCK_NET` | `NONO_BLOCK_NET=true` |
+| `--profile` | `NONO_PROFILE` | `NONO_PROFILE=developer` |
+| `--network-profile` | `NONO_NETWORK_PROFILE` | `NONO_NETWORK_PROFILE=claude-code` |
+| `--allow-domain` | `NONO_ALLOW_DOMAIN` | `NONO_ALLOW_DOMAIN=api.openai.com` |
+| `--credential` | `NONO_CREDENTIAL` | `NONO_CREDENTIAL=openai` |
+| `--env-credential` | `NONO_ENV_CREDENTIAL` | `NONO_ENV_CREDENTIAL=key1,key2` |
+| `--capability-elevation` | `NONO_CAPABILITY_ELEVATION` | `NONO_CAPABILITY_ELEVATION=true` |
+| `--startup-timeout` | `NONO_STARTUP_TIMEOUT` | `NONO_STARTUP_TIMEOUT=10` |
+| `--detach-timeout` | `NONO_DETACH_STARTUP_TIMEOUT` | `NONO_DETACH_STARTUP_TIMEOUT=60` |
+| `--upstream-proxy` | `NONO_UPSTREAM_PROXY` | `NONO_UPSTREAM_PROXY=squid.corp:3128` |
+| `--upstream-bypass` | `NONO_UPSTREAM_BYPASS` | `NONO_UPSTREAM_BYPASS=internal.corp,*.private.net` (comma-separated) |
+
+Boolean variables accept `true`, `false`, `yes`, `no`, `1`, `0`.
+
+Conflict rules apply equally whether the value comes from a flag or an environment variable. For example, setting both `NONO_ALLOW_NET=true` and `NONO_BLOCK_NET=true` is an error, just like passing both `--allow-net` and `--block-net`.
+
+```bash
+# CI/CD example: configure nono via environment
+export NONO_PROFILE=developer
+export NONO_ALLOW=/workspace
+export NONO_BLOCK_NET=true
+nono run -- cargo build
+```
+
+### Existing environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `NONO_NO_UPDATE_CHECK` | Disable automatic update checks |
+| `NONO_NO_PACK_UPDATE_HINTS` | Disable pack update hints during `nono run` |
+| `NONO_UPDATE_URL` | Custom update service URL |
+
+### Timeout tuning
+
+These environment variables override internal timing defaults. They have no CLI flag equivalents and are only needed when the defaults cause problems for specific workloads.
+
+| Variable | Unit | Default | Description |
+|----------|------|---------|-------------|
+| `NONO_PTY_DRAIN_TIMEOUT` | ms | `100` | Quiet period to drain PTY output after child exit |
+| `NONO_PTY_ATTACH_TIMEOUT` | ms | `1000` | How long `nono attach` waits for supervisor readiness |
+
+Invalid values are ignored with a warning and the default is used.
+
+## Examples
+
+See the [Examples](/cli/usage/examples) page for common usage patterns.

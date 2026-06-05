@@ -1,0 +1,357 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nono.sh/schemas/capability-manifest.schema.json",
+  "title": "nono Capability Manifest",
+  "description": "A fully-resolved, portable capability manifest describing what a nono sandbox enforces. Manifests are the machine-consumable contract for sandbox configuration — they contain no inheritance, no legacy aliases, and no composition. Profiles compile down to manifests. NOTE: additionalProperties is true during schema development to allow forward-compatible evolution without breaking existing consumers. Switch to false once the schema stabilizes (post-1.0).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema URI for editor validation and autocompletion."
+    },
+    "version": {
+      "type": "string",
+      "description": "Schema version (semver). Consumers use this to determine which fields are available.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "const": "0.1.0"
+    },
+    "filesystem": {
+      "$ref": "#/$defs/Filesystem",
+      "description": "Filesystem capability grants and denials."
+    },
+    "network": {
+      "$ref": "#/$defs/Network",
+      "description": "Network access policy including domain filtering, endpoint rules, and port allowlists."
+    },
+    "credentials": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Credential" },
+      "description": "Credential definitions for the reverse proxy. Each credential configures a service route with secret injection and optional L7 endpoint filtering."
+    },
+    "process": {
+      "$ref": "#/$defs/Process",
+      "description": "Process-level isolation and execution configuration."
+    },
+    "rollback": {
+      "$ref": "#/$defs/Rollback",
+      "description": "Rollback snapshot configuration controlling which files are excluded from undo snapshots."
+    }
+  },
+  "$defs": {
+    "Filesystem": {
+      "type": "object",
+      "description": "Filesystem capability grants and denials. All paths are unresolved strings — canonicalization happens at enforcement time to keep manifests portable across machines.",
+      "additionalProperties": true,
+      "properties": {
+        "grants": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FsGrant" },
+          "description": "Filesystem access grants. Each grant specifies a path, access mode, and whether it targets a file or directory."
+        },
+        "deny": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FsDeny" },
+          "description": "Filesystem paths to deny access to. Deny rules take precedence over grants on platforms that support them (macOS/Seatbelt). On Linux/Landlock, deny is expressed by omitting grants."
+        }
+      }
+    },
+    "FsGrant": {
+      "type": "object",
+      "description": "A filesystem access grant for a single path.",
+      "additionalProperties": true,
+      "required": ["path", "access"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Filesystem path to grant access to. May use ~ for home directory. Not canonicalized — resolution happens at enforcement time.",
+          "minLength": 1
+        },
+        "access": {
+          "$ref": "#/$defs/AccessMode",
+          "description": "Access mode for this path."
+        },
+        "type": {
+          "$ref": "#/$defs/FsEntryType",
+          "description": "Whether this grant targets a file or directory. Defaults to directory.",
+          "default": "directory"
+        }
+      }
+    },
+    "AccessMode": {
+      "type": "string",
+      "enum": ["read", "write", "readwrite"],
+      "description": "Filesystem access mode. 'read' grants read-only access, 'write' grants write-only access, 'readwrite' grants both."
+    },
+    "FsEntryType": {
+      "type": "string",
+      "enum": ["file", "directory"],
+      "description": "Whether a filesystem grant targets a single file or a directory (recursive)."
+    },
+    "FsDeny": {
+      "type": "object",
+      "description": "A filesystem path to deny access to.",
+      "additionalProperties": true,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Filesystem path to deny access to.",
+          "minLength": 1
+        }
+      }
+    },
+    "Network": {
+      "type": "object",
+      "description": "Network access policy. Controls outbound connectivity, domain filtering, L7 endpoint restrictions, and port allowlists.",
+      "additionalProperties": true,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/NetworkMode",
+          "description": "Network access mode. 'blocked' denies all network access. 'proxy' routes traffic through the nono proxy for domain/endpoint filtering and credential injection. 'unrestricted' allows all network access (default).",
+          "default": "unrestricted"
+        },
+        "allow_domains": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Domains allowed through the proxy. Only meaningful when mode is 'proxy'. Supports exact hostnames and wildcard suffixes (e.g., '.googleapis.com')."
+        },
+        "endpoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/NetworkEndpoint" },
+          "description": "L7 endpoint definitions with per-host method+path filtering. Only meaningful when mode is 'proxy'."
+        },
+        "ports": {
+          "$ref": "#/$defs/PortConfig",
+          "description": "TCP port allowlists for fine-grained network control."
+        },
+        "dns": {
+          "type": "boolean",
+          "description": "Whether DNS resolution is allowed. Defaults to true.",
+          "default": true
+        }
+      }
+    },
+    "NetworkMode": {
+      "type": "string",
+      "enum": ["blocked", "proxy", "unrestricted"],
+      "description": "Network access mode for the sandboxed process."
+    },
+    "NetworkEndpoint": {
+      "type": "object",
+      "description": "An L7 endpoint definition with host-level access and optional method+path filtering.",
+      "additionalProperties": true,
+      "required": ["host"],
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Hostname or hostname:port to allow (e.g., 'api.github.com:443').",
+          "minLength": 1
+        },
+        "rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRule" },
+          "description": "L7 method+path filtering rules. When non-empty, only requests matching at least one rule are allowed (default-deny). When empty or absent, all paths on this host are permitted."
+        }
+      }
+    },
+    "EndpointRule": {
+      "type": "object",
+      "description": "HTTP method+path access rule for restricting which API endpoints are accessible.",
+      "additionalProperties": true,
+      "required": ["method", "path"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "description": "HTTP method to match (e.g., 'GET', 'POST') or '*' for any method.",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "description": "URL path glob pattern. Uses standard glob syntax: '*' matches one path segment, '**' matches zero or more segments.",
+          "minLength": 1
+        }
+      }
+    },
+    "PortConfig": {
+      "type": "object",
+      "description": "TCP port allowlists.",
+      "additionalProperties": true,
+      "properties": {
+        "connect": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "description": "TCP ports allowed for outbound connections."
+        },
+        "bind": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "description": "TCP ports allowed for listening/binding."
+        },
+        "localhost": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "description": "Localhost TCP ports allowed for bidirectional IPC (connect + bind)."
+        }
+      }
+    },
+    "Credential": {
+      "type": "object",
+      "description": "A credential route definition for the reverse proxy. Defines how to route requests to an upstream service and inject credentials the sandboxed process never sees.",
+      "additionalProperties": true,
+      "required": ["name", "upstream", "source"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Service name for this credential (e.g., 'github', 'internal_api'). Used to reference this credential from endpoint rules.",
+          "minLength": 1
+        },
+        "upstream": {
+          "type": "string",
+          "description": "Upstream URL to proxy requests to (e.g., 'https://api.github.com'). Must use HTTPS, or HTTP only for loopback addresses.",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "description": "Credential source URI. Supported schemes: 'env://VAR_NAME' (environment variable), 'file:///path' (file contents), 'op://vault/item/field' (1Password), 'bw://item-id' or 'bw://item-id/field' (Bitwarden), 'apple-password://server/account' (macOS Keychain), or a bare account name for the system keystore.",
+          "minLength": 1
+        },
+        "inject": {
+          "$ref": "#/$defs/CredentialInject",
+          "description": "How the credential is injected into outbound requests. Defaults to Bearer token in Authorization header."
+        },
+        "env_var": {
+          "type": "string",
+          "description": "SDK API key environment variable name for phantom token injection (e.g., 'OPENAI_API_KEY'). Required when source is a URI manager reference (op://, bw://, apple-password://, file://) because those URIs cannot be meaningfully uppercased into an environment variable name. When absent for keystore-backed credentials, derived from credential_key.to_uppercase().",
+          "minLength": 1
+        },
+        "endpoint_rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRule" },
+          "description": "L7 endpoint rules for this credential route. When non-empty, only requests matching at least one rule are forwarded (default-deny). When empty or absent, all endpoints are permitted."
+        }
+      }
+    },
+    "CredentialInject": {
+      "type": "object",
+      "description": "Configuration for how a credential is injected into proxied requests.",
+      "additionalProperties": true,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/InjectMode",
+          "description": "Injection mode. Defaults to 'header'.",
+          "default": "header"
+        },
+        "header": {
+          "type": "string",
+          "description": "HTTP header name for injection. Only used when mode is 'header'.",
+          "default": "Authorization"
+        },
+        "format": {
+          "type": "string",
+          "description": "Format string for the credential value, using {} as placeholder. Only used when mode is 'header'.",
+          "default": "Bearer {}"
+        },
+        "path_pattern": {
+          "type": "string",
+          "description": "Pattern to match in incoming URL path, using {} as placeholder for the phantom token. Required when mode is 'url_path'."
+        },
+        "path_replacement": {
+          "type": "string",
+          "description": "Pattern for outgoing URL path, using {} as placeholder for the real credential. Defaults to path_pattern if not specified. Only used when mode is 'url_path'."
+        },
+        "query_param_name": {
+          "type": "string",
+          "description": "Name of the query parameter to inject the credential into. Required when mode is 'query_param'."
+        }
+      }
+    },
+    "InjectMode": {
+      "type": "string",
+      "enum": ["header", "url_path", "query_param", "basic_auth"],
+      "description": "Credential injection mode for the reverse proxy."
+    },
+    "Process": {
+      "type": "object",
+      "description": "Process-level isolation and execution configuration.",
+      "additionalProperties": true,
+      "properties": {
+        "allowed_commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Deprecated in v0.33.0. Startup-only command allowlist override. Not enforced for child processes.",
+          "deprecated": true
+        },
+        "blocked_commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Deprecated in v0.33.0. Startup-only command denylist extension. Not enforced for child processes.",
+          "deprecated": true
+        },
+        "signal_mode": {
+          "$ref": "#/$defs/SignalMode",
+          "description": "Signal isolation mode. Defaults to 'isolated'.",
+          "default": "isolated"
+        },
+        "process_info_mode": {
+          "$ref": "#/$defs/ProcessInfoMode",
+          "description": "Process inspection mode. Defaults to 'isolated'.",
+          "default": "isolated"
+        },
+        "ipc_mode": {
+          "$ref": "#/$defs/IpcMode",
+          "description": "IPC mode controlling POSIX semaphore access. Defaults to 'shared_memory_only'.",
+          "default": "shared_memory_only"
+        },
+        "exec_strategy": {
+          "$ref": "#/$defs/ExecStrategy",
+          "description": "Execution strategy for the sandboxed process. Defaults to 'monitor'.",
+          "default": "monitor"
+        }
+      }
+    },
+    "SignalMode": {
+      "type": "string",
+      "enum": ["isolated", "allow_same_sandbox", "allow_all"],
+      "description": "Signal isolation mode. 'isolated' restricts signals to the current process only. 'allow_same_sandbox' allows signaling same-sandbox children. 'allow_all' allows signaling any process."
+    },
+    "ProcessInfoMode": {
+      "type": "string",
+      "enum": ["isolated", "allow_same_sandbox", "allow_all"],
+      "description": "Process inspection mode. Controls whether the sandboxed process can read process info for other processes."
+    },
+    "IpcMode": {
+      "type": "string",
+      "enum": ["shared_memory_only", "full"],
+      "description": "IPC mode. 'shared_memory_only' allows POSIX shared memory but denies semaphores. 'full' enables both (required for Python multiprocessing and similar runtimes)."
+    },
+    "ExecStrategy": {
+      "type": "string",
+      "enum": ["direct", "monitor", "supervised"],
+      "description": "Execution strategy. 'direct' execs into the command (nono disappears). 'monitor' sandboxes then forks (default). 'supervised' forks then sandboxes (supports rollback and capability elevation)."
+    },
+    "Rollback": {
+      "type": "object",
+      "description": "Rollback snapshot configuration.",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether rollback snapshots are enabled. Defaults to false.",
+          "default": false
+        },
+        "exclude_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Patterns to exclude from rollback snapshots. Matched against path components (exact match) or as substrings of the full path if they contain a slash."
+        },
+        "exclude_globs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns to exclude from rollback snapshots."
+        }
+      }
+    }
+  }
+}

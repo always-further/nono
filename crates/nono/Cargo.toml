@@ -1,0 +1,82 @@
+[package]
+name = "nono"
+version = "0.61.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Capability-based sandboxing library using Landlock (Linux) and Seatbelt (macOS)"
+readme = "README.md"
+keywords = ["sandbox", "security", "capability", "landlock", "seatbelt"]
+categories = ["os", "api-bindings"]
+
+[features]
+default = ["system-keyring"]
+# Enables OS system keyring access (macOS Keychain / Linux Secret Service).
+# Headless/container consumers opt out with default-features = false.
+system-keyring = ["dep:keyring"]
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+walkdir.workspace = true
+ignore.workspace = true
+globset.workspace = true
+regress = "0.11"
+
+# Unix socket IPC for supervisor
+libc = "0.2"
+
+# Keychain access (optional). On Linux the Secret Service is reached via the
+# pure-Rust zbus backend (see the linux target deps below), so the default
+# build has no libdbus runtime dependency. default-features = false is set on
+# every keyring declaration so only the explicitly-listed backend is ever
+# compiled — guarding against a future keyring release adding a libdbus
+# backend to its defaults.
+keyring = { version = "3", optional = true, default-features = false }
+
+# Sigstore bundle verification.
+# `sigstore-trust-root` is pinned to 0.6.3 because 0.6.5 made
+# `TufSigningConfig::production()` async without bumping major,
+# breaking sigstore-sign 0.6.3 (which the sigstore-verify graph pulls
+# transitively even though we don't use it directly). We don't depend
+# on sigstore-sign or sigstore-trust-root in our own code; this pin
+# exists purely to keep the resolver on a coherent 0.6.3-era set
+# until the upstream API churn settles.
+sigstore-verify = { version = "0.8.0", default-features = false }
+sigstore-trust-root = "=0.8.0"
+x509-cert = { version = "0.2", default-features = false }
+der = { version = "0.7", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+nix = { workspace = true, features = ["fs", "user"] }
+# Pure-Rust Secret Service backend (zbus over the D-Bus socket) so the binary
+# does not link libdbus and starts on hosts without it. crypto-rust keeps
+# session encryption pure-Rust; async-io is the runtime (avoids a tokio
+# block_on-within-runtime panic since a tokio runtime is already active).
+keyring = { version = "3", features = ["async-secret-service", "crypto-rust", "async-io"], optional = true, default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { workspace = true, features = ["fs", "user"] }
+keyring = { version = "3", features = ["apple-native"], optional = true, default-features = false }
+
+[build-dependencies]
+typify = "0.6"
+serde_json.workspace = true
+syn = "2"
+prettyplease = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+jsonschema = "0.46"
+
+[lints]
+workspace = true

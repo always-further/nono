@@ -1,0 +1,149 @@
+name: Bump nono dependency
+
+on:
+  repository_dispatch:
+    types: [nono-release]
+  workflow_dispatch:
+    inputs:
+      nono_version:
+        description: 'nono version to bump to (e.g., v0.33.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rebuild-libs:
+    name: Rebuild nono-ffi for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    env:
+      NONO_VERSION: ${{ github.event.client_payload.nono_version || github.event.inputs.nono_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            platform: linux_amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            platform: linux_arm64
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            platform: darwin_amd64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            platform: darwin_arm64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Clone nono at release tag
+        run: |
+          git clone --depth 1 --branch "$NONO_VERSION" \
+            https://github.com/always-further/nono.git /tmp/nono
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux ARM64)
+        if: matrix.cross
+        run: cargo install cross
+
+      - name: Build libnono_ffi.a
+        run: |
+          cd /tmp/nono
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p nono-ffi
+          else
+            cargo build --release --target ${{ matrix.target }} -p nono-ffi
+          fi
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: libnono-${{ matrix.platform }}
+          path: |
+            /tmp/nono/target/${{ matrix.target }}/release/libnono_ffi.a
+            /tmp/nono/bindings/c/include/nono.h
+
+  create-pr:
+    name: Create bump PR
+    needs: rebuild-libs
+    runs-on: ubuntu-latest
+    env:
+      NONO_VERSION: ${{ github.event.client_payload.nono_version || github.event.inputs.nono_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Strip v prefix
+        id: version
+        run: |
+          VERSION="${NONO_VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch=bump-nono-${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if PR already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --search "bump nono to ${{ steps.version.outputs.version }}" --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING already exists, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all library artifacts
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Update bundled libraries
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          NONO_SHA=$(git ls-remote https://github.com/always-further/nono.git "refs/tags/${NONO_VERSION}" | cut -f1)
+          if [ -z "$NONO_SHA" ]; then
+            echo "Error: Could not resolve SHA for tag ${NONO_VERSION}"
+            exit 1
+          fi
+
+          for platform in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
+            cp "artifacts/libnono-${platform}/libnono_ffi.a" "internal/clib/${platform}/libnono_ffi.a"
+            echo "$NONO_SHA" > "internal/clib/${platform}/VERSION"
+          done
+
+          # Update shared header
+          cp artifacts/libnono-darwin_arm64/nono.h internal/clib/nono.h
+
+      - name: Create Pull Request
+        if: steps.check.outputs.skip != 'true'
+        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e # v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ steps.version.outputs.branch }}
+          commit-message: "chore(deps): bump nono to ${{ steps.version.outputs.version }}"
+          title: "chore(deps): bump nono to ${{ steps.version.outputs.version }}"
+          body: |
+            Automated PR to rebuild bundled `libnono_ffi.a` static libraries from nono `${{ env.NONO_VERSION }}`.
+
+            Triggered by [nono ${{ env.NONO_VERSION }}](https://github.com/always-further/nono/releases/tag/${{ env.NONO_VERSION }}).
+
+            ### Updated libraries
+            - `internal/clib/darwin_amd64/libnono_ffi.a`
+            - `internal/clib/darwin_arm64/libnono_ffi.a`
+            - `internal/clib/linux_amd64/libnono_ffi.a`
+            - `internal/clib/linux_arm64/libnono_ffi.a`
+            - `internal/clib/nono.h`
+
+            ## Checklist
+            - [ ] CI passes
+            - [ ] `go test ./...` passes with new libraries
+          labels: dependencies,automated

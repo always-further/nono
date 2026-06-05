@@ -1,0 +1,279 @@
+---
+title: Developer Workflows
+description: Recommended operational patterns for running coding agents safely with nono
+---
+
+This page is about how to run `nono` well in practice.
+
+The core ideas are:
+
+- prefer **one sandbox authority**
+- use **live detached sessions** for long-running work
+- pair detached sessions with **rollback** when the agent may make broad changes
+
+## Use One Sandbox Layer
+
+When an agent already ships with its own sandbox, the best practice is usually to let `nono` be the outer and only filesystem/network boundary.
+
+Why:
+
+- nested sandboxes make denials harder to reason about
+- the inner sandbox may have escape hatches or retry behavior that are separate from `nono`
+- one kernel-enforced boundary is easier to audit than two overlapping ones
+
+This does not mean turning off the agent's own approval UX. It means avoiding a second independent filesystem or process sandbox when `nono` is already enforcing the real boundary.
+
+### Claude Code
+
+Recommended pattern:
+
+```bash
+nono run --profile claude-code --allow-cwd -- claude
+```
+
+When running Claude Code under `nono`, prefer using `nono` as the real sandbox boundary and keep Claude Code's native sandbox disabled, or at minimum configured not to fall back to unsandboxed execution.
+
+The important operational point is:
+
+- let `nono` enforce filesystem and network restrictions
+- do not let Claude Code silently switch to an unsandboxed retry path
+
+See [Claude Code](/cli/clients/claude-code) for the agent-specific details.
+
+### Codex
+
+Recommended pattern:
+
+```bash
+nono run --profile codex --allow-cwd -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+The important part is the same: let `nono` enforce the filesystem and network boundary, and avoid layering another independent sandbox on top unless you have a specific reason.
+
+For Codex specifically:
+
+- keep Codex approvals enabled if you want the normal operator prompt flow
+- disable Codex's own sandbox so `nono` remains the single source of filesystem and network enforcement
+
+See [Codex](/cli/clients/codex) for the exact invocation and client-specific notes.
+
+## Think of Detached Sessions as a Sandboxed tmux-Like Workflow
+
+Detached sessions give you a workflow that feels a lot like `tmux` for agent runs:
+
+- start a long-running session
+- let it continue in the background
+- inspect it later from another terminal
+- reattach only when you need to guide, debug, or stop it
+
+The difference is that the session is still running inside the `nono` runtime model:
+
+- the child remains sandboxed
+- the supervisor keeps managing the PTY and session state
+- attach connects to the supervisor's PTY relay, not directly to an unrestricted child
+
+### Start Detached
+
+```bash
+nono run --detached --profile claude-code --allow-cwd -- claude "Do some long-running work"
+```
+
+Then later:
+
+```bash
+nono ps
+nono attach <session-id>
+```
+
+### Start Attached, Then Detach
+
+```bash
+nono run --profile claude-code --allow-cwd -- claude
+```
+
+Then detach with:
+
+```text
+Ctrl-] d
+```
+
+This sequence is configurable in `~/.config/nono/config.toml`:
+
+```toml
+[ui]
+detach_sequence = "ctrl-] d"
+```
+
+Or from another terminal:
+
+```bash
+nono detach <session-id>
+```
+
+This is a good pattern when you want to watch the session start, confirm it is behaving sensibly, then leave it running.
+
+### Runtime Control Loop
+
+The lifecycle commands are what make this feel like a sandboxed `tmux` workflow:
+
+```bash
+nono ps
+nono inspect <session-id>
+nono attach <session-id>
+nono stop <session-id>
+```
+
+Use them for different operator questions:
+
+- `nono ps`: what is still live right now?
+- `nono inspect`: what exactly is this session running, and with what profile?
+- `nono attach`: reconnect to the live terminal to guide or debug
+- `nono stop`: end the supervised session cleanly
+
+See [Session Lifecycle](/cli/features/session-lifecycle) for the full command reference.
+
+## Recommended Workflows
+
+### 1. Short Interactive Coding Session
+
+Use this when you expect to stay attached the whole time:
+
+```bash
+nono run --profile claude-code --allow-cwd -- claude
+```
+
+Good for:
+
+- quick debugging
+- one-shot code edits
+- review or exploration
+
+### 2. Long-Running Agent Session
+
+Use this when the agent may run for a while and you do not want to babysit the terminal:
+
+```bash
+nono run --detached --profile claude-code --allow-cwd -- claude
+nono ps
+nono attach <session-id>
+```
+
+Good for:
+
+- migrations
+- large refactors
+- broad repo analysis
+- slower unattended coding loops
+
+### 3. Long-Running Session With Rollback Safety
+
+This is the safest default for agents that may modify a lot of code:
+
+```bash
+nono run --detached --rollback --profile claude-code --allow-cwd -- claude
+```
+
+This combines:
+
+- a live detached session
+- later attach/detach/inspect/stop control
+- filesystem rollback if the result goes wrong
+
+Good for:
+
+- risky edits across many files
+- agents working unattended
+- sessions where you may only inspect the result after the fact
+
+See [Atomic Rollbacks](/cli/features/atomic-rollbacks) for the restore flow.
+
+### 4. Inspect and Recover a Session
+
+If a session is still alive but behaving badly:
+
+```bash
+nono ps --all
+nono inspect <session-id>
+nono attach <session-id>
+```
+
+If the session needs to end:
+
+```bash
+nono stop <session-id>
+```
+
+If the resulting file changes are wrong and rollback was enabled, use the rollback session to review and restore. This is one of the main reasons detached sessions and rollback work well together: you can let the agent continue running, come back later, inspect the result, and still have a structured recovery path.
+
+See [Session Lifecycle](/cli/features/session-lifecycle) for the full runtime command set.
+
+## Best Practices
+
+### Prefer Profiles Over Ad Hoc Flags
+
+Use preset, pack, or custom profiles for repeatable workflows:
+
+```bash
+nono run --profile claude-code -- claude
+nono run --profile codex -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+Profiles make your workflow easier to repeat, share, and audit.
+
+### Use `--allow-cwd` Deliberately
+
+`--allow-cwd` is convenient, but it means “grant the current repository read+write access”.
+
+That is often the right choice for coding agents, but treat it as an explicit workspace grant, not as boilerplate.
+
+### Keep Login/Bootstrap Permissions Temporary
+
+Some flows, especially browser-based login on macOS, need temporary extra permissions:
+
+```bash
+nono run --profile claude-code --allow-launch-services -- claude
+```
+
+Use those only for setup, then exit and rerun without them.
+
+### Prefer `nono stop` Over Killing the Child
+
+If a session has to end, stop the supervisor-managed session:
+
+```bash
+nono stop <session-id>
+```
+
+That preserves runtime cleanup, terminal cleanup, and rollback finalization.
+
+### Use Rollback For Unattended Work
+
+If you are going to let an agent run while detached, `--rollback` is usually worth the extra bookkeeping:
+
+```bash
+nono run --detached --rollback --profile codex --allow-cwd -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+This is the safer operational default for:
+
+- broad refactors
+- migrations
+- repository-wide codemods
+- unattended sessions you only plan to inspect later
+
+## A Good Default
+
+If you want one strong default workflow for powerful coding agents, use this:
+
+```bash
+nono run --detached --rollback --profile claude-code --allow-cwd -- claude
+```
+
+That gives you:
+
+- one kernel-enforced sandbox boundary
+- a long-running attach/detach workflow
+- later inspection and recovery
+- rollback if the session goes astray
+
+For many developer workflows, that is the closest thing to a “sandboxed tmux for agents” model that `nono` currently provides.

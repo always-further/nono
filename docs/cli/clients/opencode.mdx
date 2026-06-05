@@ -1,0 +1,134 @@
+---
+title: OpenCode
+description: Sandboxing OpenCode AI coding assistant with nono
+---
+
+[OpenCode](https://github.com/opencode-ai/opencode) is an open-source AI coding assistant that runs in your terminal. It reads your codebase, writes files, and executes commands. Running it under nono ensures it stays within the boundaries you define.
+
+## Why Sandbox OpenCode?
+
+OpenCode has full access to your filesystem and can run arbitrary commands. Without isolation:
+
+- It could access files outside your project directory
+- A malicious prompt or compromised dependency could exfiltrate credentials
+- Unintended writes could affect configuration or system files
+
+nono prevents all of this at the kernel level.
+
+## Quick Start
+
+```bash
+nono run --profile opencode -- opencode
+```
+
+The profile provides:
+- **Read+write access** to the current working directory
+- **Read+write access** to `~/.opencode` (binary and package data)
+- **Read+write access** to `~/.config/opencode` (configuration)
+- **Read+write access** to `~/.cache/opencode` (cache)
+- **Read+write access** to `~/.local/share/opencode` (data)
+- **Read+write access** to `~/.local/share/opentui` (OpenTUI parser/runtime data)
+- **Read+write access** to `/tmp` (temp files)
+- **Network access** enabled (required for AI provider API calls)
+
+<Note>
+  The profile grants access to `/tmp` because opencode writes temp files directly to `$TMPDIR` with dynamic filenames (e.g., `{timestamp}.md` for editor buffers, `opencode-clipboard.png` for clipboard images). Landlock cannot grant access to files with unpredictable names without granting the parent directory.
+</Note>
+
+## Custom Profile
+
+Create `~/.config/nono/profiles/opencode.json` for different permissions:
+
+```json
+{
+  "meta": {
+    "name": "opencode",
+    "version": "1.0.0",
+    "description": "OpenCode with restricted access"
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "read": [
+      "$XDG_CONFIG_HOME/opencode",
+      "$XDG_DATA_HOME/opencode",
+      "$XDG_DATA_HOME/opentui"
+    ]
+  },
+  "network": {
+    "block": false
+  },
+  "env_credentials": {
+    "openai_api_key": "OPENAI_API_KEY"
+  }
+}
+```
+
+**Usage:**
+```bash
+nono run --profile opencode -- opencode
+```
+
+## Security Tips
+
+### Use Secrets Management
+
+Load your AI provider API key from the system keystore instead of environment exports:
+
+**macOS:**
+```bash
+security add-generic-password -s "nono" -a "openai_api_key" -w
+```
+
+**Linux:**
+```bash
+secret-tool store --label="nono: openai_api_key" service nono username openai_api_key
+```
+
+Then run:
+```bash
+nono run --profile opencode --env-credential openai_api_key -- opencode
+```
+
+See [Credential Injection](/cli/features/credential-injection) for full documentation.
+
+### Read-Only Mode
+
+For reviewing code without allowing modifications:
+
+```bash
+nono run --read . --read ~/.config/opencode -- opencode
+```
+
+### Restrict to a Specific Project
+
+```bash
+nono run --allow ~/projects/my-app --read ~/.config/opencode -- opencode
+```
+
+### Overriding Profile Settings
+
+CLI flags always take precedence:
+
+```bash
+# Add extra directory access
+nono run --profile opencode --allow ~/shared-libs -- opencode
+
+# Block network
+nono run --profile opencode --block-net -- opencode
+```
+
+See [Security Profiles](/cli/features/profiles-groups) for details on profile format and precedence rules.
+
+## Known Issues
+
+### Google Gemini Proxy Credential Injection
+
+OpenCode routes Google Gemini requests directly to the Google API rather than through a configurable base URL. This means proxy-based credential injection does not work with Gemini models. Only environment variable injection is supported.
+
+Use `--env-credential` instead of proxy injection when working with Gemini:
+
+```bash
+nono run --profile opencode --env-credential gemini_api_key -- opencode
+```

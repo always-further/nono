@@ -1,0 +1,113 @@
+---
+title: Supervisor Mode
+description: Runtime services provided by the trusted parent process
+---
+
+Supervisor mode keeps a parent process alive outside the sandbox to provide runtime services that a fully sandboxed process cannot perform on its own. This includes audit recording, optional audit-integrity hashing, transparent capability expansion on Linux, network proxying, and rollback snapshots on both platforms.
+
+## Enabling Supervisor Mode
+
+Supervised execution is the default for `nono run` and `nono shell`. No extra flags are needed:
+
+```bash
+# Supervised by default
+nono run --profile claude-code -- claude
+
+# Enable rollback snapshots
+nono run --rollback --profile claude-code -- claude
+```
+
+The execution model:
+
+1. nono forks before applying the sandbox
+2. The **child** is sandboxed and runs the command
+3. The **parent** remains unsandboxed to provide supervisor services such as audit logging, capability decisions, proxy mediation, and optional rollback snapshots
+
+See [Execution Modes](/cli/features/execution-modes) for how this compares to Direct mode (`nono wrap`).
+For the operational runtime workflow built on top of supervisor mode, see [Session Lifecycle](/cli/features/session-lifecycle).
+
+## Capability Expansion (Linux)
+
+On Linux, supervisor mode enables transparent capability expansion. When the sandboxed process tries to access a file outside its allowed paths, instead of getting `EPERM`, the supervisor intercepts the request and can grant access on the fly.
+
+### How It Works
+
+1. A seccomp BPF filter intercepts `openat`/`openat2` syscalls before they reach Landlock
+2. The supervisor reads the requested path from the child's memory
+3. Protected nono state roots are checked first
+4. If the path is not protected, the supervisor prompts the user for approval
+5. On approval, the supervisor opens the file and injects the file descriptor into the child process via `SECCOMP_IOCTL_NOTIF_ADDFD`
+6. The child's `open()` call returns a valid file descriptor
+
+The agent never needs to know about nono. Its `open()` call succeeds after a brief pause while the user approves - no retries, no special handling.
+
+### Fast Path
+
+Paths already in the initial capability set are served immediately via an O(1) lookup without prompting. The supervisor prompt only appears for paths outside the granted set.
+
+### Rate Limiting
+
+To prevent prompt flooding, the supervisor uses a token bucket rate limiter:
+
+- **Rate**: 10 requests per second
+- **Burst capacity**: 5
+
+Requests exceeding the rate limit are automatically denied.
+
+### Minimum Requirements
+
+- Linux kernel 5.14+ (for `SECCOMP_ADDFD_FLAG_SEND`)
+- `PR_SET_NO_NEW_PRIVS` (standard for unprivileged seccomp)
+
+### macOS Limitations
+
+Capability expansion is not available on macOS. Apple's SIP (System Integrity Protection) strips `DYLD_INSERT_LIBRARIES` from Apple Platform Binaries, making transparent interposition infeasible for commands that route through `/usr/bin/env`, `/bin/bash`, or `/bin/sh`.
+
+On macOS, supervised mode provides rollback snapshots and the diagnostic footer, but does not prompt for capability expansion.
+
+## Protected State
+
+The supervisor always blocks access to nono's own protected state roots, such as `~/.nono`, before consulting the approval backend. This prevents dynamic grants from exposing rollback data, audit state, or other internal nono files.
+
+## Audit Responsibilities
+
+The supervisor is also the trusted recorder for supervised sessions.
+
+It is responsible for:
+
+- creating the audit session directory
+- writing session metadata
+- recording supervisor-observed events such as capability decisions and URL opens
+- draining proxy network audit events at session end
+- computing the audit-log chain head and Merkle root when `--audit-integrity` is enabled
+
+This means the sandboxed child cannot directly tamper with its own audit log. The trust assumption is that the supervisor records events honestly; `--audit-integrity` then makes later tampering with the recorded log detectable.
+
+## Approval Backends
+
+The supervisor uses an `ApprovalBackend` trait to determine whether to grant access. The library defines the trait; backends are implemented by clients.
+
+### Terminal Approval (implemented)
+
+The default backend reads approval from `/dev/tty` directly (since stdin belongs to the sandboxed child). The user sees a prompt like:
+
+```
+[nono] claude wants to read /home/luke/.config/something
+        Allow? [y/N]
+```
+
+### Webhook / Policy Approval (planned)
+
+Future backends will support:
+- **Webhook**: HTTP callback to an external approval service
+- **Policy**: Automatic decisions based on predefined rules
+
+## Diagnostic Footer
+
+When the child exits with a non-zero exit code, nono prints a diagnostic footer to stderr explaining what happened and suggesting fixes.
+
+## Limitations
+
+- Capability expansion is Linux-only. macOS supervised mode provides rollback snapshots and diagnostics only.
+- Audit recording is supervised-mode only. Direct mode (`nono wrap`) has no parent process and therefore no audit session.
+- **WSL2**: Capability expansion (`--capability-elevation`) is unavailable. WSL2's init process claims the sole seccomp notify listener, causing `EBUSY` when nono tries to install its own ([microsoft/WSL#9548](https://github.com/microsoft/WSL/issues/9548)). Supervised mode still works for rollback snapshots and diagnostics. See [WSL2 Support](/cli/internals/wsl2#seccomp-user-notification-limitation) for details.

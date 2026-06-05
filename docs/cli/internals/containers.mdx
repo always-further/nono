@@ -1,0 +1,264 @@
+---
+title: nono and containers
+description: How nono and containers complement each other for sandboxing AI agents
+---
+
+nono and containers (Docker, Podman, etc.) operate at different layers of isolation and complement each other well. Containers provide namespace and resource isolation; nono adds fine-grained, path-level filesystem control. You can use either on its own or combine them for defense in depth.
+
+This guide helps you understand what each brings to the table and when to use one, the other, or both.
+
+## Quick Comparison
+
+| Aspect | nono | Docker Container |
+|--------|------|------------------|
+| Startup time | ~0ms | ~100-500ms |
+| Setup required | None | Dockerfile, daemon |
+| Filesystem model | Path-level allow/deny | Separate filesystem |
+| Works on host files | Yes (directly) | Requires volume mounts |
+| Credential protection | Automatic blocklist | Manual (don't mount) |
+| Network isolation | On/off | Full namespace |
+| Resource limits | No | Yes (cgroups) |
+| Process isolation | No | Yes (PID namespace) |
+
+## What nono Adds
+
+**nono is strongest when you need:**
+
+### Zero-Latency Startup
+
+```bash
+# Instant startup - no container overhead
+nono run --allow-cwd -- claude-code
+
+# Compare to Docker
+docker run -v $(pwd):/work -it my-agent  # 100-500ms+ overhead per invocation
+```
+
+### Direct Access to Your Working Directory
+
+AI coding agents need to read and modify your actual source files. With nono, this works naturally:
+
+```bash
+# Agent can edit files in current directory
+nono run --allow-cwd -- aider
+```
+
+With Docker, you need to configure volume mounts and handle permission issues:
+
+```bash
+# Volume mounts can cause UID/GID mismatches
+docker run -v $(pwd):/work -u $(id -u):$(id -g) my-agent
+```
+
+### Automatic Credential Protection
+
+nono blocks sensitive paths by default, even if you allow a parent directory:
+
+```bash
+# Allows ~/projects but still blocks ~/.ssh, ~/.aws, etc.
+nono run --allow ~/projects -- agent
+```
+
+With Docker, you must be careful not to mount sensitive directories:
+
+```bash
+# Easy to accidentally expose secrets
+docker run -v $HOME:/home/user my-agent  # Dangerous!
+```
+
+### Zero Configuration
+
+nono requires no setup - just install and run:
+
+```bash
+brew install nono
+nono run --allow-cwd -- my-agent
+```
+
+Docker requires:
+- Docker daemon running
+- Dockerfile for custom images
+- Understanding of volumes, networks, users
+- Image pulls and builds
+
+## What Containers Add
+
+Containers cover areas that nono does not:
+
+### Full Environment Isolation
+
+If the agent needs specific system libraries, language runtimes, or tools:
+
+```dockerfile
+FROM python:3.11
+RUN pip install numpy pandas tensorflow
+```
+
+nono runs in your existing environment - it doesn't provide a separate runtime.
+
+### Resource Limits
+
+Containers can limit CPU, memory, and I/O:
+
+```bash
+docker run --memory=2g --cpus=1 my-agent
+```
+
+nono does not limit resources. A runaway agent can consume all available CPU/memory.
+
+### Process Isolation
+
+Containers have separate PID namespaces - processes inside can't see or signal host processes:
+
+```bash
+# Inside container, can only see container processes
+docker run my-agent ps aux  # Shows only container processes
+```
+
+nono shares the host PID namespace - the sandboxed process can see (but not necessarily interact with) other processes.
+
+### Reproducible Environments
+
+For CI/CD or sharing exact environments:
+
+```bash
+# Same environment everywhere
+docker run my-org/agent:v1.2.3 -- run-tests
+```
+
+## Using Both Together
+
+Because nono and containers operate at different layers, they combine naturally. The container handles namespace isolation and resource limits; nono handles path-level filesystem control and credential blocking inside the container:
+
+```dockerfile
+# Dockerfile
+FROM ubuntu:22.04
+COPY --from=ghcr.io/always-further/nono:latest /usr/bin/nono /usr/bin/nono
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+ENTRYPOINT ["nono", "run", "--allow", "/work"]
+```
+
+```bash
+# Defense in depth: container + nono
+docker run -v $(pwd):/work my-nono-agent -- claude-code
+```
+
+This gives you:
+- **Namespace isolation** from the container -- processes, network, and mounts are separated from the host
+- **Resource limits** from the container -- cap CPU, memory, and I/O
+- **Path-level control** from nono -- the agent can only touch `/work`, even though the container filesystem is larger
+- **Credential blocking** from nono -- sensitive paths are denied automatically, even if a home directory is mounted in
+
+## Threat Model Comparison
+
+### What nono Protects Against
+
+- Reading/writing files outside allowed paths
+- Accessing credentials (~/.ssh, ~/.aws, etc.)
+- Running blocked commands (rm, dd, etc.)
+- Network access (when blocked)
+
+### What Containers Protect Against
+
+- All of the above (but with a fair amount of configuration)
+- Process visibility and signaling
+- Resource exhaustion (with limits)
+- Environment contamination
+
+### What Neither Protects Against
+
+- Kernel vulnerabilities
+- Side-channel attacks
+- Prompt Injection (which no one can fully prevent)
+- Social engineering (agent convinces you to run dangerous command)
+
+## Performance Comparison
+
+### Startup Time
+
+```bash
+# nono: instant
+time nono run --allow-cwd -- echo hello
+# real    0m0.005s
+
+# Docker (warm, image cached)
+time docker run alpine echo hello
+# real    0m0.350s
+
+# Docker (cold, needs pull)
+time docker run alpine echo hello
+# real    0m2.500s
+```
+
+### Memory Overhead
+
+- **nono**: ~0 MB (just applies sandbox and execs)
+- **Docker**: ~10-50 MB per container (runtime overhead)
+
+### Disk Usage
+
+- **nono**: ~2 MB binary
+- **Docker**: 100 MB+ per image (varies widely)
+
+## Adding nono to an Existing Workflow
+
+If you're currently using Docker only for sandboxing (not for environment isolation), nono can simplify your setup:
+
+```bash
+# Before: Docker for sandboxing only
+docker run -v $(pwd):/work -w /work python:3.11 python script.py
+
+# After: nono (uses your installed Python, zero overhead)
+nono run --allow-cwd -- python script.py
+```
+
+If you need Docker for environment reasons, add nono inside the container for path-level control:
+
+```bash
+# Before: Docker without filesystem restrictions inside the container
+docker run -v $(pwd):/work my-agent
+
+# After: nono inside the container restricts access to /work only
+docker run -v $(pwd):/work my-nono-agent -- my-agent
+```
+
+## Decision Flowchart
+
+```
+Do you need a different OS or runtime?
+├── Yes → Container (add nono inside for filesystem control)
+└── No
+    │
+    Do you need resource limits (CPU/memory)?
+    ├── Yes → Container + nono
+    └── No
+        │
+        Do you need process isolation?
+        ├── Yes → Container + nono
+        └── No
+            │
+            Is startup time or zero setup important?
+            ├── Yes → nono
+            └── No → Both work; consider combining for defense in depth
+```
+
+## Summary
+
+| Use Case | Recommendation |
+|----------|----------------|
+| AI coding agents (Claude, Aider, etc.) | nono (or both for extra isolation) |
+| CI/CD pipelines | Both (container for environment, nono for filesystem control) |
+| Interactive development | nono |
+| Untrusted code execution | Both |
+| Reproducible environments | Container (consider adding nono inside) |
+| Quick sandboxing, zero setup | nono |
+| Resource-limited execution | Container (consider adding nono inside) |
+| Maximum security | Both |
+
+## Next Steps
+
+- [Security Model](/cli/internals/security-model) - Understanding nono's guarantees
+- [Profiles](/cli/features/profiles-groups) - Pre-configured sandboxes for common agents
+- [Installation](/cli/getting_started/installation) - Get started with nono

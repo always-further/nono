@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "name": "synthetic",
+  "description": "Synthetic test pack for nono integration tests. Not published to any registry; copied into the local pack store by test_pack_resolution.sh to exercise the pack-store resolver and sandbox enforcement of pack-shipped profiles. Contains only one profile artifact and no wiring directives.",
+  "license": "Apache-2.0",
+  "platforms": ["macos", "linux"],
+  "min_nono_version": "0.44.0",
+  "artifacts": [
+    { "type": "profile", "path": "profiles/synthetic.json", "install_as": "synthetic" }
+  ]
+}

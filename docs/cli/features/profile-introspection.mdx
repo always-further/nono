@@ -1,0 +1,363 @@
+---
+title: Profile Introspection
+description: Inspect, compare, and validate nono profiles and the policy rules they reference
+---
+
+The `nono profile` command lets you inspect the group-based security policy, explore profiles, compare configurations, and validate user-defined profiles. Every subcommand supports `--json` for programmatic consumption.
+
+> **Previously known as `nono policy`.** The `nono policy <sub>` namespace still works as a deprecated alias — it prints a warning on stderr and dispatches to the new command. Removal is tracked in upstream issue #594.
+
+## Commands
+
+### `nono profile groups`
+
+List all policy groups or show details for a specific group.
+
+```bash
+# List groups for the current platform
+nono profile groups
+
+# List groups for all platforms
+nono profile groups --all-platforms
+
+# Show details for a specific group
+nono profile groups deny_credentials
+
+# Machine-readable output
+nono profile groups --json
+```
+
+Example output:
+
+```
+nono profile: 21 groups
+
+  claude_code_macos                    Claude Code macOS-specific state and credential paths macos
+  deny_credentials                     Block access to cryptographic keys, tokens, and cloud credentials cross-platform  required
+  deny_shell_history                   Block access to shell command history files cross-platform  required
+  node_runtime                         Node.js runtime and package manager paths  cross-platform
+  system_read_macos                    macOS system paths required for executables to function macos
+  ...
+```
+
+Detailed view shows every path in the group, with variables expanded to their actual values:
+
+```
+nono profile: group 'deny_credentials'
+
+  Description:  Block access to cryptographic keys, tokens, and cloud credentials
+  Platform:     cross-platform
+  Required:     yes
+
+  deny.access:
+    ~/.ssh                               -> /Users/luke/.ssh
+    ~/.aws                               -> /Users/luke/.aws
+    ~/.config/gcloud                     -> /Users/luke/.config/gcloud
+    ~/.docker                            -> /Users/luke/.docker
+    ~/.git-credentials                   -> /Users/luke/.git-credentials
+    ...
+```
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `[NAME]` | Group name to show details for (omit to list all) |
+| `--json` | Output as JSON |
+| `--all-platforms` | Show groups for all platforms, not just the current one |
+
+### `nono profile list`
+
+List all available profiles, showing preset, pack-provided, and user-defined profiles separately. User profiles that shadow a preset or pack profile are flagged.
+
+```bash
+nono profile list
+nono profile list --json
+```
+
+Example output:
+
+```
+nono profile: 15 profiles
+
+  Built-in:
+    claude-code      Anthropic Claude Code CLI agent            extends default
+    codex            OpenAI Codex CLI agent                     extends default
+    default          Default conservative base profile
+    opencode         OpenCode AI coding assistant               extends default
+    python-dev       Python SDK development profile             extends default
+    ...
+
+  User (~/.config/nono/profiles/):
+    my-agent         Custom agent profile                       extends default
+    ...
+```
+
+Malformed user profiles are surfaced with their error instead of being silently hidden:
+
+```
+  User (~/.config/nono/profiles/):
+    broken-profile   [error: Profile error: missing field `meta`]
+```
+
+<Note>
+  Load precedence is user-first. If a user profile file exists at `~/.config/nono/profiles/claude-code.json`, it shadows the pack-provided `claude-code` profile. The `profiles` command reports the actual source in JSON output, and lists the profile under the User section.
+</Note>
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Output as JSON |
+
+### `nono profile show`
+
+Display a fully resolved profile, including all inherited groups, filesystem grants, network configuration, hooks, and rollback settings.
+
+```bash
+# Show a profile
+nono profile show default
+
+# Show a user profile
+nono profile show my-agent
+
+# Show a profile by file path
+nono profile show ./profiles/custom.json
+
+# Show raw paths (before variable expansion)
+nono profile show claude-code --raw
+
+# Machine-readable output
+nono profile show claude-code --json
+```
+
+Example output:
+
+```
+nono profile: profile 'claude-code'
+
+  Description:  Anthropic Claude Code CLI agent
+  Extends:      default
+
+  Security groups:
+    deny_credentials
+    deny_keychains_macos
+    node_runtime
+    python_runtime
+    rust_runtime
+    unlink_protection
+    ...
+
+  Filesystem:
+    allow (r+w):
+      $HOME/.claude                        -> /Users/luke/.claude
+    read_file:
+      $HOME/.gitconfig                     -> /Users/luke/.gitconfig
+
+  Workdir access:  ReadWrite
+
+  Rollback exclusions:
+    node_modules
+    target
+    __pycache__
+    glob: *.tmp.[0-9]*.[0-9]*
+
+  Open URLs:
+    localhost allowed
+    https://claude.ai
+```
+
+The `--raw` flag shows path variables as written in the profile (e.g., `$HOME/.claude`) rather than their expanded values. This is useful for understanding what a profile declares versus what it resolves to on a specific machine.
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `<PROFILE>` | Profile name or file path |
+| `--json` | Output as JSON |
+| `--raw` | Show raw paths before variable expansion |
+
+### `nono profile diff`
+
+Compare two profiles side-by-side. Shows additions, removals, and changes across all profile sections: groups, filesystem, policy patches, security settings, network, hooks, rollback, open URLs, env credentials, and custom credentials.
+
+```bash
+# Compare two profiles
+nono profile diff default claude-code
+
+# Compare a user profile against a pack profile
+nono profile diff default ./my-profile.json
+
+# Machine-readable output
+nono profile diff default claude-code --json
+```
+
+Example output:
+
+```
+nono profile: diff 'default' vs 'claude-code'
+
+  Groups:
+    + claude_code_macos
+    + node_runtime
+    + python_runtime
+    + rust_runtime
+    + unlink_protection
+    + user_caches_macos
+
+  Filesystem:
+    + allow $HOME/.claude
+    + read_file $HOME/.gitconfig
+    + read_file $HOME/.gitignore_global
+
+  Workdir:
+    - access: None
+    + access: ReadWrite
+
+  Open URLs:
+    + allow_origins https://claude.ai
+    - allow_localhost: false
+    + allow_localhost: true
+
+  Hooks:
+    + claude-code
+```
+
+For custom credentials and hooks, the diff detects value-level changes when two profiles share the same key but differ in configuration (e.g., different `upstream` URL or `inject_mode`):
+
+```
+  Custom credentials:
+    ~ my-api (changed)
+      - upstream: https://old-api.example.com
+      + upstream: https://new-api.example.com
+```
+
+When profiles are identical, the output shows `(no differences)`.
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `<PROFILE1>` | First profile name or path |
+| `<PROFILE2>` | Second profile name or path |
+| `--json` | Output as JSON |
+
+### `nono profile validate`
+
+Validate a user profile JSON file against the embedded policy. Catches common mistakes before they cause runtime failures.
+
+```bash
+nono profile validate ~/my-profile.json
+nono profile validate ./profiles/custom.json --json
+```
+
+Checks performed:
+
+| Check | Severity | Description |
+|-------|----------|-------------|
+| JSON syntax | Error | File must be valid JSON and deserialize into a profile |
+| Inheritance | Error | `extends` target must be a loadable profile |
+| Group references | Error | Every group in `groups.include` must exist in policy.json |
+| Required group exclusion | Error | `groups.exclude` cannot exclude required groups |
+| Empty paths | Warning | Empty strings in filesystem path arrays |
+
+Example output for a valid profile:
+
+```
+nono profile: validating /Users/luke/my-profile.json
+
+  [ok]  JSON syntax valid
+  [ok]  All 3 group references valid
+
+  Result: valid
+```
+
+Example output for an invalid profile:
+
+```
+nono profile: validating /Users/luke/bad-profile.json
+
+  [ok]  JSON syntax valid
+  [err]  Group 'nonexistent_group' not found in policy.json
+
+  Result: invalid (1 error)
+```
+
+The command exits with a non-zero status when validation fails, making it suitable for CI pipelines.
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `<FILE>` | Profile JSON file to validate |
+| `--json` | Output as JSON |
+
+## JSON Output
+
+All subcommands support `--json` for integration with scripts, CI pipelines, and tools like `jq`.
+
+```bash
+# List groups and extract names
+nono profile groups --json | jq '.[].name'
+
+# Check if a profile has network blocked
+nono profile show my-profile --json | jq '.network.block'
+
+# Get added groups between two profiles
+nono profile diff default claude-code --json | jq '.groups.added'
+
+# Validate in CI and check result
+nono profile validate ./profile.json --json | jq '.valid'
+```
+
+## Use Cases
+
+### Auditing security posture
+
+Review exactly what a profile grants before deploying it:
+
+```bash
+# What does this profile actually allow?
+nono profile show claude-code
+
+# What groups protect sensitive data?
+nono profile groups deny_credentials
+
+# How does our custom profile differ from the pack profile?
+nono profile diff claude-code ./our-custom-profile.json
+```
+
+### Debugging sandbox failures
+
+When a sandboxed process fails because a path is blocked, trace the policy:
+
+```bash
+# What groups apply to the current platform?
+nono profile groups
+
+# Does the profile include the needed runtime group?
+nono profile show my-profile | grep python_runtime
+
+# Compare against a working profile
+nono profile diff my-profile claude-code
+```
+
+### CI/CD validation
+
+Validate custom profiles before they ship:
+
+```bash
+# Validate all profile files in a directory
+for f in profiles/*.json; do
+  nono profile validate "$f" --json || exit 1
+done
+```
+
+### Detecting user overrides
+
+Check whether pack profiles have been shadowed by user files:
+
+```bash
+# JSON output flags the actual source
+nono profile list --json | jq '.[] | select(.source | contains("overrides"))'
+```

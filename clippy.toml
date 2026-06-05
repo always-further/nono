@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "env var mutation is not thread-safe in tests; use crate::test_env::EnvVarGuard instead (see crates/nono-cli/src/test_env.rs)" },
+    { path = "std::env::remove_var", reason = "env var mutation is not thread-safe in tests; use EnvVarGuard::remove() instead (see crates/nono-cli/src/test_env.rs)" },
+]

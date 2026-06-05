@@ -1,0 +1,554 @@
+---
+title: Trust & Attestation
+description: Cryptographic verification of files
+---
+
+Nono's trust system verifies the **provenance** and **integrity** of files before they are consumed. Any file you choose to protect — instruction files, configs, scripts, templates — can be signed and verified. At sandbox startup, nono scans for files matching the trust policy and verifies their signatures. Unsigned or tampered files are hard-denied.
+
+## Quick Start
+
+### 1. Generate a signing key
+
+```bash
+nono trust keygen
+```
+
+Creates an ECDSA P-256 key pair in the system keystore (macOS Keychain / Linux Secret Service). On headless or containerized systems where the system keystore is unavailable, use `--keyref file://` to store the key as a file instead:
+
+```bash
+nono trust keygen --keyref file:///home/user/.config/nono/trust/default.pem
+```
+
+### 2. Create and sign a trust policy
+
+A trust policy declares which files must be verified and who is allowed to sign them. It lives in the project root as `trust-policy.json` — if a project you're working on already has one, skip this step.
+
+```bash
+nono trust init --include "SKILLS.md" --include "CLAUDE.md" --include "src/config.py"
+nono trust sign-policy
+```
+
+The first command creates a `trust-policy.json` with the specified include patterns and your signing key's public key as a publisher. The second signs it — an unsigned policy could be modified by an attacker.
+
+Patterns use glob syntax and can be specific files or wildcards — `SKILLS*` matches `SKILLS.md`, `SKILLS-ops.md`, etc. Be specific with patterns: any file that matches `includes` must be signed or verification will fail.
+
+### 3. Sign files
+
+```bash
+# Sign a single file
+nono trust sign SKILLS.md
+
+# Sign all files matching the trust policy's includes
+nono trust sign --all
+```
+
+Each file gets its own `.bundle` sidecar (e.g., `SKILLS.md.bundle`). Use `--multi-subject` to produce a single `.nono-trust.bundle` instead. Commit bundles alongside the signed files.
+
+Signing works on any file — no trust policy is required for explicit file arguments. `--all` uses the policy to discover which files to sign.
+
+### 4. Verify
+
+```bash
+nono trust verify --all
+```
+
+When you run `nono run`, the pre-exec scan automatically verifies all files matching the policy before the agent launches.
+
+### Headless Quick Start (file-backed keys)
+
+On headless Linux, containers, or SSH-only hosts where the system keystore is unavailable, use `--keyref file://` throughout:
+
+```bash
+KEYREF="file://$HOME/.config/nono/trust/default.pem"
+
+nono trust keygen --keyref "$KEYREF"
+nono trust init --include "SKILLS.md" --include "CLAUDE.md" --keyref "$KEYREF"
+nono trust sign-policy --keyref "$KEYREF"
+nono trust sign --all --keyref "$KEYREF"
+nono trust verify --all
+```
+
+Verify does not need `--keyref` — it uses the public key embedded in `trust-policy.json` by `init`.
+
+<Note>
+  The trust policy records the full file path as the signer identity (e.g. `file:///home/user/.config/nono/trust/default.pem`). If you move the key to a different path, re-run `nono trust init` with the new `--keyref` to update the policy. The same key material at a different path is treated as a different signer. Use a stable, conventional path (e.g. `$HOME/.config/nono/trust/default.pem`) to avoid this.
+</Note>
+
+## CLI Commands
+
+### nono trust init
+
+Create a `trust-policy.json` in the current directory.
+
+```bash
+nono trust init --include "*.md"                    # single pattern
+nono trust init --include "*.md" --include "*.py"   # multiple patterns
+nono trust init --include "SKILLS*" --key my-key    # with specific signing key
+nono trust init --keyref file:///path/to/key.pem    # with file-backed key
+nono trust init --user                              # user-level policy (~/.config/nono/)
+nono trust init --force                             # overwrite existing policy
+```
+
+Note: the pre-exec trust scan and `sign --all`/`verify --all` do **not** respect `.gitignore` — adding a file to `.gitignore` cannot bypass trust verification.
+
+### nono trust sign
+
+Sign files. Any file can be signed — no trust policy is required for explicit file arguments.
+
+```bash
+nono trust sign SKILLS.md                  # keyed (default key), creates SKILLS.md.bundle
+nono trust sign SKILLS.md --key my-key     # keyed (specific key from keystore)
+nono trust sign SKILLS.md --keyref file:///path/to/key.pem  # keyed (file-backed key)
+nono trust sign SKILLS.md CLAUDE.md        # per-file .bundle sidecars
+nono trust sign --all                      # all files matching policy (per-file)
+nono trust sign --all --multi-subject      # single .nono-trust.bundle for all files
+```
+
+**Keyless signing** (CI environments only):
+
+```bash
+nono trust sign SKILLS.md --keyless        # requires ambient OIDC (e.g., GitHub Actions)
+```
+
+<Note>
+  Keyless signing requires a CI environment with ambient OIDC tokens, such as GitHub Actions with `permissions: id-token: write`. Interactive browser-based keyless signing is not yet supported. Use keyed signing for local development.
+</Note>
+
+### nono trust verify
+
+```bash
+nono trust verify SKILLS.md                # single file
+nono trust verify --all                    # all files matching policy
+nono trust verify SKILLS.md --policy path  # specific trust policy
+```
+
+### nono trust list
+
+List all files matching the policy and their verification status.
+
+```bash
+nono trust list
+```
+
+```
+  File                               Status       Publisher
+  -------------------------------------------------------------------
+  SKILLS.md                          VERIFIED     local-dev (keyed)
+  CLAUDE.md                          VERIFIED     local-dev (keyed)
+  .claude/commands/deploy.md         UNSIGNED     no .bundle file found
+```
+
+### nono trust keygen
+
+Generate an ECDSA P-256 signing key pair.
+
+```bash
+nono trust keygen                          # default key ID ("default") in system keystore
+nono trust keygen --id my-signing-key      # named key in system keystore
+nono trust keygen --keyref file:///path/to/key.pem  # file-backed key
+nono trust keygen --keyref file:///path/to/key.pem --force  # overwrite existing file
+```
+
+The `--keyref` flag accepts `keystore://name` (explicit keystore reference) or `file:///path` (file-backed). When using `file://`, the private key is stored at the specified path and the public key at `<path>.pub`, both with owner-only permissions (0600).
+
+### nono trust export-key
+
+Export the public key in base64 DER format for use in trust policy `public_key` fields.
+
+```bash
+nono trust export-key                      # export default key from keystore
+nono trust export-key --id my-signing-key  # export named key from keystore
+nono trust export-key --keyref file:///path/to/key.pem  # export from file-backed key
+nono trust export-key --pem                # output as PEM instead of base64 DER
+```
+
+### nono trust sign-policy
+
+Sign the trust policy file. Required after every modification to `trust-policy.json`.
+
+```bash
+nono trust sign-policy                     # sign trust-policy.json in CWD
+nono trust sign-policy --user              # sign user-level trust policy (~/.config/nono/)
+nono trust sign-policy --key my-key        # specific key from keystore
+nono trust sign-policy --keyref file:///path/to/key.pem  # file-backed key
+```
+
+## Development Override
+
+For development and testing, disable attestation enforcement:
+
+```bash
+nono run --profile claude-code --trust-override -- claude
+```
+
+Verification still runs and results are logged, but failures produce warnings instead of hard denies. This flag is CLI-only — it cannot be set in a profile or trust policy.
+
+The `NONO_TRUST_OVERRIDE=1` environment variable is also supported.
+
+## Trust Policy Reference
+
+Trust policy is defined in `trust-policy.json`, separate from the sandbox policy (`policy.json`).
+
+```json
+{
+  "version": 1,
+  "includes": [
+    "SKILLS*",
+    "CLAUDE*",
+    "*.py",
+    ".claude/**/*.md"
+  ],
+  "publishers": [
+    {
+      "name": "local-dev",
+      "key_id": "default",
+      "public_key": "<BASE64_PUBLIC_KEY>"
+    }
+  ],
+  "blocklist": {
+    "digests": [],
+    "publishers": []
+  },
+  "enforcement": "deny"
+}
+```
+
+To get the public key in base64 format for a manual policy:
+
+```bash
+nono trust export-key --id default                     # from system keystore
+nono trust export-key --keyref file:///path/to/key.pem # from file-backed key
+```
+
+### includes
+
+Glob patterns identifying files under attestation. Any file matching these patterns is subject to verification.
+
+```json
+{
+  "includes": [
+    "SKILLS*",
+    "CLAUDE*",
+    "*.py",
+    ".claude/**/*.md"
+  ]
+}
+```
+
+### publishers
+
+Trusted publisher identities. A file's signature must match at least one publisher.
+
+**Keyed publishers** match by key ID and verify with the embedded public key:
+
+```json
+{
+  "name": "local-dev",
+  "key_id": "default",
+  "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..."
+}
+```
+
+The `public_key` field contains the base64-encoded DER SPKI public key.
+
+**Keyless (OIDC) publishers** match by identity claims from the Fulcio certificate:
+
+```json
+{
+  "name": "my-org-ci",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "repository": "my-org/my-repo",
+  "workflow": ".github/workflows/sign-skills.yml",
+  "ref_pattern": "refs/heads/main"
+}
+```
+
+These fields are matched against claims in the Fulcio certificate that Sigstore issues during keyless signing. The certificate embeds the OIDC identity of the CI environment that performed the signing.
+
+| Field | Description | Wildcards |
+|-------|-------------|-----------|
+| `name` | Human-readable label for this publisher (not matched against anything) | No |
+| `issuer` | The OIDC provider URL. For GitHub Actions this is always `https://token.actions.githubusercontent.com` | No |
+| `repository` | The `owner/repo` that ran the signing workflow (maps to the GitHub OIDC `repository` claim). Use `org/*` to trust all repos in an org | Yes (`org/*`) |
+| `workflow` | Path to the workflow file that performed the signing, relative to the repo root | Yes (`*`) |
+| `ref_pattern` | The git ref that triggered the workflow (e.g., `refs/heads/main`, `refs/tags/v1.0`). Use wildcards to trust a range of refs | Yes (`refs/tags/v*`) |
+
+### blocklist
+
+Known-malicious file digests. Checked before any other verification. A file matching a blocklist digest is hard-denied regardless of signature validity.
+
+```json
+{
+  "blocklist": {
+    "digests": [
+      {
+        "sha256": "a1b2c3d4...",
+        "description": "Known malicious SKILLS.md variant",
+        "added": "2026-02-20"
+      }
+    ]
+  }
+}
+```
+
+Blocklist entries are always hard-denied, even in `warn` or `audit` enforcement modes.
+
+### enforcement
+
+| Mode | Behavior |
+|------|----------|
+| `deny` | Hard deny unsigned/invalid/untrusted files. The agent does not start. |
+| `warn` | Log warnings but allow the agent to proceed. |
+| `audit` | Allow access, log verification results for post-hoc review. |
+
+## GitHub Actions Integration
+
+Keyless signing integrates with GitHub Actions OIDC for automated CI/CD signing.
+
+### Signing Workflow
+
+```yaml
+name: Sign files
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'SKILLS.md'
+      - 'CLAUDE.md'
+      - 'AGENT*'
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nono
+        run: cargo install nono-cli
+
+      - name: Sign files
+        run: |
+          for f in SKILLS.md CLAUDE.md; do
+            [ -f "$f" ] && nono trust sign "$f" --keyless
+          done
+
+      - name: Commit bundles
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add '*.bundle'
+          git diff --staged --quiet || git commit -m "Update file signatures"
+          git push
+```
+
+### Trust Policy for CI-Signed Files
+
+```json
+{
+  "version": 1,
+  "includes": ["SKILLS*", "CLAUDE*", "AGENT*"],
+  "publishers": [
+    {
+      "name": "my-org-ci",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "repository": "my-org/my-repo",
+      "workflow": ".github/workflows/sign-skills.yml",
+      "ref_pattern": "refs/heads/main"
+    }
+  ],
+  "blocklist": { "digests": [] },
+  "enforcement": "deny"
+}
+```
+
+This policy declares: only trust files signed by a GitHub Actions workflow in `my-org/my-repo`, from the `main` branch.
+
+## Signing Modes
+
+There are two signing modes, with two key storage backends for keyed signing:
+
+**Keyed signing (keystore)** — A private key stored in the system keystore (macOS Keychain / Linux Secret Service). The default for desktop environments. Use `--key <name>` or `--keyref keystore://<name>`.
+
+**Keyed signing (file)** — A private key stored as a local file with owner-only permissions (0600). Designed for headless Linux, containers, SSH-only hosts, and environments where the system keystore is unavailable. Use `--keyref file:///path/to/key.pem`.
+
+**Keyless signing** — Ephemeral key + OIDC identity + Fulcio certificate + Rekor transparency log. Suitable for CI/CD pipelines with ambient OIDC tokens (e.g., GitHub Actions with `permissions: id-token: write`). The signer's identity is cryptographically bound to the signature via the OIDC token.
+
+Both modes produce [Sigstore bundle](https://docs.sigstore.dev/about/bundle/) v0.3 files (`.bundle` extension).
+
+## What Signing Proves (and What It Does Not)
+
+Signing a file proves two things:
+
+1. **Provenance** — The file was signed by a specific identity (a key you control, or a CI/CD pipeline you trust).
+2. **Integrity** — The file has not been modified since it was signed. Any tampering breaks the signature.
+
+Signing does **not** prove that the content is safe or correct. This is the same trust model as code signing or package signing: you decide which signers you trust (via `publishers`), and the cryptography guarantees only those signers can produce files that pass verification.
+
+## Signature Storage
+
+**Per-file bundles** (default): `<filename>.bundle`
+
+```
+project/
+  SKILLS.md
+  SKILLS.md.bundle
+  trust-policy.json
+  trust-policy.json.bundle
+```
+
+**Multi-subject bundles** (with `--multi-subject`): `.nono-trust.bundle`
+
+```
+project/
+  SKILLS.md
+  CLAUDE.md
+  helper.py
+  .nono-trust.bundle           # contains all subjects
+  trust-policy.json
+  trust-policy.json.bundle
+```
+
+Bundles are checked into version control. A missing bundle triggers verification failure.
+
+## Recommended Project Structure
+
+For most projects, use a single `.nono-trust.bundle` via `--multi-subject` rather than per-file sidecars. This keeps the tree clean and avoids bundle proliferation as the number of signed files grows.
+
+```
+project/
+  SKILLS.md
+  CLAUDE.md
+  src/
+    config.py
+  .nono-trust.bundle             # single bundle covering all signed files
+  trust-policy.json
+  trust-policy.json.bundle
+```
+
+- `trust-policy.json` lives at the project root
+- `trust-policy.json.bundle` is its signature sidecar (always per-file)
+- `.nono-trust.bundle` contains attestations for all files signed with `--multi-subject`
+- Bundle files for signed files in subdirectories (e.g., `src/config.py`) are also stored at the depth of the file when using per-file signing (`src/config.py.bundle`)
+
+To set this up:
+
+```bash
+nono trust init --include "SKILLS.md" --include "CLAUDE.md" --include "src/config.py"
+nono trust sign-policy
+nono trust sign --all --multi-subject
+```
+
+Commit `trust-policy.json`, `trust-policy.json.bundle`, and `.nono-trust.bundle` alongside your source files.
+
+## Policy Composition
+
+Trust policies compose across three levels:
+
+| Level | Location | Purpose |
+|-------|----------|---------|
+| Embedded | Built into nono binary | Baseline include patterns |
+| User | `$XDG_CONFIG_HOME/nono/trust-policy.json` | Personal trusted publishers |
+| Project | `<project-root>/trust-policy.json` | Project-specific publishers |
+
+Merging rules:
+- Publishers: union (all levels combined)
+- Blocklist digests: union (all levels combined)
+- Include patterns: union (all levels combined)
+- Enforcement: strictest wins (`deny` > `warn` > `audit`)
+
+Project-level policy **cannot** weaken user-level or embedded policy.
+
+### User-Level Policy as Trust Anchor
+
+The user-level policy (`~/.config/nono/trust-policy.json`) defines **who** you trust — your publishers, enforcement floor, and blocklist. Project-level policies define **what** gets verified (include patterns). This separation means a malicious project can't weaken your trust decisions.
+
+When only a project-level policy exists with no user-level policy, nono warns:
+
+```
+Warning: project-level trust-policy.json found but no user-level policy exists.
+Project policies are not authoritative without a user-level policy to anchor trust.
+Create a signed policy at ~/.config/nono/trust-policy.json to enforce verification.
+```
+
+Create a user-level policy:
+
+```bash
+nono trust init --user
+```
+
+This creates `~/.config/nono/trust-policy.json` with empty `includes` and your signing key as a publisher. Edit it to add your trusted OIDC publishers:
+
+```json
+{
+  "version": 1,
+  "includes": [],
+  "publishers": [
+    {
+      "name": "my-org-ci",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "repository": "my-org/*",
+      "workflow": "*",
+      "ref_pattern": "refs/heads/main"
+    }
+  ],
+  "blocklist": { "digests": [] },
+  "enforcement": "deny"
+}
+```
+
+The `includes` list is empty — the project-level policy declares which files to verify. The user-level policy establishes **who** you trust: in this example, any GitHub Actions workflow in your organization signing from `main`. Projects can add additional publishers but can't remove yours, and enforcement of `deny` can't be downgraded.
+
+You can also add keyed publishers for local development keys, though in practice your own key is already trusted implicitly — the user-level policy is more useful for declaring trust in CI/CD identities and other team members.
+
+```bash
+nono trust sign-policy --user
+```
+
+## Pre-exec Scanning
+
+When `nono run` launches a command, it scans the working directory for files matching `includes` before applying the sandbox. File discovery does **not** respect `.gitignore` — this prevents hiding files from verification.
+
+To keep startup latency bounded in large repositories, the scan prunes a small built-in set of regenerable heavy directories such as `.git`, `node_modules`, `target`, `dist`, and common cache directories. Hidden directories are otherwise still scanned. You can extend the skip set for a session with `--skip-dir <name>` or persist it in a profile with `skipdirs`.
+
+```
+nono run --profile claude-code -- claude
+  -> Scan CWD for files matching includes patterns
+  -> For each match:
+     -> Compute SHA-256 digest
+     -> Check blocklist
+     -> Load and verify .bundle
+     -> Check publisher identity against trust policy
+  -> All pass: proceed with sandbox and exec
+  -> Any fail (enforcement=deny): abort with diagnostic
+```
+
+## Runtime Interception
+
+The pre-exec scan catches files present at startup. Runtime behavior differs by platform.
+
+### Linux (seccomp-notify)
+
+In [Supervised mode](/cli/features/supervisor), the seccomp-notify supervisor traps every `openat()` syscall. When the target path matches an include pattern, the supervisor verifies the file's bundle before allowing the read. Unsigned, tampered, or blocklisted files are denied with `EPERM`.
+
+The verification result is cached by (path, inode, mtime, size). If any metadata changes, the cache entry is invalidated.
+
+Files that appear mid-session (e.g., via `curl` or `git pull`) are verified on first open. Linux provides true runtime interception.
+
+### macOS (Seatbelt)
+
+On macOS, trust verification is **startup-only**. For each verified file, a literal `(deny file-write-data ...)` rule is emitted in the Seatbelt profile, making the file structurally immutable for the session.
+
+macOS does not have syscall-level file-open interception equivalent to Linux's seccomp-notify. A file matching `includes` that appears after the sandbox is applied will be readable if its parent directory has read access granted.
+
+The macOS enforcement model provides:
+- **Integrity of verified files** — kernel-level write-protection prevents tampering
+- **Startup gating** — if any existing file fails verification, the sandbox refuses to start
+- **No runtime interception** — file existence and verification are evaluated once at startup
+
+## Why Glob Patterns?
+
+Pattern matching keeps the system practical: it avoids requiring every file in the working directory to be signed, and lets you define the verification boundary to match your needs. Common use cases include agent instruction files (`SKILLS*`, `CLAUDE*`), configuration files (`*.cfg`, `*.ini`), scripts (`*.py`, `*.sh`), or any other files your workflow depends on.

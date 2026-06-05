@@ -1,0 +1,438 @@
+---
+title: Profile Authoring
+description: Scaffolding, schema validation, and tooling for creating custom profiles
+---
+
+The `nono profile` command provides scaffolding and tooling for creating custom profiles. Instead of reverse-engineering the JSON structure from existing profiles, you can generate skeleton files, get editor autocomplete via JSON Schema, and access an LLM-oriented authoring guide.
+
+## File Format
+
+Profile files use **JSONC** (JSON with Comments): standard JSON plus `//` line comments, `/* */` block comments, and trailing commas. Both `.json` and `.jsonc` file extensions are accepted.
+
+```jsonc
+{
+  // Extend the official Claude Code profile
+  "extends": "claude-code",
+  "meta": {
+    "name": "my-claude",
+    "description": "Custom Claude profile with extra tooling access",
+  },
+  "filesystem": {
+    "allow": ["/opt/my-tools"], // custom tooling directory
+    "read": ["/etc/my-app"],
+  },
+}
+```
+
+<Tip>
+  When both `my-profile.jsonc` and `my-profile.json` exist, the `.jsonc` file takes priority.
+</Tip>
+
+<Tip>
+  For an overview of what profiles are and how they compose with groups, see [Profiles & Groups](/cli/features/profiles-groups).
+</Tip>
+
+## Generating a Profile
+
+Use `nono profile init` to scaffold a new profile:
+
+```bash
+# Minimal skeleton
+nono profile init my-agent
+
+# With inheritance and groups
+nono profile init my-agent --extends default --groups deny_credentials
+
+# With a description
+nono profile init my-agent --extends default --description "Profile for my agent"
+
+# Full skeleton with all sections
+nono profile init my-agent --full
+
+# Output to a specific path instead of ~/.config/nono/profiles/
+nono profile init my-agent --output ./my-agent.json
+```
+
+By default, the profile is written to `~/.config/nono/profiles/<name>.json`. Use `--force` to overwrite an existing file.
+
+### Minimal Skeleton
+
+A minimal skeleton includes the core sections most profiles need:
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "my-agent",
+    "description": "Profile for my agent"
+  },
+  "groups": {
+    "include": [
+      "deny_credentials"
+    ]
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "allow": [],
+    "read": []
+  }
+}
+```
+
+### Full Skeleton
+
+With `--full`, additional sections are included as empty stubs for all additive fields:
+
+```json
+{
+  "meta": {
+    "name": "my-agent"
+  },
+  "groups": {
+    "include": [],
+    "exclude": []
+  },
+  "commands": {
+    "allow": [],
+    "deny": []
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "allow": [],
+    "read": [],
+    "write": [],
+    "allow_file": [],
+    "read_file": [],
+    "write_file": [],
+    "unix_socket": [],
+    "unix_socket_bind": [],
+    "unix_socket_dir": [],
+    "unix_socket_dir_bind": [],
+    "unix_socket_subtree": [],
+    "unix_socket_subtree_bind": [],
+    "deny": [],
+    "bypass_protection": [],
+    "suppress_save_prompt": []
+  },
+  "security": {},
+  "network": {
+    "block": false,
+    "allow_domain": [],
+    "credentials": [],
+    "open_port": [],
+    "listen_port": [],
+    "custom_credentials": {}
+  },
+  "env_credentials": {},
+  "environment": {
+    "allow_vars": []
+  },
+  "hooks": {},
+  "rollback": {
+    "exclude_patterns": [],
+    "exclude_globs": []
+  }
+}
+```
+
+<Note>
+  Fields that would override inherited behavior are intentionally omitted from the skeleton: `network_profile` (emitting `null` would clear an inherited proxy profile), `open_urls` (would replace inherited OAuth2 origins), `allow_launch_services` (would override inherited browser-opening permissions), and `allow_gpu` (would override inherited GPU access). Add these explicitly only when you intend to change the inherited behavior.
+</Note>
+
+### Validation
+
+The `init` command validates inputs before writing:
+
+- **Profile name** must be alphanumeric with hyphens (no leading/trailing hyphens)
+- **`--extends`** target must exist as a preset, pack, or user profile
+- **`--groups`** are checked against the embedded policy groups
+
+After creating a profile, validate it:
+
+```bash
+nono profile validate ~/.config/nono/profiles/my-agent.json
+```
+
+## JSON Schema
+
+nono ships with a JSON Schema for profile files. Use it for editor autocomplete and validation.
+
+### Exporting the Schema
+
+```bash
+# Print to stdout
+nono profile schema
+
+# Write to a file
+nono profile schema --output nono-profile.schema.json
+```
+
+### Editor Integration
+
+Export the schema locally, then add a `$schema` field to your profile for automatic validation in editors that support JSON Schema (VS Code, IntelliJ, Neovim with LSP, etc.):
+
+```json
+{
+  "$schema": "./nono-profile.schema.json",
+  "meta": {
+    "name": "my-agent"
+  }
+}
+```
+
+In VS Code, you can also configure schema association in `.vscode/settings.json`:
+
+```json
+{
+  "json.schemas": [
+    {
+      "fileMatch": ["**/profiles/*.json", "**/profiles/*.jsonc"],
+      "url": "./nono-profile.schema.json"
+    }
+  ]
+}
+```
+
+## Authoring Guide
+
+nono includes an embedded authoring guide designed for LLM agents assisting with profile creation:
+
+```bash
+nono profile guide
+```
+
+This outputs a comprehensive reference covering every profile section, field descriptions, common patterns, variable expansion, and validation workflow. It is useful when asking an LLM to help you write a profile -- pipe or paste the guide into your conversation for context.
+
+To make the guide automatically available to your coding agent, add a line to your project's instruction file (e.g., `CLAUDE.md`, `AGENT.md`, `.cursorrules`):
+
+```md
+Should you need to work with nono profiles or policy, you can retrieve context using the `nono profile guide` command
+```
+
+## Workflow
+
+A typical profile authoring workflow:
+
+1. **Scaffold** the profile:
+   ```bash
+   nono profile init my-agent --extends default --groups deny_credentials --full
+   ```
+
+2. **Edit** the generated file in your editor (with schema autocomplete):
+   ```bash
+   $EDITOR ~/.config/nono/profiles/my-agent.json
+   ```
+
+3. **Validate** the profile:
+   ```bash
+   nono profile validate ~/.config/nono/profiles/my-agent.json
+   ```
+
+4. **Inspect** the resolved profile (after inheritance and group expansion):
+   ```bash
+   nono profile show my-agent
+   ```
+
+5. **Compare** against a baseline:
+   ```bash
+   nono profile diff default my-agent
+   ```
+
+6. **Test** the profile:
+   ```bash
+   nono run --profile my-agent --dry-run -- my-command
+   ```
+
+7. **Use** the profile:
+   ```bash
+   nono run --profile my-agent -- my-command
+   ```
+
+## Available Groups
+
+Use `nono profile groups` to list all available security groups. To see details for a specific group:
+
+```bash
+nono profile groups deny_credentials
+```
+
+Groups are referenced by name in the `groups.include` field. See [Profiles & Groups](/cli/features/profiles-groups#groups) for the full group taxonomy and built-in group list.
+
+<Note>
+  The `groups.include` key was renamed from its former location under `security` in issue #594. The legacy key still deserializes with a deprecation warning; see `nono profile guide` for the full migration table. Legacy keys will be removed in v1.0.0.
+</Note>
+
+## Process and IPC Isolation
+
+The `security` section controls process-level isolation knobs that are not filesystem path grants:
+
+```json
+{
+  "security": {
+    "signal_mode": "isolated",
+    "process_info_mode": "isolated",
+    "ipc_mode": "shared_memory_only"
+  }
+}
+```
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `signal_mode` | `isolated`, `allow_same_sandbox`, `allow_all` | Controls which processes the sandboxed command may signal. On Linux V6, restricted modes use Landlock signal scoping when available. |
+| `process_info_mode` | `isolated`, `allow_same_sandbox`, `allow_all` | Controls visibility of other process metadata. |
+| `ipc_mode` | `shared_memory_only`, `full` | Controls IPC compatibility. On Linux V6, `shared_memory_only` requests abstract UNIX socket scoping; `full` leaves abstract UNIX sockets unscoped for runtimes that require broader IPC compatibility. |
+
+Use `nono why --scope` to inspect the effective scope policy for a profile:
+
+```bash
+nono why --scope signal --profile my-agent
+nono why --scope abstract-unix-socket --profile my-agent
+```
+
+## Common Patterns
+
+### Agent with API Credentials
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "api-agent",
+    "description": "Agent with API access via credential injection"
+  },
+  "workdir": { "access": "readwrite" },
+  "env_credentials": {
+    "openai_api_key": "OPENAI_API_KEY"
+  },
+  "network": {
+    "network_profile": "standard"
+  }
+}
+```
+
+### CI Build Environment
+
+```json
+{
+  "meta": {
+    "name": "ci-build",
+    "description": "Locked-down CI environment"
+  },
+  "groups": {
+    "include": ["deny_credentials"]
+  },
+  "workdir": { "access": "readwrite" },
+  "network": { "block": true }
+}
+```
+
+### Override a Deny Rule
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "docker-agent",
+    "description": "Agent that needs Docker access"
+  },
+  "workdir": { "access": "readwrite" },
+  "filesystem": {
+    "allow": ["$HOME/.docker"],
+    "bypass_protection": ["$HOME/.docker"]
+  }
+}
+```
+
+<Note>
+  `filesystem.bypass_protection` only removes the deny rule. You must also grant access via `filesystem.allow`, `filesystem.read`, or `filesystem.write` (or the matching `*_file` variant) for the path to be accessible.
+</Note>
+
+### Suppressing Repeated Save Suggestions
+
+Use `filesystem.suppress_save_prompt` for paths you intentionally do not want
+to grant, but also do not want to see in the save-profile prompt on every run:
+
+```json
+{
+  "filesystem": {
+    "suppress_save_prompt": ["$HOME/.copilot/settings.json"]
+  }
+}
+```
+
+This does not grant access and does not hide diagnostics. Suppressed denials
+still appear in the diagnostic footer annotated with `[save skipped]`, making
+it clear why they are absent from the save prompt. It only suppresses
+matching save-profile suggestions. `filesystem.ignore` is accepted as an alias,
+but the canonical name is deliberately explicit so it is not mistaken for
+allowing the denied path.
+
+The post-run save prompt offers the same behavior interactively: choose
+`suppress` to save all listed denied-path suggestions here instead of adding
+them as `read`, `read_file`, `allow`, or `allow_file` grants.
+
+### Exclude Inherited Groups
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "permissive-agent",
+    "description": "Agent without deprecated startup-only command gating"
+  },
+  "workdir": { "access": "readwrite" },
+  "groups": {
+    "exclude": [
+      "dangerous_commands",
+      "dangerous_commands_macos",
+      "dangerous_commands_linux"
+    ]
+  }
+}
+```
+
+## Target Binary
+
+User profiles can declare a `binary` field to specify the program that nono should execute. This makes the trailing `-- <command>` optional:
+
+```jsonc
+{
+  "extends": "claude-code",
+  "meta": { "name": "my-claude" },
+  "binary": "/home/user/.local/bin/claude"
+}
+```
+
+```bash
+# No trailing command needed — the profile knows what to run
+nono run --profile ./my-claude.jsonc --allow-cwd
+```
+
+If both a profile `binary` and a CLI trailing command are provided, the profile binary takes precedence and a warning is emitted.
+
+### Restrictions
+
+The `binary` field is only honoured for **user-authored profiles** — profiles loaded from a filesystem path (e.g. `./my-profile.jsonc`) or from the user profile directory (`~/.config/nono/profiles/`). Pack and built-in profiles cannot set `binary`; the field is silently ignored for security reasons.
+
+### Inheritance
+
+When profiles are composed via `extends`, the child's `binary` overrides the parent's. If the child does not specify `binary`, it inherits the parent's value.
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `nono profile init <name>` | Generate a skeleton profile |
+| `nono profile init <name> --extends <base>` | Inherit from a base profile |
+| `nono profile init <name> --groups <g1>,<g2>` | Pre-populate security groups |
+| `nono profile init <name> --full` | Include all optional sections |
+| `nono profile init <name> --output <path>` | Write to a specific file |
+| `nono profile init <name> --force` | Overwrite existing file |
+| `nono profile init <name> --description <text>` | Set the profile description |
+| `nono profile schema` | Output JSON Schema to stdout |
+| `nono profile schema --output <path>` | Write JSON Schema to a file |
+| `nono profile guide` | Print the authoring guide |

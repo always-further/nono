@@ -1,0 +1,81 @@
+---
+title: Execution Modes
+description: Supervised and Direct execution strategies
+---
+
+nono provides two execution modes that trade off between features and attack surface. Understanding them helps you choose the right mode for your situation.
+
+## Overview
+
+| Mode | Command | Parent Sandboxed | Audit | Rollback | Expansion | Attack Surface |
+|------|---------|-----------------|-------|----------|-----------|----------------|
+| Supervised | `nono run` / `nono shell` | No | Yes | Optional | Linux only | Larger |
+| Direct | `nono wrap` | N/A (no parent) | No | No | No | Minimal |
+
+## Supervised Mode (default)
+
+```bash
+nono run --allow-cwd -- my-command
+```
+
+nono forks first, then sandboxes only the child. The parent remains unsandboxed to provide runtime services: audit recording, optional audit-integrity hashing, rollback snapshots, capability expansion (Linux), network proxy, and diagnostic output.
+
+**When to use:**
+- Interactive AI agents (default for `nono run` and `nono shell`)
+- When you want diagnostic output on failures
+- When you want default audit recording
+- When you want audit-integrity (`--audit-integrity`)
+- When you need rollback snapshots (`--rollback`)
+- When you need capability expansion (Linux)
+- When you need network proxy filtering
+
+**Trade-offs:**
+- Larger attack surface (unsandboxed parent, mitigated by ptrace hardening)
+
+**Features:**
+- Diagnostic footer on non-zero exit explaining what went wrong
+- Signal forwarding to child process
+- Audit recording by default
+- Append-only audit integrity metadata with `--audit-integrity`
+- Rollback snapshots (baseline + final) with `--rollback`
+- Interactive post-exit review of changes with `--rollback`
+- Capability expansion prompts (Linux only)
+- Network proxy filtering with `--network-profile` or `--allow-domain`
+
+## Direct Mode (`nono wrap`)
+
+```bash
+nono wrap --allow-cwd -- my-command
+```
+
+nono applies the sandbox and then `exec()`s directly into the target command. nono disappears from the process tree entirely - there is no parent process.
+
+**When to use:**
+- Scripts and CI/CD where you want minimal overhead
+- Piping and embedding where no parent process is wanted
+- Maximum security (smallest attack surface)
+
+**Trade-offs:**
+- No diagnostic footer on errors
+- No audit recording
+- No rollback snapshots
+- No capability expansion
+- No network proxy (incompatible — proxy requires a parent process)
+
+## Choosing a Mode
+
+```
+Do you need audit, rollback, expansion, proxy, or diagnostics?
+├── Yes → nono run (Supervised, default)
+└── No
+    │
+    Do you need minimal overhead or no parent process?
+    ├── Yes → nono wrap (Direct)
+    └── No → nono run (Supervised, default)
+```
+
+For most users running AI agents interactively, the default `nono run` (Supervised mode) is the right choice. Use `nono wrap` when you need a minimal, no-parent execution for scripts or embedding.
+
+## WSL2 Notes
+
+Both execution modes work on WSL2. However, capability expansion is unavailable in Supervised mode due to WSL2's seccomp notify limitation. The proxy-based network filtering in Supervised mode is also blocked by default on WSL2. See [WSL2 Support](/cli/internals/wsl2) for details.

@@ -1,0 +1,17 @@
+/target
+.vscode/
+.idea/
+.DS_Store
+
+# Claude state and config
+.claude/
+
+# misc
+proj/
+.worktrees
+.nono
+
+
+# Library tests
+bindings/python/.venv*
+bindings/node/node_modules*

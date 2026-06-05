@@ -1,0 +1,69 @@
+name: Bump nono dependency
+
+on:
+  repository_dispatch:
+    types: [nono-release]
+  workflow_dispatch:
+    inputs:
+      nono_version:
+        description: 'nono version to bump to (e.g., v0.33.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    name: Bump nono to ${{ github.event.client_payload.nono_version || github.event.inputs.nono_version }}
+    runs-on: ubuntu-latest
+    env:
+      NONO_VERSION: ${{ github.event.client_payload.nono_version || github.event.inputs.nono_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Strip v prefix
+        id: version
+        run: |
+          VERSION="${NONO_VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch=bump-nono-${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if PR already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --search "bump nono to ${{ steps.version.outputs.version }}" --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING already exists, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update Cargo.toml
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Update nono crate dependency
+          sed -i "s/^nono[[:space:]]*=[[:space:]]*\"[^\"]*\"/nono = \"${VERSION}\"/" Cargo.toml
+
+      - name: Create Pull Request
+        if: steps.check.outputs.skip != 'true'
+        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e # v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ steps.version.outputs.branch }}
+          commit-message: "chore(deps): bump nono to ${{ steps.version.outputs.version }}"
+          title: "chore(deps): bump nono to ${{ steps.version.outputs.version }}"
+          body: |
+            Automated PR to bump the nono dependency to `${{ steps.version.outputs.version }}`.
+
+            Triggered by [nono ${{ env.NONO_VERSION }}](https://github.com/always-further/nono/releases/tag/${{ env.NONO_VERSION }}).
+
+            ## Checklist
+            - [ ] CI passes
+            - [ ] Test with new nono version
+          labels: dependencies,automated

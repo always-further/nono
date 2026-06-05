@@ -1,0 +1,69 @@
+---
+title: Contributing
+description: Contributing to nono - testing, debugging, and development workflows
+---
+
+This section covers development topics for contributors and maintainers of nono.
+
+## Topics
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="vial" href="/cli/development/testing">
+    Integration test suites, running tests locally, and CI pipeline
+  </Card>
+</CardGroup>
+
+## Quick Start for Contributors
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/always-further/nono.git
+   cd nono
+   ```
+
+2. **Build the project**
+   ```bash
+   cargo build --release
+   ```
+
+3. **Run the test suite**
+   ```bash
+   ./tests/run_integration_tests.sh
+   ```
+
+4. **Check formatting and lints**
+   ```bash
+   cargo fmt -- --check
+   cargo clippy -- -D warnings -D clippy::unwrap_used
+   ```
+
+## Development Environment
+
+### Prerequisites
+
+- Rust (stable toolchain)
+- Platform-specific dependencies:
+  - **Linux**: `pkg-config` and a C toolchain (e.g. `build-essential`) for building `aws-lc-sys`. libdbus is **not** required — the Secret Service keyring backend is pure-Rust (zbus).
+  - **macOS**: none beyond the Xcode command-line tools.
+
+### Building
+
+```bash
+# Debug build
+cargo build
+
+# Release build (used for integration tests)
+cargo build --release
+
+# Run with verbose logging
+RUST_LOG=debug cargo run -- run --allow-cwd -- echo "test"
+```
+
+## Code Standards
+
+- **Error Handling**: Use `NonoError` for all errors; propagate with `?`
+- **Unwrap Policy**: Never use `.unwrap()` or `.expect()` - enforced by clippy
+- **Unsafe Code**: Restricted to FFI; must include `// SAFETY:` documentation
+- **Path Security**: All paths must be validated and canonicalized
+
+See [CLAUDE.md](https://github.com/always-further/nono/blob/main/CLAUDE.md) for complete coding standards.

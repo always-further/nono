@@ -1,0 +1,542 @@
+---
+title: Publishing Packs
+description: End-to-end setup for nono packs, trusted publishing, and the GitHub Action
+---
+
+This guide is the producer-side setup for nono packs. It covers pack layout, trusted publisher registration, GitHub Actions publishing, releases for monorepos that ship multiple packs, and the checks `nono pull` performs on the consumer side.
+
+A nono pack is a signed bundle of artifacts — profiles, hooks, plugins, instructions, scripts, trust policies, groups — distributed via the registry and verified with Sigstore at install time. Packs are the recommended way to ship agent profiles, plugins, and integrations.
+
+If you're authoring a Claude Code plugin pack specifically (the most common case today), read this guide for the publishing scaffolding and then jump to [Claude Code Plugin Packs](/cli/clients/claude-code) for the marketplace wiring details that nono synthesises automatically on `nono pull`.
+
+<Tip>
+  For the trust model behind this flow, see [Agent Instruction Attestation](/cli/features/trust).
+</Tip>
+
+## Before You Start
+
+You need four things in place before publishing works:
+
+1. A pack created in the registry.
+2. A pack namespace that matches the GitHub org that will publish it.
+3. A trusted publisher entry for the exact repository and workflow.
+4. A GitHub Actions workflow with `permissions: id-token: write`.
+
+Namespace binding is enforced. If your pack is `acme-corp/claude-code`, the publishing repository must be under `acme-corp/*`.
+
+## Step 1: Create the Pack Directory
+
+A pack is a signed bundle of artifacts. The CLI supports these artifact types:
+
+- `profile` — a nono sandbox profile (loaded by `--profile`)
+- `hook` — a hook script for an agent (legacy; new packs should use `plugin`)
+- `instruction` — a markdown context file (e.g. `CLAUDE.md`) optionally copied into the project on `nono pull --init`
+- `trust_policy` — a trust policy bundle merged into the user's local trust state
+- `groups` — additional capability groups, prefixed to avoid collision with preset groups
+- `script` — a helper script installed under the pack's script directory
+- `plugin` — a file that lives at its declared path inside the pack store. Used for assets that live alongside the profile (a Claude Code plugin's `.claude-plugin/plugin.json`, `hooks/hooks.json`, `bin/*.sh`, `skills/*/SKILL.md`, etc.). Files with an `install_dir` are also fan-out copied into the user's home; without one, they stay in the pack store and are exposed to the agent via a single symlink.
+
+A pack directory for a Claude Code agent integration looks like this:
+
+```text
+claude/
+├── package.json
+├── policy.json                       # the profile artifact
+├── README.md
+├── .claude-plugin/
+│   └── plugin.json                   # Claude Code plugin manifest
+├── hooks/
+│   └── hooks.json                    # Claude Code hook registry
+├── bin/
+│   ├── nono-hook.sh
+│   └── nono-hook-bash.sh
+└── skills/
+    └── nono-sandbox/
+        └── SKILL.md
+```
+
+The registry publishes raw files. The local install behaviour is driven entirely by `package.json::artifacts[]`.
+
+## Step 2: Write `package.json`
+
+`package.json` is required. `nono pull` will fail if it is not present in the published artifact set.
+
+Example for a Claude Code integration pack:
+
+```json
+{
+  "schema_version": 1,
+  "name": "claude",
+  "version": "0.1.0",
+  "description": "Claude Code plugin and matching nono profile",
+  "license": "Apache-2.0",
+  "platforms": ["macos", "linux"],
+  "min_nono_version": "0.43.0",
+  "artifacts": [
+    { "type": "profile", "path": "policy.json", "install_as": "claude-code" },
+    { "type": "plugin", "path": ".claude-plugin/plugin.json" },
+    { "type": "plugin", "path": "hooks/hooks.json" },
+    { "type": "plugin", "path": "bin/nono-hook.sh" },
+    { "type": "plugin", "path": "bin/nono-hook-bash.sh" },
+    { "type": "plugin", "path": "skills/nono-sandbox/SKILL.md" }
+  ]
+}
+```
+
+`version` is required and must be valid semver (e.g. `1.2.3` or `0.1.0` — not `v0.1.0`, `claude-v0.1.0`, or `main`). The registry validates this at publish time and rejects non-semver strings. Bump this field before pushing a release tag — it is the canonical version, not the tag name.
+
+Important constraints:
+
+- `name` must match the pack name registered with the registry.
+- Every `artifacts[].path` must exactly match an uploaded filename.
+- `profile` artifacts need `install_as` — the name users type after `--profile`.
+- `groups` artifacts need `prefix` — must namespace your group names so they don't clash with preset groups.
+- `instruction` artifacts with `placement: "project"` are copied into the current working directory when users run `nono pull --init`.
+- `plugin` artifacts without `install_dir` install at their relative path inside the pack store. With `install_dir`, they're also fan-out copied into the user's home — useful for shared scripts but rarely needed for Claude Code packs (the marketplace symlink exposes the whole pack tree).
+- `min_nono_version` should be set to the lowest CLI version your pack will work on. Older clients refuse to install.
+
+### Platform-Specific Content
+
+Use `platforms` for install compatibility, and `when` for content inside a pack:
+
+- `platforms: ["linux", "macos"]` means the package can be pulled on those operating systems.
+- `when` on individual profile entries or wiring directives means that entry applies only on matching hosts.
+
+Profiles accept object entries anywhere paths or group names are listed:
+
+```json
+{
+  "groups": {
+    "include": [
+      "agent_common",
+      { "name": "agent_linux", "when": "linux" },
+      { "name": "agent_macos", "when": "macos" }
+    ]
+  },
+  "filesystem": {
+    "read": [
+      "$HOME/.agent",
+      { "path": "$HOME/Library/Application Support/Agent", "when": "macos" },
+      { "path": "$XDG_CONFIG_HOME/agent", "when": "linux" }
+    ]
+  }
+}
+```
+
+Wiring directives also accept `when`:
+
+```json
+{
+  "type": "symlink",
+  "link": "$HOME/.agent/plugin",
+  "target": "$PACK_DIR/.agent-plugin",
+  "when": "linux"
+}
+```
+
+Predicates support OS, Linux distro and distro-family, version comparisons, negation, and any-of arrays:
+
+```json
+{ "path": "/etc/pki", "when": "linux:rhel-like" }
+{ "path": "/private/var/db/sudo", "when": "macos:>=15" }
+{ "path": "/some/path", "when": ["linux:fedora:>=43", "linux:rhel-like:>=9"] }
+{ "path": "/legacy/path", "when": "!linux:nixos" }
+```
+
+If a pack uses `when`, set `min_nono_version` to a CLI release that supports predicates. Older CLIs must refuse the pack rather than silently applying conditional entries unconditionally.
+
+### Profiles That Replace a Former Preset
+
+If your pack ships a profile with an `install_as` name that used to be compiled into the CLI (e.g. `claude-code` was a preset until v0.43), you also need to register it in the migration table so users on older versions get a friendly auto-pull prompt instead of a "profile not found" error. See [PACK_PROVIDED_PROFILES](#registering-a-pack-provided-profile) below.
+
+## Step 3: Create the Pack in the Registry
+
+Create the pack in the registry UI first. You will need:
+
+- Pack name
+- Description
+- Kind
+- Source GitHub repository
+- Optional repo subpath if the pack lives below the repo root
+
+After the pack exists, configure trusted publishing for it.
+
+## Step 4: Register a Trusted Publisher
+
+Trusted publishing binds a package to a GitHub Actions identity. The registry checks:
+
+- Repository
+- Workflow path
+- Git ref pattern
+- Optional GitHub environment
+
+For `acme-corp/claude-code`, a typical trusted publisher configuration is:
+
+| Field | Example |
+|-------|---------|
+| Repository | `acme-corp/nono-policies` |
+| Workflow | `.github/workflows/publish.yml` |
+| Ref pattern | `refs/tags/v*` |
+| Environment | `production` or empty |
+
+The registry rejects:
+
+- Repositories outside the pack namespace org
+- Workflows outside `.github/workflows/*.yml`
+- OIDC identities that do not match the registered publisher
+- Bundles whose repository or workflow differs from the trusted publisher
+
+If you are calling the API directly, the publisher payload is:
+
+```json
+{
+  "repository": "acme-corp/nono-policies",
+  "workflow": ".github/workflows/publish.yml",
+  "ref_pattern": "refs/tags/v*",
+  "environment": "production"
+}
+```
+
+The endpoint is:
+
+```text
+POST /api/v1/packages/{namespace}/{name}/publishers
+```
+
+This requires an authenticated session with 2FA on the registry side.
+
+## Step 5: Add the GitHub Actions Workflow
+
+The reference implementation lives in the registry repository at `action/action.yml` and is published as `agent-sign`.
+
+At a high level the action:
+
+1. Installs the `nono` CLI.
+2. Signs each selected artifact with `nono trust sign --keyless`.
+3. Requests a GitHub OIDC token with audience `nono-registry`.
+4. Exchanges that token for a short-lived registry upload token.
+5. Uploads the artifacts and matching `.bundle` sidecars.
+
+Example workflow:
+
+```yaml
+name: Publish nono package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r '.version' packages/claude-code/package.json)
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "ERROR: package.json is missing a 'version' field"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish package
+        uses: <registry-repo>/action@main
+        with:
+          package-name: claude-code
+          package-namespace: acme-corp
+          version: ${{ steps.version.outputs.version }}
+          path: packages/claude-code
+          files: |
+            package.json
+            claude-code.profile.json
+            CLAUDE.md
+            hooks/nono-hook.sh
+            groups.json
+            trust-policy.json
+```
+
+Replace `<registry-repo>` with the repository that publishes the action. The current action source lives in `nono-registry/action/`.
+
+The version comes from `package.json`, not from the tag name. Bump `version` in `package.json`, commit it, then push the tag. The registry cross-checks that the uploaded `package.json` version matches the declared version and rejects mismatches.
+
+### Required Workflow Permissions
+
+You must grant:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+```
+
+Without `id-token: write`, GitHub will not mint the OIDC token and the publish step will fail before upload.
+
+## Step 6: Configure Action Inputs
+
+The action accepts these inputs:
+
+| Input | Required | Purpose |
+|-------|----------|---------|
+| `package-name` | yes | Registry package name |
+| `package-namespace` | yes | Namespace or org |
+| `version` | yes | Version string to publish |
+| `path` | no | Directory containing the package files |
+| `files` | no | Whitespace-separated file list to sign and upload |
+| `registry-url` | no | API base, defaults to `https://registry.nono.sh/api/v1` |
+| `nono-version` | no | CLI version to install |
+
+Recommended practice:
+
+- Set `path` to the pack directory.
+- Set `files` explicitly.
+- Publish from tags and register `ref_pattern: refs/tags/v*`.
+
+### Why `files` Should Usually Be Explicit
+
+If `files` is omitted, the current action auto-discovers only non-hidden top-level files under `path`. That means nested files such as `hooks/nono-hook.sh` are not picked up automatically.
+
+Use `files:` whenever your package contains subdirectories.
+
+## Step 7: Understand the Trust-Publishing Handshake
+
+The action does not use a long-lived registry secret. The flow is:
+
+1. GitHub issues an OIDC token for the workflow run.
+2. The action posts that token to:
+
+```text
+POST {registry-url}/auth/oidc/exchange
+```
+
+with:
+
+```json
+{
+  "token": "<github-oidc-token>",
+  "package_namespace": "acme-corp",
+  "package_name": "claude-code"
+}
+```
+
+3. The registry validates the GitHub identity against the trusted publisher entry.
+4. The registry returns a short-lived upload token.
+5. The action uploads the version to:
+
+```text
+POST {registry-url}/packages/{namespace}/{name}/versions
+```
+
+This is the core trust-publishing property: GitHub attests who ran the workflow, the registry authorizes that exact identity, and the client later verifies the Sigstore bundle locally.
+
+## Step 8: Publish a Version
+
+Once the workflow is merged:
+
+1. Create a tag such as `v1.2.0`.
+2. Push it to GitHub.
+3. Wait for the publish workflow to complete.
+4. Confirm the new version appears in the registry.
+
+If you publish from a branch instead of a tag, make sure the trusted publisher `ref_pattern` matches that branch ref, for example `refs/heads/main`.
+
+### Independent Releases for Multi-Pack Monorepos
+
+If your repository ships more than one pack (for example a monorepo with `claude/`, `codex/`, and `openclaw/` subdirectories), each pack should release on its own tag prefix and have its own trigger workflow:
+
+```text
+nono-packs/
+├── .github/workflows/
+│   ├── publish-claude.yml       # tags: claude-v*  → publishes claude
+│   └── publish-codex.yml        # tags: codex-v*   → publishes codex
+├── claude/…
+└── codex/…
+```
+
+Each per-pack workflow is **fully self-contained** — checkout, build the file list from `package.json::artifacts[]`, call `agent-sign`. There's some duplication between files, but it buys strict per-pack OIDC identity (see [Why Inlined, Not Reusable](#why-inlined-not-reusable) below). The file list is still single-sourced in each pack's `package.json` so adding/removing an artifact is a one-place edit in the manifest, not the workflow.
+
+```yaml
+# .github/workflows/publish-claude.yml
+name: Publish claude pack
+on:
+  push:
+    tags: ["claude-v*"]
+  workflow_dispatch:
+
+# OIDC identity matches this exact file path; the trusted publisher
+# entry is pinned to the same.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r '.version' claude/package.json)
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "ERROR: claude/package.json is missing a 'version' field"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build files list from package.json
+        id: files
+        run: |
+          set -euo pipefail
+          {
+            echo "package.json"
+            [ -f "claude/README.md" ] && echo "README.md"
+            jq -r '.artifacts[].path' "claude/package.json"
+          } | sort -u > /tmp/files.txt
+          {
+            echo "files<<EOF"
+            cat /tmp/files.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: always-further/agent-sign@<pinned-sha>
+        with:
+          publish: "true"
+          package-name: claude
+          package-namespace: <your-org>
+          package-version: ${{ steps.version.outputs.version }}
+          package-path: claude
+          registry-url: https://registry.nono.sh/api/v1
+          files: ${{ steps.files.outputs.files }}
+```
+
+To add a third pack, copy the file and replace `claude` with the new pack name throughout.
+
+The trusted publisher entry per pack pins to the matching workflow path and tag pattern:
+
+| Pack | Workflow | Ref pattern |
+|------|----------|-------------|
+| `<org>/claude` | `.github/workflows/publish-claude.yml` | `refs/tags/claude-v*` |
+| `<org>/codex`  | `.github/workflows/publish-codex.yml`  | `refs/tags/codex-v*`  |
+
+#### Why Inlined, Not Reusable
+
+GitHub's OIDC token for a job that runs inside a reusable workflow reports `job_workflow_ref = .github/workflows/_publish.yml@<sha>` — the *callee's* path, not the caller's. Most registry trusted-publisher implementations validate against that field, so a `_publish.yml` reusable workflow plus per-pack triggers means the only thing the registry can pin is the reusable. That widens the trust surface: any new caller workflow in the repo could publish to the codex pack just by importing `_publish.yml` with `pack: codex`.
+
+Inlining the publish steps per-pack means each workflow file gets its own OIDC identity. The trusted publisher pins to that exact path. The only thing that can publish `<org>/codex` is `publish-codex.yml`, signed at a tag matching `refs/tags/codex-v*`. Defence in depth, at the cost of ~30 lines of YAML per pack.
+
+If your registry validates against `workflow_ref` (the caller) instead of `job_workflow_ref` (the callee), the reusable approach works and is DRY-er. Check your registry's docs before assuming.
+
+## Step 9: Verify the Consumer Path
+
+Test the package with `nono pull`:
+
+```bash
+nono pull acme-corp/claude-code
+```
+
+For a dev registry:
+
+```bash
+nono pull --registry http://localhost:3001/api/v1 acme-corp/claude-code
+```
+
+On pull, the CLI:
+
+1. Fetches the pull manifest from the registry.
+2. Downloads artifacts and matching `.bundle` files.
+3. Verifies Sigstore bundles locally.
+4. Verifies the signer repository org matches the pack namespace.
+5. Pins signer identity in the local pack lockfile.
+6. Installs verified artifacts into the local pack store.
+
+This matters operationally: the registry is part of the distribution path, but the trust decision is made from the signed bundle and publisher identity.
+
+## Troubleshooting
+
+### Publisher registration fails
+
+Check:
+
+- The repository is in `owner/repo` format.
+- The owner matches the pack namespace.
+- The workflow path is under `.github/workflows/`.
+- Your registry session has 2FA enabled and verified.
+
+### OIDC exchange fails
+
+Check:
+
+- `permissions: id-token: write` is present.
+- The workflow path matches the trusted publisher exactly.
+- The repository matches the trusted publisher exactly.
+- The tag or branch ref matches `ref_pattern`.
+- The GitHub environment matches if one was configured.
+
+### Publish succeeds but `nono pull` fails
+
+Check:
+
+- `package.json` was included in the uploaded files.
+- Uploaded filenames exactly match the `package.json` artifact paths.
+- Nested files were listed explicitly in `files:`.
+- Group names respect the configured prefix.
+- `min_nono_version` is not higher than the installed CLI version.
+
+## Registering a Pack-Provided Profile
+
+If your pack ships a `profile` artifact whose `install_as` name was previously a preset (e.g. `claude-code` was compiled into the CLI before v0.43), you should register it in `nono`'s migration table so users on older versions get a friendly auto-pull prompt rather than a "profile not found" error when they upgrade.
+
+The table lives at `crates/nono-cli/src/migration.rs` as `PACK_PROVIDED_PROFILES`. Each entry is a `PackProvidedProfile` struct with three fields:
+
+```rust
+pub const PACK_PROVIDED_PROFILES: &[PackProvidedProfile] = &[
+    PackProvidedProfile {
+        profile_name: "claude-code",
+        pack_ref: "always-further/claude",
+        installs_summary: "sandbox profile + Claude Code plugin",
+    },
+    // Future:
+    // PackProvidedProfile {
+    //     profile_name: "codex",
+    //     pack_ref: "always-further/codex",
+    //     installs_summary: "sandbox profile + Codex integration assets",
+    // },
+];
+```
+
+- `profile_name` — exact name a user types after `--profile` or in `extends:`.
+- `pack_ref` — the `<namespace>/<name>` registry pack ref to install.
+- `installs_summary` — one-line description rendered in the install prompt's "Installs" row. Should describe the user-visible result of accepting, not the implementation.
+
+Adding an entry causes three things to happen automatically:
+
+1. `--profile <name>` for that profile triggers an auto-pull prompt instead of failing, when the pack isn't installed.
+2. `--profile <other>` where `<other>` extends `<name>` also triggers the prompt (the resolver walks the `extends` chain).
+3. The friendly hint shown when the user declines / runs non-interactively names the right pack ref.
+
+`nono profile list` will surface installed pack profiles under their own `Packages:` section, with the providing pack ref shown next to the name.
+
+## Recommended Release Pattern
+
+The cleanest setup is:
+
+1. Keep each pack in a dedicated subdirectory of the publishing repository.
+2. One fully inlined per-pack workflow per pack (see [Independent Releases for Multi-Pack Monorepos](#independent-releases-for-multi-pack-monorepos)).
+3. Register one trusted publisher per pack, pinned to its workflow path and tag prefix.
+4. **Bump `"version"` in `package.json` and commit it** before pushing a release tag. The `version` field is the canonical version — the tag is just a trigger.
+5. Push a per-pack tag such as `claude-v1.2.0` to trigger the workflow.
+6. Use `refs/tags/<pack>-v*` as the trusted publisher ref pattern.
+7. Validate every release with a fresh `nono pull` against the intended registry.
+
+That gives consumers a straight provenance chain from installed artifacts back to a specific repository, workflow, and Git ref. The version in `package.json` is always what the registry received — no tag-name parsing required.

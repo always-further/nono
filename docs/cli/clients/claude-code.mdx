@@ -1,0 +1,471 @@
+---
+title: Claude Code
+description: Sandboxing Anthropic Claude Code with nono
+---
+
+<Note>
+When you run Claude Code under `nono`, prefer using `nono` as the only sandbox layer. Leave Claude Code's built-in sandbox disabled so all filesystem and network boundaries come from the kernel-enforced `nono` policy.
+
+If you keep Claude Code's sandbox enabled, Anthropic documents an intentional escape hatch: when a command fails because of sandbox restrictions, Claude may retry it with `dangerouslyDisableSandbox` after going through Claude Code's normal permissions flow. To disable that fallback, set `"allowUnsandboxedCommands": false` in Claude Code's sandbox settings. See Anthropic's [sandboxing docs](https://code.claude.com/docs/en/sandboxing).
+</Note>
+
+## Why Sandbox Claude Code?
+
+Claude Code includes its own sandboxing, but Anthropic documents an intentional escape hatch: when a command fails because of sandbox restrictions, Claude may retry it with `dangerouslyDisableSandbox` after approval. Running Claude inside `nono` gives you a single kernel-enforced boundary that is easier to reason about and audit.
+
+## Quick Start
+
+```bash
+nono run --profile claude-code -- claude
+```
+
+<Warning>
+**macOS users:** Claude Code needs LaunchServices access when a session will need browser login. `nono` now auto-enables this for the `claude-code` profile when it does not detect refresh-capable local auth. You can also pass the flag explicitly for first use or `claude /login`:
+
+```bash
+nono run --profile claude-code --allow-launch-services -- claude
+```
+After login completes, rerun without `--allow-launch-services` if you no longer need browser-opening help for that session.
+See [OAuth2 Login](#oauth2-login) for details.
+</Warning>
+
+The profile provides:
+- **Read+write access** to the current working directory
+- **Read+write access** to `~/.claude` (agent state, debug logs, project config)
+- **Read+write access** to `~/.claude.json` (settings file)
+- **Read+write access** to `~/.vscode` (VS Code extensions directory)
+- **Read+write access** to the OS-specific VS Code app data directory:
+  `~/Library/Application Support/Code` on macOS, `~/.config/Code` on Linux
+- **Read+write access** to Claude Code's OS-specific credential storage:
+  macOS login keychain files required for OAuth persistence/refresh, or `~/.local/share/claude` on Linux
+- **Network access** enabled (required for Anthropic API)
+- **Interactive mode** enabled (preserves TTY for Claude's terminal UI)
+- **Automatic hook installation** for sandbox-aware error handling
+- **OAuth2 login support** via supervised URL opening (allows `claude /login` to work)
+
+## Custom Profile
+
+If you need different permissions, create a custom profile at `~/.config/nono/profiles/claude-code.json`:
+
+```json
+{
+  "meta": {
+    "name": "claude-code",
+    "version": "1.0.0",
+    "description": "Claude Code with additional project access"
+  },
+  "groups": {
+    "include": ["git_config"]
+  },
+  "filesystem": {
+    "allow": ["$WORKDIR", "$HOME/.claude"],
+    "read": ["$HOME/shared-libs"],
+    "allow_file": ["$HOME/.claude.json"]
+  },
+  "network": {
+    "block": false
+  },
+  "env_credentials": {
+    "anthropic_api_key": "ANTHROPIC_API_KEY"
+  }
+}
+```
+
+If you want to inherit the Claude Code profile but remove its network filtering, create a separate extending profile and explicitly clear the inherited network profile:
+
+```json
+{
+  "meta": { "name": "claude-code-netopen" },
+  "extends": "claude-code",
+  "network": { "network_profile": null }
+}
+```
+
+Then run:
+
+```bash
+nono run --profile claude-code-netopen -- claude
+```
+
+**Usage:**
+```bash
+nono run --profile claude-code -- claude
+```
+
+<Note>
+Custom profiles with the same name override the pack profile. Remove or rename the file to revert to the pack-provided profile.
+</Note>
+
+## Multiple Claude Profiles (`CLAUDE_CONFIG_DIR`)
+
+If you use multiple Claude Code configurations via the `CLAUDE_CONFIG_DIR` environment variable, you need to grant the sandbox access to the custom config directory and its sibling `.lock` directory. Claude Code creates `$CLAUDE_CONFIG_DIR.lock/` during OAuth token refresh coordination:
+
+```bash
+export CLAUDE_CONFIG_DIR=~/.claude-work
+
+nono run --profile claude-code \
+  --allow ~/.claude-work \
+  --allow ~/.claude-work.lock \
+  -- claude
+```
+
+Alternatively, create a custom profile that includes the paths:
+
+```json
+{
+  "meta": { "name": "claude-work" },
+  "extends": "claude-code",
+  "filesystem": {
+    "allow": ["$HOME/.claude-work", "$HOME/.claude-work.lock"]
+  }
+}
+```
+
+<Note>
+Do not set `CLAUDE_CONFIG_DIR` to its default value (`~/.claude`) explicitly — Claude Code treats "explicitly set" differently from "unset", which changes keychain service names and config file lookup paths. Only set it when you genuinely need a non-default location.
+</Note>
+
+<Note>
+For the default `~/.claude` config directory, no extra flags or directories are needed — the profile already grants access to both `~/.claude` and `~/.claude.lock`.
+</Note>
+
+## Security Tips
+
+### Use Secrets Management
+
+Instead of keeping your API key in environment variable exports or shell config files, load it from the system keystore:
+
+**macOS:**
+```bash
+security add-generic-password -s "nono" -a "anthropic_api_key" -w
+```
+
+**Linux:**
+```bash
+secret-tool store --label="nono: anthropic_api_key" service nono username anthropic_api_key
+```
+
+Then run with secrets:
+```bash
+nono run --profile claude-code --env-credential anthropic_api_key -- claude
+```
+
+See [Credential Injection](/cli/features/credential-injection) for full documentation.
+
+### Restrict to Specific Projects
+
+The profile grants access to the current working directory (wherever you run the command). To limit access to a specific directory regardless of where you invoke it:
+
+```bash
+nono run --allow ~/projects/my-app --read ~/.claude -- claude
+```
+
+### Read-Only Mode
+
+For code review or exploration where Claude shouldn't modify files:
+
+```bash
+nono run --read . --read ~/.claude --allow-file ~/.claude.json -- claude
+```
+
+### Block Network for Offline Work
+
+If you want to prevent any outbound connections (e.g., for reviewing local code without API calls):
+
+```bash
+nono run --profile claude-code --block-net -- claude
+```
+
+### Add Extra Domains
+
+If Claude Code needs to reach a domain not in the built-in network profile:
+
+```bash
+nono run --profile claude-code --allow-domain my-internal-api.example.com -- claude
+```
+
+## OAuth2 Login
+
+Running `claude /login` inside a sandbox requires the browser to open outside the sandboxed process. On Linux (Landlock), `nono` can delegate approved URLs to the unsandboxed parent process. On macOS (Seatbelt), Claude's login flow needs a temporary LaunchServices permission to open the browser.
+
+The `claude-code` profile includes an origin allowlist that controls which URLs may be opened during supervised login flows:
+
+- `https://claude.ai` (OAuth2 authorize endpoint)
+- `localhost` callbacks (for the OAuth2 redirect)
+
+On Linux, no additional flags are needed:
+
+```bash
+nono run --profile claude-code -- claude
+```
+
+On macOS, `nono` auto-enables LaunchServices for the `claude-code` profile when no refresh-capable local auth is detected. You can also enable it explicitly for the login session:
+
+```bash
+nono run --profile claude-code --allow-launch-services -- claude
+```
+
+After login completes, rerun without `--allow-launch-services` unless you still need browser-opening help for that session.
+
+<Warning>
+`--allow-launch-services` lets the sandboxed Claude process ask macOS LaunchServices to open URLs, files, or apps for that session. Use it only for temporary login or setup flows, and prefer running it from a trusted directory.
+</Warning>
+
+### Adding Custom OAuth2 Origins
+
+If your organization uses a custom identity provider for Claude Code authentication, add its origin to your profile:
+
+```json
+{
+  "meta": { "name": "claude-code-custom-auth" },
+  "extends": "claude-code",
+  "open_urls": {
+    "allow_origins": [
+      "https://claude.ai",
+      "https://sso.example.com"
+    ],
+    "allow_localhost": true
+  }
+}
+```
+
+When a derived profile specifies `open_urls`, it replaces the base profile's config entirely. Include all origins you need, including `https://claude.ai` if you still want the standard OAuth2 flow. Omit `open_urls` to inherit the base profile's settings unchanged.
+
+<Note>
+The origin allowlist is enforced by the supervisor when `nono` delegates browser opening itself. On macOS, `--allow-launch-services` bypasses that supervisor path for the duration of the session in exchange for login compatibility.
+</Note>
+
+## Enabling LSPs, Linters, and Dev Tools
+
+Claude Code's LSP plugins (pyright, rust-analyzer, etc.) spawn language servers as child processes. These spawns use `posix_spawnp()` which searches your `PATH` for the binary. If any `PATH` directory is unreadable to the sandbox, `posix_spawnp()` receives `EPERM` from the kernel and stops searching immediately (unlike `ENOENT`, which continues to the next entry).
+
+nono's built-in system paths cover standard directories (`/usr/bin`, `/opt`, etc.), but version managers and dev tools install binaries under `~/` which requires explicit read access.
+
+Common home-directory `PATH` entries that need read access:
+
+| Tool | Path |
+|------|------|
+| Rust / cargo | `~/.cargo/bin` |
+| Go | `~/go/bin` |
+| Python / pyenv | `~/.pyenv/shims`, `~/.pyenv/bin` |
+| Node / fnm | `~/.local/share/fnm`, `~/.local/state/fnm_multishells` |
+| Node / nvm | `~/.nvm` |
+| Node / pnpm | `~/Library/pnpm`, `~/.local/share/pnpm` |
+| Haskell / ghcup | `~/.ghcup/bin` |
+| Ruby / rbenv | `~/.rbenv/shims`, `~/.rbenv/bin` |
+| Local binaries | `~/.local/bin` |
+
+**Diagnose which paths are needed** by listing your PATH:
+
+```bash
+echo "$PATH" | tr ':' '\n'
+```
+
+Grant read access to any `~/` entry that appears before the directory containing your LSP binary:
+
+```bash
+nono run --profile claude-code \
+  --read ~/.cargo/bin \
+  --read ~/.local/bin \
+  -- claude
+```
+
+<Note>
+You only need `--read` (not `--allow`) for these directories. This permits PATH lookup without granting write access.
+</Note>
+
+### VS Code Extension
+
+Claude Code installs a VS Code extension on startup. The profile already grants write access to `~/.vscode` plus the OS-specific VS Code data directory: `~/Library/Application Support/Code` on macOS or `~/.config/Code` on Linux. No additional flags are needed for VS Code extension installation.
+
+### Git Configuration
+
+Claude Code reads git configuration for repository operations. The profile includes the `git_config` group, which grants read access to `~/.gitconfig`, `~/.gitignore_global`, and `~/.config/git/ignore`. No additional flags are needed for git operations.
+
+## Secretive (SSH Keys in Secure Enclave)
+
+If you use [Secretive](https://github.com/maxgoedjen/secretive) to store SSH keys in the macOS Secure Enclave, git commit signing (`git commit -S`) needs access to the Secretive agent socket. Create a custom profile that extends the Claude Code profile:
+
+Save as `~/.config/nono/profiles/claude-code-secretive.json`:
+
+```json
+{
+  "meta": {
+    "name": "claude-code-secretive",
+    "version": "1.0.0",
+    "description": "Claude Code with Secretive SSH agent support"
+  },
+  "extends": "claude-code",
+  "filesystem": {
+    "read": [
+      "$HOME/.ssh/config",
+      "$HOME/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh"
+    ],
+    "allow_file": ["$HOME/.ssh/known_hosts"],
+    "allow": ["$HOME/.ssh/known_hosts"]
+  }
+}
+```
+
+**Usage:**
+```bash
+nono run --profile claude-code-secretive --allow-cwd -- claude
+```
+
+The profile extends the standard Claude Code profile with:
+- **Read access** to `~/.ssh/config` (git signing configuration)
+- **Read access** to the Secretive agent socket (`~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh`)
+- **Read+write access** to `~/.ssh/known_hosts` (SSH may append new host keys)
+
+<Note>
+The Secretive socket is a Unix domain socket, not a regular file. nono supports granting capabilities on sockets directly, so only the socket itself is exposed — not the entire container directory.
+</Note>
+## Overriding Profile Settings
+
+CLI flags always take precedence over profile settings:
+
+```bash
+# Use profile but add extra directory access
+nono run --profile claude-code --allow ~/other-project -- claude
+
+# Use profile but block network
+nono run --profile claude-code --block-net -- claude
+
+# Use profile but add a custom domain
+nono run --profile claude-code --allow-domain custom-api.example.com -- claude
+```
+
+See [Security Profiles](/cli/features/profiles-groups) for details on profile format and precedence rules.
+
+## Automatic Pack Install and Plugin Wiring
+
+As of v0.43, the `claude-code` profile is no longer compiled into the CLI. It's distributed as a signed registry pack at `always-further/claude` along with a Claude Code plugin that provides sandbox-aware diagnostics.
+
+The first time you run `nono run --profile claude-code -- claude`, nono prompts to install the pack:
+
+```
+  ⊕  Install always-further/claude?
+
+     The `claude-code` profile is provided by this registry pack.
+
+     Publisher    always-further GitHub organisation
+     Provenance   Sigstore cryptographic supply chain (verified on pull)
+     Installs     sandbox profile + Claude Code plugin
+
+  Continue? [Y/n]
+```
+
+Press `Y` (or just Enter). nono pulls the pack, verifies its Sigstore provenance, and prints a summary that ties the release artifacts back to the source repository.
+
+### What "Pull" Actually Does
+
+After verification, nono installs the pack to `~/.config/nono/packages/always-further/claude/` and wires it into Claude Code as a single-plugin marketplace:
+
+| What | Where |
+|------|-------|
+| Pack files (profile, plugin manifest, hooks, skills) | `~/.config/nono/packages/always-further/claude/` |
+| Marketplace manifest (synthesised by nono) | `~/.claude/plugins/marketplaces/always-further/.claude-plugin/marketplace.json` |
+| Plugin source (symlink → pack dir) | `~/.claude/plugins/marketplaces/always-further/plugins/nono` |
+| Cache pointer (symlink → pack dir) | `~/.claude/plugins/cache/always-further/nono/<version>` |
+| Marketplace registry entry | `~/.claude/plugins/known_marketplaces.json` |
+| Plugin install record | `~/.claude/plugins/installed_plugins.json` |
+| Enabled-plugins toggle | `~/.claude/settings.json::enabledPlugins["nono@always-further"]` |
+
+The pack store is the single source of truth — every Claude-side path is a symlink or registry entry pointing at it. Re-pulling the pack updates the contents in place; deleting the pack via `nono remove always-further/claude` unwires every Claude-side entry too.
+
+### Subsequent Runs
+
+Once installed, `nono run --profile claude-code -- claude` runs silently — no prompt. nono's profile resolver finds `claude-code` in the pack store and re-asserts the marketplace wiring on every run, so deleting any of the symlinks above is recovered transparently on the next `nono run`.
+
+If a newer version of the pack is available, nono prints a one-line hint after the capabilities block:
+
+```
+  update available  always-further/claude  0.0.12 → 0.0.13   run: nono update
+```
+
+Run `nono update` to apply it, or `nono outdated` to check all installed packs at once. See [Managing Packs](/cli/features/managing-packs) for pinning and other options.
+
+### Skipping or Automating the Prompt
+
+| Environment | Behaviour |
+|-------------|-----------|
+| Interactive TTY | Prompt fires; press Enter or `Y` to install. |
+| `NONO_AUTO_MIGRATE=1` | Prompt skipped; pull runs immediately. Useful for CI/scripted setup. |
+| `NONO_NO_MIGRATE=1` | Pull blocked; nono exits cleanly with a hint pointing at `nono pull always-further/claude`. |
+| Non-TTY (no env override) | Same as `NONO_NO_MIGRATE=1` — nono exits cleanly with a hint. |
+
+### User Profiles That Extend `claude-code`
+
+If you have a custom profile under `~/.config/nono/profiles/` that does `"extends": "claude-code"`, nono's chain-aware resolver detects the missing base and triggers the same install prompt. You don't need to migrate your existing profiles — they keep working after the upgrade.
+
+```json
+{
+  "extends": "claude-code",
+  "meta": { "name": "claude-with-docs", "version": "1.0.0" },
+  "filesystem": { "read": ["$HOME/Documents"] }
+}
+```
+
+The first time you run `nono run --profile claude-with-docs`, the prompt fires for `always-further/claude`. After accept, the profile resolves cleanly via the pack-installed `claude-code` base.
+
+## Hook-Driven Sandbox Diagnostics
+
+The pack's Claude Code plugin registers two hooks via `hooks/hooks.json`:
+
+- `PostToolUseFailure` — fires when a Read/Write/Edit/Bash tool call hits a sandbox denial. Injects an `additionalContext` block that tells Claude this is a nono sandbox boundary (not macOS TCC, not a Unix permissions issue), lists the currently-allowed paths, and instructs Claude to run `nono why` for the precise diagnosis and present the user with two options.
+- `PostToolUse` for Bash — same idea, scoped to Bash output that contains a permission-denial signature.
+
+### What Claude Sees on a Sandbox Denial
+
+When Claude attempts a blocked path, the hook injects roughly:
+
+```
+[NONO SANDBOX - PERMISSION DENIED]
+
+This is a nono sandbox denial, not macOS TCC or a Unix permissions issue.
+
+Allowed paths:
+  /Users/you/project (readwrite)
+  /Users/you/.claude (readwrite)
+Network: allowed
+
+Run `nono why --path <blocked-path> --op read` to diagnose, then present the user with two options:
+
+  Option A (quick fix): exit and restart with the path allowed:
+    nono run --allow /path/to/needed -- claude
+
+  Option B (persistent fix): write a nono profile. Run `nono profile guide` for the schema, then save a profile JSON at ~/.config/nono/profiles/<name>.json. Start sessions with:
+    nono run --profile <name> -- claude
+```
+
+Claude follows the instructions: it runs `nono why` (you'll be prompted to approve the first time — see [Pre-approving Diagnostic Commands](#pre-approving-diagnostic-commands) below), reads the diagnosis, and presents the user with both options.
+
+### Pre-approving Diagnostic Commands
+
+The hook tells Claude to run `nono why <path>` for diagnosis and `nono profile guide` if the user picks Option B. Claude prompts for approval the first time it runs each — there are two ways to skip those prompts in future sessions:
+
+1. **Per-session, on first prompt.** Pick "Yes, and don't ask again for: nono why \*". Claude saves the rule in your project-local settings.
+2. **Globally, by editing your settings file.** Add the patterns to `~/.claude/settings.json::permissions.allow`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(nono why *)",
+      "Bash(nono profile guide)",
+      "Bash(nono profile validate *)",
+      "Bash(nono profile show *)"
+    ]
+  }
+}
+```
+
+These commands are read-only diagnostics — none of them modify state — so it's reasonable to pre-approve them globally. Profile creation in Option B uses Claude's built-in Edit tool, which has its own per-path permission model.
+
+### Removing the Pack
+
+```bash
+nono remove always-further/claude
+```
+
+This removes the pack store directory, the marketplace dir, the cache subtree, the entries in `known_marketplaces.json` / `installed_plugins.json`, and the `enabledPlugins["nono@always-further"]` toggle. Claude Code's view of the world is restored to what it was before the install. Re-running `nono run --profile claude-code` will prompt to re-install.

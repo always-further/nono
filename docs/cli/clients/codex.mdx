@@ -1,0 +1,243 @@
+---
+title: Codex
+description: Sandboxing OpenAI Codex CLI with nono
+---
+
+Codex is OpenAI's CLI coding agent. It reads repositories, writes files, runs commands, and stores local session state. Running it under nono keeps that access confined to the project and state paths you intentionally grant.
+
+<Note>
+When you run Codex under `nono`, prefer a single sandbox layer: let `nono` enforce filesystem and network boundaries, and start Codex with its own sandbox disabled.
+
+Recommended invocation:
+
+```bash
+nono run --profile codex -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+This keeps Codex's approval flow while avoiding nested sandboxes that can make denials harder to diagnose. See OpenAI's [agent approvals and security docs](https://developers.openai.com/codex/agent-approvals-security).
+</Note>
+
+## Why Sandbox Codex?
+
+Codex is designed to inspect code, execute tools, and persist local state. Without isolation:
+
+- It could read files outside the repository you meant to expose
+- A prompt injection or tool mistake could modify unrelated files on the same machine
+- Long-lived local state could become a path for broader access than the current task needs
+
+nono makes those boundaries kernel-enforced instead of advisory.
+
+## Quick Start
+
+```bash
+nono run --profile codex -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+If the registry pack `always-further/codex` isn't installed yet, nono prompts to pull it (see [Automatic Pack Install and Plugin Wiring](#automatic-pack-install-and-plugin-wiring) below).
+
+The pack profile provides:
+
+- **Read+write access** to the current working directory
+- **Read+write access** to `~/.codex` (config, auth state, sessions, caches, and local metadata) and `~/.agents`
+- **Read access** to common user-local runtime paths for Rust, Node.js, Python, and Nix toolchains, plus `~/Library/Preferences` (Codex queries CFPreferences on startup)
+- **OAuth login support** via supervised URL opening on Linux and a temporary LaunchServices flag on macOS
+- **Network access** enabled
+- **Interactive mode** enabled for the terminal UI
+
+## Automatic Pack Install and Plugin Wiring
+
+The `codex` profile is distributed as a signed registry pack at `always-further/codex` along with a Codex plugin that provides sandbox-aware diagnostic hooks and a skill for guiding the user through denial-recovery.
+
+The first time you run `nono run --profile codex -- codex`, nono prompts to install the pack:
+
+```
+  ⊕  Install always-further/codex?
+
+     The `codex` profile is provided by this registry pack.
+
+     Publisher    always-further GitHub organisation
+     Provenance   Sigstore cryptographic supply chain (verified on pull)
+     Installs     sandbox profile + Codex hooks + diagnostic skill
+
+  Continue? [Y/n]
+```
+
+Press `Y`. nono pulls the pack, verifies its Sigstore provenance, and writes Codex's plugin wiring directly to the files Codex actually reads (verified against `openai/codex` source — not the `~/.agents/plugins/marketplace.json` that some external docs hint at).
+
+### What the pull writes
+
+| Path | What goes there |
+|------|-----------------|
+| `~/.config/nono/packages/always-further/codex/` | The unpacked pack: profile, plugin manifest, hooks, skill. Single source of truth — every Codex-side path below is a symlink or registry entry pointing at this dir. |
+| `~/.codex/plugins/cache/always-further/codex/local` | Symlink → pack store. Codex's `PluginStore` (`codex-rs/core-plugins/src/store.rs`) walks this dir to discover installed plugin versions. |
+| `~/.codex/config.toml` (fenced block) | `[marketplaces.always-further]` registers the marketplace; `[plugins."nono@always-further"] enabled = true` enables the plugin. |
+| `~/.codex/hooks.json` | Hook entries pointing at `<pack store>/bin/nono-hook*.sh` for `PostToolUse`, `PermissionRequest`, `SessionStart`. |
+
+The `config.toml` block is fenced with markers so re-pulls and removals never touch your other settings:
+
+```toml
+# >>> nono-managed (do not edit) >>>
+[marketplaces.always-further]
+source_type = "local"
+source = "/Users/<you>/.config/nono/packages/always-further/codex"
+
+[plugins."nono@always-further"]
+enabled = true
+# <<< nono-managed <<<
+```
+
+### Activating the hooks
+
+Codex requires an opt-in feature flag for hooks. Add the following to `~/.codex/config.toml` (the section header and the key must be on **separate** lines — this is TOML, not a single-line declaration):
+
+```toml
+[features]
+codex_hooks = true
+```
+
+nono never writes this flag — opting into a Codex feature is your call. After `nono pull` you'll see a one-line reminder if the flag isn't set:
+
+```
+note: Codex hooks need this in ~/.codex/config.toml to fire — add it once and they activate:
+        [features]
+        codex_hooks = true
+```
+
+### Subsequent runs
+
+Once installed, `nono run --profile codex -- codex` runs silently — no prompt. nono's profile resolver finds `codex` in the pack store and re-asserts the marketplace + cache wiring on every run, so deleting any of the entries above is recovered transparently on the next `nono run`.
+
+If a newer version of the pack is available, nono prints a one-line hint after the capabilities block:
+
+```
+  update available  always-further/codex  0.0.11 → 0.0.12   run: nono update
+```
+
+Run `nono update` to apply it, or `nono outdated` to check all installed packs at once. See [Managing Packs](/cli/features/managing-packs) for pinning and other options.
+
+### Skipping or automating the prompt
+
+| Environment | Behaviour |
+|-------------|-----------|
+| Interactive TTY | Prompt fires; press Enter or `Y` to install. |
+| `NONO_AUTO_MIGRATE=1` | Prompt skipped; pull runs immediately. Useful for CI/scripted setup. |
+| `NONO_NO_MIGRATE=1` | Pull blocked; nono exits cleanly with a hint pointing at `nono pull always-further/codex`. |
+| Non-TTY (no env override) | Same as `NONO_NO_MIGRATE=1`. |
+
+### Hook-driven sandbox diagnostics
+
+The pack's hooks wire into three Codex events:
+
+- **`PostToolUse`** for `Bash`, `apply_patch`, and MCP file tools — when the tool's output matches a sandbox-denial signature (`Operation not permitted`, `EACCES`, `EPERM`, `landlock`), the hook returns `decision: block` with a `reason` string. Codex pauses the agent loop and shows the reason to the user verbatim — no LLM paraphrasing, no "Want me to run nono why?" dangler. The `reason` includes the diagnostic, the allowed paths, and an inline JSON template for the Option B persistent-fix profile (extends `codex` and adds the blocked path).
+- **`PermissionRequest`** — when Codex's approval flow asks the user to escalate, the hook denies upstream with a message explaining that approval can't grant access the OS sandbox already blocks. The user is told to restart with `--allow <path>`.
+- **`SessionStart`** — pre-loads the sandbox boundary into the conversation as `additionalContext`, so the model understands the limits from turn 1 and won't reach for "macOS TCC" or "chmod" diagnoses on the first denial.
+
+In `permission_mode = "bypassPermissions"` (Codex's yolo mode), all three hooks stay silent — the user has explicitly opted into running without approval.
+
+### Removing the pack
+
+```bash
+nono remove always-further/codex
+```
+
+Removes the pack store directory, the cache subtree, the fenced block from `config.toml`, the hook entries from `hooks.json`, and the lockfile entry. `[features] codex_hooks = true` is left alone — it's a user-set Codex preference, not something nono installed.
+
+## Custom Profile
+
+Create `~/.config/nono/profiles/my-codex.json` if you want different permissions. Extend the pack profile so you keep all its grants (groups, OAuth origin, etc.) and just add what you need:
+
+```json
+{
+  "extends": "codex",
+  "meta": {
+    "name": "my-codex",
+    "version": "1.0.0",
+    "description": "Codex with additional project access"
+  },
+  "filesystem": {
+    "read": ["$HOME/shared-libs"]
+  }
+}
+```
+
+Then start sessions with `nono run --profile my-codex -- codex`.
+
+<Note>
+The `extends` chain pulls in everything the pack profile declares (allow paths, runtime groups, OAuth origin, hook plugin) and merges your additions on top. If you instead create a profile literally named `codex` in `~/.config/nono/profiles/`, it shadows the pack profile entirely — you take responsibility for the full configuration.
+</Note>
+
+## Security Tips
+
+### OAuth Login
+
+Codex login opens `https://auth.openai.com` during the OAuth flow.
+
+The profile includes the required browser-open allowlist:
+
+- `https://auth.openai.com`
+- `localhost` callbacks for the OAuth redirect
+
+On Linux, no additional flags are needed:
+
+```bash
+nono run --profile codex -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+On macOS, enable LaunchServices temporarily for the login session:
+
+```bash
+nono run --profile codex --allow-launch-services -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+After login completes, exit and rerun without `--allow-launch-services`.
+
+<Warning>
+`--allow-launch-services` lets the sandboxed Codex process ask macOS LaunchServices to open URLs, files, or apps for that session. Use it only for temporary login or setup flows, and prefer running it from a trusted directory.
+</Warning>
+
+### Restrict to a Specific Project
+
+The profile grants access to the directory you run Codex from. To pin access to a specific repository:
+
+```bash
+nono run --profile codex --workdir ~/projects/my-app -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+### Read-Only Workspace
+
+If you want Codex to keep its local state but not modify the repository:
+
+```bash
+nono run --read . --allow ~/.codex -- codex --sandbox danger-full-access --ask-for-approval on-request review
+```
+
+### Block Network for Local-Only Work
+
+If you want to inspect local code without allowing outbound access:
+
+```bash
+nono run --profile codex --block-net -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+### Use Network Filtering
+
+If you want Codex limited to the built-in host allowlist for coding workflows:
+
+```bash
+nono run --profile codex --network-profile codex -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+### Additional Home-Directory Tools
+
+The profile covers common Rust, Node.js, Python, and Nix runtime locations under `~/`, but some developer tools still install into other home-directory paths such as `~/go/bin` or `~/.bun/bin`.
+
+If a tool exists on your `PATH` but Codex cannot launch it inside the sandbox, grant read access to the specific path entry:
+
+```bash
+nono run --profile codex \
+  --read ~/.bun/bin \
+  --read ~/go/bin \
+  -- codex --sandbox danger-full-access --ask-for-approval on-request
+```
+
+See [Network Filtering](/cli/features/networking) and [Security Profiles](/cli/features/profiles-groups) for details on host allowlists, profile format, and precedence rules.

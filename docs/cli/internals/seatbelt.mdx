@@ -1,0 +1,234 @@
+---
+title: macOS Seatbelt
+description: How nono uses Apple's Seatbelt sandbox on macOS
+---
+
+nono uses Apple's Seatbelt sandbox framework on macOS to enforce capability restrictions at the kernel level.
+
+## What is Seatbelt?
+
+Seatbelt is macOS's mandatory access control (MAC) framework. It's the same technology that sandboxes App Store applications and Safari. Seatbelt policies are enforced by the XNU kernel - they cannot be bypassed by userspace code.
+
+> **Note:** nono uses Apple's private `sandbox_init()` API rather than the newer `sandbox_apply_container()`. While technically undocumented, this API has been stable for over a decade and is widely used by third-party tools. Apple's public `sandbox-exec` command uses the same underlying mechanism.
+
+## How nono Uses Seatbelt
+
+nono generates a Seatbelt profile (a Scheme-like DSL) based on your capability flags, then calls `sandbox_init()` to apply it before executing the target command.
+
+```c
+// Simplified: what nono does internally
+sandbox_init(profile_string, 0, &error);
+exec(command, args);
+// After sandbox_init(), restrictions are permanent for this process
+```
+
+## Profile Structure
+
+A nono-generated Seatbelt profile follows this structure:
+
+```scheme
+(version 1)
+(deny default)
+
+; Process operations (narrowed - no blanket process*)
+(allow process-exec*)                    ; Execute programs
+(allow process-fork)                     ; Fork child processes
+(allow process-info* (target self))      ; Self-inspection (dyld, code signing)
+(deny process-info* (target others))     ; Block inspecting other processes
+
+; System operations
+(allow sysctl-read)
+(allow mach*)
+(allow ipc*)
+(allow signal)
+(allow system-socket)
+(allow system-fsctl)
+(allow system-info)
+
+; Root directory access for path resolution
+(allow file-read* (literal "/"))
+
+; Executable mapping (required for dyld)
+(allow file-map-executable)
+
+; System paths from security-lists.toml
+(allow file-read* (subpath "/System/Library"))
+(allow file-read* (subpath "/usr/lib"))
+(allow file-read* (subpath "/private/var/db/dyld"))
+; ... more system paths
+
+; User-granted paths
+(allow file-read* (subpath "/Users/luke/project"))
+
+; Sensitive paths: "Allow Discovery, Deny Content"
+(allow file-read-metadata (subpath "/Users/luke/.ssh"))
+(deny file-read-data (subpath "/Users/luke/.ssh"))
+; ... more sensitive paths
+
+; Network (default: allowed)
+(allow network-outbound)
+(allow network-inbound)
+(allow network-bind)
+```
+
+## Security Model: "Allow Discovery, Deny Content"
+
+nono uses a nuanced approach to sensitive path protection:
+
+| Operation | Seatbelt Rule | Result |
+|-----------|---------------|--------|
+| `stat ~/.ssh` | `file-read-metadata` | Allowed |
+| `test -d ~/.ssh` | `file-read-metadata` | Allowed |
+| `ls ~/.ssh` | `file-read-data` (readdir) | Blocked |
+| `cat ~/.ssh/id_rsa` | `file-read-data` | Blocked |
+
+This approach:
+- **Prevents data exfiltration** - actual file contents cannot be read
+- **Allows graceful error handling** - programs can check if files exist without crashing
+- **Mirrors TCC behavior** - feels native to macOS users
+
+## System Paths
+
+nono allows read access to system paths required for running executables. These are loaded from `security-lists.toml`:
+
+| Category | Paths | Purpose |
+|----------|-------|---------|
+| Executables | `/System/Library`, `/Library`, `/usr/lib` | System binaries and libraries |
+| Frameworks | `/System/Library/Frameworks`, `/Library/Frameworks` | macOS frameworks |
+| dyld | `/private/var/db/dyld`, `/var/db` | Dynamic linker cache |
+| SSL | `/etc/ssl`, `/private/etc/ssl` | Certificate stores |
+| Locale | `/usr/share/zoneinfo`, `/usr/share/locale` | Timezone and locale data |
+| System | `/var`, `/private/var`, `/System/Volumes` | System paths and APFS volumes |
+
+The `file-map-executable` permission is also granted globally, which is required for `dyld` to map executables and shared libraries into memory.
+
+## Sensitive Paths
+
+nono explicitly denies data access to credential storage:
+
+| Category | Paths |
+|----------|-------|
+| Cloud Credentials | `~/.aws`, `~/.azure`, `~/.gcloud`, `~/.kube` |
+| SSH/GPG | `~/.ssh`, `~/.gnupg` |
+| Password Managers | `~/Library/Keychains`, `~/.password-store`, `~/.1password` |
+| Browser Data | `~/Library/Application Support/Google/Chrome`, Firefox, Safari, etc. |
+| macOS Private | `~/Library/Messages`, `~/Library/Mail`, `~/Library/Cookies` |
+| Shell Configs | `~/.zshrc`, `~/.bashrc`, `~/.profile`, etc. (read-blocked; may contain API keys) |
+| History Files | `~/.zsh_history`, `~/.bash_history` (read-blocked; may contain secrets) |
+| Credential Files | `~/.git-credentials`, `~/.netrc`, `~/.npmrc` |
+
+Users can override these with explicit `--allow` or `--read` flags.
+
+## System Operations
+
+nono narrows `system*` permissions to only what's commonly needed:
+
+| Permission | Purpose |
+|------------|---------|
+| `system-socket` | Network socket operations |
+| `system-fsctl` | Filesystem control operations |
+| `system-info` | Reading system information (uname, etc.) |
+
+Notably **omitted**: `system-audit`, `system-privilege`, `system-reboot`, `system-set-time`
+
+## Network Control
+
+Network access is allowed by default:
+
+```scheme
+; Default (network allowed)
+(allow network-outbound)
+(allow network-inbound)
+(allow network-bind)
+
+; If --block-net is specified
+(deny network*)
+```
+
+### Unix Socket Connections
+
+When a process calls `connect(2)` on a Unix socket (e.g., `/var/run/docker.sock`), Seatbelt classifies the operation as `network-outbound`, **not** a file operation. This means a `file-read-data` or `file-write-data` deny rule for the socket path will not block the connection.
+
+To block Unix socket connections, nono emits an additional rule alongside the standard file deny rules when a socket path appears in `add_deny_access`:
+
+```scheme
+; File deny (blocks open/read/write on the socket file itself)
+(allow file-read-metadata (literal "/private/var/run/docker.sock"))
+(deny file-read-data (literal "/private/var/run/docker.sock"))
+(deny file-write-data (literal "/private/var/run/docker.sock"))
+
+; Network deny (blocks connect(2) to the socket)
+(deny network-outbound (path "/private/var/run/docker.sock"))
+```
+
+The `network-outbound` rule uses `(path ...)` for an exact match rather than `(subpath ...)` because socket connections match on the precise path. Seatbelt evaluates this rule at `connect(2)` time, so it blocks connections to sockets that do not exist when the sandbox initializes.
+
+### Granular Filtering Limitations
+
+Seatbelt supports filtering by protocol (TCP/UDP), direction (inbound/outbound), and even IP address via `remote ip` filters. However, it does **not** provide per-hostname or per-domain filtering. Since DNS resolution happens before the connection, filtering by domain would require:
+
+1. **IP allowlists** - Fragile due to CDNs, load balancers, and changing IP addresses
+2. **Application-layer proxy** - Adds complexity, requires elevated permissions
+3. **Packet filtering (pf)** - Requires root, conflicts with nono's design
+
+For now, nono uses binary network control (all or nothing). Granular filtering may be explored in future releases.
+
+## Irreversibility
+
+Once `sandbox_init()` is called, restrictions are permanent:
+
+- There is no `sandbox_remove()` or `sandbox_expand()` API
+- The process cannot modify its own sandbox
+- All child processes inherit the restrictions
+- The only way to escape is to exploit a kernel vulnerability
+
+This is the core security guarantee.
+
+## Debugging
+
+If a command fails with permission errors:
+
+1. Run with `--dry-run` to see what capabilities would be granted
+2. Run with `-vvv` for verbose logging (shows generated profile)
+3. Check Console.app for sandbox violation logs:
+   - Filter by "sandbox" or your process name
+   - Violations show the exact path and operation blocked
+
+### Common Issues
+
+| Error | Likely Cause | Solution |
+|-------|--------------|----------|
+| Abort (exit 134) | Missing system path | Check if a custom tool needs additional paths |
+| Trace/BPT trap: 5 | Sandbox profile syntax error | Run with `-vvv` to see the generated profile |
+| "Operation not permitted" on sensitive path | Working as intended | Use `--read ~/.path` to explicitly allow |
+| Python/Node fails | Interpreter outside allowed paths | Ensure `/usr/bin`, `/usr/local/bin` are accessible |
+| Missing env vars in subshell | Shell configs are read-blocked | Use `--read-file ~/.zshrc` if shell init is needed |
+
+## Limitations
+
+### macOS Version Support
+
+Seatbelt is available on macOS 10.5+, but nono is tested on macOS 10.15 (Catalina) and later.
+
+#### APFS Firmlinks
+
+macOS 10.15+ uses APFS with **firmlinks** - bidirectional hard links that make `/System/Volumes/Data/Users` appear as `/Users`. nono's security lists include `/System/Volumes` to handle path resolution across firmlink boundaries. Without this, sandbox rules written for `/Users/luke` might not match the kernel's resolved path `/System/Volumes/Data/Users/luke`.
+
+### TCC Interaction
+
+macOS TCC (Transparency, Consent, and Control) may still block access to certain paths if the terminal running nono doesn't have "Full Disk Access." nono's "Allow Discovery, Deny Content" approach mirrors TCC behavior.
+
+### App Sandbox Interaction
+
+If nono runs inside an App Sandbox (e.g., from a sandboxed terminal), restrictions stack. The inner sandbox cannot grant more permissions than the outer sandbox allows.
+
+### Code Signing
+
+Some macOS security features interact with code signing. Building nono from source without signing may trigger Gatekeeper warnings, but this doesn't affect sandbox enforcement.
+
+## References
+
+- [Apple Sandbox Design Guide](https://developer.apple.com/library/archive/documentation/Security/Conceptual/AppSandboxDesignGuide/)
+- [sandbox_init man page](https://developer.apple.com/library/archive/documentation/Darwin/Reference/ManPages/man3/sandbox_init.3.html)
+- [XNU source code](https://github.com/apple-oss-distributions/xnu)
+- [Apple Sandbox Guide (reverse engineering)](https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf)

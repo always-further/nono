@@ -1,0 +1,492 @@
+---
+title: OpenClaw
+description: Sandboxing OpenClaw gateway and agents with nono
+---
+
+[OpenClaw](https://openclaw.ai) is a multi-channel AI agent platform that enables chat interactions across WhatsApp, Telegram, Discord, and Mattermost. Running OpenClaw under nono provides OS-level isolation that cannot be bypassed.
+
+## Quick Start
+
+```bash
+nono run --profile openclaw -- openclaw gateway
+```
+
+The built-in `openclaw` profile provides:
+- **Read-only access** to the current working directory (Node.js requires this at startup)
+- **Read+write access** to `~/.openclaw` and `~/.config/openclaw` (agent config and state)
+- **Read+write access** to `~/.local` (OpenClaw data/state)
+- **Read+write access** to `$TMPDIR/openclaw-$UID` (temporary files)
+- **Network access** enabled (required for messaging APIs)
+
+## Why Sandbox OpenClaw?
+
+OpenClaw agents receive messages from external users and can execute commands on the host system. Without proper isolation:
+
+- A malicious message could trick an agent into accessing sensitive files
+- Compromised agent code could exfiltrate credentials from `~/.openclaw/`
+- An agent could be used as a pivot point to attack other systems on the network
+
+nono's kernel-enforced sandbox ensures that even if an agent is compromised, it cannot exceed its granted capabilities.
+
+<Note>
+nono has already proven capable of stopping some nasty reported CVEs from exploiting live systems, as its protections are impossible to overide
+</Note>
+
+## Custom Profile
+
+If you need different permissions, create a custom profile at `~/.config/nono/profiles/openclaw-strict.json`:
+
+```bash
+mkdir -p ~/.config/nono/profiles
+```
+
+```json
+{
+  "meta": {
+    "name": "openclaw-strict",
+    "version": "1.0.0",
+    "description": "OpenClaw with read-only config access"
+  },
+  "filesystem": {
+    "allow": ["$WORKDIR"],
+    "read": ["$HOME/.openclaw", "$HOME/.config/openclaw"]
+  },
+  "network": {
+    "block": false
+  },
+  "env_credentials": {
+    "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
+    "openai_api_key": "OPENAI_API_KEY"
+  }
+}
+```
+
+**Usage:**
+```bash
+nono run --profile openclaw-strict -- openclaw gateway
+```
+
+<Note>
+Custom profiles override pack profiles of the same name. If you create `~/.config/nono/profiles/openclaw.json`, it will be used instead of the pack-provided profile.
+</Note>
+
+See [Security Profiles](/cli/features/profiles-groups) for the full profile format reference.
+
+## Security Tips
+
+### Protect Credentials
+
+OpenClaw stores sensitive data in `~/.openclaw/` including:
+- Channel authentication tokens (WhatsApp sessions, Telegram bot tokens)
+- OAuth credentials
+- API keys for AI providers
+
+The profile grants **read+write** access to this directory so OpenClaw can update its state. If you need stricter isolation, use a custom profile with read-only access (see the custom profile example above).
+
+For maximum security, use nono's secrets management to load API keys from the system keystore. This keeps credentials out of config files and environment variable exports where they could be leaked.
+
+**Step 1: Store your secrets**
+
+OpenClaw typically needs a messaging platform token (e.g., Telegram) and an AI provider API key. Store these in the system keystore:
+
+**macOS:**
+```bash
+# Store Telegram bot token
+security add-generic-password -s "nono" -a "telegram_bot_token" -w
+
+# Store OpenAI API key
+security add-generic-password -s "nono" -a "openai_api_key" -w
+
+# Or store Anthropic API key instead
+security add-generic-password -s "nono" -a "anthropic_api_key" -w
+```
+
+**Linux:**
+```bash
+# Store Telegram bot token
+secret-tool store --label="nono: telegram_bot_token" service nono username telegram_bot_token
+
+# Store OpenAI API key
+secret-tool store --label="nono: openai_api_key" service nono username openai_api_key
+```
+
+**Step 2: Run OpenClaw with secrets loaded**
+
+```bash
+nono run --profile openclaw --env-credential telegram_bot_token,openai_api_key -- openclaw gateway
+```
+
+The secrets are loaded from the keystore and injected as `$TELEGRAM_BOT_TOKEN` and `$OPENAI_API_KEY` environment variables. OpenClaw reads these automatically.
+
+<Note>
+Secrets are loaded **before** the sandbox is applied, then zeroized from nono's memory after `exec()`. The sandboxed process cannot access the keystore directly - it only receives the specific secrets you authorized.
+</Note>
+
+See [Credential Injection](/cli/features/credential-injection) for complete documentation on storing and managing secrets.
+
+### Limit Agent Filesystem Access
+
+The profile grants access to OpenClaw's config directories. To also grant access to a project directory:
+
+```bash
+# Restrict to specific project directory only
+nono run --profile openclaw --allow ~/projects/my-agent -- openclaw gateway
+
+# Block all writes, read-only mode
+nono run --profile openclaw --read . -- openclaw gateway
+```
+
+### Network Considerations
+
+OpenClaw requires network access to communicate with:
+- Messaging platform APIs (WhatsApp, Telegram, Discord, Mattermost)
+- AI provider APIs (OpenAI, Anthropic, etc.)
+- Optional web search APIs (Brave Search)
+
+The profile allows full network access. For stricter isolation, use nono's proxy mode with credential injection (see below).
+
+### Credential Injection (Recommended)
+
+Instead of passing API keys directly to OpenClaw, use nono's credential injection to keep secrets out of the agent's memory entirely.
+
+**Step 1: Store your API key in the system keyring**
+
+<Tabs>
+<Tab title="macOS">
+```bash
+# Google Gemini
+security add-generic-password -s "nono" -a "gemini_api_key" -w
+
+# OpenAI
+security add-generic-password -s "nono" -a "openai_api_key" -w
+
+# Anthropic
+security add-generic-password -s "nono" -a "anthropic_api_key" -w
+```
+</Tab>
+
+<Tab title="Linux">
+```bash
+# Google Gemini
+secret-tool store --label="nono: gemini_api_key" service nono username gemini_api_key
+
+# OpenAI
+secret-tool store --label="nono: openai_api_key" service nono username openai_api_key
+
+# Anthropic
+secret-tool store --label="nono: anthropic_api_key" service nono username anthropic_api_key
+```
+</Tab>
+</Tabs>
+
+**Step 2: Configure OpenClaw to use nono's proxy**
+
+OpenClaw's SDK doesn't read `*_BASE_URL` environment variables, so you need to configure each provider's `baseUrl` directly.
+
+Provider settings can be configured in two locations:
+- **Global**: `~/.openclaw/openclaw.json` - applies to all agents
+- **Per-agent**: `~/.openclaw/agents/<agentId>/agent/models.json` - overrides global for that agent
+
+Add/update the `models.providers` section with the proxy baseUrl:
+
+<Tabs>
+<Tab title="Google Gemini">
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "google": {
+        "baseUrl": "http://127.0.0.1:19999/gemini/v1beta",
+        "apiKey": "GEMINI_API_KEY",
+        "api": "google-generative-ai",
+        "models": [
+          {
+            "id": "gemini-2.5-flash",
+            "name": "Gemini 2.5 Flash",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The `baseUrl` must include `/v1beta` because the SDK appends paths like `/models/gemini-2.5-flash:streamGenerateContent` directly.
+</Tab>
+
+<Tab title="OpenAI">
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "openai": {
+        "baseUrl": "http://127.0.0.1:19999/openai/v1",
+        "apiKey": "OPENAI_API_KEY",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gpt-4o",
+            "name": "GPT-4o",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": 16384
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The `baseUrl` must include `/v1` because the SDK appends paths like `/chat/completions` directly.
+</Tab>
+
+<Tab title="Anthropic">
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "anthropic": {
+        "baseUrl": "http://127.0.0.1:19999/anthropic/v1",
+        "apiKey": "ANTHROPIC_API_KEY",
+        "api": "anthropic-messages",
+        "models": [
+          {
+            "id": "claude-sonnet-4-20250514",
+            "name": "Claude Sonnet 4",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The `baseUrl` must include `/v1` because the SDK appends paths like `/messages` directly.
+</Tab>
+</Tabs>
+
+<Warning>
+If you have provider config in both `openclaw.json` and `agents/<agentId>/agent/models.json`, the agent-specific config takes precedence. Make sure the `baseUrl` is set correctly in whichever file your agent is actually using.
+</Warning>
+
+**Step 3: Configure auth profile to read from environment**
+
+Edit `~/.openclaw/agents/main/agent/auth-profiles.json` and ensure each profile uses `envVar` instead of a hardcoded key:
+
+<Tabs>
+<Tab title="Google Gemini">
+```json
+{
+  "version": 1,
+  "profiles": {
+    "google:default": {
+      "type": "api_key",
+      "provider": "google",
+      "envVar": "GEMINI_API_KEY"
+    }
+  },
+  "lastGood": {
+    "google": "google:default"
+  }
+}
+```
+</Tab>
+
+<Tab title="OpenAI">
+```json
+{
+  "version": 1,
+  "profiles": {
+    "openai:default": {
+      "type": "api_key",
+      "provider": "openai",
+      "envVar": "OPENAI_API_KEY"
+    }
+  },
+  "lastGood": {
+    "openai": "openai:default"
+  }
+}
+```
+</Tab>
+
+<Tab title="Anthropic">
+```json
+{
+  "version": 1,
+  "profiles": {
+    "anthropic:default": {
+      "type": "api_key",
+      "provider": "anthropic",
+      "envVar": "ANTHROPIC_API_KEY"
+    }
+  },
+  "lastGood": {
+    "anthropic": "anthropic:default"
+  }
+}
+```
+</Tab>
+</Tabs>
+
+**Step 4: Run OpenClaw with credential injection**
+
+```bash
+# For Google Gemini
+nono run --profile openclaw --allow-cwd \
+  --credential gemini --proxy-port 19999 \
+  --listen-port 18789 -- openclaw gateway
+
+# For OpenAI
+nono run --profile openclaw --allow-cwd \
+  --credential openai --proxy-port 19999 \
+  --listen-port 18789 -- openclaw gateway
+
+# For Anthropic
+nono run --profile openclaw --allow-cwd \
+  --credential anthropic --proxy-port 19999 \
+  --listen-port 18789 -- openclaw gateway
+
+# Multiple providers
+nono run --profile openclaw --allow-cwd \
+  --credential gemini --credential openai --credential anthropic \
+  --proxy-port 19999 --listen-port 18789 -- openclaw gateway
+```
+
+**How it works:**
+1. Real API keys are stored in your system keyring (never in files)
+2. nono starts a proxy on port 19999 and sets provider-specific API key environment variables (e.g., `GEMINI_API_KEY`, `OPENAI_API_KEY`) to a session-specific phantom token
+3. OpenClaw reads the phantom token and sends requests to the configured `baseUrl` (e.g., `http://127.0.0.1:19999/gemini/v1beta`)
+4. The proxy validates the phantom token, swaps in the real API key, and forwards the request to the provider's API
+5. The real API key never enters the sandboxed process
+
+This protects against prompt injection attacks that attempt to exfiltrate credentials - even if an attacker tricks the agent into revealing its "API key", they only get the worthless phantom token.
+
+See [Credential Injection](/cli/features/credential-injection) for setup instructions.
+
+### Server Apps and Port Binding
+
+OpenClaw Gateway listens on a WebSocket port (default 18789) to accept connections from UI clients and nodes. In proxy mode, you must explicitly allow this with `--listen-port`:
+
+```bash
+nono run --profile openclaw --listen-port 18789 \
+  --credential openai -- openclaw gateway
+```
+
+<Warning>
+**macOS limitation:** Seatbelt cannot filter by port number. When `--listen-port` is specified on macOS, the sandbox permits binding to any port and accepting inbound connections from any source.
+
+This is a broader permission than intended, but the security impact is limited:
+- Outbound connections are still restricted to the proxy (credential exfiltration is blocked)
+- Filesystem access is still limited to granted paths
+- An attacker would need to know the machine's IP and which port the agent opened
+- Even if they connect, they can only send data in - the agent cannot exfiltrate responses
+
+On Linux with Landlock ABI v4+, per-port filtering is enforced and only the specified ports can be bound.
+</Warning>
+
+### Running as a Daemon
+
+When running OpenClaw as a system service, wrap the daemon command with nono:
+
+**macOS (launchd):**
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/usr/local/bin/nono</string>
+  <string>run</string>
+  <string>--profile</string>
+  <string>openclaw</string>
+  <string>--</string>
+  <string>openclaw</string>
+  <string>daemon</string>
+</array>
+```
+
+**Linux (systemd):**
+```ini
+[Service]
+ExecStart=/usr/local/bin/nono run --profile openclaw -- openclaw daemon
+```
+
+### Combine with OpenClaw's Built-in Sandbox
+
+OpenClaw has its own sandboxing option for group/channel sessions. Layer both for defense in depth:
+
+1. **nono**: OS-level isolation (Landlock/Seatbelt) - cannot be bypassed by code
+2. **OpenClaw sandbox**: Application-level isolation - easier to configure per-agent
+
+```bash
+# Both layers active
+nono run --profile openclaw -- openclaw gateway --sandbox
+```
+
+## Strict Mode Example
+
+For high-security deployments where agents should have minimal access:
+
+```bash
+nono run \
+  --read ~/.openclaw \
+  --read ~/agents/my-agent \
+  --allow ~/agents/my-agent/workspace \
+  --env-credential telegram_bot_token,openai_api_key \
+  -- openclaw gateway
+```
+
+This configuration:
+- Reads config from `~/.openclaw` (no writes)
+- Reads agent code from `~/agents/my-agent`
+- Only allows writes to the workspace subdirectory
+- Loads `$TELEGRAM_BOT_TOKEN` and `$OPENAI_API_KEY` from the system keystore
+
+## Already Using Containers?
+
+If you're running OpenClaw in Docker or Podman, you already have solid isolation. Containers provide process isolation, resource limits, and filesystem separation that protect your host system.
+
+That said, there are tradeoffs to consider:
+
+| Aspect | nono | Containers |
+|--------|------|------------|
+| Startup overhead | ~0ms | ~100-500ms |
+| Host file access | Direct | Requires volume mounts |
+| Credential blocking | Automatic | Manual (don't mount ~/.ssh, etc.) |
+| Resource limits | No | Yes |
+| Environment isolation | No | Yes |
+
+**When containers make more sense:**
+- You need CPU/memory limits to prevent runaway agents
+- You want a reproducible environment across machines
+- You're already using container orchestration (Kubernetes, etc.)
+
+**When nono makes more sense:**
+- You need fast startup for interactive use
+- You want to work directly on host files without volume mount complexity
+- You want automatic credential protection without manual configuration
+- You want protection from destructive commands like `rm -rf`, `dd`, and `chmod`
+
+**For maximum security, use both:**
+
+```bash
+# nono inside a container - defense in depth
+docker run -v $(pwd):/work my-openclaw-image \
+  nono run --profile openclaw -- openclaw gateway
+```
+
+See [nono vs Containers](/cli/internals/containers) for a detailed comparison.

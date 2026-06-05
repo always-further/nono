@@ -1,0 +1,866 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nono.sh/schemas/nono-profile.schema.json",
+  "title": "nono Profile",
+  "description": "A nono profile definition that configures sandbox capabilities, filesystem access, network policy, and other security settings for running untrusted processes.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema URI for editor validation and autocompletion."
+    },
+    "extends": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      ],
+      "description": "Name of a base profile (or array of base profiles) to inherit from. All fields from the base profile are used as defaults, with this profile's values taking precedence. When an array is given, bases are merged left-to-right before the child is applied. Shared transitive bases are deduplicated: each profile is resolved at most once."
+    },
+    "meta": {
+      "$ref": "#/$defs/ProfileMeta",
+      "description": "Profile metadata including name, version, description, and author."
+    },
+    "security": {
+      "$ref": "#/$defs/SecurityConfig",
+      "description": "Security configuration for process-level isolation modes (signal, IPC, process info, capability elevation, WSL2 proxy policy)."
+    },
+    "groups": {
+      "$ref": "#/$defs/GroupsConfig",
+      "description": "Group composition: include and exclude policy group names resolved from policy.json."
+    },
+    "commands": {
+      "$ref": "#/$defs/CommandsConfig",
+      "description": "Command allow/deny lists applied during sandbox setup."
+    },
+    "filesystem": {
+      "$ref": "#/$defs/FilesystemConfig",
+      "description": "Filesystem access rules specifying which directories and files the sandboxed process can read or write."
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkConfig",
+      "description": "Network access configuration including proxy settings, credential injection, and port allowlists."
+    },
+    "diagnostics": {
+      "$ref": "#/$defs/DiagnosticsConfig",
+      "description": "Diagnostic output controls. These settings do not change sandbox enforcement."
+    },
+    "linux": {
+      "$ref": "#/$defs/LinuxConfig",
+      "description": "Linux-specific hardening controls."
+    },
+    "env_credentials": {
+      "$ref": "#/$defs/SecretsConfig",
+      "description": "Maps keystore account names (or op://, bw://, apple-password://, env:// URIs) to environment variable names. Secrets are loaded from the system keystore at startup."
+    },
+    "secrets": {
+      "$ref": "#/$defs/SecretsConfig",
+      "description": "Alias for env_credentials. Maps keystore account names to environment variable names."
+    },
+    "environment": {
+      "oneOf": [
+        { "$ref": "#/$defs/EnvironmentConfig" },
+        { "type": "null" }
+      ],
+      "description": "Controls which environment variables are passed to the sandboxed process. By default all variables are inherited."
+    },
+    "workdir": {
+      "$ref": "#/$defs/WorkdirConfig",
+      "description": "Working directory access configuration controlling whether and how the current working directory is shared with the sandboxed process."
+    },
+    "hooks": {
+      "$ref": "#/$defs/HooksConfig",
+      "description": "Hook configurations for target applications. Maps application names to their hook definitions."
+    },
+    "session_hooks": {
+      "$ref": "#/$defs/SessionHooks",
+      "description": "Session lifecycle hooks. Scripts run outside the sandbox with host privileges before and after the sandboxed process."
+    },
+    "rollback": {
+      "$ref": "#/$defs/RollbackConfig",
+      "description": "Rollback snapshot configuration controlling which files are excluded from undo snapshots."
+    },
+    "undo": {
+      "$ref": "#/$defs/RollbackConfig",
+      "description": "Alias for rollback. Controls which files are excluded from undo snapshots."
+    },
+    "open_urls": {
+      "oneOf": [
+        { "$ref": "#/$defs/OpenUrlConfig" },
+        { "type": "null" }
+      ],
+      "description": "Supervisor-delegated URL opening configuration for OAuth2 login flows and similar operations. When present, replaces the base profile's config entirely. When absent or null, inherits from the base profile. To clear inherited permissions, provide an explicit empty object with allow_origins: [] and allow_localhost: false."
+    },
+    "allow_launch_services": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "null" }
+      ],
+      "description": "Opt-in gate for temporary direct LaunchServices opens on macOS. Must be paired with the CLI flag --allow-launch-services. Set to null to inherit from the base profile."
+    },
+    "allow_gpu": {
+      "oneOf": [
+        { "type": "boolean" },
+        { "type": "null" }
+      ],
+      "description": "Opt-in gate for GPU access (Metal/IOKit on Apple Silicon macOS, render nodes on Linux). Intel Macs are not yet supported. Must be paired with the CLI flag --allow-gpu. Set to null to inherit from the base profile."
+    },
+    "interactive": {
+      "type": "boolean",
+      "description": "Deprecated. Parsed for backward compatibility but ignored. Supervised mode preserves TTY by default.",
+      "deprecated": true
+    },
+    "packs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Pack dependencies verified at launch. Each entry is a namespace/name reference to an installed pack."
+    },
+    "command_args": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Extra arguments appended to the child command at launch. Supports variable expansion (e.g. $NONO_PACKAGES)."
+    },
+    "unsafe_macos_seatbelt_rules": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "macOS-only. Expert escape hatch: raw Seatbelt S-expression rules applied verbatim to the sandbox policy. Each entry must be a valid S-expression, e.g. \"(allow iokit-open)\". Rules are validated at load time and rejected if malformed. Ignored on Linux. Surfaced prominently in 'nono profile show' output. If a rule pattern becomes common, prefer promoting it to a typed first-class capability instead."
+    }
+  },
+  "$defs": {
+    "ProfileMeta": {
+      "type": "object",
+      "description": "Profile metadata.",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable name of this profile."
+        },
+        "version": {
+          "type": "string",
+          "description": "Version string for this profile definition."
+        },
+        "description": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Optional description of what this profile is for."
+        },
+        "author": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Optional author or maintainer of this profile."
+        }
+      }
+    },
+    "SecurityConfig": {
+      "type": "object",
+      "description": "Security configuration for process-level isolation modes.",
+      "additionalProperties": false,
+      "properties": {
+        "signal_mode": {
+          "oneOf": [
+            { "$ref": "#/$defs/ProfileSignalMode" },
+            { "type": "null" }
+          ],
+          "description": "Signal isolation mode controlling whether the sandboxed process can signal other processes. When null, inherits from the base profile (defaults to isolated)."
+        },
+        "process_info_mode": {
+          "oneOf": [
+            { "$ref": "#/$defs/ProfileProcessInfoMode" },
+            { "type": "null" }
+          ],
+          "description": "Process inspection mode controlling whether the sandboxed process can read process info for other processes. When null, defaults to isolated."
+        },
+        "ipc_mode": {
+          "oneOf": [
+            { "$ref": "#/$defs/ProfileIpcMode" },
+            { "type": "null" }
+          ],
+          "description": "IPC mode controlling whether the sandboxed process can use POSIX semaphores (needed for multiprocessing). When null, defaults to shared_memory_only."
+        },
+        "capability_elevation": {
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "null" }
+          ],
+          "description": "Enable runtime capability elevation via seccomp-notify (Linux). When true, the supervisor intercepts file opens and can grant access to paths not in the initial capability set. When false, the sandbox is static."
+        },
+        "wsl2_proxy_policy": {
+          "oneOf": [
+            { "$ref": "#/$defs/Wsl2ProxyPolicy" },
+            { "type": "null" }
+          ],
+          "description": "WSL2 proxy fallback policy. Controls behavior when proxy-only network mode cannot be kernel-enforced on WSL2 (seccomp notify returns EBUSY). Default: error (refuse to run). Set to insecure_proxy to allow degraded execution where the credential proxy runs but network is not locked down."
+        }
+      }
+    },
+    "Wsl2ProxyPolicy": {
+      "type": "string",
+      "enum": ["error", "insecure_proxy"],
+      "description": "WSL2 proxy fallback policy. 'error' (default) refuses to run if proxy-only mode cannot be kernel-enforced. 'insecure_proxy' allows degraded execution where the credential proxy injects credentials but the sandboxed process is not prevented from bypassing the proxy."
+    },
+    "LinuxConfig": {
+      "type": "object",
+      "description": "Linux-specific hardening controls.",
+      "additionalProperties": false,
+      "properties": {
+        "af_unix_mediation": {
+          "oneOf": [
+            { "$ref": "#/$defs/LinuxAfUnixMediation" },
+            { "type": "null" }
+          ],
+          "description": "Opt-in pathname AF_UNIX mediation. 'off' preserves compatibility. 'pathname' requires explicit filesystem.unix_socket* grants for pathname Unix socket connect/bind."
+        }
+      }
+    },
+    "LinuxAfUnixMediation": {
+      "type": "string",
+      "enum": ["off", "pathname"],
+      "description": "Linux pathname AF_UNIX mediation mode."
+    },
+    "ProfileSignalMode": {
+      "type": "string",
+      "enum": ["isolated", "allow_same_sandbox", "allow_all"],
+      "description": "Signal isolation mode for the sandboxed process."
+    },
+    "ProfileProcessInfoMode": {
+      "type": "string",
+      "enum": ["isolated", "allow_same_sandbox", "allow_all"],
+      "description": "Process inspection mode for the sandboxed process."
+    },
+    "ProfileIpcMode": {
+      "type": "string",
+      "enum": ["shared_memory_only", "full"],
+      "description": "IPC mode for the sandboxed process. 'shared_memory_only' allows POSIX shared memory but denies semaphores. 'full' enables both shared memory and semaphores (required for Python multiprocessing and similar runtimes)."
+    },
+    "WhenPredicate": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      ],
+      "description": "Platform predicate string or any-of array, e.g. linux, macos:>=15, linux:fedora-like:>=43, linux:fedora:>=43:workstation, or !linux:nixos."
+    },
+    "ConditionalPath": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path": { "type": "string" },
+            "when": { "$ref": "#/$defs/WhenPredicate" }
+          }
+        }
+      ]
+    },
+    "ConditionalName": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string" },
+            "when": { "$ref": "#/$defs/WhenPredicate" }
+          }
+        }
+      ]
+    },
+    "ConditionalOrigin": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["origin"],
+          "properties": {
+            "origin": { "type": "string" },
+            "when": { "$ref": "#/$defs/WhenPredicate" }
+          }
+        }
+      ]
+    },
+    "FilesystemConfig": {
+      "type": "object",
+      "description": "Filesystem access rules for the sandboxed process.",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Directories with read+write access."
+        },
+        "read": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Directories with read-only access."
+        },
+        "write": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Directories with write-only access."
+        },
+        "allow_file": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Single files with read+write access."
+        },
+        "read_file": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Single files with read-only access."
+        },
+        "write_file": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Single files with write-only access."
+        },
+        "deny": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Paths denied filesystem access. Denies apply regardless of other allow rules."
+        },
+        "bypass_protection": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Paths exempted from group-level deny rules. Each path must also appear in an allow/read/write section to actually grant access; bypass_protection only removes the deny."
+        },
+        "suppress_save_prompt": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Paths whose runtime denials should not be offered in the save-profile prompt. Does not grant access, remove deny rules, or hide diagnostic output."
+        },
+        "ignore": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalPath" },
+          "description": "Alias for suppress_save_prompt. Prefer filesystem.suppress_save_prompt in new profiles."
+        }
+      }
+    },
+    "GroupsConfig": {
+      "type": "object",
+      "description": "Group composition for the sandboxed process.",
+      "additionalProperties": false,
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalName" },
+          "description": "Policy group names to include. Groups are resolved against policy.json."
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalName" },
+          "description": "Policy group names to remove from the resolved group set (subtractive composition)."
+        }
+      }
+    },
+    "CommandsConfig": {
+      "type": "object",
+      "description": "Command allow/deny lists applied during sandbox setup.",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Deprecated in v0.33.0. Startup-only command allowlist override. Not enforced for child processes; prefer resource-based controls instead.",
+          "deprecated": true
+        },
+        "deny": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Deprecated in v0.33.0. Startup-only command denylist extension. Not enforced for child processes; prefer resource-based controls instead.",
+          "deprecated": true
+        }
+      }
+    },
+    "NetworkConfig": {
+      "type": "object",
+      "description": "Network access configuration including proxy, credential injection, and port allowlists.",
+      "additionalProperties": false,
+      "properties": {
+        "block": {
+          "type": "boolean",
+          "description": "Block network access. Network is allowed by default; set to true to deny all outbound traffic."
+        },
+        "network_profile": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Network proxy profile name from network-policy.json. When set, outbound traffic is filtered through the proxy. Set to null to clear an inherited value."
+        },
+        "allow_domain": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/$defs/AllowDomainWithEndpoints" }
+            ]
+          },
+          "description": "Additional domains to allow through the proxy. Entries can be plain hostname strings (CONNECT tunnel, no L7 filtering) or objects with endpoint rules (TLS-intercepted method+path filtering). When endpoints are present, only matching requests are allowed (default-deny)."
+        },
+        "proxy_allow": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Legacy alias for allow_domain."
+        },
+        "allow_proxy": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Legacy alias for allow_domain."
+        },
+        "credentials": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Credential service names to enable via the reverse proxy."
+        },
+        "proxy_credentials": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Legacy alias for credentials."
+        },
+        "open_port": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Localhost TCP IPC (connect+bind). Port 0: macOS only (localhost:* outbound); Linux needs explicit ports."
+        },
+        "port_allow": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Legacy alias for open_port."
+        },
+        "allow_port": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Legacy alias for open_port."
+        },
+        "listen_port": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "TCP ports the sandboxed child may listen on."
+        },
+        "custom_credentials": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/CustomCredentialDef"
+          },
+          "description": "Custom credential definitions for services not in network-policy.json. Keys are service names used with --credential."
+        },
+        "upstream_proxy": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Upstream proxy address (host:port) for enterprise proxy passthrough."
+        },
+        "external_proxy": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Legacy alias for upstream_proxy."
+        },
+        "upstream_bypass": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hosts to bypass the upstream proxy and route directly. Supports exact hostnames and wildcard suffixes (e.g., *.example.com)."
+        },
+        "external_proxy_bypass": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Legacy alias for upstream_bypass."
+        }
+      }
+    },
+    "CustomCredentialDef": {
+      "type": "object",
+      "description": "Custom credential route definition for the reverse proxy. Defines how to route requests and inject credentials for a service. Must have either credential_key or auth (mutually exclusive).",
+      "additionalProperties": false,
+      "required": ["upstream"],
+      "properties": {
+        "upstream": {
+          "type": "string",
+          "description": "Upstream URL to proxy requests to (e.g., \"https://api.telegram.org\"). Must use HTTPS, or HTTP only for loopback addresses."
+        },
+        "credential_key": {
+          "type": "string",
+          "description": "Keystore account name for the credential (e.g., \"telegram_bot_token\"), or a 1Password op:// URI, Bitwarden bw:// URI, apple-password:// URI, file:// URI, or env:// URI (e.g., \"env://MY_TOKEN\"). Mutually exclusive with auth."
+        },
+        "auth": {
+          "$ref": "#/$defs/OAuth2Config",
+          "description": "OAuth2 client_credentials configuration. When present, the proxy handles token exchange automatically. Mutually exclusive with credential_key."
+        },
+        "inject_mode": {
+          "$ref": "#/$defs/InjectMode",
+          "description": "Credential injection mode. Determines how the credential is inserted into outbound requests.",
+          "default": "header"
+        },
+        "inject_header": {
+          "type": "string",
+          "description": "HTTP header name to inject the credential into. Only used when inject_mode is \"header\".",
+          "default": "Authorization"
+        },
+        "credential_format": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Template with {} for the secret (header inject mode). If set, used as-is. If omitted: Authorization header (case-insensitive) defaults to Bearer {}; other headers default to {} (secret only)."
+        },
+        "path_pattern": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Pattern to match in incoming URL path, using {} as placeholder for the phantom token. Required when inject_mode is \"url_path\"."
+        },
+        "path_replacement": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Pattern for outgoing URL path, using {} as placeholder for the real credential. Defaults to path_pattern if not specified. Only used when inject_mode is \"url_path\"."
+        },
+        "query_param_name": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Name of the query parameter to add or replace with the credential. Required when inject_mode is \"query_param\"."
+        },
+        "proxy": {
+          "oneOf": [
+            { "$ref": "#/$defs/ProxyInjectConfig" },
+            { "type": "null" }
+          ],
+          "description": "Optional proxy-side overrides for phantom token parsing. When omitted, proxy behavior uses top-level custom credential fields."
+        },
+        "env_var": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Explicit environment variable name for the phantom token (e.g., \"OPENAI_API_KEY\"). Required when credential_key is a URI manager reference (op://, bw://, apple-password://, or file://). Optional for env:// (derived from the URI)."
+        },
+        "endpoint_rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EndpointRule"
+          },
+          "description": "L7 endpoint rules for method+path filtering. When non-empty, only requests matching at least one rule are allowed (default-deny). When empty or absent, all endpoints are permitted.",
+          "default": []
+        },
+        "tls_ca": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Path to a PEM-encoded CA certificate file for upstream TLS. When set, the proxy trusts this CA in addition to system roots. Required for upstreams with self-signed or private CA certificates (e.g. a Kubernetes API server). Supports tilde (~) expansion."
+        },
+        "tls_client_cert": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Path to a PEM-encoded client certificate for upstream mutual TLS (mTLS). When set together with tls_client_key, the proxy presents this certificate during the TLS handshake. Required for upstreams that enforce client-certificate authentication."
+        },
+        "tls_client_key": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Path to the PEM-encoded private key corresponding to tls_client_cert. Must be set together with tls_client_cert."
+        }
+      }
+    },
+    "EndpointRule": {
+      "type": "object",
+      "description": "HTTP method+path access rule for restricting which API endpoints an agent can access through a credential route.",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "description": "HTTP method to match (e.g., \"GET\", \"POST\") or \"*\" for any method."
+        },
+        "path": {
+          "type": "string",
+          "description": "URL path glob pattern. Uses standard glob syntax: \"*\" matches one path segment, \"**\" matches zero or more segments."
+        }
+      }
+    },
+    "AllowDomainWithEndpoints": {
+      "type": "object",
+      "description": "Domain with fine-grained method+path endpoint restrictions. Requires TLS interception for L7 filtering. When endpoints is non-empty, only matching method+path combinations are allowed (default-deny).",
+      "additionalProperties": false,
+      "required": ["domain", "endpoints"],
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Domain hostname to allow (e.g., \"api.github.com\")."
+        },
+        "endpoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRule" },
+          "description": "L7 method+path rules. Only requests matching at least one rule are allowed."
+        }
+      }
+    },
+    "InjectMode": {
+      "type": "string",
+      "enum": ["header", "url_path", "query_param", "basic_auth"],
+      "description": "Credential injection mode for the reverse proxy.",
+      "default": "header"
+    },
+    "ProxyInjectConfig": {
+      "type": "object",
+      "description": "Optional proxy-side overrides for phantom token parsing. These settings only affect incoming client request validation, not outbound upstream credential injection.",
+      "additionalProperties": false,
+      "properties": {
+        "inject_mode": {
+          "oneOf": [
+            { "$ref": "#/$defs/InjectMode" },
+            { "type": "null" }
+          ],
+          "description": "Override inject mode for proxy-side phantom token parsing. Falls back to parent inject_mode when omitted."
+        },
+        "inject_header": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Override header name for proxy-side header/basic_auth modes. Falls back to parent inject_header when omitted."
+        },
+        "credential_format": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Override credential format for proxy-side header mode. Falls back to parent credential_format when omitted."
+        },
+        "path_pattern": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Override path pattern for proxy-side url_path mode. Falls back to parent path_pattern when omitted."
+        },
+        "path_replacement": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Override path replacement for proxy-side url_path mode. Falls back to parent path_replacement when omitted."
+        },
+        "query_param_name": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Override query parameter name for proxy-side query_param mode. Falls back to parent query_param_name when omitted."
+        }
+      }
+    },
+    "OAuth2Config": {
+      "type": "object",
+      "description": "OAuth2 client_credentials configuration for automatic token exchange. The proxy exchanges client_id + client_secret for an access_token, caches it, and refreshes automatically before expiry.",
+      "additionalProperties": false,
+      "required": ["token_url", "client_id", "client_secret"],
+      "properties": {
+        "token_url": {
+          "type": "string",
+          "description": "Token endpoint URL (e.g., \"https://auth.example.com/oauth/token\"). Must use HTTPS, or HTTP only for loopback addresses."
+        },
+        "client_id": {
+          "type": "string",
+          "description": "Client ID — plain value or credential reference (env://, file://, op://)."
+        },
+        "client_secret": {
+          "type": "string",
+          "description": "Client secret — credential reference (env://, file://, op://)."
+        },
+        "scope": {
+          "type": "string",
+          "description": "OAuth2 scopes (space-separated). Empty or omitted means no scope parameter is sent.",
+          "default": ""
+        }
+      }
+    },
+    "SecretsConfig": {
+      "type": "object",
+      "description": "Maps keystore account names (or op://, bw://, apple-password://, env:// URIs) to environment variable names. Secrets are loaded from the system keystore under the service name \"nono\".",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Environment variable name to inject the secret value into."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["env_var"],
+            "properties": {
+              "env_var": {
+                "type": "string",
+                "description": "Environment variable name to inject the secret value into."
+              },
+              "when": { "$ref": "#/$defs/WhenPredicate" }
+            }
+          }
+        ]
+      }
+    },
+    "EnvironmentConfig": {
+      "type": "object",
+      "description": "Controls which environment variables are passed to the sandboxed process. By default all variables are inherited. Precedence (highest to lowest): 1. Hardcoded dangerous vars (always stripped), 2. deny_vars (stripped even if in allow_vars), 3. allow_vars (if non-empty, only matching vars pass).",
+      "additionalProperties": false,
+      "properties": {
+        "allow_vars": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^([^*]+\\*?|\\*)$" },
+          "description": "Allow-list of environment variable names passed to the sandboxed process. Supports exact names (\"PATH\") and prefix patterns ending with * (\"AWS_*\"). When empty or absent, all variables are allowed."
+        },
+        "deny_vars": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^([^*]+\\*?|\\*)$" },
+          "description": "Deny-list of environment variable names stripped from the sandboxed process. Supports exact names (\"GH_TOKEN\") and prefix patterns ending with * (\"GITHUB_*\"). Denied vars are stripped even if they also appear in allow_vars."
+        }
+      }
+    },
+    "WorkdirConfig": {
+      "type": "object",
+      "description": "Working directory access configuration.",
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "$ref": "#/$defs/WorkdirAccess",
+          "description": "Access level for the current working directory.",
+          "default": "none"
+        }
+      }
+    },
+    "DiagnosticsConfig": {
+      "type": "object",
+      "description": "Diagnostic output controls. Suppressions only affect nono's footer; the sandbox still denies the underlying operations.",
+      "additionalProperties": false,
+      "properties": {
+        "suppress_system_services": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Non-filesystem sandbox operation names to hide from diagnostic footers, such as forbidden-exec-sugid."
+        }
+      }
+    },
+    "WorkdirAccess": {
+      "type": "string",
+      "enum": ["none", "read", "write", "readwrite"],
+      "description": "Working directory access level controlling whether and how the current working directory is shared with the sandboxed process."
+    },
+    "HooksConfig": {
+      "type": "object",
+      "description": "Hook configurations for target applications. Keys are application names (e.g., \"claude-code\"), values define the hook to install.",
+      "additionalProperties": {
+        "$ref": "#/$defs/HookConfig"
+      }
+    },
+    "HookConfig": {
+      "type": "object",
+      "description": "Hook definition for a target application.",
+      "additionalProperties": false,
+      "required": ["event", "matcher", "script"],
+      "properties": {
+        "event": {
+          "type": "string",
+          "description": "Event that triggers the hook (e.g., \"PostToolUseFailure\")."
+        },
+        "matcher": {
+          "type": "string",
+          "description": "Regex pattern to match tool names (e.g., \"Read|Write|Edit|Bash\")."
+        },
+        "script": {
+          "type": "string",
+          "description": "Script filename from data/hooks/ to install."
+        }
+      }
+    },
+    "SessionHooks": {
+      "type": "object",
+      "description": "Session lifecycle hooks. before runs before the sandboxed child is forked; after runs after it exits. Both run outside the sandbox with host privileges.",
+      "additionalProperties": false,
+      "properties": {
+        "before": {
+          "$ref": "#/$defs/SessionHook",
+          "description": "Hook executed before the sandboxed process starts. May export environment variables to the sandboxed child via NONO_ENV_FILE."
+        },
+        "after": {
+          "$ref": "#/$defs/SessionHook",
+          "description": "Hook executed after the sandboxed process exits. Receives the child exit code via NONO_EXIT_CODE."
+        }
+      }
+    },
+    "SessionHook": {
+      "type": "object",
+      "description": "A single session lifecycle hook configuration.",
+      "additionalProperties": false,
+      "required": ["script"],
+      "properties": {
+        "script": {
+          "type": "string",
+          "description": "Absolute path to the hook script. Must be an executable regular file owned by the current user or root, not located in a world-writable directory. Validated at execution time."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional timeout in seconds. If set, the hook is killed (SIGTERM then SIGKILL) after this duration. If absent, no timeout is enforced."
+        }
+      }
+    },
+    "RollbackConfig": {
+      "type": "object",
+      "description": "Rollback snapshot configuration controlling which files are excluded from undo snapshots.",
+      "additionalProperties": false,
+      "properties": {
+        "exclude_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Patterns to exclude from rollback snapshots. Matched against path components (exact match) or as substrings of the full path if they contain a slash."
+        },
+        "exclude_globs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns to exclude from rollback snapshots. Matched against the filename using standard glob syntax."
+        }
+      }
+    },
+    "OpenUrlConfig": {
+      "type": "object",
+      "description": "Configuration for supervisor-delegated URL opening, used for OAuth2 login flows and similar operations.",
+      "additionalProperties": false,
+      "properties": {
+        "allow_origins": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConditionalOrigin" },
+          "description": "Allowed URL origins (scheme + host, e.g., \"https://console.anthropic.com\"). The supervisor validates each URL open request against this list. An empty list means no URLs are allowed."
+        },
+        "allow_localhost": {
+          "type": "boolean",
+          "description": "Allow opening http://localhost and http://127.0.0.1 URLs, typically for OAuth2 callback handlers."
+        }
+      }
+    }
+  }
+}

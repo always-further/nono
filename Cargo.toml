@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nono",
+    "crates/nono-cli",
+    "crates/nono-proxy",
+    "bindings/c",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+authors = ["Luke Hinds"]
+license = "Apache-2.0"
+repository = "https://github.com/always-further/nono"
+homepage = "https://github.com/always-further/nono"
+
+[workspace.dependencies]
+# Error handling
+thiserror = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Secure credential handling
+zeroize = { version = "1", features = ["alloc", "serde"] }
+
+# Hashing
+sha2 = "0.11"
+
+# Filesystem walking
+walkdir = "2"
+ignore = "0.4"
+globset = "0.4"
+
+# Shared system dependencies
+nix = "0.31.3"
+landlock = "0.4"
+url = "2"
+getrandom = "0.4"
+
+# Async runtime and HTTP
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync", "time"] }
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = "0.1"
+
+# Testing
+tempfile = "3"
+
+# C FFI bindings
+cbindgen = "0.29"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,96 @@
+---
+title: Installation
+description: How to install nono on your system
+---
+
+## Homebrew (macOS/Linux)
+
+```bash
+brew install nono
+```
+
+## Linux Package Managers
+
+### Debian/Ubuntu
+
+Download the `.deb` package from [GitHub Releases](https://github.com/always-further/nono/releases):
+
+```bash
+VERSION=$(curl -sI https://github.com/always-further/nono/releases/latest | grep -i location | grep -oP 'v\K[0-9a-zA-Z.-]+')
+ARCH=$(dpkg --print-architecture)
+wget https://github.com/always-further/nono/releases/download/v${VERSION}/nono-cli_${VERSION}_${ARCH}.deb
+sudo dpkg -i nono-cli_${VERSION}_${ARCH}.deb
+```
+
+### Fedora/RHEL/openSUSE
+
+Download the `.rpm` package from [GitHub Releases](https://github.com/always-further/nono/releases):
+
+```bash
+VERSION=$(curl -sI https://github.com/always-further/nono/releases/latest | grep -i location | grep -oP 'v\K[0-9a-zA-Z.-]+')
+ARCH=$(uname -m)
+wget https://github.com/always-further/nono/releases/download/v${VERSION}/nono-cli-${VERSION}-1.${ARCH}.rpm
+sudo dnf install ./nono-cli-${VERSION}-1.${ARCH}.rpm
+```
+
+For openSUSE, use `sudo zypper install ./nono-cli-${VERSION}-1.${ARCH}.rpm` instead.
+
+### Nix
+
+nono is available in [nixpkgs](https://search.nixos.org/packages?channel=unstable&show=nono) as `nono`:
+
+```nix
+# Installing in NixOS
+environment.systemPackages = [
+  pkgs.nono
+];
+```
+
+```bash
+# Loading in shell
+nix shell nixpkgs#nono
+# Or using the legacy CLI
+nix-shell -p nono
+```
+
+### Arch Linux (AUR)
+
+nono is available on the [Arch User Repository](https://aur.archlinux.org/packages/nono-ai-bin) as `nono-ai-bin`, a community-maintained binary package that tracks official GitHub releases and verifies SHA256 checksums. It supports `x86_64` and `aarch64`.
+
+```bash
+# Using yay
+yay -S nono-ai-bin
+
+# Using paru
+paru -S nono-ai-bin
+
+# Manual install with makepkg
+git clone https://aur.archlinux.org/nono-ai-bin.git
+cd nono-ai-bin
+makepkg -si
+```
+
+<Note>
+  This package is not maintained by the nono team. For issues with the AUR package itself, please report them on the [AUR page](https://aur.archlinux.org/packages/nono-ai-bin).
+</Note>
+
+Other distributions are in the process of being packaged. In the meantime, you can use the prebuilt binaries or build from source.
+
+## Building from Source
+
+See the [Development Guide](/cli/development/index) for instructions on building nono from source.
+
+## Platform Support
+
+| Platform | Mechanism | Status |
+|----------|-----------|--------|
+| Linux (kernel 5.13+) | Landlock LSM | Supported |
+| macOS | Seatbelt (sandbox_init) | Supported |
+| Windows (WSL2) | Landlock LSM (via WSL2 kernel) | Supported ([84% feature coverage](/cli/internals/wsl2-feature-matrix)) |
+| Windows (native) | - | Not supported |
+
+### WSL2
+
+nono runs inside [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) using the same Landlock enforcement as native Linux. The WSL2 kernel (6.6) ships with `CONFIG_SECURITY_LANDLOCK=y` enabled by default. Install nono inside your WSL2 distribution using any of the Linux methods above.
+
+See [WSL2 Support](/cli/internals/wsl2) for the full compatibility details and known limitations.

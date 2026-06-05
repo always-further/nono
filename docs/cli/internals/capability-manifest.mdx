@@ -1,0 +1,222 @@
+---
+title: "Capability Manifest"
+description: "Schema-first capability manifest for machine-consumable sandbox configuration"
+---
+
+# Capability Manifest
+
+A **capability manifest** is a fully-resolved, portable JSON document describing what a nono sandbox enforces. It is the machine-consumable contract for sandbox configuration.
+
+## Profiles vs Manifests
+
+| | Profile | Manifest |
+|---|---|---|
+| **Audience** | Human authors | Machines (K8s operators, CI, policy engines) |
+| **Composition** | `extends`, group references, legacy aliases | Fully resolved, no composition |
+| **Contains** | Hooks, inheritance, deprecated fields | Only enforcement-relevant capabilities |
+| **Format** | JSON with `$schema` pointing to profile schema | JSON with `$schema` pointing to manifest schema |
+
+Profiles compile down to manifests. A manifest is what a fully-resolved profile looks like once all inheritance, group expansion, and patching is applied.
+
+```bash
+# Export a profile as a manifest
+nono profile show claude-code --format manifest > manifest.json
+
+# Use a manifest directly
+nono run --config manifest.json -- my-agent
+```
+
+## Schema
+
+The manifest schema is at [`crates/nono/schema/capability-manifest.schema.json`](https://github.com/always-further/nono/blob/main/crates/nono/schema/capability-manifest.schema.json), using JSON Schema Draft 2020-12.
+
+### Capability Domains
+
+The schema defines four capability domains, modeled after [WASI's capability-based security model](https://wasi.dev/):
+
+#### Filesystem
+
+Controls which paths the sandboxed process can access and at what level.
+
+```json
+{
+  "filesystem": {
+    "grants": [
+      { "path": "/workspace", "access": "readwrite" },
+      { "path": "/usr/lib", "access": "read" },
+      { "path": "/tmp/output.log", "access": "readwrite", "type": "file" }
+    ],
+    "deny": [
+      { "path": "~/.ssh" },
+      { "path": "~/.aws" }
+    ]
+  }
+}
+```
+
+- **`grants`**: Each grant specifies a `path`, an `access` mode (`read`, `write`, or `readwrite`), and an optional `type` (`file` or `directory`, defaults to `directory`).
+- **`deny`**: Paths to explicitly deny. On macOS/Seatbelt, deny rules take precedence over grants. On Linux/Landlock, deny is expressed by omitting grants.
+- Paths are **unresolved strings** (may use `~`). Canonicalization happens at enforcement time, keeping manifests portable across machines.
+
+#### Network
+
+Controls outbound connectivity, domain filtering, L7 endpoint restrictions, and port allowlists.
+
+```json
+{
+  "network": {
+    "mode": "proxy",
+    "allow_domains": ["api.github.com", ".googleapis.com"],
+    "endpoints": [
+      {
+        "host": "api.github.com:443",
+        "rules": [
+          { "method": "GET", "path": "/repos/*/issues/**" },
+          { "method": "POST", "path": "/repos/*/issues/*/comments" }
+        ]
+      }
+    ],
+    "ports": {
+      "connect": [443],
+      "bind": [3000],
+      "localhost": [5432]
+    },
+    "dns": true
+  }
+}
+```
+
+- **`mode`**: `blocked` (no network), `proxy` (routed through nono proxy for filtering/credential injection), or `unrestricted` (default).
+- **`endpoints`**: Per-host L7 method+path filtering. When `rules` is non-empty, only matching requests are allowed (default-deny). When absent, all paths on that host are permitted.
+- **`ports`**: Fine-grained TCP port control for `connect` (outbound), `bind` (listening), and `localhost` (bidirectional IPC).
+
+#### Credentials
+
+Configures credential routes for the reverse proxy. The sandboxed process never sees the actual credentials.
+
+```json
+{
+  "credentials": [
+    {
+      "name": "github",
+      "upstream": "https://api.github.com",
+      "source": "file:///vault/secrets/github-token",
+      "inject": {
+        "mode": "header",
+        "header": "Authorization",
+        "format": "Bearer {}"
+      },
+      "endpoint_rules": [
+        { "method": "GET", "path": "/repos/*/issues/**" }
+      ]
+    }
+  ]
+}
+```
+
+- **`source`**: URI for the credential. Supported schemes: `env://` (environment variable), `file://` (file contents), `op://` (1Password), `apple-password://` (macOS Keychain), or a bare account name for the system keystore.
+- **`inject`**: How the credential is inserted into outbound requests. Modes: `header` (default), `url_path`, `query_param`, `basic_auth`.
+- **`endpoint_rules`**: Optional L7 filtering per credential route (default-deny when non-empty).
+
+#### Process
+
+Controls process-level isolation and execution strategy.
+
+```json
+{
+  "process": {
+    "allowed_commands": ["git", "npm"],
+    "blocked_commands": ["rm", "sudo"],
+    "signal_mode": "allow_same_sandbox",
+    "process_info_mode": "isolated",
+    "ipc_mode": "full",
+    "exec_strategy": "supervised"
+  }
+}
+```
+
+- **`signal_mode`**: `isolated` (default), `allow_same_sandbox`, or `allow_all`.
+- **`ipc_mode`**: `shared_memory_only` (default) or `full` (needed for Python multiprocessing).
+- **`exec_strategy`**: `direct` (exec, nono disappears), `monitor` (sandbox-then-fork, default), or `supervised` (fork-then-sandbox, supports rollback).
+
+### Rollback
+
+```json
+{
+  "rollback": {
+    "enabled": true,
+    "exclude_patterns": ["node_modules", ".git"],
+    "exclude_globs": ["*.log"]
+  }
+}
+```
+
+## Design Principles
+
+1. **Fully resolved** -- No inheritance, no `extends`, no group references. What you see is what the sandbox enforces.
+2. **No legacy aliases** -- Clean field names only. Legacy compatibility is the profile layer's concern.
+3. **No hooks** -- Hooks are CLI UX, not sandbox enforcement. They belong in profiles.
+4. **Portable paths** -- Paths are unresolved strings. Canonicalization happens at enforcement time.
+5. **Schema-first** -- The JSON Schema is the source of truth. Rust types are generated from it (via [typify](https://github.com/oxidecomputer/typify)), not the other way around.
+6. **Versioned** -- The `version` field (semver) tells consumers which schema fields are available.
+
+## Full Example
+
+```json
+{
+  "version": "0.1.0",
+  "filesystem": {
+    "grants": [
+      { "path": "/workspace", "access": "readwrite" },
+      { "path": "/usr/lib", "access": "read" }
+    ],
+    "deny": [
+      { "path": "~/.ssh" },
+      { "path": "~/.aws" }
+    ]
+  },
+  "network": {
+    "mode": "proxy",
+    "allow_domains": [".googleapis.com"],
+    "endpoints": [
+      {
+        "host": "api.github.com:443",
+        "rules": [
+          { "method": "GET", "path": "/repos/*/issues/**" },
+          { "method": "POST", "path": "/repos/*/issues/*/comments" }
+        ]
+      }
+    ],
+    "ports": { "localhost": [5432] },
+    "dns": true
+  },
+  "credentials": [
+    {
+      "name": "github",
+      "upstream": "https://api.github.com",
+      "source": "file:///vault/secrets/github-token",
+      "inject": {
+        "mode": "header",
+        "header": "Authorization",
+        "format": "Bearer {}"
+      },
+      "endpoint_rules": [
+        { "method": "GET", "path": "/repos/*/issues/**" },
+        { "method": "POST", "path": "/repos/*/issues/*/comments" }
+      ]
+    }
+  ],
+  "process": {
+    "allowed_commands": ["git", "npm", "node"],
+    "blocked_commands": ["rm", "sudo"],
+    "signal_mode": "allow_same_sandbox",
+    "ipc_mode": "full",
+    "exec_strategy": "supervised"
+  },
+  "rollback": {
+    "enabled": true,
+    "exclude_patterns": ["node_modules"],
+    "exclude_globs": ["*.log"]
+  }
+}
+```

@@ -1,0 +1,28 @@
+name: Bump nono docs
+
+on:
+  repository_dispatch:
+    types: [nono-release]
+  workflow_dispatch:
+    inputs:
+      nono_version:
+        description: 'nono version that triggered the rebuild (e.g., v0.33.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild-docs:
+    name: Rebuild docs for nono ${{ github.event.client_payload.nono_version || github.event.inputs.nono_version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # Trigger the existing aggregate-docs workflow via dispatch
+      - name: Trigger docs aggregation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run aggregate-docs.yml

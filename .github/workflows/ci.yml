@@ -1,0 +1,281 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  changes:
+    name: Classify Changes
+    runs-on: ubuntu-latest
+    outputs:
+      run_code_jobs: ${{ steps.classify.outputs.run_code_jobs }}
+      run_docs_checks: ${{ steps.classify.outputs.run_docs_checks }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          run_code_jobs=true
+          run_docs_checks=true
+
+          case "${EVENT_NAME}" in
+            pull_request)
+              base_sha="${PR_BASE_SHA}"
+              head_sha="${PR_HEAD_SHA}"
+              diff_mode="merge-base"
+              ;;
+            push)
+              base_sha="${PUSH_BEFORE_SHA}"
+              head_sha="${PUSH_HEAD_SHA}"
+              diff_mode="direct"
+              ;;
+            *)
+              base_sha=""
+              head_sha=""
+              diff_mode=""
+              ;;
+          esac
+
+          if [[ -n "${base_sha}" && -n "${head_sha}" && "${base_sha}" != "0000000000000000000000000000000000000000" ]]; then
+            if [[ "${diff_mode}" == "merge-base" ]]; then
+              mapfile -t changed_files < <(git diff --name-only "${base_sha}...${head_sha}")
+            else
+              mapfile -t changed_files < <(git diff --name-only "${base_sha}" "${head_sha}")
+            fi
+
+            if [[ ${#changed_files[@]} -gt 0 ]]; then
+              run_code_jobs=false
+              run_docs_checks=false
+
+              for file in "${changed_files[@]}"; do
+                [[ -z "${file}" ]] && continue
+                echo "changed: ${file}"
+
+                if [[ ! "${file}" =~ (^docs/)|(\.md$)|(\.mdx$)|(^LICENSE$)|(^\.github/ISSUE_TEMPLATE/) ]]; then
+                  run_code_jobs=true
+                fi
+
+                if [[ "${file}" =~ (^docs/)|(^\.github/scripts/check-cli-doc-flags\.sh$)|(^crates/nono-cli/src/cli\.rs$) ]]; then
+                  run_docs_checks=true
+                fi
+              done
+            fi
+          fi
+
+          echo "run_code_jobs=${run_code_jobs}" >> "${GITHUB_OUTPUT}"
+          echo "run_docs_checks=${run_docs_checks}" >> "${GITHUB_OUTPUT}"
+
+  test:
+    name: Test
+    needs: changes
+    if: ${{ !startsWith(github.head_ref, 'dependabot/github_actions/') && needs.changes.outputs.run_code_jobs == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --workspace --verbose
+
+      - name: Verify nono does not link libdbus (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/debug/nono"
+          needed="$(objdump -p "$bin" | awk '/NEEDED/ {print $2}')"
+          echo "NEEDED libraries:"
+          echo "$needed"
+          if echo "$needed" | grep -qi '^libdbus'; then
+            echo "::error::$bin links libdbus — the Linux keyring backend regressed off the pure-Rust zbus path"
+            exit 1
+          fi
+          echo "OK: no libdbus dependency"
+
+      - name: Run tests
+        run: cargo test --workspace --verbose
+
+  fmt:
+    name: Rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.run_code_jobs == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  ffi-header:
+    name: Verify FFI Header
+    needs: changes
+    if: ${{ !startsWith(github.head_ref, 'dependabot/github_actions/') && needs.changes.outputs.run_code_jobs == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+
+      - name: Build nono-ffi (regenerates header)
+        run: cargo build -p nono-ffi
+
+      - name: Verify nono.h is up-to-date
+        run: |
+          if ! git diff --exit-code bindings/c/include/nono.h; then
+            echo "ERROR: bindings/c/include/nono.h is out of date"
+            echo "Run 'cargo build -p nono-ffi' and commit the updated header"
+            exit 1
+          fi
+
+  clippy:
+    name: Clippy
+    needs: changes
+    if: ${{ !startsWith(github.head_ref, 'dependabot/github_actions/') && needs.changes.outputs.run_code_jobs == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::unwrap_used
+
+  integration:
+    name: Integration Tests
+    needs: changes
+    if: ${{ !startsWith(github.head_ref, 'dependabot/github_actions/') && needs.changes.outputs.run_code_jobs == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run integration tests
+        run: |
+          if [[ -f ./tests/run_integration_tests.sh ]]; then
+            ./tests/run_integration_tests.sh
+          else
+            echo "No integration tests found, skipping"
+          fi
+
+  audit:
+    name: Cargo Audit
+    needs: changes
+    if: ${{ needs.changes.outputs.run_code_jobs == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  docs-checks:
+    name: Docs Checks
+    needs: changes
+    if: ${{ needs.changes.outputs.run_docs_checks == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Verify docs routes are canonical
+        run: |
+          if rg -n -P 'href="/(?!cli/|assets/)|\]\(/(?!cli/|assets/)' docs/cli; then
+            echo "Found non-canonical absolute docs links in docs/cli."
+            exit 1
+          fi
+
+      - name: Verify docs nav pages exist
+        run: |
+          jq -r '.navigation.groups[].pages[]' docs/docs.json | while read -r page; do
+            if [[ ! -f "docs/${page}.mdx" ]]; then
+              echo "Missing page from docs.json navigation: docs/${page}.mdx"
+              exit 1
+            fi
+          done
+
+      - name: Verify CLI run flags are documented
+        run: |
+          chmod +x .github/scripts/check-cli-doc-flags.sh
+          .github/scripts/check-cli-doc-flags.sh

@@ -1,0 +1,284 @@
+---
+title: Linux Landlock
+description: How nono uses Landlock LSM on Linux for kernel-level enforcement
+---
+
+nono uses Landlock LSM (Linux Security Module) on Linux to enforce capability restrictions at the kernel level.
+
+## What is Landlock?
+
+Landlock is a Linux security module that allows unprivileged processes to sandbox themselves. Unlike traditional LSMs (SELinux, AppArmor) that require root configuration, Landlock can be used by any process to restrict its own capabilities.
+
+Landlock was merged into Linux kernel 5.13 (2021) and has been enhanced in subsequent releases.
+
+## How nono Uses Landlock
+
+nono uses the `landlock` Rust crate to:
+
+1. Detect the available Landlock ABI version
+2. Create a ruleset with the allowed operations
+3. Add path rules for each granted capability
+4. Apply the ruleset to the current process
+
+```rust
+// Simplified: what nono does internally
+let ruleset = Ruleset::new()
+    .handle_access(AccessFs::from_all(abi))?
+    .create()?;
+
+ruleset.add_rule(PathBeneath::new(PathFd::new(path)?, access))?;
+// ... add more rules ...
+
+ruleset.restrict_self()?;
+// After this call, restrictions are permanent
+```
+
+## ABI Versions
+
+Landlock capabilities have evolved across kernel versions:
+
+| Kernel | ABI | New Capabilities |
+|--------|-----|------------------|
+| 5.13+ | v1 | Basic filesystem access control |
+| 5.19+ | v2 | `REFER` - rename/link across directories |
+| 6.2+ | v3 | `TRUNCATE` - file truncation |
+| 6.7+ | v4 | TCP `bind` and `connect` filtering |
+| 6.10+ | v5 | `IOCTL_DEV` - device ioctl filtering |
+| 6.12+ | v6 | Signal and abstract UNIX socket scoping |
+
+nono automatically detects the highest available ABI and uses it. On older kernels, some features are unavailable but core filesystem sandboxing still works.
+
+## Access Rights Mapping
+
+nono maps its capability flags to Landlock access rights:
+
+### Read Access (`--read`)
+
+```rust
+AccessFs::ReadFile
+AccessFs::ReadDir
+AccessFs::Execute
+```
+
+### Write Access (`--write`)
+
+```rust
+AccessFs::WriteFile
+AccessFs::MakeChar
+AccessFs::MakeDir
+AccessFs::MakeReg
+AccessFs::MakeSock
+AccessFs::MakeFifo
+AccessFs::MakeBlock
+AccessFs::MakeSym
+AccessFs::RemoveFile  // File deletion (needed for atomic writes)
+AccessFs::RemoveDir   // Directory deletion (needed for rename() on directories)
+AccessFs::Refer       // Rename/hard link across directories (ABI v2+)
+AccessFs::Truncate    // ABI v3+
+```
+
+Note: `RemoveFile` and `RemoveDir` are both included because `rename()` requires removal rights on the source. This enables atomic write patterns (write to `.tmp` then rename to target) for both files and directories.
+
+### Full Access (`--allow`)
+
+Both read and write access rights combined.
+
+## Network Filtering
+
+Landlock ABI v4 (kernel 6.7+) added TCP network filtering:
+
+```rust
+AccessNet::BindTcp   // Control which ports can be bound
+AccessNet::ConnectTcp // Control outbound connections
+```
+
+<Warning>
+  Network filtering requires kernel 6.7+. On older kernels, nono cannot enforce network restrictions via Landlock and will warn you.
+</Warning>
+
+## Signal and IPC Scoping
+
+Landlock ABI v6 added scope restrictions for process signals and abstract UNIX sockets:
+
+```rust
+Scope::Signal
+Scope::AbstractUnixSocket
+```
+
+nono derives these scopes from the effective capability set:
+
+| Profile / capability setting | Linux V6 behavior |
+|------------------------------|-------------------|
+| `security.signal_mode: "allow_same_sandbox"` | Requests signal scoping and fails closed if the kernel cannot enforce it |
+| `security.signal_mode: "isolated"` | Requests signal scoping when available |
+| `security.signal_mode: "allow_all"` | Does not request signal scoping |
+| `security.ipc_mode: "shared_memory_only"` | Requests abstract UNIX socket scoping when available |
+| `security.ipc_mode: "full"` | Does not request abstract UNIX socket scoping |
+
+`shared_memory_only` is the default IPC mode. On V6 kernels it prevents connecting to abstract UNIX sockets created outside the current Landlock domain. Profiles that need broader runtime IPC compatibility can opt into `ipc_mode: "full"`.
+
+Use verbose dry-run output to see what would be requested and enforced:
+
+```bash
+nono run --dry-run -v --profile claude-code -- claude
+```
+
+Use `nono why` for a focused scope query:
+
+```bash
+nono why --scope signal --profile claude-code
+nono why --scope abstract-unix-socket --profile claude-code
+```
+
+## Pathname Unix Socket Mediation
+
+Landlock filesystem rules and pathname Unix socket IPC are separate security
+surfaces. On Linux, a process that can reach a filesystem-backed Unix socket
+path may be able to communicate with a user-session service through that
+socket unless nono separately mediates AF_UNIX `connect(2)` and `bind(2)`.
+
+For compatibility, this mediation is off by default on Landlock V4+ kernels.
+Profiles that need stricter IPC isolation can opt in:
+
+```json
+{
+  "linux": {
+    "af_unix_mediation": "pathname"
+  },
+  "filesystem": {
+    "unix_socket": ["$XDG_RUNTIME_DIR/bus"],
+    "unix_socket_dir_bind": ["$TMPDIR/my-tool"]
+  }
+}
+```
+
+When enabled, pathname AF_UNIX sockets are default-deny and must match explicit
+`filesystem.unix_socket*` grants. Broad filesystem read/write grants no longer
+imply permission to talk to every socket under those paths.
+
+Allowed pathname sockets are resumed through Linux seccomp user notification.
+Because seccomp receives the syscall before the kernel copies `sockaddr_un`
+from userspace, a multi-threaded sandboxed process can race an allowed
+`connect(2)` or `bind(2)` by mutating that userspace address before the kernel
+continues the syscall. Denied sockets do not have this race because nono returns
+`EACCES` directly and the kernel never runs the original syscall. Treat this
+mode as a strong default-deny IPC hardening layer; avoid broad socket grants for
+untrusted multi-threaded workloads.
+
+High-risk socket categories include user service managers, session buses,
+keyring and credential agents, SSH/GPG agents, container runtimes, and package
+manager daemons. Hardened profiles should grant only the specific sockets they
+need.
+
+<Warning>
+  If you run with `linux.af_unix_mediation` off in a public-facing,
+  multi-tenant, privacy-sensitive, or otherwise high-risk deployment, run nono
+  inside a stronger outer isolation boundary such as a MicroVM. Firecracker
+  style MicroVMs are a good fit for service deployments where the VM boundary
+  can isolate host user-session services and credentials from the sandboxed
+  agent.
+</Warning>
+
+## Enforcement Status
+
+nono reports the enforcement status after applying the sandbox:
+
+| Status | Meaning |
+|--------|---------|
+| `FullyEnforced` | All requested restrictions are active |
+| `PartiallyEnforced` | Some restrictions active, others unavailable (older kernel) |
+| `NotEnforced` | Landlock not available on this system |
+
+Use `-v` to see the enforcement status:
+
+```bash
+nono run -v --allow-cwd -- command
+# Output includes: Sandbox status: FullyEnforced
+```
+
+## Checking Landlock Availability
+
+```bash
+# Check if Landlock is in the LSM list
+cat /sys/kernel/security/lsm
+# Should include "landlock"
+
+# Check kernel version
+uname -r
+# 5.13+ required, 6.7+ for network filtering
+```
+
+### Enabling Landlock
+
+If Landlock is not listed in `/sys/kernel/security/lsm`, you may need to:
+
+1. **Check kernel config**: Ensure `CONFIG_SECURITY_LANDLOCK=y`
+2. **Add to boot params**: Add `lsm=landlock,lockdown,yama,integrity,apparmor,bpf` to kernel boot parameters
+3. **Reboot**
+
+Most modern distributions (Ubuntu 22.04+, Fedora 35+, Debian 12+) have Landlock enabled by default.
+
+## Irreversibility
+
+Once `restrict_self()` is called:
+
+- The ruleset is permanently applied
+- No API exists to add more permissions
+- Child processes inherit the restrictions
+- The only escape is a kernel exploit
+
+This is enforced by the kernel - nono cannot undo it even if it wanted to.
+
+## Debugging
+
+If a command fails with permission errors:
+
+1. **Run with dry-run**: See what capabilities would be granted
+   ```bash
+   nono run --allow-cwd --dry-run -- command
+   ```
+
+2. **Check verbose output**:
+   ```bash
+   nono run -vvv --allow-cwd -- command
+   ```
+
+3. **Check dmesg for Landlock denials**:
+   ```bash
+   dmesg | grep -i landlock
+   ```
+
+4. **Use strace**: See which syscalls are being denied
+   ```bash
+   strace -f nono run --allow-cwd -- command 2>&1 | grep EACCES
+   ```
+
+## Limitations
+
+### Kernel Version Requirements
+
+- Basic sandboxing requires kernel 5.13+
+- Full filesystem control requires kernel 6.2+
+- Network filtering requires kernel 6.7+
+- Signal and abstract UNIX socket scoping requires Landlock ABI v6
+
+### No Network Filtering on Older Kernels
+
+Without ABI v4 (kernel 6.7+), Landlock cannot filter TCP connections. nono will warn if you use `--block-net` on an older kernel. On kernels 6.7+, nono uses Landlock's `AccessNet::BindTcp` and `AccessNet::ConnectTcp` to block TCP traffic.
+
+Note: DNS resolution (UDP) is not blocked by Landlock, only TCP connections.
+
+### Bind Mounts
+
+Landlock follows bind mounts. If `/home` is bind-mounted to `/mnt/home`, access to one affects the other. This is usually not a concern but can be surprising in complex mount configurations.
+
+### Special Filesystems
+
+Landlock may behave differently with special filesystems (procfs, sysfs, etc.). nono does not grant access to these by default.
+
+## References
+
+- [Landlock documentation](https://landlock.io/)
+- [Kernel documentation](https://docs.kernel.org/userspace-api/landlock.html)
+- [landlock-rs crate](https://docs.rs/landlock/latest/landlock/)
+- [LWN article on Landlock](https://lwn.net/Articles/859908/)

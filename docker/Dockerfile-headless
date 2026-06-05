@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.7
+#
+# Headless build — no libdbus / Secret Service dependency.
+#
+# Use this image for CI runners, serverless, and container environments
+# where D-Bus is unavailable. Credentials must be supplied via env://,
+# file://, or op:// references instead of the system keyring.
+#
+# Build with:
+#   docker buildx build -f docker/Dockerfile-headless -t nono-headless .
+
+FROM rust:1-bookworm AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p nono-cli --no-default-features && \
+    cp target/release/nono /usr/local/bin/nono
+
+FROM debian:bookworm-slim
+
+LABEL org.opencontainers.image.source="https://github.com/always-further/nono"
+LABEL org.opencontainers.image.description="Capability-based sandboxing for untrusted AI agents (headless, no dbus)"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+RUN groupadd -r nono && useradd -r -g nono -s /usr/sbin/nologin nono && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    mkdir /work && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/nono /usr/bin/nono
+
+WORKDIR /work
+USER nono
+ENTRYPOINT ["nono"]

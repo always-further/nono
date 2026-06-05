@@ -1,0 +1,324 @@
+---
+title: Session Lifecycle
+description: Manage live sandbox sessions with ps, attach, detach, stop, inspect, and prune
+---
+
+nono can manage long-lived sandbox sessions as a runtime. Each session is supervised with a PTY-backed terminal, so you can attach and detach from the session terminal at will without stopping the underlying process.
+
+As this occurs via the supervisor, the session lifecycle is decoupled from client attachments. You can start a session detached, let it run while you do something else, then come back and attach to it later.
+
+The important semantic change is:
+
+- **Detached means unattached but still running**
+- **Attached means a human client is currently connected to the session terminal**
+- **Exited means the supervisor has recorded a final exit code**
+
+A session is not frozen just because you detached from it. The sandboxed process keeps running unless it is waiting at an approval boundary or has exited.
+
+## Core Commands
+
+| Command | Purpose |
+|---------|---------|
+| `nono ps` | List live sessions by default, or include exited sessions with `--all` |
+| `nono attach <id>` | Connect to a live session terminal |
+| `nono detach <id>` | Drop the current terminal attachment without stopping the session |
+| `nono stop <id>` | Ask the supervisor to terminate the session cleanly |
+| `nono inspect <id>` | Show session metadata and current state |
+| `nono prune` | Remove old session records from the local registry |
+
+## Session States
+
+Each supervised session has two pieces of runtime state:
+
+- **Lifecycle state**: `running`, `paused`, or `exited`
+- **Attachment state**: `attached` or `detached`
+
+In normal day-to-day usage, the common states are:
+
+- `running + attached`
+- `running + detached`
+- `exited`
+
+`paused` is not the default detached behavior. It is an exceptional state, not the normal runtime model.
+
+## How Sessions Start
+
+### Attached Start
+
+```bash
+nono run --profile claude-code --allow-cwd -- claude
+```
+
+This starts the session attached to your current terminal. You interact with the agent directly from the start.
+
+### Detached Start
+
+```bash
+nono run --detached --profile claude-code --allow-cwd -- claude
+```
+
+This starts the session with no client attached, but the session keeps running under supervisor and PTY management.
+
+If startup succeeds, nono prints a session id:
+
+```text
+Started detached session a3f7c2.
+Attach with: nono attach a3f7c2
+```
+
+Detached startup is fail-closed. nono only reports success once the session registry entry and attach socket are both ready.
+
+## Inspecting Live Sessions
+
+Use `nono ps` to see active sessions:
+
+```bash
+nono ps
+```
+
+Example:
+
+```text
+SESSION    NAME         STATUS     ATTACH     PID      UPTIME     PROFILE        COMMAND
+a3f7c2     calm-node    running    detached   4821     2m         claude-code    claude
+b8e1d4     -            running    attached   5103     30s        -              python3 main.py
+```
+
+Use `--all` to include exited sessions:
+
+```bash
+nono ps --all
+```
+
+Use `--json` for automation:
+
+```bash
+nono ps --json
+```
+
+## Attaching and Detaching
+
+### Attach to a Live Session
+
+```bash
+nono attach a3f7c2
+```
+
+Attach connects to the live PTY session and redraws the current terminal state from the runtime’s stored terminal model.
+
+If another client is already attached, the supervisor rejects the attach attempt.
+
+### Detach Without Stopping the Session
+
+You can detach in two ways:
+
+```bash
+nono detach a3f7c2
+```
+
+Or from inside the attached terminal:
+
+```text
+Ctrl-] d
+```
+
+The in-band detach sequence is configurable in `~/.config/nono/config.toml`:
+
+```toml
+[ui]
+detach_sequence = "ctrl-] d"
+```
+
+Use space-separated key presses. Supported tokens are single characters such as `d` or `x`,
+named keys `esc`, `tab`, `enter`, `space`, and control chords like `ctrl-]` or `ctrl-a`.
+The sequence must contain at least two key presses to avoid accidental detach.
+
+Detaching only disconnects the client. It does **not** stop the supervisor or the sandboxed process.
+
+## Stopping a Session
+
+Use `nono stop` when you want the session to terminate cleanly:
+
+```bash
+nono stop a3f7c2
+```
+
+By default, nono sends `SIGTERM` to the supervisor, waits for cleanup, then escalates to `SIGKILL` after the timeout.
+
+```bash
+nono stop a3f7c2 --timeout 15
+nono stop a3f7c2 --force
+```
+
+Stopping the **supervisor** rather than the child is important because it preserves runtime cleanup:
+
+- final session state update
+- rollback finalization
+- audit/session shutdown
+- PTY/socket cleanup
+
+## Inspecting a Session
+
+Use `nono inspect` when you want the full record for one session:
+
+```bash
+nono inspect a3f7c2
+```
+
+It includes:
+
+- session id
+- name
+- status
+- attachment state
+- child and supervisor pids
+- start time
+- command
+- profile
+- workdir
+- network mode
+- rollback session id, when present
+
+For scripts and tooling:
+
+```bash
+nono inspect a3f7c2 --json
+```
+
+## Pruning Old Session Records
+
+Exited sessions stay in the registry until you remove them. Use `nono prune` to clean them up:
+
+```bash
+nono prune
+```
+
+Common variants:
+
+```bash
+nono prune --dry-run
+nono prune --older-than 7
+nono prune --keep 20
+```
+
+`nono prune` currently skips sessions in `running` state and removes exited sessions. `paused` sessions are treated more conservatively elsewhere in the runtime than they are here, so do not use `prune` as a maintenance step for paused/stopped sessions until that behavior is tightened.
+
+## Common Workflows
+
+### Start Detached, Check Back Later
+
+Use this when you want an agent to keep running while you do something else:
+
+```bash
+nono run --detached --rollback --profile claude-code --allow-cwd -- claude
+nono ps
+nono attach <session-id>
+```
+
+This is the recommended workflow for long-running coding or migration sessions.
+
+### Start Attached, Detach When You Need Your Terminal Back
+
+Use this when you want to watch the first phase of the run, then leave it working:
+
+```bash
+nono run --rollback --profile claude-code --allow-cwd -- claude
+```
+
+Then detach with:
+
+```text
+Ctrl-] d
+```
+
+If you changed the detach sequence in `~/.config/nono/config.toml`, use your configured keys
+instead.
+
+Or from another terminal:
+
+```bash
+nono detach <session-id>
+```
+
+### Find a Broken Session and Reattach for Debugging
+
+If an agent run misbehaves but is still alive:
+
+```bash
+nono ps --all
+nono inspect <session-id>
+nono attach <session-id>
+```
+
+This is the main operational workflow for debugging long-lived supervised sessions.
+
+### Stop a Session Cleanly
+
+If the agent is no longer useful or has wedged:
+
+```bash
+nono stop <session-id>
+```
+
+Prefer `nono stop` over killing the child directly, because the supervisor is responsible for state cleanup.
+
+## Rollback Pairing
+
+Detached sessions are especially useful when combined with rollback:
+
+```bash
+nono run --detached --rollback --profile claude-code --allow-cwd -- claude
+```
+
+This gives you two safety properties at once:
+
+- the agent can keep running while no terminal is attached
+- if the session goes astray, you still have a rollback session available for review and restore
+
+That makes a good default workflow for powerful agents working in a real repository:
+
+1. Start detached with rollback enabled
+2. Let the agent work unattended
+3. Reattach only when you need to inspect, guide, or debug
+4. Use rollback review/restore if the resulting changes are wrong
+
+See [Atomic Rollbacks](/cli/features/atomic-rollbacks) for the snapshot and restore flow.
+
+## Approval Semantics While Detached
+
+Detached does not mean “run completely unchecked”.
+
+If a session reaches an approval boundary:
+
+- with an attached operator, approval can be handled interactively
+- without an attached operator, the session should not auto-grant
+
+The important nuance is:
+
+- **detachment itself does not pause the session**
+- **approval waiting may pause forward progress for that specific request**
+
+This is different from the older “park the whole session on detach” model.
+
+## Local Attach Security Model
+
+Current attach is **local-only** and **same-user only**.
+
+The supervisor protects attach with:
+
+- a private session registry directory
+- owner-only attach socket permissions
+- kernel peer-credential checks on every accepted attach socket
+
+This means:
+
+- another local user should not be able to attach to your session
+- another process running as your **same uid** is still inside your local trust boundary
+
+This is not a remote authentication protocol. Future HTTP or cross-host attach support would need stronger authentication and authorization than the local Unix-socket model.
+
+## Related Pages
+
+- [Supervisor Mode](/cli/features/supervisor)
+- [Execution Modes](/cli/features/execution-modes)
+- [Atomic Rollbacks](/cli/features/atomic-rollbacks)

@@ -1,0 +1,16 @@
+{
+  "extends": "default",
+  "meta": {
+    "name": "synthetic",
+    "version": "1.0.0",
+    "description": "Test profile for the integration synthetic-pack scenario. Grants exactly one extra path so tests can assert the resolver picked up the pack-shipped profile rather than falling through to the embedded default."
+  },
+  "filesystem": {
+    "allow": [
+      "$WORKDIR"
+    ]
+  },
+  "network": { "block": false },
+  "workdir": { "access": "readwrite" },
+  "interactive": false
+}

@@ -1,0 +1,207 @@
+---
+title: Atomic Rollbacks
+description: Content-addressable filesystem snapshots with integrity verification
+---
+
+nono can take filesystem snapshots before and after sandboxed execution, allowing you to review and reverse any changes an agent made. The rollback system uses content-addressable storage with SHA-256 deduplication and Merkle tree integrity verification.
+
+The idea is that if an agent makes unintended changes to your filesystem, you can easily see what changed and restore any modified or deleted files back to their original state. This provides a safety net when running powerful agents that have write access to your files.
+
+## How It Works
+
+When you run a command with `--rollback`, nono:
+
+1. **Takes a baseline snapshot** of all files in tracked directories before the command starts
+2. **Runs the command** inside the sandbox
+3. **Takes a final snapshot** after the command exits
+4. **Shows an interactive diff** of all changes, offering to restore any modified or deleted files
+
+```bash
+# Enable rollback snapshots
+nono run --rollback --profile claude-code -- claude
+```
+
+<Note>
+`--rollback` automatically selects supervised execution because the parent process needs to remain unsandboxed to write snapshots to `~/.nono/rollbacks/`.
+</Note>
+
+## Snapshot Architecture
+
+### Content-Addressable Object Store
+
+Files are stored by their SHA-256 hash, so identical content is never stored twice. On macOS with APFS, nono uses `clonefile()` for copy-on-write storage - snapshots consume minimal additional disk space when files haven't changed.
+
+### Merkle Tree Integrity
+
+Each snapshot builds a Merkle tree over all tracked files. The root hash provides a cryptographic commitment to the exact filesystem state at that point in time. This allows:
+
+- Verifying that no snapshot data has been tampered with
+- Detecting corruption in stored objects
+- Efficient comparison between snapshots (only recompute changed subtrees)
+
+### Session Structure
+
+Sessions are stored in `~/.nono/rollbacks/` with the following layout:
+
+```
+~/.nono/rollbacks/
+  <session-id>/
+    manifest.json       # Session metadata, Merkle roots, timestamps
+    objects/            # Content-addressable file store
+      ab/cd1234...      # Files stored by SHA-256 hash
+    snapshots/
+      0/                # Baseline snapshot
+      1/                # Final snapshot (or intermediate)
+```
+
+Session IDs use the format `YYYYMMDD-HHMMSS-PID` (e.g., `20260214-143022-12345`).
+
+### Exclusion Filters
+
+Not every file needs tracking. The rollback system respects:
+
+- **Profile-defined patterns**: Common build artifacts like `node_modules`, `.next`, `__pycache__`, `target`
+- **Profile-defined globs**: Patterns like `*.tmp.[0-9]*.[0-9]*`
+- **gitignore integration**: Reads `.gitignore` patterns from the working directory
+
+These exclusions keep snapshots fast and storage efficient.
+
+## Commands
+
+### `nono rollback list`
+
+List past sessions grouped by project directory.
+
+```bash
+# Show recent sessions (grouped by project)
+nono rollback list
+
+# Filter to a specific project
+nono rollback list --path ~/dev/my-project
+
+# Show only the 5 most recent
+nono rollback list --recent 5
+
+# Include sessions with no file changes
+nono rollback list --all
+
+# Machine-readable output
+nono rollback list --json
+```
+
+Example output:
+
+```
+[nono] 10 session(s)
+
+  ~/dev/sprockets (7 sessions)
+    20260219-092017-8117  just now  claude  ~2 modified
+    20260219-091403-90291  7m ago  claude  ~2 modified
+    20260218-134433-28210  19h ago  claude  +5 files
+    ...
+
+  ~/dev/widgets (3 sessions)
+    20260219-100000-1234  5m ago  claude  +2 files
+    20260218-120000-5678  1d ago  claude  ~1 modified
+    ...
+```
+
+### `nono rollback show`
+
+Inspect the changes made during a session.
+
+```bash
+# Show summary of changes
+nono rollback show 20260214-143022-12345
+
+# Show unified diff (git-style)
+nono rollback show 20260214-143022-12345 --diff
+
+# Side-by-side diff
+nono rollback show 20260214-143022-12345 --side-by-side
+
+# Show full file content from snapshot
+nono rollback show 20260214-143022-12345 --full
+
+# Machine-readable output
+nono rollback show 20260214-143022-12345 --json
+```
+
+### `nono rollback restore`
+
+Restore files from a past session to their pre-change state.
+
+```bash
+# Restore all files to baseline state
+nono rollback restore 20260214-143022-12345
+
+# Restore to a specific snapshot (0 = baseline, 1 = final)
+nono rollback restore 20260214-143022-12345 --snapshot 0
+
+# Preview what would change without modifying files
+nono rollback restore 20260214-143022-12345 --dry-run
+```
+
+Restoration uses atomic rename per file to prevent partial restores.
+
+### `nono rollback verify`
+
+Verify the integrity of a stored session by recomputing Merkle tree hashes and checking all objects in the store.
+
+```bash
+nono rollback verify 20260214-143022-12345
+```
+
+Reports any missing objects, hash mismatches, or corrupted metadata.
+
+### `nono rollback cleanup`
+
+Remove old sessions to reclaim disk space.
+
+```bash
+# Keep only the 10 most recent sessions
+nono rollback cleanup --keep 10
+
+# Remove sessions older than 30 days
+nono rollback cleanup --older-than 30
+
+# Preview what would be deleted
+nono rollback cleanup --dry-run
+
+# Remove all sessions (requires confirmation)
+nono rollback cleanup --all
+```
+
+## Interactive Post-Exit Flow
+
+When a `--rollback` command exits and file changes are detected, nono presents an interactive review:
+
+1. Shows a summary of all changes (created, modified, deleted files)
+2. Offers to show diffs for individual files
+3. Asks whether to restore some or all files
+
+Use `--no-rollback-prompt` to suppress the interactive UI while still taking snapshots (useful for scripting).
+
+## Storage Management
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Max sessions | 10 | Oldest sessions pruned automatically |
+| Max storage | 5 GB | Total storage limit for all sessions |
+
+Configure these in your nono config file or use `nono rollback cleanup` for manual management.
+
+## Profile Rollback Configuration
+
+Profiles can customize rollback behavior:
+
+```json
+{
+  "rollback": {
+    "exclude_patterns": ["node_modules", ".next", "__pycache__", "target"],
+    "exclude_globs": ["*.tmp.[0-9]*.[0-9]*"]
+  }
+}
+```
+
+These exclusions are combined with gitignore patterns from the working directory.
