@@ -4891,7 +4891,7 @@ mod tests {
 
         assert!(
             spec.fs.iter().any(|grant| {
-                !grant.is_file && PathBuf::from(OsString::from_vec(grant.path.clone())) == shim_dir
+                !grant.is_file && grant.path.as_slice() == shim_dir.as_os_str().as_bytes()
             }),
             "child must retain read access to immutable shim directory"
         );
@@ -4899,8 +4899,7 @@ mod tests {
             !spec.fs.iter().any(|grant| {
                 !grant.is_file
                     && matches!(grant.access.as_str(), "read" | "read+write")
-                    && launch_spec
-                        .starts_with(PathBuf::from(OsString::from_vec(grant.path.clone())))
+                    && launch_spec.starts_with(Path::new(OsStr::from_bytes(&grant.path)))
             }),
             "child must not receive a recursive read grant covering launch specs"
         );
