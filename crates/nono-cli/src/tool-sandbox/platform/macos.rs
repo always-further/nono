@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
+use zeroize::Zeroizing;
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -294,7 +295,7 @@ impl PreparedToolSandboxRuntime {
             .map(|secret| {
                 (
                     secret.env_var.clone(),
-                    broker.issue(secret.value.as_bytes().to_vec()),
+                    broker.issue(Zeroizing::new(secret.value.as_bytes().to_vec())),
                 )
             })
             .collect())
@@ -4305,7 +4306,7 @@ mod tests {
             let mut broker = state.token_broker.lock().map_err(|_| {
                 NonoError::SandboxInit("tool-sandbox token broker lock poisoned".to_string())
             })?;
-            broker.issue(b"s3cr3t".to_vec())
+            broker.issue(Zeroizing::new(b"s3cr3t".to_vec()))
         };
         let nonce_entry = format!("API_TOKEN={nonce}").into_bytes();
         let request = request_with_env(vec![nonce_entry.clone()]);

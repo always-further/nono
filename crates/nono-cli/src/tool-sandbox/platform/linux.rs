@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
+use zeroize::Zeroizing;
 
 /// Diagnostic-only: parent's CLOCK_MONOTONIC nanos at the latest pre-fork point.
 /// Set by exec_strategy on the supervised child's exec env when TOOL_SANDBOX_PROFILE_HOTPATH
@@ -355,7 +356,7 @@ impl PreparedToolSandboxRuntime {
             .map(|secret| {
                 (
                     secret.env_var.clone(),
-                    broker.issue(secret.value.as_bytes().to_vec()),
+                    broker.issue(Zeroizing::new(secret.value.as_bytes().to_vec())),
                 )
             })
             .collect())

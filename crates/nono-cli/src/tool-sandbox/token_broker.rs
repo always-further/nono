@@ -43,7 +43,7 @@ impl TokenBroker {
     /// Issue a nonce for `value`. Returns the nonce string. Subsequent calls to
     /// `resolve_env_entry` or `scan_and_reissue` with this nonce will return the
     /// real value.
-    pub(crate) fn issue(&mut self, value: Vec<u8>) -> String {
+    pub(crate) fn issue(&mut self, value: Zeroizing<Vec<u8>>) -> String {
         let mut raw = [0u8; 32];
         rand::rng().fill(&mut raw);
         let nonce = format!(
@@ -51,19 +51,20 @@ impl TokenBroker {
             NONCE_PREFIX,
             raw.iter().map(|b| format!("{b:02x}")).collect::<String>()
         );
-        self.map.insert(nonce.clone(), Zeroizing::new(value));
+        self.map.insert(nonce.clone(), value);
         nonce
     }
 
     /// Store or replace a named supervisor credential and issue a nonce for it.
     pub(crate) fn store_named(&mut self, name: String, value: Vec<u8>) -> String {
-        self.named.insert(name, Zeroizing::new(value.clone()));
-        self.issue(value)
+        let zeroized = Zeroizing::new(value);
+        self.named.insert(name, zeroized.clone());
+        self.issue(zeroized)
     }
 
     /// Issue a fresh nonce for a previously stored named supervisor credential.
     pub(crate) fn issue_named(&mut self, name: &str) -> Option<String> {
-        let value = self.named.get(name)?.to_vec();
+        let value = self.named.get(name)?.clone();
         Some(self.issue(value))
     }
 
@@ -114,7 +115,7 @@ impl TokenBroker {
                 let candidate = &input[i..i + NONCE_LEN];
                 if let Ok(s) = std::str::from_utf8(candidate)
                     && is_nonce(s)
-                    && let Some(real) = self.map.get(s).map(|v| v.to_vec())
+                    && let Some(real) = self.map.get(s).cloned()
                 {
                     // Re-issue a fresh nonce for the real value
                     let new_nonce = self.issue(real);
@@ -125,9 +126,10 @@ impl TokenBroker {
             }
 
             if let Some(real) = self.longest_secret_value_at(&input[i..]) {
-                let new_nonce = self.issue(real.clone());
+                let len = real.len();
+                let new_nonce = self.issue(real);
                 out.extend_from_slice(new_nonce.as_bytes());
-                i += real.len();
+                i += len;
                 continue;
             }
 
@@ -137,12 +139,12 @@ impl TokenBroker {
         out
     }
 
-    fn longest_secret_value_at(&self, input: &[u8]) -> Option<Vec<u8>> {
+    fn longest_secret_value_at(&self, input: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
         self.map
             .values()
             .filter(|value| !value.is_empty() && input.starts_with(value.as_slice()))
             .max_by_key(|value| value.len())
-            .map(|value| value.to_vec())
+            .cloned()
     }
 }
 
@@ -188,7 +190,7 @@ mod tests {
     fn issue_and_resolve_env_entry() {
         let mut broker = TokenBroker::new();
         let secret = b"hunter2".to_vec();
-        let nonce = broker.issue(secret.clone());
+        let nonce = broker.issue(Zeroizing::new(secret));
         assert!(is_nonce(&nonce), "issued nonce must be well-formed");
 
         let entry = format!("MY_SECRET={nonce}").into_bytes();
@@ -231,7 +233,7 @@ mod tests {
     fn scan_and_reissue_replaces_nonce_in_output() {
         let mut broker = TokenBroker::new();
         let secret = b"s3cr3t".to_vec();
-        let nonce = broker.issue(secret.clone());
+        let nonce = broker.issue(Zeroizing::new(secret));
 
         let captured = format!("output contains {nonce} here").into_bytes();
         let result = broker.scan_and_reissue(&captured);
@@ -252,7 +254,7 @@ mod tests {
     fn scan_and_reissue_replaces_real_secret_in_output() {
         let mut broker = TokenBroker::new();
         let secret = b"s3cr3t".to_vec();
-        let _nonce = broker.issue(secret.clone());
+        let _nonce = broker.issue(Zeroizing::new(secret.clone()));
 
         let captured = b"token=s3cr3t\n".to_vec();
         let result = broker.scan_and_reissue(&captured);
@@ -272,8 +274,8 @@ mod tests {
     #[test]
     fn scan_and_reissue_prefers_longest_secret_match() {
         let mut broker = TokenBroker::new();
-        let _short = broker.issue(b"abc".to_vec());
-        let _long = broker.issue(b"abcdef".to_vec());
+        let _short = broker.issue(Zeroizing::new(b"abc".to_vec()));
+        let _long = broker.issue(Zeroizing::new(b"abcdef".to_vec()));
 
         let result = broker.scan_and_reissue(b"abcdef");
         let result_str = as_utf8(&result);
