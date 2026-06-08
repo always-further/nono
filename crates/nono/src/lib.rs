@@ -85,13 +85,14 @@ pub use path::try_canonicalize;
 pub use sandbox::{DetectedAbi, LandlockScopePolicy, detect_abi, is_wsl2, landlock_scope_policy};
 pub use sandbox::{Sandbox, SupportInfo};
 pub use scrub::{
-    ScrubPolicy, ScrubPolicyDiff, scrub_argv, scrub_argv_with_policy, scrub_header,
+    ScrubPolicy, ScrubPolicyDiff, scrub_argv, scrub_argv_with_policy, scrub_env_name,
+    scrub_env_name_with_policy, scrub_env_value, scrub_env_value_with_policy, scrub_header,
     scrub_header_with_policy, scrub_value, scrub_value_with_policy,
 };
 pub use state::SandboxState;
 pub use supervisor::{
-    ApprovalBackend, ApprovalDecision, CapabilityRequest, SupervisorListener, SupervisorSocket,
-    UrlOpenRequest,
+    ApprovalBackend, ApprovalDecision, ApprovalRequest, CapabilityRequest, SupervisorListener,
+    SupervisorSocket, UrlOpenRequest,
 };
 pub use trust::{
     Enforcement, IncludePatterns, Publisher, SignerIdentity, TrustPolicy, VerificationOutcome,

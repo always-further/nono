@@ -33,7 +33,7 @@ const STYLES: Styles = Styles::plain().header(Style::new().bold());
 
 \x1b[1mEXPLORATION & DEBUGGING\x1b[0m
   learn      [deprecated] Use `nono run` to learn from sandbox denials
-  why        Check why a path or network operation would be allowed or denied
+  why        Check why filesystem, network, scope, or command access would be allowed or denied
 
 \x1b[1mSESSION MANAGEMENT\x1b[0m
   ps         List running or detached sandbox sessions
@@ -206,7 +206,7 @@ pub enum Commands {
 ")]
     Learn(Box<LearnArgs>),
 
-    /// Check why a path or network operation would be allowed or denied
+    /// Check why filesystem, network, scope, or command access would be allowed or denied
     #[command(help_template = "\
 {about}
 
@@ -221,6 +221,19 @@ pub enum Commands {
   nono why --json --path ~/.aws --op read      # JSON output for agents
   nono why --host api.openai.com --port 443    # Query network access
   nono why --self --path /tmp --op write       # Inside sandbox, query own capabilities
+  nono why --profile gh --command gh -- issue comment 1052
+                                                # Query ETI command argv policy
+
+\x1b[1mETI TOOL DENIALS\x1b[0m
+  `nono why --command <cmd> -- <args...>` diagnoses tool-sandbox argv policy.
+  A message like:
+
+    nono: tool-sandbox denied gh: Command 'gh' is blocked: agents may read issues but not comment on them
+
+  is an ephemeral tool invocation command-policy denial from
+  command_policies.commands.<name>.from.<caller>.invocation_policy. If the
+  command uses proxy credentials, also check endpoint_policy for HTTP method
+  and path rules.
 ")]
     Why(Box<WhyArgs>),
 
@@ -1710,8 +1723,7 @@ pub struct RunArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub no_diagnostics: bool,
 
-    /// Kill the process if it has not entered alt-screen mode after this many seconds.
-    /// Startup banners and log lines do not count; only a full-screen TUI transition satisfies the check.
+    /// Kill the process if it has not become interactive after this many seconds.
     /// Set to 0 to disable. Env: NONO_STARTUP_TIMEOUT.
     #[arg(
         long = "startup-timeout",
@@ -1785,8 +1797,7 @@ pub struct ShellArgs {
     #[arg(long, value_name = "NAME", help_heading = "OPTIONS")]
     pub name: Option<String>,
 
-    /// Kill the process if it has not entered alt-screen mode after this many seconds.
-    /// Startup banners and log lines do not count; only a full-screen TUI transition satisfies the check.
+    /// Kill the process if it has not become interactive after this many seconds.
     /// Set to 0 to disable. Env: NONO_STARTUP_TIMEOUT.
     #[arg(
         long = "startup-timeout",
@@ -1847,6 +1858,18 @@ pub struct SetupArgs {
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true)]
 pub struct WhyArgs {
+    /// Tool-sandbox command name to check (ETI command policy)
+    #[arg(long, help_heading = "QUERY")]
+    pub command: Option<String>,
+
+    /// Caller edge for command policy checks (default: session)
+    #[arg(long, default_value = "session", help_heading = "QUERY")]
+    pub caller: String,
+
+    /// Arguments for --command after `--`
+    #[arg(last = true, value_name = "ARGS", help_heading = "QUERY")]
+    pub command_args: Vec<String>,
+
     /// Path to check
     #[arg(long, help_heading = "QUERY")]
     pub path: Option<PathBuf>,
@@ -3321,6 +3344,49 @@ mod tests {
             }
             _ => panic!("Expected Why command"),
         }
+
+        let cli = Cli::parse_from([
+            "nono",
+            "why",
+            "--profile",
+            "gh",
+            "--command",
+            "gh",
+            "--",
+            "issue",
+            "comment",
+            "1052",
+        ]);
+        match cli.command {
+            Commands::Why(args) => {
+                assert_eq!(args.profile.as_deref(), Some("gh"));
+                assert_eq!(args.command.as_deref(), Some("gh"));
+                assert_eq!(args.caller, "session");
+                assert_eq!(args.command_args, vec!["issue", "comment", "1052"]);
+            }
+            _ => panic!("Expected Why command"),
+        }
+    }
+
+    #[test]
+    fn test_why_help_mentions_eti_command_policy_denials() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("why")
+            .expect("why subcommand exists")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("ETI TOOL DENIALS"), "{help}");
+        assert!(
+            help.contains("command_policies.commands.<name>.from.<caller>.invocation_policy"),
+            "{help}"
+        );
+        assert!(help.contains("--command <COMMAND>"), "{help}");
+        assert!(
+            help.contains("nono why --command <cmd> -- <args...>"),
+            "{help}"
+        );
     }
 
     #[test]

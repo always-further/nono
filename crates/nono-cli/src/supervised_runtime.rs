@@ -15,7 +15,7 @@ use colored::Colorize;
 use nono::undo::ExecutableIdentity;
 use nono::{CapabilitySet, Result};
 use std::io::IsTerminal;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 struct SessionRuntimeState {
     started: String,
@@ -202,12 +202,12 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     } else {
         None
     };
-    let audit_recorder = if audit_state.is_some() && !rollback.no_audit_integrity {
+    let audit_recorder = if audit_state.is_some() {
         audit_state
             .as_ref()
             .map(|state| {
                 AuditRecorder::new_with_policy(state.session_dir.clone(), redaction_policy.clone())
-                    .map(Mutex::new)
+                    .map(|recorder| Arc::new(Mutex::new(recorder)))
             })
             .transpose()?
     } else {
@@ -221,6 +221,18 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
             .lock()
             .map_err(|_| nono::NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
         recorder.record_session_started(started.clone(), command.to_vec())?;
+        #[cfg(target_os = "linux")]
+        if let Some(tool_sandbox_runtime) = config.tool_sandbox_runtime {
+            recorder.record_sandbox_runtime_event(
+                crate::audit_integrity::SandboxRuntimeAuditEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    platform: "linux".to_string(),
+                    landlock_abi: Some(tool_sandbox_runtime.landlock_abi_version().to_string()),
+                    landlock_execute_enforced: Some(true),
+                    tool_sandbox_active: true,
+                },
+            )?;
+        }
     }
 
     let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
@@ -234,7 +246,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         detach_sequence: session.detach_sequence.as_deref(),
         open_url_origins: &proxy.open_url_origins,
         open_url_allow_localhost: proxy.open_url_allow_localhost,
-        audit_recorder: audit_recorder.as_ref(),
+        audit_recorder: audit_recorder.clone(),
         network_audit_events: supervisor_network_audit_events.as_ref(),
         redaction_policy,
         allow_launch_services_active: proxy.allow_launch_services_active,
@@ -256,6 +268,8 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         } else {
             exec_strategy::LinuxNetworkNotifyMode::AfUnixOnly
         },
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        tool_sandbox_runtime: config.tool_sandbox_runtime,
     };
 
     let exit_code = {
@@ -282,7 +296,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         rollback_state,
         audit_snapshot_state,
         audit_tracked_paths,
-        audit_recorder: audit_recorder.as_ref(),
+        audit_recorder: audit_recorder.as_deref(),
         supervisor_network_audit_events: supervisor_network_audit_events.as_ref(),
         audit_integrity_enabled: !rollback.no_audit_integrity,
         proxy_handle,

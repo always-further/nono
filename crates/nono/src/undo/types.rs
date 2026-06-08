@@ -194,6 +194,16 @@ pub enum NetworkAuditDecision {
     Allow,
     /// Request was denied
     Deny,
+    /// Endpoint approval was requested from an approval backend
+    ApproveRequested,
+    /// Endpoint approval was granted
+    ApproveGranted,
+    /// Endpoint approval was denied by the backend or user
+    ApproveDenied,
+    /// Endpoint approval timed out
+    ApproveTimeout,
+    /// Endpoint approval backend failed
+    ApproveError,
 }
 
 /// Authentication mechanism used at the proxy boundary.
@@ -274,8 +284,20 @@ pub struct NetworkAuditEvent {
     /// Structured denial category when the request was denied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denial_category: Option<NetworkAuditDenialCategory>,
+    /// Endpoint policy action that matched this L7 request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_policy_action: Option<String>,
+    /// Endpoint policy rule/default label that matched this L7 request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_policy_rule: Option<String>,
+    /// Approval backend consulted for endpoint approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_backend: Option<String>,
     /// Hostname or logical service target (for reverse proxy events)
     pub target: String,
+    /// Upstream URL for route-scoped L7 events, without credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
     /// Port when available (CONNECT/external), otherwise None
     pub port: Option<u16>,
     /// HTTP method when available

@@ -214,6 +214,8 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             allowed_env_vars: prepared.allowed_env_vars,
             denied_env_vars: prepared.denied_env_vars,
             startup_timeout_secs: args.startup_timeout_secs,
+            command_policies: prepared.command_policies,
+            session_hooks: prepared.session_hooks,
             proxy,
             redaction_policy: load_configured_redaction_policy()?,
             session: SessionLaunchOptions {
@@ -297,6 +299,8 @@ pub(crate) fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
             suppressed_system_service_operations: prepared.suppressed_system_service_operations,
             allowed_env_vars: prepared.allowed_env_vars,
             denied_env_vars: prepared.denied_env_vars,
+            command_policies: prepared.command_policies,
+            session_hooks: prepared.session_hooks,
             ..ExecutionFlags::defaults(silent)?
         },
     })

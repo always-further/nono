@@ -447,7 +447,7 @@ pub(super) fn handle_seccomp_notification(
     };
 
     // 8. Delegate to approval backend (for both instruction and non-instruction files)
-    let request = nono::supervisor::CapabilityRequest {
+    let request = nono::supervisor::ApprovalRequest::Capability {
         request_id: format!("seccomp-{}", unique_request_id()),
         path: path.clone(),
         access,
@@ -456,7 +456,7 @@ pub(super) fn handle_seccomp_notification(
         session_id: config.session_id.to_string(),
     };
 
-    let decision = match config.approval_backend.request_capability(&request) {
+    let decision = match config.approval_backend.request_approval(&request) {
         Ok(d) => {
             if d.is_denied() {
                 record_denial(
@@ -987,7 +987,11 @@ fn record_network_audit_denial(
         managed_credential_active: None,
         injection_mode: None,
         denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
+        endpoint_policy_action: None,
+        endpoint_policy_rule: None,
+        approval_backend: None,
         target,
+        upstream: None,
         port: if sockaddr.port == 0 {
             None
         } else {
@@ -1006,7 +1010,7 @@ fn record_network_audit_denial(
         events.push(event.clone());
     }
 
-    if let Some(recorder_mutex) = config.audit_recorder {
+    if let Some(recorder_mutex) = config.audit_recorder.as_ref() {
         let mut recorder = recorder_mutex
             .lock()
             .map_err(|_| NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
@@ -1321,17 +1325,14 @@ mod tests {
         };
         use nix::libc;
         use nono::sandbox::{SYS_BIND, SYS_CONNECT, SockaddrInfo, UnixSocketKind};
-        use nono::supervisor::{ApprovalDecision, CapabilityRequest};
+        use nono::supervisor::{ApprovalDecision, ApprovalRequest};
         use nono::{ApprovalBackend, UnixSocketCapability, UnixSocketMode};
         use std::os::unix::net::UnixListener;
         use std::path::{Path, PathBuf};
 
         struct DenyAllBackend;
         impl ApprovalBackend for DenyAllBackend {
-            fn request_capability(
-                &self,
-                _req: &CapabilityRequest,
-            ) -> nono::Result<ApprovalDecision> {
+            fn request_approval(&self, _req: &ApprovalRequest) -> nono::Result<ApprovalDecision> {
                 Ok(ApprovalDecision::Denied {
                     reason: "test".to_string(),
                 })
@@ -1365,6 +1366,7 @@ mod tests {
                 proxy_bind_ports,
                 unix_socket_allowlist,
                 linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
+                tool_sandbox_runtime: None,
             }
         }
 
