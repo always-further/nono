@@ -12,9 +12,6 @@ use tracing::warn;
 /// diagnostics/prompts take over the terminal.
 pub const POST_EXIT_PTY_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// Poll interval for the non-blocking `waitpid` loop.
-pub const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
-
 // pty_proxy
 
 /// Read timeout on the attach socket when reading the request-kind byte.
