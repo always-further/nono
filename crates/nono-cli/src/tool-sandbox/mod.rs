@@ -43,6 +43,19 @@ mod protocol;
 pub(crate) mod token_broker;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct ToolSandboxPrepare<'a> {
+    pub(crate) config: &'a crate::command_policy::CommandPoliciesConfig,
+    pub(crate) audit_context: ToolSandboxAuditContext,
+    pub(crate) allowed_commands: &'a [String],
+    pub(crate) blocked_commands: &'a [String],
+    pub(crate) outer_caps: &'a nono::CapabilitySet,
+    pub(crate) policy_root: &'a std::path::Path,
+    pub(crate) proxy_credential_env_vars:
+        &'a std::collections::BTreeMap<String, Vec<(String, String)>>,
+    pub(crate) proxy_trust_bundle_paths: &'a [std::path::PathBuf],
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use self::audit_context::ToolSandboxAuditContext;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use self::policy::*;

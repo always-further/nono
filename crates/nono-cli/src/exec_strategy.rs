@@ -853,21 +853,21 @@ pub fn execute_supervised(
             // intercept Landlock's own path opens and deadlock.)
             #[cfg(target_os = "linux")]
             {
-                if let Some(tool_sandbox_runtime) = config.tool_sandbox_runtime {
-                    if let Err(e) = tool_sandbox_runtime.apply_outer_exec_gate() {
-                        let detail = format!(
-                            "nono: failed to apply tool-sandbox outer exec gate in supervised child: {}\n",
-                            e
+                if let Some(tool_sandbox_runtime) = config.tool_sandbox_runtime
+                    && let Err(e) = tool_sandbox_runtime.apply_outer_exec_gate()
+                {
+                    let detail = format!(
+                        "nono: failed to apply tool-sandbox outer exec gate in supervised child: {}\n",
+                        e
+                    );
+                    let msg = detail.as_bytes();
+                    unsafe {
+                        libc::write(
+                            libc::STDERR_FILENO,
+                            msg.as_ptr().cast::<libc::c_void>(),
+                            msg.len(),
                         );
-                        let msg = detail.as_bytes();
-                        unsafe {
-                            libc::write(
-                                libc::STDERR_FILENO,
-                                msg.as_ptr().cast::<libc::c_void>(),
-                                msg.len(),
-                            );
-                            libc::_exit(126);
-                        }
+                        libc::_exit(126);
                     }
                 }
 
@@ -2542,16 +2542,14 @@ fn run_supervisor_loop(
 
                 if let (Some(tool_sandbox_idx), Some(runtime)) =
                     (tool_sandbox_idx, tool_sandbox_runtime)
+                    && pfds[tool_sandbox_idx].revents & libc::POLLIN != 0
+                    && let Err(e) = runtime.handle_listener(
+                        child.as_raw() as u32,
+                        config.session_id,
+                        config.audit_recorder.clone(),
+                    )
                 {
-                    if pfds[tool_sandbox_idx].revents & libc::POLLIN != 0 {
-                        if let Err(e) = runtime.handle_listener(
-                            child.as_raw() as u32,
-                            config.session_id,
-                            config.audit_recorder.clone(),
-                        ) {
-                            debug!("Error handling tool-sandbox shim request: {}", e);
-                        }
-                    }
+                    debug!("Error handling tool-sandbox shim request: {}", e);
                 }
 
                 if let Some(ref mut p) = pty

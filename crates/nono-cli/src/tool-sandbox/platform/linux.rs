@@ -205,16 +205,18 @@ impl ResolvedToolSandboxPlan {
 }
 
 impl PreparedToolSandboxRuntime {
-    pub(crate) fn prepare(
-        config: &CommandPoliciesConfig,
-        audit_context: super::ToolSandboxAuditContext,
-        allowed_commands: &[String],
-        blocked_commands: &[String],
-        outer_caps: &CapabilitySet,
-        policy_root: &Path,
-        proxy_credential_env_vars: &BTreeMap<String, Vec<(String, String)>>,
-        proxy_trust_bundle_paths: &[PathBuf],
-    ) -> Result<Self> {
+    pub(crate) fn prepare(input: super::ToolSandboxPrepare<'_>) -> Result<Self> {
+        let super::ToolSandboxPrepare {
+            config,
+            audit_context,
+            allowed_commands,
+            blocked_commands,
+            outer_caps,
+            policy_root,
+            proxy_credential_env_vars,
+            proxy_trust_bundle_paths,
+        } = input;
+
         let start_total = std::time::Instant::now();
         if let Some(start) = MAIN_START.get() {
             tool_sandbox_profile_log!("main_to_prepare: {:?}", start.elapsed());
@@ -1857,6 +1859,7 @@ fn caller_pid(caller: Option<&Caller>) -> Option<u32> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_command_policy_audit(
     recorder: Option<&Arc<Mutex<AuditRecorder>>>,
     request: &ToolSandboxShimRequest,
@@ -2809,11 +2812,11 @@ fn build_child_launch_spec(
     }
     if let Some(interp) = binary.shape.interpreter.as_ref() {
         allowed_exec_paths.push(interp.as_os_str().as_bytes().to_vec());
-        if let Ok(canonical_interp) = interp.canonicalize() {
-            if let Some(closure) = state.baseline_cache.closures.get(&canonical_interp) {
-                for dep in closure {
-                    allowed_exec_paths.push(dep.as_os_str().as_bytes().to_vec());
-                }
+        if let Ok(canonical_interp) = interp.canonicalize()
+            && let Some(closure) = state.baseline_cache.closures.get(&canonical_interp)
+        {
+            for dep in closure {
+                allowed_exec_paths.push(dep.as_os_str().as_bytes().to_vec());
             }
         }
     }
@@ -2823,11 +2826,11 @@ fn build_child_launch_spec(
     // All shims are hard links to the same nono binary; include the shim's
     // ELF dependency closure once so the dynamic linker can be exec'd when
     // a child process (e.g. sh) execs a shim.
-    if let Some(shim) = state.shims_by_command.values().next() {
-        if let Some(closure) = state.baseline_cache.closures.get(&shim.path) {
-            for dep in closure {
-                allowed_exec_paths.push(dep.as_os_str().as_bytes().to_vec());
-            }
+    if let Some(shim) = state.shims_by_command.values().next()
+        && let Some(closure) = state.baseline_cache.closures.get(&shim.path)
+    {
+        for dep in closure {
+            allowed_exec_paths.push(dep.as_os_str().as_bytes().to_vec());
         }
     }
 
@@ -4486,19 +4489,17 @@ fn vaddr_to_offset(vaddr: u64, loads: &[LoadSegment]) -> Option<usize> {
 }
 
 fn read_cstr_path(data: &[u8], offset: usize, max_len: usize) -> Result<PathBuf> {
-    Ok(
-        PathBuf::from(read_cstr_string(data, offset.min(data.len()))?)
-            .canonicalize()
-            .map_err(|source| NonoError::PathCanonicalization {
-                path: PathBuf::from(
-                    String::from_utf8_lossy(
-                        &data[offset..offset.saturating_add(max_len).min(data.len())],
-                    )
-                    .to_string(),
-                ),
-                source,
-            })?,
-    )
+    PathBuf::from(read_cstr_string(data, offset.min(data.len()))?)
+        .canonicalize()
+        .map_err(|source| NonoError::PathCanonicalization {
+            path: PathBuf::from(
+                String::from_utf8_lossy(
+                    &data[offset..offset.saturating_add(max_len).min(data.len())],
+                )
+                .to_string(),
+            ),
+            source,
+        })
 }
 
 fn read_cstr_string(data: &[u8], offset: usize) -> Result<String> {
@@ -4843,6 +4844,7 @@ mod tests {
                 is_file: false,
             }],
             unix_sockets: Vec::new(),
+            platform_rules: Vec::new(),
             network_blocked: false,
             proxy_port: None,
             proxy_bind_ports: Vec::new(),

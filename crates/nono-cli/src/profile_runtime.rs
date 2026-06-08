@@ -692,10 +692,10 @@ fn command_policies_use_tcp_port_rules(profile: &profile::Profile) -> bool {
         }
 
         for from_policy in command.from.values() {
-            if let crate::command_policy::CommandFromConfig::Policy(sandbox) = from_policy {
-                if command_sandbox_uses_tcp_port_rules(sandbox) {
-                    return true;
-                }
+            if let crate::command_policy::CommandFromConfig::Policy(sandbox) = from_policy
+                && command_sandbox_uses_tcp_port_rules(sandbox)
+            {
+                return true;
             }
         }
     }

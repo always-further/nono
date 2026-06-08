@@ -518,6 +518,7 @@ struct ScopedEnvVars {
 }
 
 impl ScopedEnvVars {
+    #[allow(clippy::disallowed_methods)] // Scoped production wrapper; caller runs before command launch.
     fn set(vars: &HashMap<String, String>) -> Self {
         let mut previous = Vec::new();
         for (name, value) in vars {
@@ -531,6 +532,7 @@ impl ScopedEnvVars {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // Restores values captured by ScopedEnvVars::set.
 impl Drop for ScopedEnvVars {
     fn drop(&mut self) {
         for (name, value) in self.previous.drain(..).rev() {

@@ -192,16 +192,18 @@ impl ResolvedToolSandboxPlan {
 }
 
 impl PreparedToolSandboxRuntime {
-    pub(crate) fn prepare(
-        config: &CommandPoliciesConfig,
-        audit_context: super::ToolSandboxAuditContext,
-        allowed_commands: &[String],
-        blocked_commands: &[String],
-        outer_caps: &CapabilitySet,
-        policy_root: &Path,
-        proxy_credential_env_vars: &BTreeMap<String, Vec<(String, String)>>,
-        proxy_trust_bundle_paths: &[PathBuf],
-    ) -> Result<Self> {
+    pub(crate) fn prepare(input: super::ToolSandboxPrepare<'_>) -> Result<Self> {
+        let super::ToolSandboxPrepare {
+            config,
+            audit_context,
+            allowed_commands,
+            blocked_commands,
+            outer_caps,
+            policy_root,
+            proxy_credential_env_vars,
+            proxy_trust_bundle_paths,
+        } = input;
+
         validate_platform_requirements(config)?;
 
         let plan =

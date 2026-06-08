@@ -276,17 +276,19 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         .filter(|config| config.is_active())
     {
         let runtime = crate::tool_sandbox::PreparedToolSandboxRuntime::prepare(
-            command_policies,
-            crate::tool_sandbox::ToolSandboxAuditContext::new(
-                flags.profile_display_name.clone(),
-                flags.redaction_policy.clone(),
-            ),
-            caps.allowed_commands(),
-            caps.blocked_commands(),
-            &caps,
-            &requested_workdir,
-            &tool_sandbox_proxy_credential_env_vars,
-            &tool_sandbox_trust_bundle_paths,
+            crate::tool_sandbox::ToolSandboxPrepare {
+                config: command_policies,
+                audit_context: crate::tool_sandbox::ToolSandboxAuditContext::new(
+                    flags.profile_display_name.clone(),
+                    flags.redaction_policy.clone(),
+                ),
+                allowed_commands: caps.allowed_commands(),
+                blocked_commands: caps.blocked_commands(),
+                outer_caps: &caps,
+                policy_root: &requested_workdir,
+                proxy_credential_env_vars: &tool_sandbox_proxy_credential_env_vars,
+                proxy_trust_bundle_paths: &tool_sandbox_trust_bundle_paths,
+            },
         )?;
         runtime.grant_outer_caps(&mut caps)?;
         Some(runtime)
@@ -300,17 +302,19 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         .filter(|config| config.is_active())
     {
         let runtime = crate::tool_sandbox::PreparedToolSandboxRuntime::prepare(
-            command_policies,
-            crate::tool_sandbox::ToolSandboxAuditContext::new(
-                flags.profile_display_name.clone(),
-                flags.redaction_policy.clone(),
-            ),
-            caps.allowed_commands(),
-            caps.blocked_commands(),
-            &caps,
-            &requested_workdir,
-            &tool_sandbox_proxy_credential_env_vars,
-            &tool_sandbox_trust_bundle_paths,
+            crate::tool_sandbox::ToolSandboxPrepare {
+                config: command_policies,
+                audit_context: crate::tool_sandbox::ToolSandboxAuditContext::new(
+                    flags.profile_display_name.clone(),
+                    flags.redaction_policy.clone(),
+                ),
+                allowed_commands: caps.allowed_commands(),
+                blocked_commands: caps.blocked_commands(),
+                outer_caps: &caps,
+                policy_root: &requested_workdir,
+                proxy_credential_env_vars: &tool_sandbox_proxy_credential_env_vars,
+                proxy_trust_bundle_paths: &tool_sandbox_trust_bundle_paths,
+            },
         )?;
         runtime.grant_outer_caps(&mut caps)?;
         Some(runtime)
