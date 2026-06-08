@@ -382,9 +382,13 @@ impl PreparedToolSandboxRuntime {
         let listener = Arc::clone(&self.listener);
         let session_id = session_id.to_string();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _addr)) => {
+                        if let Err(err) = stream.set_nonblocking(false) {
+                            debug!("tool-sandbox listener stream blocking mode error: {err}");
+                            continue;
+                        }
                         let state = Arc::clone(&state);
                         let session_id = session_id.clone();
                         let audit_recorder = audit_recorder.clone();
@@ -404,6 +408,9 @@ impl PreparedToolSandboxRuntime {
                                 audit_recorder,
                             );
                         });
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                     Err(err) => {
                         debug!("tool-sandbox listener error: {err}");

@@ -1801,7 +1801,7 @@ fn wait_for_child_with_pty(
     let pty = match pty {
         Some(pty) => pty,
         None => {
-            return wait_for_child_with_startup_timeout(child, startup_timeout, killed_by_timeout);
+            return wait_for_child(child);
         }
     };
     let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
@@ -1864,7 +1864,7 @@ fn wait_for_child_with_pty(
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline
                     && Instant::now() >= deadline
-                    && !pty.is_interactive()
+                    && startup_timeout_should_terminate(Some(pty.is_interactive()))
                 {
                     notify_startup_termination_for_child(
                         timeout_cfg,
@@ -1897,33 +1897,8 @@ fn wait_for_child_with_pty(
     wait_for_child(child)
 }
 
-fn wait_for_child_with_startup_timeout(
-    child: Pid,
-    startup_timeout: Option<StartupTimeoutConfig<'_>>,
-    killed_by_timeout: &mut bool,
-) -> Result<WaitStatus> {
-    let startup_deadline = startup_timeout.map(|cfg| (Instant::now() + cfg.timeout, cfg));
-
-    loop {
-        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => {
-                if let Some((deadline, timeout_cfg)) = startup_deadline
-                    && Instant::now() >= deadline
-                {
-                    notify_startup_termination_for_child(timeout_cfg, true, None);
-                    *killed_by_timeout = true;
-                    let _ = signal::kill(child, Signal::SIGKILL);
-                    return wait_for_child(child);
-                }
-                std::thread::sleep(timeouts::CHILD_POLL_INTERVAL);
-            }
-            Ok(status) => return Ok(status),
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(e) => {
-                return Err(NonoError::SandboxInit(format!("waitpid() failed: {}", e)));
-            }
-        }
-    }
+fn startup_timeout_should_terminate(pty_interactive: Option<bool>) -> bool {
+    matches!(pty_interactive, Some(false))
 }
 
 /// Wait for child process, handling EINTR from signals.
@@ -2493,7 +2468,7 @@ fn run_supervisor_loop(
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline
                     && Instant::now() >= deadline
-                    && !pty.as_ref().is_some_and(|p| p.is_interactive())
+                    && startup_timeout_should_terminate(pty.as_ref().map(|p| p.is_interactive()))
                 {
                     notify_startup_termination_for_child(
                         timeout_cfg,
@@ -2630,15 +2605,6 @@ fn run_supervisor_loop(
             let idx = pfds.len();
             pfds.push(libc::pollfd {
                 fd: pfd,
-                events: libc::POLLIN,
-                revents: 0,
-            });
-            idx
-        });
-        let listener_idx = listener_raw_fd.map(|lfd| {
-            let idx = pfds.len();
-            pfds.push(libc::pollfd {
-                fd: lfd,
                 events: libc::POLLIN,
                 revents: 0,
             });
@@ -2831,7 +2797,7 @@ fn run_supervisor_loop(
             Ok(WaitStatus::StillAlive) => {
                 if let Some((deadline, timeout_cfg)) = startup_deadline
                     && Instant::now() >= deadline
-                    && !pty.as_ref().is_some_and(|p| p.is_interactive())
+                    && startup_timeout_should_terminate(pty.as_ref().map(|p| p.is_interactive()))
                 {
                     notify_startup_termination_for_child(
                         timeout_cfg,
@@ -4131,6 +4097,13 @@ mod tests {
                 .iter()
                 .any(|d| d.path == Path::new("/etc/hosts"))
         );
+    }
+
+    #[test]
+    fn test_startup_timeout_requires_noninteractive_pty() {
+        assert!(!startup_timeout_should_terminate(None));
+        assert!(!startup_timeout_should_terminate(Some(true)));
+        assert!(startup_timeout_should_terminate(Some(false)));
     }
 
     #[test]
