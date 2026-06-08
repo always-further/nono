@@ -2378,23 +2378,16 @@ pub fn read_msghdr_dest(pid: u32, msghdr_ptr: u64) -> Result<Option<(u64, u64)>>
         .map_err(|e| NonoError::SandboxInit(format!("Failed to seek in {}: {}", mem_path, e)))?;
 
     let mut buf = [0u8; MSGHDR_MIN_READ];
-    let n = file.read(&mut buf).map_err(|e| {
+    file.read_exact(&mut buf).map_err(|e| {
         NonoError::SandboxInit(format!("Failed to read msghdr from {}: {}", mem_path, e))
     })?;
-
-    if n < MSGHDR_MIN_READ {
-        return Err(NonoError::SandboxInit(format!(
-            "Short read for msghdr: got {} bytes, need {}",
-            n, MSGHDR_MIN_READ
-        )));
-    }
 
     // msg_name is a pointer (8 bytes, native endian on Linux)
     let msg_name = u64::from_ne_bytes([
         buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
     ]);
-    // msg_namelen is socklen_t (4 bytes, native endian)
-    let msg_namelen = u64::from_ne_bytes([buf[8], buf[9], buf[10], buf[11], 0, 0, 0, 0]);
+    // msg_namelen is socklen_t (4 bytes, native endian), cast to u64 for read_notif_sockaddr
+    let msg_namelen = u32::from_ne_bytes([buf[8], buf[9], buf[10], buf[11]]) as u64;
 
     if msg_name == 0 {
         // No destination address: the socket is connected, sendmsg just
