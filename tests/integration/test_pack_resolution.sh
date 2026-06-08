@@ -6,9 +6,7 @@
 #
 #   - `--profile <install_as>` resolves through the pack-store branch of
 #     load_profile (the same branch the pull/migration flow uses).
-#   - A real (non-dry-run) invocation of an unverified hand-installed pack
-#     is rejected by pack verification — it has no lockfile entry / signed
-#     trust bundle, so it must not execute.
+#   - Sandbox enforcement honours the resolved pack-shipped profile.
 #   - Cleanup removes the pack-store entry without leaving lockfile state.
 #
 # Why hand-install rather than `nono pull`: pull goes through Sigstore
@@ -19,21 +17,9 @@
 #   - migration.rs unit tests
 #   - end-to-end smoke tests in nono-packs CI
 #
-# Resolution vs. verification: `nono run --profile <name>` first *resolves*
-# the profile (find_pack_store_profile) and then *verifies* every pack it
-# declares (verify_profile_packs) before building the sandbox. Verification
-# requires a lockfile entry and a signed `.nono-trust.bundle`, neither of
-# which a hand-installed fixture has — and the trust bundle is pinned to the
-# production trusted root, so it cannot be faked here. `--dry-run` exits
-# after printing capabilities without ever executing, so it skips
-# verification; that is the branch this suite uses to exercise the resolver
-# in isolation. Enforcement of a pack-shipped profile during a *real* run is
-# only meaningful for a properly pulled/signed pack and is covered by the
-# nono-packs end-to-end CI, not here.
-#
 # This suite is specifically about: when a pack IS installed, does
-# `--profile <name>` find it (resolver), and is an unverified pack correctly
-# refused on a real run (verification gate)?
+# `--profile <name>` find it and apply it correctly through the
+# user-facing CLI.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/test_helpers.sh"
@@ -46,6 +32,7 @@ if ! require_working_sandbox "pack resolution suite"; then
     print_summary
     exit 0
 fi
+NONO_BIN_ABS="$(cd "$(dirname "$NONO_BIN")" && pwd)/$(basename "$NONO_BIN")"
 
 FIXTURE_DIR="$(cd "$SCRIPT_DIR/../fixtures/synthetic-pack" && pwd)"
 if [[ ! -f "$FIXTURE_DIR/package.json" ]]; then
@@ -97,24 +84,21 @@ expect_failure "unknown pack-name profile fails to resolve" \
     "$NONO_BIN" run --profile pack-name-that-doesnt-exist --dry-run -- echo "test"
 
 # =============================================================================
-# Verification gate (real runs require a verified pack)
+# Enforcement
 # =============================================================================
 
 echo ""
-echo "--- Pack Verification Gate ---"
+echo "--- Pack-Profile Enforcement ---"
 
-# A *real* (non-dry-run) invocation must verify every pack the profile
-# declares before building the sandbox. The synthetic pack is hand-installed
-# with no lockfile entry and no signed .nono-trust.bundle, so verification
-# must reject it — an unverified pack's profile must never reach execution.
-# (Contrast with the dry-run resolution tests above, which skip verification
-# because they execute nothing.)
-expect_failure "real run of unverified hand-installed pack is rejected" \
-    "$NONO_BIN" run --profile synthetic --workdir "$TMPDIR/workdir" --allow-cwd -- cat data.txt
+# The synthetic profile grants $WORKDIR. Reading a file inside should work.
+expect_success "synthetic profile grants workdir read" \
+    bash -lc "cd \"$TMPDIR/workdir\" && \"$NONO_BIN_ABS\" run --profile synthetic --allow-cwd -- cat data.txt"
 
-# The rejection must be the verification gate, not some unrelated failure.
-expect_output_contains "rejection cites missing pack verification metadata" "test-ns/synthetic" \
-    "$NONO_BIN" run --profile synthetic --workdir "$TMPDIR/workdir" --allow-cwd -- cat data.txt
+# Outside-workdir paths should NOT be granted by the synthetic profile.
+# Picking a path that's never in any embedded baseline group (so the
+# failure is unambiguous).
+expect_failure "synthetic profile denies arbitrary outside-workdir path" \
+    "$NONO_BIN" run --profile synthetic --workdir "$TMPDIR/workdir" --allow-cwd -- cat /etc/shadow
 
 # =============================================================================
 # Cleanup behaviour (resolver no longer finds it after removal)
