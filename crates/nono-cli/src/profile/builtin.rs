@@ -59,6 +59,54 @@ mod tests {
     }
 
     #[test]
+    fn test_get_builtin_linux_tool_sandbox_git_ssh() {
+        let profile = get_builtin("linux-tool-sandbox-git-ssh").expect("Profile not found");
+        assert_eq!(profile.meta.name, "linux-tool-sandbox-git-ssh");
+        let command_policies = profile
+            .command_policies
+            .as_ref()
+            .expect("linux tool-sandbox profile must define command policies");
+        assert!(command_policies.commands.contains_key("git"));
+        assert!(command_policies.commands.contains_key("ssh"));
+        assert_eq!(command_policies.entrypoint.as_deref(), Some("git"));
+        let git = command_policies.commands.get("git").expect("git policy");
+        let git_env = git
+            .sandbox
+            .as_ref()
+            .and_then(|sandbox| sandbox.environment.as_ref())
+            .expect("git policy environment");
+        assert_eq!(
+            git_env.set_vars.get("GIT_CONFIG_VALUE_0"),
+            Some(&"ssh".to_string())
+        );
+        assert_eq!(
+            git_env.set_vars.get("GIT_CONFIG_VALUE_1"),
+            Some(&String::new())
+        );
+        assert_eq!(git_env.set_vars.get("GIT_PAGER"), Some(&String::new()));
+        assert_eq!(git_env.set_vars.get("GIT_SSH"), Some(&"ssh".to_string()));
+        let ssh = command_policies.commands.get("ssh").expect("ssh policy");
+        let ssh_from_git = ssh.from.get("git").expect("ssh.from.git policy");
+        match ssh_from_git {
+            crate::command_policy::CommandFromConfig::Policy(policy) => {
+                assert_eq!(
+                    policy.argv_prepend,
+                    vec!["-o".to_string(), "IdentityFile=none".to_string()]
+                );
+            }
+            crate::command_policy::CommandFromConfig::Edge(edge) => {
+                assert_eq!(
+                    edge.sandbox.argv_prepend,
+                    vec!["-o".to_string(), "IdentityFile=none".to_string()]
+                );
+            }
+            crate::command_policy::CommandFromConfig::Deny(_) => {
+                panic!("ssh.from.git should allow policy launch");
+            }
+        }
+    }
+
+    #[test]
     fn test_get_builtin_swival() {
         let profile = get_builtin("swival").expect("Profile not found");
         assert_eq!(profile.meta.name, "swival");
@@ -112,6 +160,7 @@ mod tests {
         let profiles = list_builtin();
         assert!(profiles.contains(&"default".to_string()));
         assert!(profiles.contains(&"linux-host-compat".to_string()));
+        assert!(profiles.contains(&"linux-tool-sandbox-git-ssh".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
         assert!(profiles.contains(&"swival".to_string()));
         // Profiles that ship via registry packs instead of as built-ins:

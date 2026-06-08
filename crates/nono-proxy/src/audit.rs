@@ -41,6 +41,10 @@ pub struct EventContext<'a> {
     pub managed_credential_active: Option<bool>,
     pub injection_mode: Option<NetworkAuditInjectionMode>,
     pub denial_category: Option<NetworkAuditDenialCategory>,
+    pub endpoint_policy_action: Option<&'a str>,
+    pub endpoint_policy_rule: Option<&'a str>,
+    pub approval_backend: Option<&'a str>,
+    pub upstream: Option<&'a str>,
 }
 
 impl std::fmt::Display for ProxyMode {
@@ -161,11 +165,11 @@ pub fn log_allowed(
             managed_credential_active: ctx.managed_credential_active,
             injection_mode: ctx.injection_mode.clone(),
             denial_category: None,
-            endpoint_policy_action: None,
-            endpoint_policy_rule: None,
-            approval_backend: None,
+            endpoint_policy_action: ctx.endpoint_policy_action.map(str::to_string),
+            endpoint_policy_rule: ctx.endpoint_policy_rule.map(str::to_string),
+            approval_backend: ctx.approval_backend.map(str::to_string),
             target: host.to_string(),
-            upstream: None,
+            upstream: ctx.upstream.map(str::to_string),
             port: Some(port),
             method: Some(method.to_string()),
             path: None,
@@ -206,11 +210,11 @@ pub fn log_denied(
             managed_credential_active: ctx.managed_credential_active,
             injection_mode: ctx.injection_mode.clone(),
             denial_category: ctx.denial_category.clone(),
-            endpoint_policy_action: None,
-            endpoint_policy_rule: None,
-            approval_backend: None,
+            endpoint_policy_action: ctx.endpoint_policy_action.map(str::to_string),
+            endpoint_policy_rule: ctx.endpoint_policy_rule.map(str::to_string),
+            approval_backend: ctx.approval_backend.map(str::to_string),
             target: host.to_string(),
-            upstream: None,
+            upstream: ctx.upstream.map(str::to_string),
             port: Some(port),
             method: None,
             path: None,
@@ -256,16 +260,69 @@ pub fn log_l7_request(
             managed_credential_active: ctx.managed_credential_active,
             injection_mode: ctx.injection_mode.clone(),
             denial_category: None,
-            endpoint_policy_action: None,
-            endpoint_policy_rule: None,
-            approval_backend: None,
+            endpoint_policy_action: ctx.endpoint_policy_action.map(str::to_string),
+            endpoint_policy_rule: ctx.endpoint_policy_rule.map(str::to_string),
+            approval_backend: ctx.approval_backend.map(str::to_string),
             target: target.to_string(),
-            upstream: None,
+            upstream: ctx.upstream.map(str::to_string),
             port: None,
             method: Some(method.to_string()),
             path: Some(path.to_string()),
             status: Some(status),
             reason: None,
+        },
+    );
+}
+
+/// Log an L7 endpoint-policy decision before the upstream request is made.
+#[allow(clippy::too_many_arguments)]
+pub fn log_l7_policy_decision(
+    audit_log: Option<&SharedAuditLog>,
+    mode: ProxyMode,
+    ctx: &EventContext<'_>,
+    target: &str,
+    port: Option<u16>,
+    method: &str,
+    path: &str,
+    decision: NetworkAuditDecision,
+    action: &str,
+    rule_label: &str,
+    reason: Option<&str>,
+) {
+    info!(
+        target: "nono_proxy::audit",
+        mode = %mode,
+        target = target,
+        method = method,
+        path = path,
+        decision = ?decision,
+        endpoint_policy_action = action,
+        endpoint_policy_rule = rule_label,
+        "l7 endpoint policy decision"
+    );
+
+    push_event(
+        audit_log,
+        NetworkAuditEvent {
+            timestamp_unix_ms: now_unix_millis(),
+            mode: map_mode(mode),
+            decision,
+            route_id: ctx.route_id.map(str::to_string),
+            auth_mechanism: ctx.auth_mechanism.clone(),
+            auth_outcome: ctx.auth_outcome.clone(),
+            managed_credential_active: ctx.managed_credential_active,
+            injection_mode: ctx.injection_mode.clone(),
+            denial_category: ctx.denial_category.clone(),
+            endpoint_policy_action: Some(action.to_string()),
+            endpoint_policy_rule: Some(rule_label.to_string()),
+            approval_backend: ctx.approval_backend.map(str::to_string),
+            target: target.to_string(),
+            upstream: ctx.upstream.map(str::to_string),
+            port,
+            method: Some(method.to_string()),
+            path: Some(path.to_string()),
+            status: None,
+            reason: reason.map(str::to_string),
         },
     );
 }
@@ -350,5 +407,58 @@ mod tests {
             event.reason.as_deref(),
             Some("blocked by metadata deny list")
         );
+    }
+
+    #[test]
+    fn log_l7_policy_decision_records_endpoint_context() {
+        let log = new_audit_log();
+
+        log_l7_policy_decision(
+            Some(&log),
+            ProxyMode::Reverse,
+            &EventContext {
+                route_id: Some("internal-api"),
+                managed_credential_active: Some(true),
+                injection_mode: Some(NetworkAuditInjectionMode::Header),
+                approval_backend: Some("terminal"),
+                upstream: Some("https://api.internal.example"),
+                ..EventContext::default()
+            },
+            "internal-api",
+            None,
+            "POST",
+            "/v1/tasks/123/comments",
+            NetworkAuditDecision::ApproveRequested,
+            "approve",
+            "endpoint_policy.approve[POST /v1/tasks/*/comments]",
+            Some("approval required"),
+        );
+
+        let events = drain_audit_events(&log);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.mode, NetworkAuditMode::Reverse);
+        assert_eq!(event.decision, NetworkAuditDecision::ApproveRequested);
+        assert_eq!(event.route_id.as_deref(), Some("internal-api"));
+        assert_eq!(event.managed_credential_active, Some(true));
+        assert_eq!(
+            event.injection_mode,
+            Some(NetworkAuditInjectionMode::Header)
+        );
+        assert_eq!(event.endpoint_policy_action.as_deref(), Some("approve"));
+        assert_eq!(
+            event.endpoint_policy_rule.as_deref(),
+            Some("endpoint_policy.approve[POST /v1/tasks/*/comments]")
+        );
+        assert_eq!(event.approval_backend.as_deref(), Some("terminal"));
+        assert_eq!(
+            event.upstream.as_deref(),
+            Some("https://api.internal.example")
+        );
+        assert_eq!(event.target, "internal-api");
+        assert_eq!(event.port, None);
+        assert_eq!(event.method.as_deref(), Some("POST"));
+        assert_eq!(event.path.as_deref(), Some("/v1/tasks/123/comments"));
+        assert_eq!(event.reason.as_deref(), Some("approval required"));
     }
 }

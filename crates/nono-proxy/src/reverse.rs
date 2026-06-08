@@ -15,7 +15,7 @@
 //! forwarded without buffering.
 
 use crate::audit;
-use crate::config::InjectMode;
+use crate::config::{EndpointPolicyOutcome, InjectMode};
 use crate::credential::{CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
@@ -23,6 +23,7 @@ use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrat
 use crate::route::RouteStore;
 use crate::token;
 use std::net::SocketAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -94,6 +95,8 @@ pub struct ReverseProxyCtx<'a> {
     pub tls_connector: &'a TlsConnector,
     /// Shared network audit sink for session metadata capture
     pub audit_log: Option<&'a audit::SharedAuditLog>,
+    /// Optional approval backend registry for endpoint-policy approve decisions.
+    pub approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
 }
 
 /// Handle a non-CONNECT HTTP request (reverse proxy mode).
@@ -168,6 +171,7 @@ pub async fn handle_reverse_proxy(
             denial_category: Some(
                 nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
             ),
+            ..audit::EventContext::default()
         };
         audit::log_denied(
             ctx.audit_log,
@@ -181,27 +185,17 @@ pub async fn handle_reverse_proxy(
         return Ok(());
     }
 
-    // L7 endpoint filtering runs for all reverse-proxy routes, whether or not
-    // they inject a credential.
-    if !route.endpoint_rules.is_allowed(&method, &upstream_path) {
-        let reason = format!(
-            "endpoint denied: {} {} on service '{}'",
-            method, upstream_path, service
-        );
-        warn!("{}", reason);
-        let deny_ctx = audit::EventContext {
-            denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
-            ..route_ctx.clone()
-        };
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &deny_ctx,
-            &service,
-            0,
-            &reason,
-        );
-        send_error(stream, 403, "Forbidden").await?;
+    if !enforce_endpoint_policy(
+        route,
+        &service,
+        &method,
+        &upstream_path,
+        &route_ctx,
+        ctx,
+        stream,
+    )
+    .await?
+    {
         return Ok(());
     }
 
@@ -430,6 +424,289 @@ pub async fn handle_reverse_proxy(
     Ok(())
 }
 
+async fn enforce_endpoint_policy(
+    route: &crate::route::LoadedRoute,
+    service: &str,
+    method: &str,
+    upstream_path: &str,
+    route_ctx: &audit::EventContext<'_>,
+    ctx: &ReverseProxyCtx<'_>,
+    stream: &mut TcpStream,
+) -> Result<bool> {
+    match route.endpoint_policy.evaluate(method, upstream_path) {
+        EndpointPolicyOutcome::Allow { rule_label } => {
+            let policy_ctx = audit::EventContext {
+                endpoint_policy_action: Some("allow"),
+                endpoint_policy_rule: Some(&rule_label),
+                upstream: Some(&route.upstream),
+                ..route_ctx.clone()
+            };
+            audit::log_l7_policy_decision(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &policy_ctx,
+                service,
+                None,
+                method,
+                upstream_path,
+                nono::undo::NetworkAuditDecision::Allow,
+                "allow",
+                &rule_label,
+                None,
+            );
+            Ok(true)
+        }
+        EndpointPolicyOutcome::Deny { reason, rule_label } => {
+            let reason = reason.map(str::to_string).unwrap_or_else(|| {
+                format!(
+                    "endpoint denied by {}: {} {} on service '{}'",
+                    rule_label, method, upstream_path, service
+                )
+            });
+            warn!("{}", reason);
+            let deny_ctx = audit::EventContext {
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                endpoint_policy_action: Some("deny"),
+                endpoint_policy_rule: Some(&rule_label),
+                upstream: Some(&route.upstream),
+                ..route_ctx.clone()
+            };
+            audit::log_l7_policy_decision(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                service,
+                None,
+                method,
+                upstream_path,
+                nono::undo::NetworkAuditDecision::Deny,
+                "deny",
+                &rule_label,
+                Some(&reason),
+            );
+            send_error(stream, 403, "Forbidden").await?;
+            Ok(false)
+        }
+        EndpointPolicyOutcome::Approve {
+            backend,
+            reason,
+            timeout_secs,
+            rule_label,
+        } => {
+            let Some(approval_backends) = ctx.approval_backends.clone() else {
+                let deny_reason = format!(
+                    "endpoint approval required by {} but no approval backend is configured",
+                    rule_label
+                );
+                warn!("{}", deny_reason);
+                let deny_ctx = audit::EventContext {
+                    denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                    endpoint_policy_action: Some("approve"),
+                    endpoint_policy_rule: Some(&rule_label),
+                    upstream: Some(&route.upstream),
+                    ..route_ctx.clone()
+                };
+                audit::log_l7_policy_decision(
+                    ctx.audit_log,
+                    audit::ProxyMode::Reverse,
+                    &deny_ctx,
+                    service,
+                    None,
+                    method,
+                    upstream_path,
+                    nono::undo::NetworkAuditDecision::ApproveError,
+                    "approve",
+                    &rule_label,
+                    Some(&deny_reason),
+                );
+                send_error(stream, 403, "Forbidden").await?;
+                return Ok(false);
+            };
+            let (backend_name, backend) = match approval_backends.resolve(backend) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    let deny_reason = format!("endpoint approval backend resolution failed: {err}");
+                    warn!("{}", deny_reason);
+                    let deny_ctx = audit::EventContext {
+                        denial_category: Some(
+                            nono::undo::NetworkAuditDenialCategory::EndpointPolicy,
+                        ),
+                        endpoint_policy_action: Some("approve"),
+                        endpoint_policy_rule: Some(&rule_label),
+                        upstream: Some(&route.upstream),
+                        ..route_ctx.clone()
+                    };
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &deny_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveError,
+                        "approve",
+                        &rule_label,
+                        Some(&deny_reason),
+                    );
+                    send_error(stream, 403, "Forbidden").await?;
+                    return Ok(false);
+                }
+            };
+            let request_reason = reason.map(str::to_string).unwrap_or_else(|| {
+                format!(
+                    "endpoint approval required by {} for {} {}",
+                    rule_label, method, upstream_path
+                )
+            });
+            let approval_ctx = audit::EventContext {
+                endpoint_policy_action: Some("approve"),
+                endpoint_policy_rule: Some(&rule_label),
+                approval_backend: Some(&backend_name),
+                upstream: Some(&route.upstream),
+                ..route_ctx.clone()
+            };
+            audit::log_l7_policy_decision(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &approval_ctx,
+                service,
+                None,
+                method,
+                upstream_path,
+                nono::undo::NetworkAuditDecision::ApproveRequested,
+                "approve",
+                &rule_label,
+                Some(&request_reason),
+            );
+            let request = nono::supervisor::ApprovalRequest::Endpoint {
+                request_id: endpoint_approval_request_id(service),
+                route_id: service.to_string(),
+                upstream: route.upstream.clone(),
+                method: method.to_string(),
+                path: upstream_path.to_string(),
+                rule_label: rule_label.clone(),
+                reason: Some(request_reason),
+                child_pid: 0,
+                session_id: "proxy".to_string(),
+            };
+            let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(60));
+            let decision = tokio::time::timeout(
+                timeout,
+                tokio::task::spawn_blocking(move || backend.request_approval(&request)),
+            )
+            .await;
+            match decision {
+                Ok(Ok(Ok(decision))) if decision.is_granted() => {
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &approval_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveGranted,
+                        "approve",
+                        &rule_label,
+                        None,
+                    );
+                    return Ok(true);
+                }
+                Ok(Ok(Ok(_))) => {}
+                Ok(Ok(Err(err))) => {
+                    let deny_reason = format!("endpoint approval backend error: {err}");
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &approval_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveError,
+                        "approve",
+                        &rule_label,
+                        Some(&deny_reason),
+                    );
+                    warn!("{}", deny_reason);
+                    send_error(stream, 403, "Forbidden").await?;
+                    return Ok(false);
+                }
+                Ok(Err(err)) => {
+                    let deny_reason = format!("endpoint approval task failed: {err}");
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &approval_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveError,
+                        "approve",
+                        &rule_label,
+                        Some(&deny_reason),
+                    );
+                    warn!("{}", deny_reason);
+                    send_error(stream, 403, "Forbidden").await?;
+                    return Ok(false);
+                }
+                Err(_) => {
+                    let deny_reason = format!(
+                        "endpoint approval timed out by {}: {} {} on service '{}'",
+                        rule_label, method, upstream_path, service
+                    );
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &approval_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveTimeout,
+                        "approve",
+                        &rule_label,
+                        Some(&deny_reason),
+                    );
+                    warn!("{}", deny_reason);
+                    send_error(stream, 403, "Forbidden").await?;
+                    return Ok(false);
+                }
+            }
+            let deny_reason = format!(
+                "endpoint approval denied by {}: {} {} on service '{}'",
+                rule_label, method, upstream_path, service
+            );
+            warn!("{}", deny_reason);
+            audit::log_l7_policy_decision(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &approval_ctx,
+                service,
+                None,
+                method,
+                upstream_path,
+                nono::undo::NetworkAuditDecision::ApproveDenied,
+                "approve",
+                &rule_label,
+                Some(&deny_reason),
+            );
+            send_error(stream, 403, "Forbidden").await?;
+            Ok(false)
+        }
+    }
+}
+
+fn endpoint_approval_request_id(service: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("proxy-endpoint-approval-{service}-{nanos}")
+}
+
 /// Handle a reverse proxy request using an OAuth2 token cache.
 ///
 /// Retrieves a (possibly refreshed) access token from the cache and injects
@@ -463,6 +740,7 @@ async fn handle_oauth2_credential(
             managed_credential_active: Some(true),
             injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
             denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
+            ..audit::EventContext::default()
         };
         audit::log_denied(
             ctx.audit_log,
@@ -585,6 +863,7 @@ async fn handle_oauth2_credential(
             managed_credential_active: Some(true),
             injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
             denial_category: None,
+            ..audit::EventContext::default()
         },
         target: service,
         method,
@@ -607,6 +886,7 @@ async fn handle_oauth2_credential(
                 denial_category: Some(
                     nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
                 ),
+                ..audit::EventContext::default()
             },
             service,
             0,

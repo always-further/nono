@@ -31,13 +31,14 @@ use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use time::OffsetDateTime;
 use tracing::{debug, warn};
 
 /// Per-hostname leaf certificate cache backed by the session's [`EphemeralCa`].
 pub struct CertCache {
     ca: Arc<EphemeralCa>,
+    leaf_validity: Option<Duration>,
     /// Hostname → minted leaf. Kept behind a `Mutex` because rustls' cert
     /// resolver is invoked from sync handshake context.
     cache: Mutex<HashMap<String, Arc<CertifiedKey>>>,
@@ -47,8 +48,14 @@ impl CertCache {
     /// Construct a new cache backed by `ca`.
     #[must_use]
     pub fn new(ca: Arc<EphemeralCa>) -> Self {
+        Self::new_with_leaf_validity(ca, None)
+    }
+
+    #[must_use]
+    pub fn new_with_leaf_validity(ca: Arc<EphemeralCa>, leaf_validity: Option<Duration>) -> Self {
         Self {
             ca,
+            leaf_validity,
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -80,7 +87,7 @@ impl CertCache {
         if let Some(existing) = cache.get(hostname) {
             return Ok(Arc::clone(existing));
         }
-        let minted = mint_leaf(self.ca.as_ref(), hostname)?;
+        let minted = mint_leaf(self.ca.as_ref(), hostname, self.leaf_validity)?;
         cache.insert(hostname.to_string(), Arc::clone(&minted));
         debug!("tls_intercept: minted leaf certificate for {}", hostname);
         Ok(minted)
@@ -125,7 +132,11 @@ impl ResolvesServerCert for CertCache {
 /// Go's TLS verifier (via `SecTrustEvaluateWithError`) requires the full
 /// chain to be presented by the server even when the CA is in the user
 /// trust store.
-fn mint_leaf(ca: &EphemeralCa, hostname: &str) -> Result<Arc<CertifiedKey>> {
+fn mint_leaf(
+    ca: &EphemeralCa,
+    hostname: &str,
+    leaf_validity: Option<Duration>,
+) -> Result<Arc<CertifiedKey>> {
     // Generate a new key pair for this leaf. Distinct from the CA key:
     // we never expose the CA's signing key in any TLS handshake.
     let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
@@ -147,8 +158,12 @@ fn mint_leaf(ca: &EphemeralCa, hostname: &str) -> Result<Arc<CertifiedKey>> {
             "CA certificate has expired; cannot mint leaf for '{hostname}'"
         )));
     }
+    let leaf_not_after = leaf_validity
+        .and_then(|validity| now.checked_add(validity))
+        .map(|requested| requested.min(ca_not_after))
+        .unwrap_or(ca_not_after);
     params.not_before = system_time_to_offset(now)?;
-    params.not_after = system_time_to_offset(ca_not_after)?;
+    params.not_after = system_time_to_offset(leaf_not_after)?;
 
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, hostname);
@@ -250,6 +265,30 @@ mod tests {
         assert!(
             der.windows(aki_oid.len()).any(|w| w == aki_oid),
             "minted leaf must include Authority Key Identifier (OID 2.5.29.35)"
+        );
+    }
+
+    #[test]
+    fn minted_leaf_uses_configured_shorter_validity() {
+        use x509_parser::prelude::FromDer;
+
+        let ca = Arc::new(
+            EphemeralCa::generate_with_cn("nono-test-ca", Duration::from_secs(24 * 60 * 60))
+                .unwrap(),
+        );
+        let cache =
+            CertCache::new_with_leaf_validity(Arc::clone(&ca), Some(Duration::from_secs(60)));
+        let ck = cache.get_or_mint("api.example.com").unwrap();
+        let (_, cert) =
+            x509_parser::certificate::X509Certificate::from_der(ck.cert[0].as_ref()).unwrap();
+        let leaf_not_after = cert.validity().not_after.timestamp();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            leaf_not_after >= now + 30 && leaf_not_after <= now + 90,
+            "leaf_not_after={leaf_not_after}, now={now}"
         );
     }
 

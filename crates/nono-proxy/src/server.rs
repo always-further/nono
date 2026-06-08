@@ -124,14 +124,19 @@ impl ProxyHandle {
             let intercept_summary = if self.intercept_ca_path.is_some()
                 && (route.credential_key.is_some()
                     || route.oauth2.is_some()
-                    || !route.endpoint_rules.is_empty())
+                    || !route.endpoint_rules.is_empty()
+                    || route.endpoint_policy.is_some())
             {
                 "intercept: on"
             } else {
                 "intercept: off"
             };
 
-            let rules_summary = format!("endpoint_rules: {}", route.endpoint_rules.len());
+            let rules_summary = if route.endpoint_policy.is_some() {
+                "endpoint_policy: on".to_string()
+            } else {
+                format!("endpoint_rules: {}", route.endpoint_rules.len())
+            };
             let summary = format!(
                 "→ {} | {} | {} | {}",
                 route.upstream, cred_summary, intercept_summary, rules_summary
@@ -287,6 +292,7 @@ impl Drop for ProxyHandle {
     /// surface them, and the file may already be gone if the user invoked
     /// `shutdown()` from another path.
     fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
         if let Some(path) = self.intercept_ca_path.take() {
             let _ = std::fs::remove_file(&path);
             // If the parent dir is now empty (we may have been the only
@@ -316,6 +322,8 @@ struct ProxyState {
     active_connections: AtomicUsize,
     /// Shared network audit log for this proxy session.
     audit_log: audit::SharedAuditLog,
+    /// Optional approval backend registry for L7 endpoint-policy approve routes.
+    approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
     /// Matcher for hosts that bypass the external proxy and route direct.
     /// Built once at startup from `ExternalProxyConfig.bypass_hosts`.
     bypass_matcher: external::BypassMatcher,
@@ -334,6 +342,26 @@ struct ProxyState {
 /// Returns a `ProxyHandle` with the assigned port and session token.
 /// The server runs until the handle is dropped or `shutdown()` is called.
 pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
+    start_with_approval(config, None).await
+}
+
+/// Start the proxy server with an optional approval backend for L7
+/// endpoint-policy `approve` decisions.
+pub async fn start_with_approval(
+    config: ProxyConfig,
+    approval_backend: Option<Arc<dyn nono::ApprovalBackend>>,
+) -> Result<ProxyHandle> {
+    let approval_backends =
+        approval_backend.map(crate::approval::ApprovalBackendRegistry::singleton);
+    start_with_approval_registry(config, approval_backends).await
+}
+
+/// Start the proxy server with an optional named approval backend registry for
+/// L7 endpoint-policy `approve` decisions.
+pub async fn start_with_approval_registry(
+    config: ProxyConfig,
+    approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+) -> Result<ProxyHandle> {
     // Generate session token
     let session_token = token::generate_session_token()?;
 
@@ -500,7 +528,10 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
             };
             match ca_result.and_then(|ca| {
                 let ca = Arc::new(ca);
-                let cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+                let cache = Arc::new(CertCache::new_with_leaf_validity(
+                    Arc::clone(&ca),
+                    config.leaf_validity,
+                ));
                 let path = tls_intercept::write_bundle(tls_intercept::BundleInputs {
                     dir,
                     filename: "intercept-ca.pem",
@@ -546,6 +577,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         tls_connector,
         active_connections: AtomicUsize::new(0),
         audit_log: Arc::clone(&audit_log),
+        approval_backends,
         bypass_matcher,
         cert_cache,
     });
@@ -753,6 +785,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             tls_connector: &state.tls_connector,
                             filter: &state.filter,
                             audit_log: Some(&state.audit_log),
+                            approval_backends: state.approval_backends.clone(),
                         };
                         return tls_intercept::handle_intercept_connect(&mut stream, ctx).await;
                     }
@@ -859,6 +892,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             filter: &state.filter,
             tls_connector: &state.tls_connector,
             audit_log: Some(&state.audit_log),
+            approval_backends: state.approval_backends.clone(),
         };
         reverse::handle_reverse_proxy(first_line, &mut stream, &header_bytes, &ctx, &buffered).await
     } else {
@@ -888,6 +922,24 @@ mod tests {
         handle.shutdown();
     }
 
+    #[test]
+    fn test_proxy_handle_drop_signals_shutdown() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        {
+            let _handle = ProxyHandle {
+                port: 12345,
+                token: Zeroizing::new("test_token".to_string()),
+                audit_log: audit::new_audit_log(),
+                shutdown_tx,
+                loaded_routes: std::collections::HashSet::new(),
+                no_proxy_hosts: Vec::new(),
+                intercept_ca_path: None,
+            };
+        }
+
+        assert!(*shutdown_rx.borrow());
+    }
+
     /// End-to-end smoke test: when `intercept_ca_dir` is set AND a route
     /// requires L7 visibility, the proxy:
     /// 1. generates an ephemeral CA;
@@ -915,6 +967,7 @@ mod tests {
                     proxy: None,
                     env_var: None,
                     endpoint_rules: vec![],
+                    endpoint_policy: None,
                     tls_ca: None,
                     tls_client_cert: None,
                     tls_client_key: None,
@@ -979,6 +1032,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1025,6 +1079,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1071,6 +1126,7 @@ mod tests {
                     proxy: None,
                     env_var: None,
                     endpoint_rules: vec![],
+                    endpoint_policy: None,
                     tls_ca: None,
                     tls_client_cert: None,
                     tls_client_key: None,
@@ -1089,6 +1145,7 @@ mod tests {
                     proxy: None,
                     env_var: None,
                     endpoint_rules: vec![],
+                    endpoint_policy: None,
                     tls_ca: None,
                     tls_client_cert: None,
                     tls_client_key: None,
@@ -1162,6 +1219,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1208,6 +1266,7 @@ mod tests {
                 proxy: None,
                 env_var: None, // No explicit env_var — should fall back to uppercase
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1263,6 +1322,7 @@ mod tests {
                 proxy: None,
                 env_var: Some("OPENAI_API_KEY".to_string()),
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1324,6 +1384,7 @@ mod tests {
                     proxy: None,
                     env_var: None,
                     endpoint_rules: vec![],
+                    endpoint_policy: None,
                     tls_ca: None,
                     tls_client_cert: None,
                     tls_client_key: None,
@@ -1342,6 +1403,7 @@ mod tests {
                     proxy: None,
                     env_var: Some("GITHUB_TOKEN".to_string()),
                     endpoint_rules: vec![],
+                    endpoint_policy: None,
                     tls_ca: None,
                     tls_client_cert: None,
                     tls_client_key: None,
@@ -1405,6 +1467,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1439,6 +1502,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1491,6 +1555,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1532,6 +1597,7 @@ mod tests {
                 proxy: None,
                 env_var: Some("ANTHROPIC_API_KEY".to_string()),
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
