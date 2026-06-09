@@ -289,6 +289,7 @@ mod tests {
             suppressed_system_service_operations: Vec::new(),
             allowed_env_vars: None,
             denied_env_vars: None,
+            network_block_requested: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -341,6 +342,7 @@ mod tests {
             suppressed_system_service_operations: Vec::new(),
             allowed_env_vars: None,
             denied_env_vars: None,
+            network_block_requested: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
