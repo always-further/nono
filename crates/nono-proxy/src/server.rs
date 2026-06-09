@@ -1657,7 +1657,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             ..ProxyConfig::default()
         };
-        let handle = start(config).await.unwrap();
+        let handle = start(config, None).await.unwrap();
         let addr = format!("127.0.0.1:{}", handle.port);
 
         let mut stream = TcpStream::connect(&addr).await.unwrap();
