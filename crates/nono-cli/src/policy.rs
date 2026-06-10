@@ -170,6 +170,7 @@ impl ProfileDef {
             env_credentials: self.env_credentials.clone(),
             environment: None,
             command_policies: self.command_policies.clone(),
+            credential_capture: HashMap::new(),
             workdir: self.workdir.clone(),
             hooks: self.hooks.clone(),
             session_hooks: profile::SessionHooks::default(),

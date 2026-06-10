@@ -88,9 +88,14 @@ fn create_session_runtime_state(
     redaction_policy: &nono::ScrubPolicy,
 ) -> Result<SessionRuntimeState> {
     let started = chrono::Local::now().to_rfc3339();
-    let short_session_id = std::env::var(DETACHED_SESSION_ID_ENV)
-        .ok()
-        .filter(|id| !id.is_empty())
+    let short_session_id = session
+        .session_id
+        .clone()
+        .or_else(|| {
+            std::env::var(DETACHED_SESSION_ID_ENV)
+                .ok()
+                .filter(|id| !id.is_empty())
+        })
         .unwrap_or_else(session::generate_session_id);
     let session_record = session::SessionRecord {
         session_id: short_session_id.clone(),
@@ -168,7 +173,11 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
 
     output::print_applying_sandbox(silent);
 
-    let audit_state = create_audit_state(rollback.audit_disabled, rollback.destination.as_ref())?;
+    let audit_state = create_audit_state(
+        rollback.audit_disabled,
+        rollback.destination.as_ref(),
+        session.session_id.as_deref(),
+    )?;
     warn_if_rollback_flags_ignored(rollback, silent);
 
     // Create the session guard (writes session file) and PTY pair BEFORE

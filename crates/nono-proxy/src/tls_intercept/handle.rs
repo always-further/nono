@@ -12,6 +12,7 @@
 //! inner requests are not required to carry a token.
 
 use crate::audit;
+use crate::capture::CredentialCaptureBackend;
 use crate::config::{EndpointPolicyOutcome, InjectMode};
 use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
@@ -45,6 +46,7 @@ pub struct InterceptCtx<'a> {
     pub filter: &'a ProxyFilter,
     pub audit_log: Option<&'a audit::SharedAuditLog>,
     pub approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+    pub credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
 }
 
 /// Handle a CONNECT request that matched a route requiring L7 visibility.
@@ -534,11 +536,16 @@ where
         ),
     }
 
-    let cred = service.and_then(|s| ctx.credential_store.get(s));
+    let static_cred = service.and_then(|s| ctx.credential_store.get(s));
+    let cmd_route = service.and_then(|s| ctx.credential_store.get_cmd(s));
     let oauth2_route = service.and_then(|s| ctx.credential_store.get_oauth2(s));
 
     if let Some(rt) = route
-        && rt.missing_managed_credential(cred.is_some(), oauth2_route.is_some())
+        && rt.missing_managed_credential(
+            static_cred.is_some()
+                || (cmd_route.is_some() && ctx.credential_capture_backend.is_some()),
+            oauth2_route.is_some(),
+        )
     {
         let svc = service.unwrap_or("unknown");
         let reason = format!(
@@ -567,6 +574,54 @@ where
         reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
         return Ok(());
     }
+
+    let captured_credential = if let (Some(svc), Some(cmd)) = (service, cmd_route)
+        && static_cred.is_none()
+    {
+        match reverse::capture_cmd_credential(
+            cmd,
+            svc,
+            route.map(|r| r.upstream.as_str()).unwrap_or(""),
+            &path,
+            &method,
+            ctx.host,
+            ctx.port,
+            audit::ProxyMode::ConnectIntercept,
+            ctx.audit_log,
+            ctx.credential_capture_backend.clone(),
+        )
+        .await
+        {
+            Ok(credential) => Some(credential),
+            Err(err) => {
+                let reason = err.to_string();
+                warn!("tls_intercept: {}", reason);
+                audit::log_denied(
+                    ctx.audit_log,
+                    audit::ProxyMode::ConnectIntercept,
+                    &audit::EventContext {
+                        route_id: service,
+                        auth_mechanism: route.and_then(|r| r.managed_auth_mechanism.clone()),
+                        auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                        managed_credential_active: Some(false),
+                        injection_mode: route.and_then(|r| r.managed_injection_mode.clone()),
+                        denial_category: Some(
+                            nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                        ),
+                        ..audit::EventContext::default()
+                    },
+                    ctx.host,
+                    ctx.port,
+                    &reason,
+                );
+                reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let cred = static_cred.or(captured_credential.as_ref());
 
     // --- Path / credential transformation ---
     let transformed_path = if let Some(cred) = cred {
@@ -636,11 +691,11 @@ where
     if let Some(cred) = cred {
         reverse::inject_credential_for_mode(cred, &mut request);
     }
-    let auth_header_lower = cred.map(|c| c.header_name.to_lowercase());
+    let injected_header_names = reverse::injected_credential_header_names(cred);
     for (name, value) in &filtered_headers {
-        if let (Some(cred), Some(hdr)) = (cred, auth_header_lower.as_ref())
-            && matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
-            && name.to_lowercase() == *hdr
+        if injected_header_names
+            .iter()
+            .any(|header| name.eq_ignore_ascii_case(header))
         {
             continue;
         }

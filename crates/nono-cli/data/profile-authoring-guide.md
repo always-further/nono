@@ -326,7 +326,7 @@ Define a custom reverse proxy credential route for services not in `network-poli
 | Field               | Type            | Required    | Description |
 |---------------------|-----------------|-------------|-------------|
 | `upstream`          | string          | yes         | Upstream URL. Must be HTTPS (HTTP only for loopback). |
-| `credential_key`    | string          | yes         | Keystore account name, `op://` URI, `bw://` URI, `apple-password://` URI, `file://` URI, or `env://` URI. |
+| `credential_key`    | string          | yes         | Keystore account name, `op://` URI, `bw://` URI, `apple-password://` URI, `file://` URI, `env://` URI, or `cmd://` URI referencing `credential_capture`. |
 | `inject_mode`       | string          | no          | One of: `"header"` (default), `"url_path"`, `"query_param"`, `"basic_auth"`. |
 | `inject_header`     | string          | header mode | HTTP header name. Default: `"Authorization"`. |
 | `credential_format` | string          | header mode | Format string with `{}` placeholder. Default: `"Bearer {}"`. |
@@ -334,13 +334,108 @@ Define a custom reverse proxy credential route for services not in `network-poli
 | `path_replacement`  | string          | url_path    | Replacement pattern. Defaults to `path_pattern`. |
 | `query_param_name`  | string          | query_param | Query parameter name for credential injection. |
 | `proxy`             | object          | no          | Optional proxy-side overrides for phantom token parsing. Omitted fields inherit from top-level values. |
-| `env_var`           | string          | URI keys    | Environment variable name for SDK API key. Required when `credential_key` is `op://`, `bw://`, `apple-password://`, or `file://`. Optional for `env://`. |
+| `env_var`           | string          | URI keys    | Environment variable name for SDK API key. Required when `credential_key` is `op://`, `bw://`, `apple-password://`, `file://`, or `cmd://`. Optional for `env://`. |
 | `endpoint_rules`    | array           | no          | L7 allow-list of `{"method": "GET", "path": "/**"}` rules. When non-empty, only matching requests are forwarded (default-deny). |
 | `tls_ca`            | string (path)   | no          | Path to a PEM-encoded CA certificate. Use for upstreams with self-signed or private CA certs (e.g. a Kubernetes API server). |
 | `tls_client_cert`   | string (path)   | no          | Path to a PEM-encoded client certificate for mutual TLS (mTLS). Must be set together with `tls_client_key`. |
 | `tls_client_key`    | string (path)   | no          | Path to the PEM-encoded private key matching `tls_client_cert`. |
 
 `proxy` overrides apply only to how the local proxy validates incoming phantom tokens from the sandboxed process. Outbound upstream credential injection continues to use top-level fields.
+
+### credential_capture
+
+Defines supervisor-side commands that produce credentials for `cmd://` custom credential routes. The command runs lazily when the proxy first needs the credential; only the proxy receives stdout, and the sandboxed child never sees the command output.
+
+```json
+{
+  "network": {
+    "credentials": ["github"],
+    "custom_credentials": {
+      "github": {
+        "upstream": "https://api.github.com",
+        "credential_key": "cmd://github",
+        "env_var": "GH_TOKEN",
+        "credential_format": "token {}"
+      }
+    }
+  },
+  "credential_capture": {
+    "github": {
+      "command": ["gh", "auth", "token"],
+      "timeout_secs": 5,
+      "cache_ttl_secs": 900,
+      "cache_path_regex": "^/(?:repos/|orgs/)?([^/]+)"
+    }
+  }
+}
+```
+
+| Field              | Type            | Required | Default | Description |
+|--------------------|-----------------|----------|---------|-------------|
+| `command`          | array of string | yes      | —       | Command and arguments. No shell interpolation is used. |
+| `timeout_secs`     | integer         | no       | `5`     | Maximum runtime, 1–300 seconds. |
+| `cache_ttl_secs`   | integer         | no       | `900`   | In-memory cache TTL, 0–3600 seconds. `0` disables caching. |
+| `ttl_secs`         | integer         | no       | `900`   | Older alias for `cache_ttl_secs`. Do not set both fields. |
+| `cache_path_regex` | string          | no       | host    | Regex evaluated against the request path. Capture group 1 becomes the cache scope; otherwise the full match is used. |
+| `stdin`            | string          | no       | `null`  | `null` closes stdin; `request_json` writes request metadata JSON to stdin. |
+| `output`           | string/object   | no       | `text`  | `text` captures stdout as one credential. `{"format":"json","allow_headers":[...]}` captures multiple headers. |
+| `interaction`      | object          | no       | none    | Explicit opt-in for capture commands that need inherited stdio or browser opening. |
+
+Capture commands run with `NONO_SESSION_ID`, `NONO_REQUEST_HOST`, `NONO_REQUEST_PATH`, `NONO_REQUEST_METHOD`, `NONO_CACHE_SCOPE`, `NONO_CAPTURE_CREDENTIAL`, and `NONO_CAPTURE_ROUTE` set. Proxy environment variables are removed to avoid recursively using the same proxy route while capturing the credential.
+
+`stdin: "request_json"` sends this shape to the command:
+
+```json
+{
+  "session_id": "c0ffee1234567890",
+  "credential_name": "github",
+  "route_id": "github",
+  "request_host": "api.github.com",
+  "request_path": "/repos/always-further/nono/issues/787",
+  "request_method": "GET",
+  "cache_scope": "always-further"
+}
+```
+
+For multi-header injection, use object-form output and allow every header name explicitly:
+
+```json
+{
+  "credential_capture": {
+    "gateway": {
+      "command": ["internal-auth", "headers"],
+      "output": {
+        "format": "json",
+        "allow_headers": ["Authorization", "X-Gateway-Key"]
+      }
+    }
+  }
+}
+```
+
+The command must print JSON like `{"headers":{"Authorization":"Bearer ...","X-Gateway-Key":"..."}}`. The proxy rejects empty output, unlisted headers, hop-by-hop headers, invalid header names, non-string values, and values containing CR or LF. Audit records include the route, command path, redacted argv, duration, exit status, cache state, cache scope, output format, header names, stdin mode, interaction flag, stdout byte count, and redacted stderr for failures; credential values are never logged.
+
+Browser auth is command-scoped. Add `interaction.open_urls` to a specific capture entry when that command may open a browser:
+
+```json
+{
+  "credential_capture": {
+    "github": {
+      "command": ["gh", "auth", "login"],
+      "interaction": {
+        "stdio": true,
+        "open_urls": {
+          "allow_origins": ["https://github.com"],
+          "allow_localhost": true
+        },
+        "allow_launch_services": true
+      }
+    }
+  }
+}
+```
+
+When `open_urls` is configured, nono gives the capture command a temporary `BROWSER` helper and URL-opening socket. On macOS it also prepends an `open` shim to `PATH`. URL requests through those helpers are validated against that capture entry's `interaction.open_urls`, not the child sandbox's top-level `open_urls`. Non-URL `open` fallback through the shim is available only when `allow_launch_services` is true.
 
 ### env_credentials (alias: secrets)
 

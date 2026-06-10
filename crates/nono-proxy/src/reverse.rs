@@ -15,14 +15,16 @@
 //! forwarded without buffering.
 
 use crate::audit;
+use crate::capture::{CredentialCaptureBackend, CredentialCaptureRequest};
 use crate::config::{EndpointPolicyOutcome, InjectMode};
-use crate::credential::{CredentialStore, LoadedCredential};
+use crate::credential::{CmdCredentialRoute, CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
 use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
 use crate::route::RouteStore;
 use crate::token;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -97,6 +99,8 @@ pub struct ReverseProxyCtx<'a> {
     pub audit_log: Option<&'a audit::SharedAuditLog>,
     /// Optional approval backend registry for endpoint-policy approve decisions.
     pub approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+    /// Optional supervisor capture backend for command-backed credentials.
+    pub credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
 }
 
 /// Handle a non-CONNECT HTTP request (reverse proxy mode).
@@ -132,14 +136,25 @@ pub async fn handle_reverse_proxy(
             prefix: service.clone(),
         })?;
     let static_cred = ctx.credential_store.get(&service);
+    let cmd_route = ctx.credential_store.get_cmd(&service);
     let oauth2_route = ctx.credential_store.get_oauth2(&service);
-    let managed_ctx = static_cred.map(|cred| {
-        managed_credential_event_ctx(
-            &service,
-            &cred.proxy_inject_mode,
-            audit_injection_mode_for_inject_mode(&cred.inject_mode),
-        )
-    });
+    let managed_ctx = static_cred
+        .map(|cred| {
+            managed_credential_event_ctx(
+                &service,
+                &cred.proxy_inject_mode,
+                audit_injection_mode_for_inject_mode(&cred.inject_mode),
+            )
+        })
+        .or_else(|| {
+            cmd_route.map(|cmd| {
+                managed_credential_event_ctx(
+                    &service,
+                    &cmd.proxy_inject_mode,
+                    audit_injection_mode_for_inject_mode(&cmd.inject_mode),
+                )
+            })
+        });
     let oauth2_ctx = oauth2_route.map(|_| audit::EventContext {
         route_id: Some(&service),
         auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
@@ -156,7 +171,11 @@ pub async fn handle_reverse_proxy(
             ..audit::EventContext::default()
         });
 
-    if route.missing_managed_credential(static_cred.is_some(), oauth2_route.is_some()) {
+    let cmd_available = cmd_route.is_some() && ctx.credential_capture_backend.is_some();
+    if route.missing_managed_credential(
+        static_cred.is_some() || cmd_available,
+        oauth2_route.is_some(),
+    ) {
         let reason = format!(
             "managed credential unavailable for service '{}': route is configured for proxy-supplied auth",
             service
@@ -246,6 +265,32 @@ pub async fn handle_reverse_proxy(
             send_error(stream, 401, "Unauthorized").await?;
             return Ok(());
         }
+    } else if let Some(cmd) = cmd_route {
+        if let Err(e) = validate_phantom_token_for_mode(
+            &cmd.proxy_inject_mode,
+            remaining_header,
+            &upstream_path,
+            &cmd.proxy_header_name,
+            cmd.proxy_path_pattern.as_deref(),
+            cmd.proxy_query_param_name.as_deref(),
+            ctx.session_token,
+        ) {
+            let deny_ctx = audit::EventContext {
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
+                ..managed_ctx.clone().unwrap_or_else(|| route_ctx.clone())
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                &service,
+                0,
+                &e.to_string(),
+            );
+            send_error(stream, 401, "Unauthorized").await?;
+            return Ok(());
+        }
     } else if let Err(e) = token::validate_proxy_auth(remaining_header, ctx.session_token) {
         let deny_ctx = audit::EventContext {
             auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
@@ -263,6 +308,54 @@ pub async fn handle_reverse_proxy(
         send_error(stream, 407, "Proxy Authentication Required").await?;
         return Ok(());
     }
+
+    let captured_credential = if let Some(cmd) = cmd_route
+        && cred.is_none()
+    {
+        match capture_cmd_credential(
+            cmd,
+            &service,
+            &route.upstream,
+            &upstream_path,
+            &method,
+            &service,
+            0,
+            audit::ProxyMode::Reverse,
+            ctx.audit_log,
+            ctx.credential_capture_backend.clone(),
+        )
+        .await
+        {
+            Ok(credential) => Some(credential),
+            Err(err) => {
+                warn!("{}", err);
+                let deny_ctx = audit::EventContext {
+                    route_id: Some(&service),
+                    auth_mechanism: route.managed_auth_mechanism.clone(),
+                    auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                    managed_credential_active: Some(false),
+                    injection_mode: route.managed_injection_mode.clone(),
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                    ),
+                    ..audit::EventContext::default()
+                };
+                audit::log_denied(
+                    ctx.audit_log,
+                    audit::ProxyMode::Reverse,
+                    &deny_ctx,
+                    &service,
+                    0,
+                    &err.to_string(),
+                );
+                send_error(stream, 503, "Service Unavailable").await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let cred = cred.or(captured_credential.as_ref());
 
     let transformed_path = if let Some(cred) = cred {
         let cleaned_path = strip_proxy_artifacts(
@@ -368,11 +461,11 @@ pub async fn handle_reverse_proxy(
         inject_credential_for_mode(cred, &mut request);
     }
 
-    let auth_header_lower = cred.map(|c| c.header_name.to_lowercase());
+    let injected_header_names = injected_credential_header_names(cred);
     for (name, value) in &filtered_headers {
-        if let (Some(cred), Some(header_lower)) = (cred, auth_header_lower.as_ref())
-            && matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
-            && name.to_lowercase() == *header_lower
+        if injected_header_names
+            .iter()
+            .any(|header| name.eq_ignore_ascii_case(header))
         {
             continue;
         }
@@ -422,6 +515,131 @@ pub async fn handle_reverse_proxy(
         );
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn capture_cmd_credential(
+    cmd: &CmdCredentialRoute,
+    route_id: &str,
+    upstream: &str,
+    request_path: &str,
+    request_method: &str,
+    request_host: &str,
+    request_port: u16,
+    proxy_mode: audit::ProxyMode,
+    audit_log: Option<&audit::SharedAuditLog>,
+    backend: Option<Arc<dyn CredentialCaptureBackend>>,
+) -> Result<LoadedCredential> {
+    let Some(backend) = backend else {
+        let reason = format!(
+            "credential '{}' requires supervisor capture but no capture backend is configured",
+            cmd.credential_name
+        );
+        audit::log_credential_capture(
+            audit_log,
+            proxy_mode,
+            audit::CredentialCaptureAudit {
+                route_id,
+                credential_name: &cmd.credential_name,
+                action: "denied",
+                decision: nono::undo::NetworkAuditDecision::Deny,
+                command: None,
+                argv: None,
+                exit_status: None,
+                duration_ms: Some(0),
+                stdout_bytes: None,
+                stderr_redacted: None,
+                cache_scope: None,
+                output_format: None,
+                header_names: None,
+                stdin_mode: None,
+                interactive: None,
+                upstream: Some(upstream),
+                request_host,
+                request_port: Some(request_port),
+                request_method,
+                request_path,
+                reason: Some(&reason),
+            },
+        );
+        return Err(ProxyError::Credential(reason));
+    };
+
+    let request = CredentialCaptureRequest {
+        credential_name: cmd.credential_name.clone(),
+        route_id: route_id.to_string(),
+        request_host: request_host.to_string(),
+        request_path: request_path.to_string(),
+        request_method: request_method.to_string(),
+        session_id: String::new(),
+        cache_scope: String::new(),
+    };
+    let result = tokio::task::spawn_blocking(move || backend.capture(request))
+        .await
+        .map_err(|err| ProxyError::Credential(format!("credential capture task failed: {err}")))?;
+
+    match result {
+        Ok(response) => {
+            audit::log_credential_capture(
+                audit_log,
+                proxy_mode,
+                audit::CredentialCaptureAudit {
+                    route_id,
+                    credential_name: &cmd.credential_name,
+                    action: &response.metadata.cache_action,
+                    decision: nono::undo::NetworkAuditDecision::Allow,
+                    command: response.metadata.command.as_deref(),
+                    argv: Some(&response.metadata.argv),
+                    exit_status: response.metadata.exit_status,
+                    duration_ms: Some(response.metadata.duration_ms),
+                    stdout_bytes: response.metadata.stdout_bytes,
+                    stderr_redacted: response.metadata.stderr_redacted.as_deref(),
+                    cache_scope: response.metadata.cache_scope.as_deref(),
+                    output_format: response.metadata.output_format.as_deref(),
+                    header_names: Some(&response.metadata.header_names),
+                    stdin_mode: response.metadata.stdin_mode.as_deref(),
+                    interactive: response.metadata.interactive,
+                    upstream: Some(upstream),
+                    request_host,
+                    request_port: Some(request_port),
+                    request_method,
+                    request_path,
+                    reason: None,
+                },
+            );
+            Ok(cmd.materialize(response.material))
+        }
+        Err(err) => {
+            audit::log_credential_capture(
+                audit_log,
+                proxy_mode,
+                audit::CredentialCaptureAudit {
+                    route_id,
+                    credential_name: &cmd.credential_name,
+                    action: &err.metadata.cache_action,
+                    decision: nono::undo::NetworkAuditDecision::Deny,
+                    command: err.metadata.command.as_deref(),
+                    argv: Some(&err.metadata.argv),
+                    exit_status: err.metadata.exit_status,
+                    duration_ms: Some(err.metadata.duration_ms),
+                    stdout_bytes: err.metadata.stdout_bytes,
+                    stderr_redacted: err.metadata.stderr_redacted.as_deref(),
+                    cache_scope: err.metadata.cache_scope.as_deref(),
+                    output_format: err.metadata.output_format.as_deref(),
+                    header_names: Some(&err.metadata.header_names),
+                    stdin_mode: err.metadata.stdin_mode.as_deref(),
+                    interactive: err.metadata.interactive,
+                    upstream: Some(upstream),
+                    request_host,
+                    request_port: Some(request_port),
+                    request_method,
+                    request_path,
+                    reason: Some(&err.reason),
+                },
+            );
+            Err(ProxyError::Credential(err.reason))
+        }
+    }
 }
 
 async fn enforce_endpoint_policy(
@@ -1578,17 +1796,32 @@ pub(crate) fn inject_credential_for_mode(cred: &LoadedCredential, request: &mut 
     match cred.inject_mode {
         InjectMode::Header | InjectMode::BasicAuth => {
             // Inject credential header
-            request.push_str(&format!(
-                "{}: {}\r\n",
-                cred.header_name,
-                cred.header_value.as_str()
-            ));
+            if !cred.header_value.is_empty() {
+                request.push_str(&format!(
+                    "{}: {}\r\n",
+                    cred.header_name,
+                    cred.header_value.as_str()
+                ));
+            }
+            for (name, value) in &cred.extra_headers {
+                request.push_str(&format!("{}: {}\r\n", name, value.as_str()));
+            }
         }
         InjectMode::UrlPath | InjectMode::QueryParam => {
             // Credential is already injected into the URL path/query
             // No header injection needed
         }
     }
+}
+
+pub(crate) fn injected_credential_header_names(cred: Option<&LoadedCredential>) -> Vec<String> {
+    cred.filter(|c| matches!(c.inject_mode, InjectMode::Header | InjectMode::BasicAuth))
+        .map(|c| {
+            let mut names = vec![c.header_name.to_lowercase()];
+            names.extend(c.extra_headers.iter().map(|(name, _)| name.to_lowercase()));
+            names
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1688,6 +1921,33 @@ mod tests {
         let filtered = filter_headers(header, "PRIVATE-TOKEN");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "Content-Type");
+    }
+
+    #[test]
+    fn test_injected_credential_header_names_include_extra_headers() {
+        let cred = LoadedCredential {
+            inject_mode: InjectMode::Header,
+            proxy_inject_mode: InjectMode::Header,
+            raw_credential: Zeroizing::new(String::new()),
+            header_name: "Authorization".to_string(),
+            proxy_header_name: "Authorization".to_string(),
+            header_value: Zeroizing::new("Bearer real".to_string()),
+            extra_headers: vec![(
+                "X-Gateway-Key".to_string(),
+                Zeroizing::new("gateway-real".to_string()),
+            )],
+            path_pattern: None,
+            proxy_path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy_query_param_name: None,
+        };
+
+        let names = injected_credential_header_names(Some(&cred));
+        assert_eq!(
+            names,
+            vec!["authorization".to_string(), "x-gateway-key".to_string()]
+        );
     }
 
     #[test]

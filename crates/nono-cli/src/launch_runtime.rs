@@ -38,6 +38,7 @@ pub(crate) struct LaunchPlan {
 
 #[derive(Clone, Default)]
 pub(crate) struct SessionLaunchOptions {
+    pub(crate) session_id: Option<String>,
     pub(crate) detached_start: bool,
     pub(crate) session_name: Option<String>,
     pub(crate) profile_name: Option<String>,
@@ -73,10 +74,12 @@ pub(crate) struct TrustLaunchOptions {
 #[derive(Clone, Default)]
 pub(crate) struct ProxyLaunchOptions {
     pub(crate) active: bool,
+    pub(crate) session_id: String,
     pub(crate) network_profile: Option<String>,
     pub(crate) allow_domain: Vec<profile::AllowDomainEntry>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
+    pub(crate) credential_capture: HashMap<String, profile::CredentialCaptureEntry>,
     pub(crate) proxy_source_env_vars: HashMap<String, String>,
     pub(crate) tool_sandbox_base_url_env_vars: HashMap<String, String>,
     pub(crate) tool_sandbox_proxy_credentials: HashSet<String>,
@@ -245,7 +248,11 @@ pub(crate) fn prepare_run_launch_plan(
         prepared.caps.set_extensions_enabled(true);
     }
 
-    let proxy = prepare_proxy_launch_options(&args, &prepared, silent)?;
+    let session_id = std::env::var(crate::DETACHED_SESSION_ID_ENV)
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(crate::session::generate_session_id);
+    let proxy = prepare_proxy_launch_options(&args, &prepared, silent, session_id.clone())?;
     let rollback_options = prepare_rollback_launch_options(
         &run_args.rollback_exclude,
         run_args.rollback_all,
@@ -283,6 +290,7 @@ pub(crate) fn prepare_run_launch_plan(
             suppressed_system_service_operations: prepared.suppressed_system_service_operations,
             profile_display_name: prepared.profile_display_name,
             session: SessionLaunchOptions {
+                session_id: Some(session_id),
                 detached_start: run_args.detached,
                 session_name: run_args.name,
                 profile_name: args.profile.clone(),
