@@ -82,6 +82,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
 globset = "0.4"
+regex = "1"
 urlencoding = "2"
 tempfile.workspace = true
 vt100 = "0.16.2"

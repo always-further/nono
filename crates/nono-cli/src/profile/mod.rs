@@ -358,6 +358,85 @@ pub struct CustomCredentialDef {
     pub aws_auth: Option<nono_proxy::config::AwsAuthConfig>,
 }
 
+/// Host-side command that materializes a proxy credential for `cmd://<name>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialCaptureEntry {
+    /// Command and arguments. The first element is resolved by the supervisor
+    /// before execution; no shell is used.
+    pub command: Vec<String>,
+    /// Maximum command runtime in seconds.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// In-memory cache TTL in seconds. `0` disables caching.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+    /// In-memory cache TTL in seconds. `0` disables caching. Preferred name
+    /// for new profiles; `ttl_secs` remains accepted for compatibility.
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
+    /// Optional regular expression used to derive the cache scope from the
+    /// request path. The first capture group is used when present.
+    #[serde(default)]
+    pub cache_path_regex: Option<String>,
+    /// Capture command stdin mode. Defaults to `null`.
+    #[serde(default)]
+    pub stdin: CredentialCaptureStdinMode,
+    /// Capture command output mode. Defaults to text.
+    #[serde(default)]
+    pub output: CredentialCaptureOutput,
+    /// Explicit interactive affordances for browser-backed auth flows.
+    #[serde(default)]
+    pub interaction: Option<CredentialCaptureInteraction>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialCaptureStdinMode {
+    #[default]
+    Null,
+    RequestJson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CredentialCaptureOutput {
+    Format(CredentialCaptureOutputFormat),
+    Config(CredentialCaptureOutputConfig),
+}
+
+impl Default for CredentialCaptureOutput {
+    fn default() -> Self {
+        Self::Format(CredentialCaptureOutputFormat::Text)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialCaptureOutputFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialCaptureOutputConfig {
+    pub format: CredentialCaptureOutputFormat,
+    #[serde(default)]
+    pub allow_headers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialCaptureInteraction {
+    #[serde(default)]
+    pub stdio: bool,
+    #[serde(default)]
+    pub open_urls: Option<OpenUrlConfig>,
+    #[serde(default)]
+    pub allow_launch_services: bool,
+}
+
 fn default_inject_header() -> String {
     "Authorization".to_string()
 }
@@ -430,6 +509,13 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
                 context_name, e
             ))
         })
+    } else if nono::keystore::is_cmd_uri(key) {
+        nono::keystore::validate_cmd_uri(key).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "invalid cmd:// URI for custom credential '{}': {}",
+                context_name, e
+            ))
+        })
     } else if nono::keystore::is_env_uri(key) {
         nono::keystore::validate_env_uri(key).map_err(|e| {
             NonoError::ProfileParse(format!(
@@ -442,7 +528,7 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(NonoError::ProfileParse(format!(
                 "credential_key '{}' for custom credential '{}' must contain only \
-                 alphanumeric characters and underscores (or use op:// / bw:// / apple-password:// / file:// / env:// URI)",
+                 alphanumeric characters and underscores (or use op:// / bw:// / apple-password:// / file:// / env:// / cmd:// URI)",
                 key, context_name
             )));
         }
@@ -454,7 +540,7 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
 ///
 /// Checks:
 /// - `credential_key` must be alphanumeric + underscores only, or a valid
-///   `op://` / `bw://` / `apple-password://` / `file://` / `env://` URI
+///   `op://` / `bw://` / `apple-password://` / `file://` / `env://` / `cmd://` URI
 /// - `upstream` must be HTTPS (or HTTP for loopback only)
 /// - Mode-specific validation:
 ///   - `header`: inject_header must be valid HTTP token; effective format (see field doc) must not contain CR/LF
@@ -508,12 +594,13 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
         if (nono::keystore::is_op_uri(key)
             || nono::keystore::is_bw_uri(key)
             || nono::keystore::is_apple_password_uri(key)
-            || nono::keystore::is_file_uri(key))
+            || nono::keystore::is_file_uri(key)
+            || nono::keystore::is_cmd_uri(key))
             && cred.env_var.is_none()
         {
             return Err(NonoError::ProfileParse(format!(
                 "env_var is required for custom credential '{}' when credential_key is a URI \
-                 manager reference (op://, bw://, apple-password://, or file://); \
+                 manager reference (op://, bw://, apple-password://, file://, or cmd://); \
                  set it to the SDK API key env var name (e.g., \"OPENAI_API_KEY\")",
                 name
             )));
@@ -922,6 +1009,193 @@ fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
         validate_custom_credential(name, cred)?;
     }
     Ok(())
+}
+
+fn validate_open_url_config(config: &OpenUrlConfig) -> Result<()> {
+    for origin in &config.allow_origins {
+        if origin.trim().is_empty() || origin.contains('\0') {
+            return Err(NonoError::ProfileParse(
+                "open_urls.allow_origins entries must be non-empty and must not contain NUL"
+                    .to_string(),
+            ));
+        }
+        let parsed = url::Url::parse(origin).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "open_urls.allow_origins entry '{origin}' is not a valid URL origin: {e}"
+            ))
+        })?;
+        if parsed.scheme() != "https" && parsed.scheme() != "http" {
+            return Err(NonoError::ProfileParse(format!(
+                "open_urls.allow_origins entry '{origin}' must use http or https"
+            )));
+        }
+        if parsed.host_str().is_none() {
+            return Err(NonoError::ProfileParse(format!(
+                "open_urls.allow_origins entry '{origin}' must include a host"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_credential_capture_entries(profile: &Profile) -> Result<()> {
+    for (name, entry) in &profile.credential_capture {
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_capture entry '{name}' must contain only alphanumeric characters and underscores"
+            )));
+        }
+        if entry.command.is_empty() {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_capture entry '{name}' must include a non-empty command array"
+            )));
+        }
+        for part in &entry.command {
+            if part.is_empty() || part.contains('\0') {
+                return Err(NonoError::ProfileParse(format!(
+                    "credential_capture entry '{name}' contains an empty or NUL-bearing command argument"
+                )));
+            }
+        }
+        if matches!(entry.timeout_secs, Some(0)) {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_capture entry '{name}' timeout_secs must be greater than zero"
+            )));
+        }
+        if entry.timeout_secs.is_some_and(|secs| secs > 300) {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_capture entry '{name}' timeout_secs must be <= 300"
+            )));
+        }
+        if entry.ttl_secs.is_some_and(|secs| secs > 3600) {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_capture entry '{name}' ttl_secs must be <= 3600"
+            )));
+        }
+        if entry.cache_ttl_secs.is_some_and(|secs| secs > 3600) {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_capture entry '{name}' cache_ttl_secs must be <= 3600"
+            )));
+        }
+        if entry.ttl_secs.is_some()
+            && entry.cache_ttl_secs.is_some()
+            && entry.ttl_secs != entry.cache_ttl_secs
+        {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_capture entry '{name}' must not set conflicting ttl_secs and cache_ttl_secs values"
+            )));
+        }
+        if let Some(pattern) = &entry.cache_path_regex {
+            if pattern.is_empty() || pattern.contains('\0') {
+                return Err(NonoError::ProfileParse(format!(
+                    "credential_capture entry '{name}' cache_path_regex must be non-empty and must not contain NUL"
+                )));
+            }
+            regex::Regex::new(pattern).map_err(|err| {
+                NonoError::ProfileParse(format!(
+                    "credential_capture entry '{name}' cache_path_regex is invalid: {err}"
+                ))
+            })?;
+        }
+        let output_format = match &entry.output {
+            CredentialCaptureOutput::Format(format) => *format,
+            CredentialCaptureOutput::Config(config) => {
+                if config.format != CredentialCaptureOutputFormat::Json {
+                    return Err(NonoError::ProfileParse(format!(
+                        "credential_capture entry '{name}' output object form is only supported with format json"
+                    )));
+                }
+                if config.format == CredentialCaptureOutputFormat::Json
+                    && config.allow_headers.is_empty()
+                {
+                    return Err(NonoError::ProfileParse(format!(
+                        "credential_capture entry '{name}' output.allow_headers must be non-empty when output.format is json"
+                    )));
+                }
+                for header in &config.allow_headers {
+                    if !is_safe_capture_header_name(header) {
+                        return Err(NonoError::ProfileParse(format!(
+                            "credential_capture entry '{name}' output.allow_headers contains invalid or forbidden HTTP header name '{header}'"
+                        )));
+                    }
+                }
+                config.format
+            }
+        };
+        if output_format == CredentialCaptureOutputFormat::Json
+            && matches!(entry.output, CredentialCaptureOutput::Format(_))
+        {
+            return Err(NonoError::ProfileParse(format!(
+                "credential_capture entry '{name}' output json must use object form with allow_headers"
+            )));
+        }
+        if let Some(interaction) = &entry.interaction
+            && let Some(open_urls) = &interaction.open_urls
+        {
+            validate_open_url_config(open_urls)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn is_safe_capture_header_name(name: &str) -> bool {
+    if name.is_empty() || !name.chars().all(is_http_token_char) {
+        return false;
+    }
+    !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "upgrade"
+            | "te"
+            | "trailer"
+            | "keep-alive"
+    )
+}
+
+fn validate_credential_capture_references(profile: &Profile) -> Result<()> {
+    for (route_name, cred) in &profile.network.custom_credentials {
+        let Some(key) = cred.credential_key.as_deref() else {
+            continue;
+        };
+        if !nono::keystore::is_cmd_uri(key) {
+            continue;
+        }
+        let name = key.strip_prefix("cmd://").unwrap_or("");
+        let Some(entry) = profile.credential_capture.get(name) else {
+            return Err(NonoError::ProfileParse(format!(
+                "custom credential '{route_name}' references '{key}' but credential_capture.{name} is not defined"
+            )));
+        };
+        if credential_capture_entry_output_format(entry) == CredentialCaptureOutputFormat::Json
+            && !matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
+        {
+            return Err(NonoError::ProfileParse(format!(
+                "custom credential '{route_name}' uses credential_capture.{name} JSON output, which is only supported with header-style injection"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn credential_capture_entry_output_format(
+    entry: &CredentialCaptureEntry,
+) -> CredentialCaptureOutputFormat {
+    match &entry.output {
+        CredentialCaptureOutput::Format(format) => *format,
+        CredentialCaptureOutput::Config(config) => config.format,
+    }
+}
+
+fn validate_credential_capture_resolved(profile: &Profile) -> Result<()> {
+    validate_credential_capture_entries(profile)?;
+    validate_credential_capture_references(profile)
 }
 
 fn validate_profile_tls_intercept(profile: &Profile) -> Result<()> {
@@ -1650,7 +1924,7 @@ pub struct EnvironmentConfig {
 /// Controls which URLs the sandboxed child can request the supervisor to
 /// open in the user's browser. Used for OAuth2 login flows and similar
 /// operations where the sandboxed process cannot launch a browser directly.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenUrlConfig {
     /// Allowed URL origins (scheme + host, e.g., "https://console.anthropic.com").
@@ -1746,6 +2020,8 @@ pub struct Profile {
     pub environment: Option<EnvironmentConfig>,
     #[serde(default)]
     pub command_policies: Option<CommandPoliciesConfig>,
+    #[serde(default)]
+    pub credential_capture: HashMap<String, CredentialCaptureEntry>,
     #[serde(default)]
     pub workdir: WorkdirConfig,
     #[serde(default)]
@@ -1849,6 +2125,8 @@ struct ProfileDeserialize {
     #[serde(default, deserialize_with = "deserialize_command_policies")]
     command_policies: Option<CommandPoliciesConfig>,
     #[serde(default)]
+    credential_capture: HashMap<String, CredentialCaptureEntry>,
+    #[serde(default)]
     workdir: WorkdirConfig,
     #[serde(default)]
     hooks: HooksConfig,
@@ -1900,6 +2178,7 @@ impl From<ProfileDeserialize> for Profile {
             env_credentials: raw.env_credentials,
             environment: raw.environment,
             command_policies: raw.command_policies,
+            credential_capture: raw.credential_capture,
             workdir: raw.workdir,
             hooks: raw.hooks,
             session_hooks: raw.session_hooks,
@@ -2440,6 +2719,7 @@ pub(crate) fn load_raw_profile_from_path(path: &Path) -> Result<Profile> {
 #[allow(deprecated)]
 pub(crate) fn finalize_profile(mut profile: Profile) -> Result<Profile> {
     merge_implicit_default_groups(&mut profile)?;
+    validate_credential_capture_resolved(&profile)?;
     validate_profile_tls_intercept(&profile)?;
     validate_command_policies(
         profile.command_policies.as_ref(),
@@ -2527,6 +2807,7 @@ pub(crate) fn parse_profile_bytes(content: &[u8]) -> Result<Profile> {
 
     // Validate custom credentials for security issues
     validate_profile_custom_credentials(&profile)?;
+    validate_credential_capture_entries(&profile)?;
     validate_profile_tls_intercept(&profile)?;
 
     // Validate env_credentials keys (URI entries need structural validation)
@@ -2922,6 +3203,11 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             }),
         },
         command_policies: merge_command_policies(&base.command_policies, &child.command_policies),
+        credential_capture: {
+            let mut merged = base.credential_capture;
+            merged.extend(child.credential_capture);
+            merged
+        },
         // NOTE: WorkdirAccess::None serves as both "not specified" and "explicitly no access".
         // A child cannot override a base's workdir grant to None. This is a v1 limitation;
         // fixing it requires wrapping in Option<WorkdirAccess> and updating all consumers.
@@ -5057,6 +5343,7 @@ mod tests {
             },
             environment: None,
             command_policies: None,
+            credential_capture: HashMap::new(),
             workdir: WorkdirConfig {
                 access: WorkdirAccess::ReadWrite,
             },
@@ -5140,6 +5427,7 @@ mod tests {
             },
             environment: None,
             command_policies: None,
+            credential_capture: HashMap::new(),
             workdir: WorkdirConfig {
                 access: WorkdirAccess::None,
             },
@@ -7312,6 +7600,146 @@ mod tests {
             aws_auth: None,
         };
         assert!(validate_custom_credential("example", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_profile_cmd_uri_custom_credential_requires_capture_entry() {
+        let json = r#"{
+            "meta": { "name": "cmd-creds" },
+            "network": {
+                "credentials": ["github"],
+                "custom_credentials": {
+                    "github": {
+                        "upstream": "https://api.github.com",
+                        "credential_key": "cmd://github",
+                        "env_var": "GH_TOKEN"
+                    }
+                }
+            }
+        }"#;
+        let profile = parse_profile_bytes(json.as_bytes()).expect("raw profile parses");
+        let err = finalize_profile(profile).expect_err("missing capture should reject");
+        assert!(
+            err.to_string().contains("credential_capture.github"),
+            "error should mention missing capture entry: {err}"
+        );
+    }
+
+    #[test]
+    fn test_profile_cmd_uri_custom_credential_accepts_capture_entry() {
+        let json = r#"{
+            "meta": { "name": "cmd-creds" },
+            "network": {
+                "credentials": ["github"],
+                "custom_credentials": {
+                    "github": {
+                        "upstream": "https://api.github.com",
+                        "credential_key": "cmd://github",
+                        "env_var": "GH_TOKEN"
+                    }
+                }
+            },
+            "credential_capture": {
+                "github": {
+                    "command": ["/bin/echo", "token"],
+                    "timeout_secs": 5,
+                    "ttl_secs": 0
+                }
+            }
+        }"#;
+        let profile = parse_profile_bytes(json.as_bytes()).expect("cmd capture profile parses");
+        assert!(profile.credential_capture.contains_key("github"));
+    }
+
+    #[test]
+    fn test_profile_cmd_uri_capture_rejects_invalid_cache_regex() {
+        let json = br#"{
+            "meta": { "name": "cmd-creds" },
+            "credential_capture": {
+                "github": {
+                    "command": ["/bin/echo", "token"],
+                    "cache_path_regex": "["
+                }
+            }
+        }"#;
+        let err = parse_profile_bytes(json).expect_err("invalid cache regex should reject");
+        assert!(
+            err.to_string().contains("cache_path_regex is invalid"),
+            "error should mention invalid cache regex: {err}"
+        );
+    }
+
+    #[test]
+    fn test_profile_cmd_uri_json_output_requires_header_style_route() {
+        let json = r#"{
+            "meta": { "name": "cmd-creds" },
+            "network": {
+                "credentials": ["github"],
+                "custom_credentials": {
+                    "github": {
+                        "upstream": "https://api.github.com",
+                        "credential_key": "cmd://github",
+                        "env_var": "GH_TOKEN",
+                        "inject_mode": "query_param",
+                        "query_param_name": "token"
+                    }
+                }
+            },
+            "credential_capture": {
+                "github": {
+                    "command": ["/bin/echo", "{\"headers\":{\"Authorization\":\"Bearer token\"}}"],
+                    "output": {
+                        "format": "json",
+                        "allow_headers": ["Authorization"]
+                    }
+                }
+            }
+        }"#;
+        let profile = parse_profile_bytes(json.as_bytes()).expect("raw profile parses");
+        let err = finalize_profile(profile).expect_err("json output should reject query route");
+        assert!(
+            err.to_string().contains("header-style injection"),
+            "error should mention header-style injection: {err}"
+        );
+    }
+
+    #[test]
+    fn test_profile_cmd_uri_custom_credential_accepts_inherited_capture_entry() {
+        let dir = tempdir().expect("tmpdir");
+        std::fs::write(
+            dir.path().join("base.json"),
+            r#"{
+                "meta": { "name": "base" },
+                "credential_capture": {
+                    "github": {
+                        "command": ["/bin/echo", "token"]
+                    }
+                }
+            }"#,
+        )
+        .expect("write base");
+        let child_path = dir.path().join("child.json");
+        std::fs::write(
+            &child_path,
+            r#"{
+                "extends": "base",
+                "meta": { "name": "child" },
+                "network": {
+                    "credentials": ["github"],
+                    "custom_credentials": {
+                        "github": {
+                            "upstream": "https://api.github.com",
+                            "credential_key": "cmd://github",
+                            "env_var": "GH_TOKEN"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write child");
+
+        let profile = load_from_file(&child_path).expect("inherited cmd capture resolves");
+        assert!(profile.credential_capture.contains_key("github"));
     }
 
     #[test]

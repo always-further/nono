@@ -293,6 +293,47 @@ pub struct NetworkAuditEvent {
     /// Approval backend consulted for endpoint approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_backend: Option<String>,
+    /// Credential capture action, when a proxy route lazily materialized a
+    /// command-backed credential (`requested`, `cache_hit`, `captured`,
+    /// `denied`, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_action: Option<String>,
+    /// Logical credential name for a command-backed credential capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_name: Option<String>,
+    /// Redacted/resolved command path used for credential capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_command: Option<String>,
+    /// Redacted command arguments used for credential capture, excluding argv[0].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_argv: Option<Vec<String>>,
+    /// Command exit status for credential capture attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_exit_status: Option<i32>,
+    /// Credential capture duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_duration_ms: Option<u64>,
+    /// Captured stdout byte count. The credential value itself is never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_stdout_bytes: Option<usize>,
+    /// Redacted stderr excerpt from a failed credential capture attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_stderr: Option<String>,
+    /// Cache scope used for command-backed credential capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_cache_scope: Option<String>,
+    /// Capture output format, for example `text` or `json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_output_format: Option<String>,
+    /// Header names returned by JSON capture output. Values are never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_header_names: Option<Vec<String>>,
+    /// Capture stdin mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_stdin_mode: Option<String>,
+    /// Whether the capture entry requested interactive affordances.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_capture_interactive: Option<bool>,
     /// Hostname or logical service target (for reverse proxy events)
     pub target: String,
     /// Upstream URL for route-scoped L7 events, without credentials.

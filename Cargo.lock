@@ -2283,6 +2283,7 @@ dependencies = [
  "nono-proxy",
  "proptest",
  "rand 0.10.1",
+ "regex",
  "security-framework 3.7.0",
  "semver",
  "serde",

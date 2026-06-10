@@ -18,11 +18,19 @@ use nono_proxy::config::{
     EndpointPolicyDefault as ProxyEndpointPolicyDefault,
     EndpointPolicyRule as ProxyEndpointPolicyRule, InjectMode,
 };
+use regex::Regex;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 pub(crate) struct ActiveProxyRuntime {
     pub(crate) env_vars: Vec<(String, String)>,
@@ -38,10 +46,1134 @@ pub(crate) struct EffectiveProxySettings {
     pub(crate) credentials: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedCredentialCaptureEntry {
+    command_path: PathBuf,
+    args: Vec<String>,
+    timeout: Duration,
+    ttl: Duration,
+    cache_path_regex: Option<Regex>,
+    stdin_mode: crate::profile::CredentialCaptureStdinMode,
+    output_format: crate::profile::CredentialCaptureOutputFormat,
+    allow_headers: HashSet<String>,
+    interactive: bool,
+    stdio: bool,
+    open_urls: Option<CaptureOpenUrlPolicy>,
+    allow_launch_services: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CaptureOpenUrlPolicy {
+    allow_origins: Vec<String>,
+    allow_localhost: bool,
+}
+
+#[derive(Debug)]
+struct CachedCapturedCredential {
+    material: nono_proxy::capture::CredentialCaptureMaterial,
+    stdout_bytes: usize,
+    expires_at: Instant,
+}
+
+#[derive(Debug)]
+struct ProxyCredentialCaptureBackend {
+    session_id: String,
+    entries: HashMap<String, ResolvedCredentialCaptureEntry>,
+    cache: Mutex<HashMap<String, CachedCapturedCredential>>,
+    active: Mutex<HashSet<String>>,
+    active_cv: Condvar,
+    redaction_policy: nono::ScrubPolicy,
+}
+
+struct ActiveCaptureGuard<'a> {
+    active: &'a Mutex<HashSet<String>>,
+    active_cv: &'a Condvar,
+    key: String,
+}
+
+impl Drop for ActiveCaptureGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active.lock() {
+            active.remove(&self.key);
+            self.active_cv.notify_all();
+        }
+    }
+}
+
+struct CaptureBrowserBridge {
+    socket_path: PathBuf,
+    shim: CaptureBrowserShim,
+    _listener_dir: tempfile::TempDir,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for CaptureBrowserBridge {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct CaptureBrowserShim {
+    dir: tempfile::TempDir,
+    launcher: PathBuf,
+}
+
+impl ProxyCredentialCaptureBackend {
+    fn new(
+        entries: &HashMap<String, crate::profile::CredentialCaptureEntry>,
+        session_id: String,
+    ) -> Result<Self> {
+        let mut resolved = HashMap::new();
+        for (name, entry) in entries {
+            let Some(command) = entry.command.first() else {
+                return Err(NonoError::ConfigParse(format!(
+                    "credential_capture.{name}.command must not be empty"
+                )));
+            };
+            let command_path = resolve_capture_command(command)?;
+            let interaction = entry.interaction.as_ref();
+            let open_urls = interaction.and_then(|interaction| {
+                interaction
+                    .open_urls
+                    .as_ref()
+                    .map(|open_urls| CaptureOpenUrlPolicy {
+                        allow_origins: open_urls.allow_origins.clone(),
+                        allow_localhost: open_urls.allow_localhost,
+                    })
+            });
+            let stdio = interaction.is_some_and(|interaction| interaction.stdio);
+            let allow_launch_services =
+                interaction.is_some_and(|interaction| interaction.allow_launch_services);
+            resolved.insert(
+                name.clone(),
+                ResolvedCredentialCaptureEntry {
+                    command_path,
+                    args: entry.command.iter().skip(1).cloned().collect(),
+                    timeout: Duration::from_secs(entry.timeout_secs.unwrap_or(5)),
+                    ttl: Duration::from_secs(
+                        entry.cache_ttl_secs.or(entry.ttl_secs).unwrap_or(900),
+                    ),
+                    cache_path_regex: entry
+                        .cache_path_regex
+                        .as_deref()
+                        .map(Regex::new)
+                        .transpose()
+                        .map_err(|err| {
+                            NonoError::ConfigParse(format!(
+                                "credential_capture.{name}.cache_path_regex is invalid: {err}"
+                            ))
+                        })?,
+                    stdin_mode: entry.stdin,
+                    output_format: credential_capture_output_format(&entry.output),
+                    allow_headers: credential_capture_allow_headers(&entry.output),
+                    interactive: stdio || open_urls.is_some() || allow_launch_services,
+                    stdio,
+                    open_urls,
+                    allow_launch_services,
+                },
+            );
+        }
+        Ok(Self {
+            session_id,
+            entries: resolved,
+            cache: Mutex::new(HashMap::new()),
+            active: Mutex::new(HashSet::new()),
+            active_cv: Condvar::new(),
+            redaction_policy: nono::ScrubPolicy::secure_default(),
+        })
+    }
+
+    fn capture_cache_scope(
+        entry: &ResolvedCredentialCaptureEntry,
+        request: &nono_proxy::capture::CredentialCaptureRequest,
+    ) -> String {
+        if let Some(regex) = &entry.cache_path_regex
+            && let Some(captures) = regex.captures(&request.request_path)
+        {
+            if let Some(scope) = captures.get(1).or_else(|| captures.get(0)) {
+                return scope.as_str().to_string();
+            }
+        }
+        request.request_host.clone()
+    }
+
+    fn capture_cache_key(
+        request: &nono_proxy::capture::CredentialCaptureRequest,
+        cache_scope: &str,
+    ) -> String {
+        format!(
+            "{}\0{}\0{}",
+            request.credential_name, request.request_host, cache_scope
+        )
+    }
+
+    fn try_enter_capture(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<ActiveCaptureGuard<'_>>, String> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| "credential capture active-set lock poisoned".to_string())?;
+        if !active.insert(key.to_string()) {
+            return Ok(None);
+        }
+        Ok(Some(ActiveCaptureGuard {
+            active: &self.active,
+            active_cv: &self.active_cv,
+            key: key.to_string(),
+        }))
+    }
+
+    fn wait_for_active_capture(&self, key: &str) -> std::result::Result<(), String> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| "credential capture active-set lock poisoned".to_string())?;
+        while active.contains(key) {
+            active = self
+                .active_cv
+                .wait(active)
+                .map_err(|_| "credential capture active-set lock poisoned".to_string())?;
+        }
+        Ok(())
+    }
+
+    fn run_capture_command(
+        &self,
+        entry: &ResolvedCredentialCaptureEntry,
+        request: &nono_proxy::capture::CredentialCaptureRequest,
+    ) -> std::result::Result<
+        nono_proxy::capture::CredentialCaptureResponse,
+        nono_proxy::capture::CredentialCaptureError,
+    > {
+        let start = Instant::now();
+        let mut command = Command::new(&entry.command_path);
+        let stdin = match entry.stdin_mode {
+            crate::profile::CredentialCaptureStdinMode::Null if entry.stdio => Stdio::inherit(),
+            crate::profile::CredentialCaptureStdinMode::Null => Stdio::null(),
+            crate::profile::CredentialCaptureStdinMode::RequestJson => Stdio::piped(),
+        };
+        let stderr = if entry.stdio {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        };
+        let browser_bridge = prepare_capture_browser_bridge(entry, request).map_err(|err| {
+            self.capture_error(
+                entry,
+                "browser_setup_failed",
+                None,
+                start.elapsed(),
+                None,
+                None,
+                Some(format!(
+                    "failed to prepare credential capture browser support: {err}"
+                )),
+            )
+        })?;
+        command
+            .args(&entry.args)
+            .stdin(stdin)
+            .stdout(Stdio::piped())
+            .stderr(stderr)
+            .env("NONO_SESSION_ID", &request.session_id)
+            .env("NONO_REQUEST_HOST", &request.request_host)
+            .env("NONO_REQUEST_PATH", &request.request_path)
+            .env("NONO_REQUEST_METHOD", &request.request_method)
+            .env("NONO_CACHE_SCOPE", &request.cache_scope)
+            .env("NONO_CAPTURE_CREDENTIAL", &request.credential_name)
+            .env("NONO_CAPTURE_ROUTE", &request.route_id);
+        if entry.allow_launch_services {
+            command.env("NONO_CAPTURE_ALLOW_LAUNCH_SERVICES", "1");
+        }
+        if let Some(bridge) = browser_bridge.as_ref() {
+            command
+                .env("NONO_SUPERVISOR_PATH", &bridge.socket_path)
+                .env("BROWSER", &bridge.shim.launcher);
+            let current_path = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths = vec![bridge.shim.dir.path().to_path_buf()];
+            paths.extend(std::env::split_paths(&current_path));
+            let joined = std::env::join_paths(paths).map_err(|err| {
+                self.capture_error(
+                    entry,
+                    "browser_setup_failed",
+                    None,
+                    start.elapsed(),
+                    None,
+                    None,
+                    Some(format!(
+                        "failed to prepare credential capture browser PATH: {err}"
+                    )),
+                )
+            })?;
+            command.env("PATH", joined);
+        }
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "NONO_PROXY_TOKEN",
+            "NODE_USE_ENV_PROXY",
+        ] {
+            command.env_remove(name);
+        }
+
+        let mut child = command.spawn().map_err(|err| {
+            self.capture_error(
+                entry,
+                "spawn_failed",
+                None,
+                start.elapsed(),
+                None,
+                None,
+                Some(format!("failed to start credential capture command: {err}")),
+            )
+        })?;
+        if entry.stdin_mode == crate::profile::CredentialCaptureStdinMode::RequestJson {
+            let stdin_payload = serde_json::json!({
+                "session_id": request.session_id,
+                "credential_name": request.credential_name,
+                "route_id": request.route_id,
+                "request_host": request.request_host,
+                "request_path": request.request_path,
+                "request_method": request.request_method,
+                "cache_scope": request.cache_scope,
+            });
+            if let Some(mut stdin) = child.stdin.take() {
+                let bytes = serde_json::to_vec(&stdin_payload).map_err(|err| {
+                    self.capture_error(
+                        entry,
+                        "stdin_failed",
+                        None,
+                        start.elapsed(),
+                        None,
+                        None,
+                        Some(format!(
+                            "failed to serialize credential capture stdin: {err}"
+                        )),
+                    )
+                })?;
+                stdin.write_all(&bytes).map_err(|err| {
+                    self.capture_error(
+                        entry,
+                        "stdin_failed",
+                        None,
+                        start.elapsed(),
+                        None,
+                        None,
+                        Some(format!("failed to write credential capture stdin: {err}")),
+                    )
+                })?;
+            }
+        }
+
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(self.capture_error(
+                        entry,
+                        "wait_failed",
+                        None,
+                        start.elapsed(),
+                        None,
+                        None,
+                        Some(format!(
+                            "failed to wait for credential capture command: {err}"
+                        )),
+                    ));
+                }
+            }
+            if start.elapsed() >= entry.timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(self.capture_error(
+                    entry,
+                    "timeout",
+                    None,
+                    start.elapsed(),
+                    None,
+                    None,
+                    Some(format!(
+                        "credential capture command timed out after {}s",
+                        entry.timeout.as_secs()
+                    )),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let output = child.wait_with_output().map_err(|err| {
+            self.capture_error(
+                entry,
+                "collect_failed",
+                None,
+                start.elapsed(),
+                None,
+                None,
+                Some(format!(
+                    "failed to collect credential capture command output: {err}"
+                )),
+            )
+        })?;
+        let status_code = output.status.code();
+        if !output.status.success() {
+            let stderr_redacted = redacted_stderr(&output.stderr, &self.redaction_policy);
+            return Err(self.capture_error(
+                entry,
+                "command_failed",
+                status_code,
+                start.elapsed(),
+                None,
+                stderr_redacted,
+                Some(format!(
+                    "credential capture command failed with exit code {}",
+                    status_code.map_or_else(|| "unknown".to_string(), |code| code.to_string())
+                )),
+            ));
+        }
+        let mut stdout = output.stdout;
+        while matches!(stdout.last(), Some(b'\r' | b'\n')) {
+            stdout.pop();
+        }
+        let stdout_bytes = stdout.len();
+        if stdout.is_empty() {
+            let stderr_redacted = redacted_stderr(&output.stderr, &self.redaction_policy);
+            return Err(self.capture_error(
+                entry,
+                "empty_stdout",
+                status_code,
+                start.elapsed(),
+                Some(stdout_bytes),
+                stderr_redacted,
+                Some("credential capture command produced empty stdout".to_string()),
+            ));
+        }
+        let value = String::from_utf8(stdout).map_err(|err| {
+            let stderr_redacted = redacted_stderr(&output.stderr, &self.redaction_policy);
+            self.capture_error(
+                entry,
+                "non_utf8_stdout",
+                status_code,
+                start.elapsed(),
+                None,
+                stderr_redacted,
+                Some(format!(
+                    "credential capture command produced non-UTF-8 stdout: {err}"
+                )),
+            )
+        })?;
+
+        let (material, header_names) = match entry.output_format {
+            crate::profile::CredentialCaptureOutputFormat::Text => (
+                nono_proxy::capture::CredentialCaptureMaterial::Secret(Zeroizing::new(value)),
+                Vec::new(),
+            ),
+            crate::profile::CredentialCaptureOutputFormat::Json => {
+                let headers =
+                    parse_capture_headers_json(&value, &entry.allow_headers).map_err(|reason| {
+                        self.capture_error(
+                            entry,
+                            "invalid_json_output",
+                            status_code,
+                            start.elapsed(),
+                            Some(stdout_bytes),
+                            None,
+                            Some(reason),
+                        )
+                    })?;
+                let names = headers.iter().map(|(name, _)| name.clone()).collect();
+                (
+                    nono_proxy::capture::CredentialCaptureMaterial::Headers(headers),
+                    names,
+                )
+            }
+        };
+
+        Ok(nono_proxy::capture::CredentialCaptureResponse {
+            material,
+            metadata: nono_proxy::capture::CredentialCaptureMetadata {
+                cache_action: "captured".to_string(),
+                command: Some(entry.command_path.to_string_lossy().into_owned()),
+                argv: scrub_capture_argv(&entry.args, &self.redaction_policy),
+                exit_status: status_code,
+                duration_ms: millis_u64(start.elapsed()),
+                stdout_bytes: Some(stdout_bytes),
+                stderr_redacted: None,
+                cache_scope: Some(request.cache_scope.clone()),
+                output_format: Some(capture_output_format_name(entry.output_format).to_string()),
+                header_names,
+                stdin_mode: Some(capture_stdin_mode_name(entry.stdin_mode).to_string()),
+                interactive: Some(entry.interactive),
+            },
+        })
+    }
+
+    fn capture_error(
+        &self,
+        entry: &ResolvedCredentialCaptureEntry,
+        action: &str,
+        exit_status: Option<i32>,
+        duration: Duration,
+        stdout_bytes: Option<usize>,
+        stderr_redacted: Option<String>,
+        reason: Option<String>,
+    ) -> nono_proxy::capture::CredentialCaptureError {
+        nono_proxy::capture::CredentialCaptureError {
+            reason: reason.unwrap_or_else(|| "credential capture failed".to_string()),
+            metadata: nono_proxy::capture::CredentialCaptureMetadata {
+                cache_action: action.to_string(),
+                command: Some(entry.command_path.to_string_lossy().into_owned()),
+                argv: scrub_capture_argv(&entry.args, &self.redaction_policy),
+                exit_status,
+                duration_ms: millis_u64(duration),
+                stdout_bytes,
+                stderr_redacted,
+                cache_scope: None,
+                output_format: Some(capture_output_format_name(entry.output_format).to_string()),
+                header_names: Vec::new(),
+                stdin_mode: Some(capture_stdin_mode_name(entry.stdin_mode).to_string()),
+                interactive: Some(entry.interactive),
+            },
+        }
+    }
+}
+
+impl nono_proxy::capture::CredentialCaptureBackend for ProxyCredentialCaptureBackend {
+    fn capture(
+        &self,
+        mut request: nono_proxy::capture::CredentialCaptureRequest,
+    ) -> std::result::Result<
+        nono_proxy::capture::CredentialCaptureResponse,
+        nono_proxy::capture::CredentialCaptureError,
+    > {
+        let Some(entry) = self.entries.get(&request.credential_name) else {
+            return Err(nono_proxy::capture::CredentialCaptureError {
+                reason: format!(
+                    "credential capture '{}' is not configured",
+                    request.credential_name
+                ),
+                metadata: nono_proxy::capture::CredentialCaptureMetadata {
+                    cache_action: "unknown_credential".to_string(),
+                    ..Default::default()
+                },
+            });
+        };
+        let cache_scope = Self::capture_cache_scope(entry, &request);
+        request.session_id = self.session_id.clone();
+        request.cache_scope = cache_scope.clone();
+        let key = Self::capture_cache_key(&request, &cache_scope);
+        let guard = loop {
+            let now = Instant::now();
+            {
+                let mut cache =
+                    self.cache
+                        .lock()
+                        .map_err(|_| nono_proxy::capture::CredentialCaptureError {
+                            reason: "credential capture cache lock poisoned".to_string(),
+                            metadata: nono_proxy::capture::CredentialCaptureMetadata {
+                                cache_action: "cache_error".to_string(),
+                                ..Default::default()
+                            },
+                        })?;
+                if let Some(cached) = cache.get(&key)
+                    && cached.expires_at > now
+                {
+                    return Ok(nono_proxy::capture::CredentialCaptureResponse {
+                        material: cached.material.clone(),
+                        metadata: nono_proxy::capture::CredentialCaptureMetadata {
+                            cache_action: "cache_hit".to_string(),
+                            command: Some(entry.command_path.to_string_lossy().into_owned()),
+                            argv: scrub_capture_argv(&entry.args, &self.redaction_policy),
+                            exit_status: Some(0),
+                            duration_ms: 0,
+                            stdout_bytes: Some(cached.stdout_bytes),
+                            stderr_redacted: None,
+                            cache_scope: Some(cache_scope),
+                            output_format: Some(
+                                capture_output_format_name(entry.output_format).to_string(),
+                            ),
+                            header_names: capture_material_header_names(&cached.material),
+                            stdin_mode: Some(capture_stdin_mode_name(entry.stdin_mode).to_string()),
+                            interactive: Some(entry.interactive),
+                        },
+                    });
+                }
+                cache.remove(&key);
+            }
+
+            if let Some(guard) = self.try_enter_capture(&key).map_err(|reason| {
+                nono_proxy::capture::CredentialCaptureError {
+                    reason,
+                    metadata: nono_proxy::capture::CredentialCaptureMetadata {
+                        cache_action: "active_set_error".to_string(),
+                        command: Some(entry.command_path.to_string_lossy().into_owned()),
+                        argv: scrub_capture_argv(&entry.args, &self.redaction_policy),
+                        cache_scope: Some(cache_scope.clone()),
+                        output_format: Some(
+                            capture_output_format_name(entry.output_format).to_string(),
+                        ),
+                        stdin_mode: Some(capture_stdin_mode_name(entry.stdin_mode).to_string()),
+                        interactive: Some(entry.interactive),
+                        ..Default::default()
+                    },
+                }
+            })? {
+                break guard;
+            }
+
+            self.wait_for_active_capture(&key).map_err(|reason| {
+                nono_proxy::capture::CredentialCaptureError {
+                    reason,
+                    metadata: nono_proxy::capture::CredentialCaptureMetadata {
+                        cache_action: "wait_failed".to_string(),
+                        command: Some(entry.command_path.to_string_lossy().into_owned()),
+                        argv: scrub_capture_argv(&entry.args, &self.redaction_policy),
+                        cache_scope: Some(cache_scope.clone()),
+                        output_format: Some(
+                            capture_output_format_name(entry.output_format).to_string(),
+                        ),
+                        stdin_mode: Some(capture_stdin_mode_name(entry.stdin_mode).to_string()),
+                        interactive: Some(entry.interactive),
+                        ..Default::default()
+                    },
+                }
+            })?;
+        };
+        let response = self
+            .run_capture_command(entry, &request)
+            .map_err(|mut err| {
+                if err.metadata.cache_scope.is_none() {
+                    err.metadata.cache_scope = Some(cache_scope.clone());
+                }
+                err
+            })?;
+        if !entry.ttl.is_zero() {
+            let mut cache =
+                self.cache
+                    .lock()
+                    .map_err(|_| nono_proxy::capture::CredentialCaptureError {
+                        reason: "credential capture cache lock poisoned".to_string(),
+                        metadata: nono_proxy::capture::CredentialCaptureMetadata {
+                            cache_action: "cache_error".to_string(),
+                            ..Default::default()
+                        },
+                    })?;
+            cache.insert(
+                key,
+                CachedCapturedCredential {
+                    material: response.material.clone(),
+                    stdout_bytes: response.metadata.stdout_bytes.unwrap_or(0),
+                    expires_at: Instant::now() + entry.ttl,
+                },
+            );
+        }
+        drop(guard);
+        Ok(response)
+    }
+}
+
+fn prepare_capture_browser_bridge(
+    entry: &ResolvedCredentialCaptureEntry,
+    request: &nono_proxy::capture::CredentialCaptureRequest,
+) -> Result<Option<CaptureBrowserBridge>> {
+    let Some(policy) = entry.open_urls.clone() else {
+        return Ok(None);
+    };
+    let nono_exe = std::env::current_exe().map_err(|err| {
+        NonoError::SandboxInit(format!(
+            "failed to locate current executable for credential capture browser helper: {err}"
+        ))
+    })?;
+    let listener_dir = tempfile::Builder::new()
+        .prefix("nono-capture-url-sock-")
+        .tempdir()
+        .map_err(|err| {
+            NonoError::SandboxInit(format!(
+                "failed to create credential capture URL listener directory: {err}"
+            ))
+        })?;
+    let socket_path = listener_dir.path().join("supervisor.sock");
+    let listener = nono::supervisor::SupervisorListener::bind(&socket_path)?;
+    let shim = create_capture_browser_shim(&nono_exe, &socket_path, entry.allow_launch_services)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = Arc::clone(&stop);
+    let credential_name = request.credential_name.clone();
+    let route_id = request.route_id.clone();
+    let session_id = request.session_id.clone();
+    let thread = std::thread::spawn(move || {
+        while !stop_for_thread.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok(Some(mut socket)) => {
+                    handle_capture_url_connection(
+                        &mut socket,
+                        &policy,
+                        &credential_name,
+                        &route_id,
+                        &session_id,
+                    );
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(err) => {
+                    warn!("credential capture URL listener failed: {err}");
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        }
+    });
+    Ok(Some(CaptureBrowserBridge {
+        socket_path,
+        shim,
+        _listener_dir: listener_dir,
+        stop,
+        thread: Some(thread),
+    }))
+}
+
+fn handle_capture_url_connection(
+    socket: &mut nono::supervisor::SupervisorSocket,
+    policy: &CaptureOpenUrlPolicy,
+    credential_name: &str,
+    route_id: &str,
+    session_id: &str,
+) {
+    let msg = match socket.recv_message() {
+        Ok(msg) => msg,
+        Err(err) => {
+            warn!("credential capture URL listener failed to read request: {err}");
+            return;
+        }
+    };
+    let nono::supervisor::types::SupervisorMessage::OpenUrl(mut request) = msg else {
+        warn!("credential capture URL listener received non-OpenUrl request");
+        return;
+    };
+    if request.session_id.is_empty() {
+        request.session_id = session_id.to_string();
+    }
+    let request_id = request.request_id.clone();
+    let (success, error) = match validate_capture_url(&request.url, policy)
+        .and_then(|()| open_url_in_browser(&request.url))
+    {
+        Ok(()) => {
+            info!(
+                credential = credential_name,
+                route = route_id,
+                url = %request.url,
+                "credential capture opened URL"
+            );
+            (true, None)
+        }
+        Err(reason) => {
+            warn!(
+                credential = credential_name,
+                route = route_id,
+                url = %request.url,
+                reason = %reason,
+                "credential capture URL open denied"
+            );
+            (false, Some(reason))
+        }
+    };
+    let response = nono::supervisor::types::SupervisorResponse::UrlOpened {
+        request_id,
+        success,
+        error,
+    };
+    if let Err(err) = socket.send_response(&response) {
+        warn!("credential capture URL listener failed to send response: {err}");
+    }
+}
+
+const MAX_CAPTURE_URL_LENGTH: usize = 8192;
+
+fn validate_capture_url(
+    url: &str,
+    policy: &CaptureOpenUrlPolicy,
+) -> std::result::Result<(), String> {
+    if url.len() > MAX_CAPTURE_URL_LENGTH {
+        return Err(format!(
+            "URL exceeds maximum length ({} > {})",
+            url.len(),
+            MAX_CAPTURE_URL_LENGTH
+        ));
+    }
+    let parsed = url::Url::parse(url).map_err(|err| format!("Invalid URL: {err}"))?;
+    let scheme = parsed.scheme();
+    let host = parsed.host_str().unwrap_or("");
+    let is_localhost = matches!(host, "localhost" | "127.0.0.1" | "::1");
+    if is_localhost {
+        if scheme != "http" && scheme != "https" {
+            return Err(format!(
+                "Localhost URL must use http or https scheme, got: {scheme}"
+            ));
+        }
+        if !policy.allow_localhost {
+            return Err(
+                "Localhost URLs are not allowed by this credential_capture interaction.open_urls policy"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+    if scheme != "https" {
+        return Err(format!(
+            "Only https:// URLs are allowed (got {scheme}://). \
+             file://, javascript:, data:, and other schemes are blocked."
+        ));
+    }
+    let origin = parsed.origin().unicode_serialization();
+    if policy.allow_origins.contains(&origin) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Origin {origin} is not in credential_capture interaction.open_urls.allow_origins"
+        ))
+    }
+}
+
+fn open_url_in_browser(url: &str) -> std::result::Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result: std::result::Result<std::process::ExitStatus, std::io::Error> =
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "URL opening not supported on this platform",
+        ));
+
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("Browser opener exited with status: {status}")),
+        Err(err) => Err(format!("Failed to launch browser: {err}")),
+    }
+}
+
+fn create_capture_browser_shim(
+    nono_exe: &Path,
+    supervisor_socket_path: &Path,
+    allow_launch_services: bool,
+) -> Result<CaptureBrowserShim> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let shim_dir = tempfile::Builder::new()
+        .prefix("nono-capture-browser-")
+        .tempdir()
+        .map_err(|err| {
+            NonoError::SandboxInit(format!(
+                "failed to create credential capture browser shim directory: {err}"
+            ))
+        })?;
+    let shim_dir_path = shim_dir.path();
+    let launcher_name = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "nono-browser"
+    };
+    let launcher_path = shim_dir_path.join(launcher_name);
+    let quoted_exe = shell_quote(&nono_exe.display().to_string());
+    let quoted_socket_path = shell_quote(&supervisor_socket_path.display().to_string());
+    let script = if cfg!(target_os = "macos") {
+        let non_url_fallback = if allow_launch_services {
+            r#"exec /usr/bin/open "$@""#
+        } else {
+            r#"printf '%s\n' 'nono: credential capture LaunchServices fallback is disabled for this command' >&2
+exit 126"#
+        };
+        format!(
+            r#"#!/bin/sh
+url_arg=""
+for arg in "$@"; do
+    case "$arg" in
+        http://*|https://*)
+            url_arg="$arg"
+            break
+            ;;
+    esac
+done
+
+if [ -n "$url_arg" ]; then
+    NONO_SUPERVISOR_PATH={quoted_socket_path} exec {quoted_exe} open-url-helper "$url_arg"
+else
+    {non_url_fallback}
+fi
+"#
+        )
+    } else {
+        format!(
+            r#"#!/bin/sh
+NONO_SUPERVISOR_PATH={quoted_socket_path} exec {quoted_exe} open-url-helper "$@"
+"#
+        )
+    };
+    std::fs::write(&launcher_path, script).map_err(|err| {
+        NonoError::SandboxInit(format!(
+            "failed to write credential capture browser shim: {err}"
+        ))
+    })?;
+    std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o755)).map_err(
+        |err| {
+            NonoError::SandboxInit(format!(
+                "failed to make credential capture browser shim executable: {err}"
+            ))
+        },
+    )?;
+    Ok(CaptureBrowserShim {
+        dir: shim_dir,
+        launcher: launcher_path,
+    })
+}
+
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn scrub_capture_argv(args: &[String], policy: &nono::ScrubPolicy) -> Vec<String> {
+    if args.is_empty() {
+        Vec::new()
+    } else {
+        nono::scrub_argv_with_policy(args, policy)
+    }
+}
+
+fn credential_capture_output_format(
+    output: &crate::profile::CredentialCaptureOutput,
+) -> crate::profile::CredentialCaptureOutputFormat {
+    match output {
+        crate::profile::CredentialCaptureOutput::Format(format) => *format,
+        crate::profile::CredentialCaptureOutput::Config(config) => config.format,
+    }
+}
+
+fn credential_capture_allow_headers(
+    output: &crate::profile::CredentialCaptureOutput,
+) -> HashSet<String> {
+    match output {
+        crate::profile::CredentialCaptureOutput::Format(_) => HashSet::new(),
+        crate::profile::CredentialCaptureOutput::Config(config) => config
+            .allow_headers
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect(),
+    }
+}
+
+fn capture_output_format_name(
+    format: crate::profile::CredentialCaptureOutputFormat,
+) -> &'static str {
+    match format {
+        crate::profile::CredentialCaptureOutputFormat::Text => "text",
+        crate::profile::CredentialCaptureOutputFormat::Json => "json",
+    }
+}
+
+fn capture_stdin_mode_name(mode: crate::profile::CredentialCaptureStdinMode) -> &'static str {
+    match mode {
+        crate::profile::CredentialCaptureStdinMode::Null => "null",
+        crate::profile::CredentialCaptureStdinMode::RequestJson => "request_json",
+    }
+}
+
+fn capture_material_header_names(
+    material: &nono_proxy::capture::CredentialCaptureMaterial,
+) -> Vec<String> {
+    match material {
+        nono_proxy::capture::CredentialCaptureMaterial::Secret(_) => Vec::new(),
+        nono_proxy::capture::CredentialCaptureMaterial::Headers(headers) => {
+            headers.iter().map(|(name, _)| name.clone()).collect()
+        }
+    }
+}
+
+fn parse_capture_headers_json(
+    value: &str,
+    allow_headers: &HashSet<String>,
+) -> std::result::Result<Vec<(String, Zeroizing<String>)>, String> {
+    let parsed: serde_json::Value = serde_json::from_str(value)
+        .map_err(|err| format!("credential capture JSON output could not be parsed: {err}"))?;
+    let headers = parsed
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            "credential capture JSON output must include an object field 'headers'".to_string()
+        })?;
+    if headers.is_empty() {
+        return Err("credential capture JSON output headers must not be empty".to_string());
+    }
+
+    let mut result = Vec::new();
+    for (name, raw_value) in headers {
+        let lower = name.to_ascii_lowercase();
+        if !is_safe_capture_header_name(name) {
+            return Err(format!(
+                "credential capture JSON output contains invalid or forbidden header '{name}'"
+            ));
+        }
+        if !allow_headers.contains(&lower) {
+            return Err(format!(
+                "credential capture JSON output header '{name}' is not in output.allow_headers"
+            ));
+        }
+        let Some(header_value) = raw_value.as_str() else {
+            return Err(format!(
+                "credential capture JSON output header '{name}' must have a string value"
+            ));
+        };
+        if header_value.is_empty() || header_value.contains('\r') || header_value.contains('\n') {
+            return Err(format!(
+                "credential capture JSON output header '{name}' has an invalid value"
+            ));
+        }
+        result.push((name.clone(), Zeroizing::new(header_value.to_string())));
+    }
+    Ok(result)
+}
+
+fn is_http_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '!' | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~'
+        )
+}
+
+fn is_safe_capture_header_name(name: &str) -> bool {
+    if name.is_empty() || !name.chars().all(is_http_token_char) {
+        return false;
+    }
+    !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "upgrade"
+            | "te"
+            | "trailer"
+            | "keep-alive"
+    )
+}
+
+fn millis_u64(duration: Duration) -> u64 {
+    let millis = duration.as_millis();
+    if millis > u128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        millis as u64
+    }
+}
+
+fn redacted_stderr(stderr: &[u8], policy: &nono::ScrubPolicy) -> Option<String> {
+    if stderr.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(stderr);
+    Some(nono::scrub_value_with_policy(&text, policy).into_owned())
+}
+
+fn resolve_capture_command(command: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(command);
+    if path.is_absolute() {
+        return validate_capture_command_path(path);
+    }
+    if command.contains(std::path::MAIN_SEPARATOR) {
+        return Err(NonoError::ConfigParse(format!(
+            "credential_capture command '{command}' must be an absolute path or bare command name"
+        )));
+    }
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return Err(NonoError::ConfigParse(format!(
+            "credential_capture command '{command}' could not be resolved because PATH is unset"
+        )));
+    };
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return validate_capture_command_path(candidate);
+        }
+    }
+    Err(NonoError::ConfigParse(format!(
+        "credential_capture command '{command}' was not found in PATH"
+    )))
+}
+
+fn validate_capture_command_path(path: PathBuf) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|source| NonoError::PathCanonicalization {
+            path: path.clone(),
+            source,
+        })?;
+    if !canonical.is_file() {
+        return Err(NonoError::ExpectedFile(canonical));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = canonical
+            .metadata()
+            .map_err(NonoError::Io)?
+            .permissions()
+            .mode();
+        if mode & 0o111 == 0 {
+            return Err(NonoError::ConfigParse(format!(
+                "credential_capture command '{}' is not executable",
+                canonical.display()
+            )));
+        }
+    }
+    Ok(canonical)
+}
+
 pub(crate) fn prepare_proxy_launch_options(
     args: &SandboxArgs,
     prepared: &PreparedSandbox,
     silent: bool,
+    session_id: String,
 ) -> Result<ProxyLaunchOptions> {
     validate_external_proxy_bypass(args, prepared)?;
 
@@ -193,6 +1325,8 @@ pub(crate) fn prepare_proxy_launch_options(
         proxy_source_env_vars,
         tool_sandbox_base_url_env_vars,
         tool_sandbox_proxy_credentials,
+        session_id,
+        credential_capture: prepared.credential_capture.clone(),
     };
 
     // Infra-only flags make no sense without an activating proxy feature.
@@ -940,11 +2074,21 @@ pub(crate) fn start_proxy_runtime(
         .map_err(|e| NonoError::SandboxInit(format!("Failed to start proxy runtime: {}", e)))?;
     let approval_registry =
         crate::approval_runtime::build_proxy_approval_registry(proxy.command_policies.as_ref())?;
+    let credential_capture_backend: Option<Arc<dyn nono_proxy::capture::CredentialCaptureBackend>> =
+        if proxy.credential_capture.is_empty() {
+            None
+        } else {
+            Some(Arc::new(ProxyCredentialCaptureBackend::new(
+                &proxy.credential_capture,
+                proxy.session_id.clone(),
+            )?))
+        };
     let handle = rt
         .block_on(async {
-            nono_proxy::server::start_with_approval_registry(
+            nono_proxy::server::start_with_approval_and_capture_registry(
                 proxy_config.clone(),
                 approval_registry,
+                credential_capture_backend,
             )
             .await
         })
@@ -1754,5 +2898,358 @@ mod tests {
             ])
         );
         Ok(())
+    }
+
+    #[test]
+    fn proxy_credential_capture_backend_captures_and_caches() -> Result<()> {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "github".to_string(),
+            test_capture_entry(vec!["/bin/echo".to_string(), "ghp_test".to_string()]),
+        );
+        let backend = ProxyCredentialCaptureBackend::new(&entries, "sess-test".to_string())?;
+        let request = nono_proxy::capture::CredentialCaptureRequest {
+            credential_name: "github".to_string(),
+            route_id: "github".to_string(),
+            request_host: "api.github.com".to_string(),
+            request_path: "/repos/always-further/nono/issues/787".to_string(),
+            request_method: "GET".to_string(),
+            session_id: String::new(),
+            cache_scope: String::new(),
+        };
+
+        let first =
+            nono_proxy::capture::CredentialCaptureBackend::capture(&backend, request.clone())
+                .map_err(|err| NonoError::SandboxInit(err.to_string()))?;
+        assert_capture_secret(&first, "ghp_test");
+        assert_eq!(first.metadata.cache_action, "captured");
+        assert_eq!(first.metadata.stdout_bytes, Some("ghp_test".len()));
+        assert_eq!(
+            first.metadata.cache_scope.as_deref(),
+            Some("api.github.com")
+        );
+
+        let second = nono_proxy::capture::CredentialCaptureBackend::capture(&backend, request)
+            .map_err(|err| NonoError::SandboxInit(err.to_string()))?;
+        assert_capture_secret(&second, "ghp_test");
+        assert_eq!(second.metadata.cache_action, "cache_hit");
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_credential_capture_backend_waits_for_inflight_capture() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(NonoError::Io)?;
+        let counter_path = temp.path().join("capture-count");
+        let mut entries = HashMap::new();
+        entries.insert(
+            "github".to_string(),
+            test_capture_entry(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf x >> \"$1\"; sleep 0.2; printf ghp_parallel".to_string(),
+                "sh".to_string(),
+                counter_path.to_string_lossy().into_owned(),
+            ]),
+        );
+        let backend = std::sync::Arc::new(ProxyCredentialCaptureBackend::new(
+            &entries,
+            "sess-parallel".to_string(),
+        )?);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let backend = std::sync::Arc::clone(&backend);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let request = nono_proxy::capture::CredentialCaptureRequest {
+                    credential_name: "github".to_string(),
+                    route_id: "github".to_string(),
+                    request_host: "api.github.com".to_string(),
+                    request_path: "/repos/always-further/nono/issues/787".to_string(),
+                    request_method: "GET".to_string(),
+                    session_id: String::new(),
+                    cache_scope: String::new(),
+                };
+                barrier.wait();
+                let response = nono_proxy::capture::CredentialCaptureBackend::capture(
+                    backend.as_ref(),
+                    request,
+                )
+                .map_err(|err| err.to_string())?;
+                Ok::<_, String>((
+                    capture_secret(&response).to_string(),
+                    response.metadata.cache_action,
+                ))
+            }));
+        }
+        barrier.wait();
+
+        let mut actions = Vec::new();
+        for handle in handles {
+            let (secret, action) = handle
+                .join()
+                .map_err(|_| NonoError::SandboxInit("capture thread panicked".to_string()))?
+                .map_err(NonoError::SandboxInit)?;
+            assert_eq!(secret, "ghp_parallel");
+            actions.push(action);
+        }
+        actions.sort();
+        assert_eq!(
+            actions,
+            vec!["cache_hit".to_string(), "captured".to_string()]
+        );
+        let counter = std::fs::read_to_string(&counter_path).map_err(NonoError::Io)?;
+        assert_eq!(counter, "x");
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_credential_capture_backend_rejects_empty_stdout() -> Result<()> {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "empty".to_string(),
+            test_capture_entry_no_cache(vec!["/bin/echo".to_string()]),
+        );
+        let backend = ProxyCredentialCaptureBackend::new(&entries, "sess-test".to_string())?;
+        let request = nono_proxy::capture::CredentialCaptureRequest {
+            credential_name: "empty".to_string(),
+            route_id: "empty".to_string(),
+            request_host: "api.example.com".to_string(),
+            request_path: "/".to_string(),
+            request_method: "GET".to_string(),
+            session_id: String::new(),
+            cache_scope: String::new(),
+        };
+
+        let err = nono_proxy::capture::CredentialCaptureBackend::capture(&backend, request)
+            .expect_err("empty stdout should not produce a credential");
+        assert_eq!(err.metadata.cache_action, "empty_stdout");
+        assert_eq!(err.metadata.stdout_bytes, Some(0));
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_credential_capture_backend_audits_redacted_stderr() -> Result<()> {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "github".to_string(),
+            test_capture_entry_no_cache(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf 'Authorization: Bearer ghp_secret\\n' >&2; exit 7".to_string(),
+            ]),
+        );
+        let backend = ProxyCredentialCaptureBackend::new(&entries, "sess-test".to_string())?;
+        let request = nono_proxy::capture::CredentialCaptureRequest {
+            credential_name: "github".to_string(),
+            route_id: "github".to_string(),
+            request_host: "api.github.com".to_string(),
+            request_path: "/".to_string(),
+            request_method: "GET".to_string(),
+            session_id: String::new(),
+            cache_scope: String::new(),
+        };
+
+        let err = nono_proxy::capture::CredentialCaptureBackend::capture(&backend, request)
+            .expect_err("non-zero command should fail");
+        assert_eq!(err.metadata.cache_action, "command_failed");
+        assert_eq!(err.metadata.exit_status, Some(7));
+        let stderr = err
+            .metadata
+            .stderr_redacted
+            .expect("stderr should be retained in redacted form");
+        assert!(
+            stderr.contains("[REDACTED]"),
+            "stderr was not redacted: {stderr}"
+        );
+        assert!(
+            !stderr.contains("ghp_secret"),
+            "stderr leaked secret value: {stderr}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_credential_capture_backend_uses_path_cache_scope() -> Result<()> {
+        let mut entry = test_capture_entry(vec!["/bin/echo".to_string(), "scoped".to_string()]);
+        entry.cache_path_regex = Some("^/(?:repos/|orgs/)?([^/]+)".to_string());
+        let mut entries = HashMap::new();
+        entries.insert("github".to_string(), entry);
+        let backend = ProxyCredentialCaptureBackend::new(&entries, "sess-test".to_string())?;
+        let request = nono_proxy::capture::CredentialCaptureRequest {
+            credential_name: "github".to_string(),
+            route_id: "github".to_string(),
+            request_host: "api.github.com".to_string(),
+            request_path: "/repos/example/private/issues/1".to_string(),
+            request_method: "GET".to_string(),
+            session_id: String::new(),
+            cache_scope: String::new(),
+        };
+
+        let first =
+            nono_proxy::capture::CredentialCaptureBackend::capture(&backend, request.clone())
+                .map_err(|err| NonoError::SandboxInit(err.to_string()))?;
+        assert_eq!(first.metadata.cache_scope.as_deref(), Some("example"));
+
+        let second = nono_proxy::capture::CredentialCaptureBackend::capture(&backend, request)
+            .map_err(|err| NonoError::SandboxInit(err.to_string()))?;
+        assert_eq!(second.metadata.cache_action, "cache_hit");
+        assert_eq!(second.metadata.cache_scope.as_deref(), Some("example"));
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_credential_capture_backend_parses_json_headers() -> Result<()> {
+        let mut entry = test_capture_entry_no_cache(vec![
+            "/bin/echo".to_string(),
+            r#"{"headers":{"Authorization":"Bearer one","X-Gateway-Key":"two"}}"#.to_string(),
+        ]);
+        entry.output = crate::profile::CredentialCaptureOutput::Config(
+            crate::profile::CredentialCaptureOutputConfig {
+                format: crate::profile::CredentialCaptureOutputFormat::Json,
+                allow_headers: vec!["Authorization".to_string(), "X-Gateway-Key".to_string()],
+            },
+        );
+        let mut entries = HashMap::new();
+        entries.insert("gateway".to_string(), entry);
+        let backend = ProxyCredentialCaptureBackend::new(&entries, "sess-test".to_string())?;
+        let response = nono_proxy::capture::CredentialCaptureBackend::capture(
+            &backend,
+            nono_proxy::capture::CredentialCaptureRequest {
+                credential_name: "gateway".to_string(),
+                route_id: "gateway".to_string(),
+                request_host: "api.example.com".to_string(),
+                request_path: "/".to_string(),
+                request_method: "POST".to_string(),
+                session_id: String::new(),
+                cache_scope: String::new(),
+            },
+        )
+        .map_err(|err| NonoError::SandboxInit(err.to_string()))?;
+
+        assert_eq!(response.metadata.output_format.as_deref(), Some("json"));
+        assert_eq!(
+            response.metadata.header_names,
+            vec!["Authorization".to_string(), "X-Gateway-Key".to_string()]
+        );
+        match response.material {
+            nono_proxy::capture::CredentialCaptureMaterial::Headers(headers) => {
+                assert_eq!(headers.len(), 2);
+                assert_eq!(headers[0].0, "Authorization");
+                assert_eq!(headers[0].1.as_str(), "Bearer one");
+            }
+            nono_proxy::capture::CredentialCaptureMaterial::Secret(_) => {
+                panic!("expected JSON header material")
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_credential_capture_backend_sends_request_json_stdin() -> Result<()> {
+        let mut entry = test_capture_entry_no_cache(vec!["/bin/cat".to_string()]);
+        entry.stdin = crate::profile::CredentialCaptureStdinMode::RequestJson;
+        entry.cache_path_regex = Some("^/orgs/([^/]+)".to_string());
+        let mut entries = HashMap::new();
+        entries.insert("github".to_string(), entry);
+        let backend = ProxyCredentialCaptureBackend::new(&entries, "sess-stdin".to_string())?;
+        let response = nono_proxy::capture::CredentialCaptureBackend::capture(
+            &backend,
+            nono_proxy::capture::CredentialCaptureRequest {
+                credential_name: "github".to_string(),
+                route_id: "github".to_string(),
+                request_host: "api.github.com".to_string(),
+                request_path: "/orgs/example/repos".to_string(),
+                request_method: "GET".to_string(),
+                session_id: String::new(),
+                cache_scope: String::new(),
+            },
+        )
+        .map_err(|err| NonoError::SandboxInit(err.to_string()))?;
+
+        let value = capture_secret(&response);
+        let payload: serde_json::Value =
+            serde_json::from_str(value).map_err(|err| NonoError::ConfigParse(err.to_string()))?;
+        assert_eq!(payload["session_id"], "sess-stdin");
+        assert_eq!(payload["cache_scope"], "example");
+        assert_eq!(payload["request_method"], "GET");
+        assert_eq!(
+            response.metadata.stdin_mode.as_deref(),
+            Some("request_json")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_credential_capture_backend_exposes_browser_helper_for_open_urls() -> Result<()> {
+        let mut entry = test_capture_entry_no_cache(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            r#"test -n "$BROWSER" && test -x "$BROWSER" && test -S "$NONO_SUPERVISOR_PATH" && printf browser-ok"#.to_string(),
+        ]);
+        entry.interaction = Some(crate::profile::CredentialCaptureInteraction {
+            stdio: false,
+            open_urls: Some(crate::profile::OpenUrlConfig {
+                allow_origins: vec!["https://github.com".to_string()],
+                allow_localhost: true,
+            }),
+            allow_launch_services: true,
+        });
+        let mut entries = HashMap::new();
+        entries.insert("github".to_string(), entry);
+        let backend = ProxyCredentialCaptureBackend::new(&entries, "sess-browser".to_string())?;
+        let response = nono_proxy::capture::CredentialCaptureBackend::capture(
+            &backend,
+            nono_proxy::capture::CredentialCaptureRequest {
+                credential_name: "github".to_string(),
+                route_id: "github".to_string(),
+                request_host: "api.github.com".to_string(),
+                request_path: "/".to_string(),
+                request_method: "GET".to_string(),
+                session_id: String::new(),
+                cache_scope: String::new(),
+            },
+        )
+        .map_err(|err| NonoError::SandboxInit(err.to_string()))?;
+
+        assert_capture_secret(&response, "browser-ok");
+        assert_eq!(response.metadata.interactive, Some(true));
+        Ok(())
+    }
+
+    fn test_capture_entry(command: Vec<String>) -> crate::profile::CredentialCaptureEntry {
+        crate::profile::CredentialCaptureEntry {
+            command,
+            timeout_secs: Some(5),
+            ttl_secs: Some(60),
+            cache_ttl_secs: None,
+            cache_path_regex: None,
+            stdin: crate::profile::CredentialCaptureStdinMode::Null,
+            output: crate::profile::CredentialCaptureOutput::default(),
+            interaction: None,
+        }
+    }
+
+    fn test_capture_entry_no_cache(command: Vec<String>) -> crate::profile::CredentialCaptureEntry {
+        let mut entry = test_capture_entry(command);
+        entry.ttl_secs = Some(0);
+        entry
+    }
+
+    fn assert_capture_secret(
+        response: &nono_proxy::capture::CredentialCaptureResponse,
+        expected: &str,
+    ) {
+        assert_eq!(capture_secret(response), expected);
+    }
+
+    fn capture_secret(response: &nono_proxy::capture::CredentialCaptureResponse) -> &str {
+        match &response.material {
+            nono_proxy::capture::CredentialCaptureMaterial::Secret(value) => value.as_str(),
+            nono_proxy::capture::CredentialCaptureMaterial::Headers(_) => {
+                panic!("expected text credential material")
+            }
+        }
     }
 }

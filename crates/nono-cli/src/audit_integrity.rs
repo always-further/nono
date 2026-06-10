@@ -1,8 +1,13 @@
 pub(crate) use nono::audit::{
-    AUDIT_EVENTS_FILENAME, AUDIT_HASH_ALGORITHM, AuditEventPayload, AuditEventRecord,
+    AUDIT_EVENTS_FILENAME, AuditEventPayload, AuditEventRecord,
     AuditRecorder, CommandPolicyAuditEvent, CommandPolicyEnvAuditEntry, CommandPolicyStdioAudit,
-    CommandPolicyStdioStreamAudit, SandboxRuntimeAuditEvent, verify_audit_log,
+    CommandPolicyStdioStreamAudit, verify_audit_log,
 };
+
+#[cfg(test)]
+pub(crate) use nono::audit::AUDIT_HASH_ALGORITHM;
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) use nono::audit::SandboxRuntimeAuditEvent;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -150,6 +155,19 @@ mod tests {
                 endpoint_policy_action: Some("deny".to_string()),
                 endpoint_policy_rule: Some("endpoint_policy.default".to_string()),
                 approval_backend: None,
+                credential_capture_action: None,
+                credential_capture_name: None,
+                credential_capture_command: None,
+                credential_capture_argv: None,
+                credential_capture_exit_status: None,
+                credential_capture_duration_ms: None,
+                credential_capture_stdout_bytes: None,
+                credential_capture_stderr: None,
+                credential_capture_cache_scope: None,
+                credential_capture_output_format: None,
+                credential_capture_header_names: None,
+                credential_capture_stdin_mode: None,
+                credential_capture_interactive: None,
                 target: "api.example.com".to_string(),
                 upstream: Some("https://api.example.com".to_string()),
                 port: Some(443),

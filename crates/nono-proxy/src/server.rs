@@ -8,6 +8,7 @@
 //! Other methods  -> [`reverse`] handler (credential injection)
 
 use crate::audit;
+use crate::capture::CredentialCaptureBackend;
 use crate::config::ProxyConfig;
 use crate::connect;
 use crate::credential::CredentialStore;
@@ -386,6 +387,8 @@ struct ProxyState {
     audit_log: audit::SharedAuditLog,
     /// Optional approval backend registry for L7 endpoint-policy approve routes.
     approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+    /// Optional supervisor-backed capture backend for command-backed credentials.
+    credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
     /// Matcher for hosts that bypass the external proxy and route direct.
     /// Built once at startup from `ExternalProxyConfig.bypass_hosts`.
     bypass_matcher: external::BypassMatcher,
@@ -423,6 +426,16 @@ pub async fn start_with_approval(
 pub async fn start_with_approval_registry(
     config: ProxyConfig,
     approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+) -> Result<ProxyHandle> {
+    start_with_approval_and_capture_registry(config, approval_backends, None).await
+}
+
+/// Start the proxy server with optional named approval and credential capture
+/// backend registries.
+pub async fn start_with_approval_and_capture_registry(
+    config: ProxyConfig,
+    approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+    credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
 ) -> Result<ProxyHandle> {
     // Generate session token
     let session_token = token::generate_session_token()?;
@@ -641,6 +654,7 @@ pub async fn start_with_approval_registry(
         active_connections: AtomicUsize::new(0),
         audit_log: Arc::clone(&audit_log),
         approval_backends,
+        credential_capture_backend,
         bypass_matcher,
         cert_cache,
     });
@@ -953,6 +967,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             audit_log: Some(&state.audit_log),
                             upstream_proxy,
                             approval_backends: state.approval_backends.clone(),
+                            credential_capture_backend: state.credential_capture_backend.clone(),
                         };
                         return tls_intercept::handle_intercept_connect(&mut stream, ctx).await;
                     }
@@ -1060,6 +1075,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
             tls_connector: &state.tls_connector,
             audit_log: Some(&state.audit_log),
             approval_backends: state.approval_backends.clone(),
+            credential_capture_backend: state.credential_capture_backend.clone(),
         };
         reverse::handle_reverse_proxy(first_line, &mut stream, &header_bytes, &ctx, &buffered).await
     } else {

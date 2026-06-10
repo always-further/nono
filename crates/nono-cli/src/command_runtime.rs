@@ -185,7 +185,11 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         eprintln!();
     }
 
-    let proxy = prepare_proxy_launch_options(&args.sandbox, &prepared, silent)?;
+    let session_id = std::env::var(crate::DETACHED_SESSION_ID_ENV)
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(crate::session::generate_session_id);
+    let proxy = prepare_proxy_launch_options(&args.sandbox, &prepared, silent, session_id.clone())?;
     let strategy = select_exec_strategy(
         false,
         proxy.is_active(),
@@ -220,6 +224,7 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             proxy,
             redaction_policy: load_configured_redaction_policy()?,
             session: SessionLaunchOptions {
+                session_id: Some(session_id),
                 session_name: args.name,
                 detach_sequence: load_configured_detach_sequence()?,
                 ..SessionLaunchOptions::default()

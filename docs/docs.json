@@ -120,7 +120,11 @@
       },
       {
         "group": "Development",
-        "pages": ["cli/development/index", "cli/development/testing"]
+        "pages": [
+          "cli/development/index",
+          "cli/development/testing",
+          "cli/development/manual-witness-guide"
+        ]
       }
     ]
   },

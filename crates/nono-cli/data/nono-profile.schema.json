@@ -128,6 +128,13 @@
       "items": { "type": "string" },
       "description": "Extra arguments appended to the child command at launch. Supports variable expansion (e.g. $NONO_CONFIG, $NONO_PACKAGES)."
     },
+    "credential_capture": {
+      "type": "object",
+      "description": "Maps logical credential names to supervisor-side commands used by custom_credentials entries with credential_key: \"cmd://<name>\". Commands are run lazily when the proxy first needs the credential; stdout is injected by the proxy and never exposed to the sandboxed child.",
+      "additionalProperties": {
+        "$ref": "#/$defs/CredentialCaptureEntry"
+      }
+    },
     "unsafe_macos_seatbelt_rules": {
       "type": "array",
       "items": { "type": "string" },
@@ -161,6 +168,113 @@
             { "type": "null" }
           ],
           "description": "Optional author or maintainer of this profile."
+        }
+      }
+    },
+    "CredentialCaptureEntry": {
+      "type": "object",
+      "description": "Configuration for a supervisor-side credential capture command.",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Command and arguments to execute without a shell, for example [\"gh\", \"auth\", \"token\"]. The executable is resolved before proxy startup."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300,
+          "default": 5,
+          "description": "Maximum seconds to wait for the command."
+        },
+        "ttl_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "default": 900,
+          "description": "How long to cache the captured credential in memory. Set to 0 to disable caching."
+        },
+        "cache_ttl_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Preferred alias for ttl_secs. How long to cache captured material in memory. Set to 0 to disable caching. Do not set both ttl_secs and cache_ttl_secs."
+        },
+        "cache_path_regex": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional regular expression evaluated against the upstream request path. If it matches, capture group 1 is used as the cache scope; otherwise the full match is used. When absent or unmatched, the request host is used."
+        },
+        "stdin": {
+          "type": "string",
+          "enum": ["null", "request_json"],
+          "default": "null",
+          "description": "Controls stdin for the capture command. null closes stdin unless interaction.stdio is true. request_json writes request metadata JSON to stdin."
+        },
+        "output": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": ["text"],
+              "description": "Capture stdout as a single credential string."
+            },
+            {
+              "$ref": "#/$defs/CredentialCaptureOutputConfig"
+            }
+          ],
+          "default": "text",
+          "description": "Controls how capture stdout is interpreted. JSON output requires an object form with allow_headers."
+        },
+        "interaction": {
+          "$ref": "#/$defs/CredentialCaptureInteraction",
+          "description": "Explicit opt-in policy for interactive capture commands."
+        }
+      }
+    },
+    "CredentialCaptureOutputConfig": {
+      "type": "object",
+      "description": "Structured output configuration for a credential capture command.",
+      "additionalProperties": false,
+      "required": ["format"],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["json"],
+          "description": "Interpret stdout as JSON. The supported shape is {\"headers\": {\"Header-Name\": \"value\"}}."
+        },
+        "allow_headers": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Header names that JSON output may inject. Required for json output."
+        }
+      }
+    },
+    "CredentialCaptureInteraction": {
+      "type": "object",
+      "description": "Explicit policy for capture commands that need terminal or browser interaction.",
+      "additionalProperties": false,
+      "properties": {
+        "stdio": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the capture command to use inherited stderr and, when stdin is null, inherited stdin."
+        },
+        "open_urls": {
+          "oneOf": [
+            { "$ref": "#/$defs/OpenUrlConfig" },
+            { "type": "null" }
+          ],
+          "description": "Origins this capture command may open through nono's browser helper."
+        },
+        "allow_launch_services": {
+          "type": "boolean",
+          "default": false,
+          "description": "Mark this capture command as allowed to use host browser/app launch mechanisms during auth setup."
         }
       }
     },
@@ -528,7 +642,7 @@
         },
         "credential_key": {
           "type": "string",
-          "description": "Keystore account name for the credential (e.g., \"telegram_bot_token\"), or a 1Password op:// URI, Bitwarden bw:// URI, apple-password:// URI, file:// URI, or env:// URI (e.g., \"env://MY_TOKEN\"). Mutually exclusive with auth and aws_auth."
+          "description": "Keystore account name for the credential (e.g., \"telegram_bot_token\"), or a 1Password op:// URI, Bitwarden bw:// URI, apple-password:// URI, file:// URI, env:// URI (e.g., \"env://MY_TOKEN\"), or cmd:// URI backed by credential_capture. Mutually exclusive with auth and aws_auth."
         },
         "auth": {
           "$ref": "#/$defs/OAuth2Config",
