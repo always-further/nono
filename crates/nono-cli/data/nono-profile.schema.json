@@ -829,6 +829,15 @@
           "$ref": "#/$defs/CommandPolicyIdentifier",
           "description": "Legacy session entrypoint hint. Current profiles should express direct session access with commands.<name>.sandbox or commands.<name>.from.session."
         },
+        "approval_backends": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ApprovalBackendConfig" },
+          "description": "Named approval backends used by approve decisions in invocation and endpoint policies."
+        },
+        "approval_defaults": {
+          "$ref": "#/$defs/ApprovalDefaultsConfig",
+          "description": "Default approval backend and timeout used when an approve decision does not route explicitly."
+        },
         "credentials": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/CommandCredentialConfig" },
@@ -892,6 +901,64 @@
         "source": {
           "$ref": "#/$defs/AmbientCredentialSourceConfig",
           "description": "Optional supervisor-side credential source for ambient credentials or proxy credentials. For proxy credentials, use either source or credential_key, not both."
+        },
+        "tls_ca": {
+          "type": "string",
+          "description": "Optional PEM CA bundle used by proxy credentials for upstream TLS verification."
+        },
+        "tls_client_cert": {
+          "type": "string",
+          "description": "Optional PEM client certificate for proxy credential mutual TLS. Must be paired with tls_client_key."
+        },
+        "tls_client_key": {
+          "type": "string",
+          "description": "Optional PEM client private key for proxy credential mutual TLS. Must be paired with tls_client_cert."
+        }
+      }
+    },
+    "ApprovalDefaultsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/CommandPolicyIdentifier",
+          "description": "Default approval backend name."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Default approval timeout in seconds."
+        }
+      }
+    },
+    "ApprovalBackendConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["terminal", "webhook", "chain"],
+          "description": "Approval backend kind."
+        },
+        "url": {
+          "type": "string",
+          "description": "Webhook URL for webhook approval backends."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Backend-specific approval timeout in seconds."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["all", "any"],
+          "description": "Decision mode for chain approval backends."
+        },
+        "backends": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+          "description": "Child backend names for chain approval backends."
         }
       }
     },
@@ -1020,10 +1087,11 @@
           "additionalProperties": {
             "oneOf": [
               { "type": "string", "enum": ["deny"] },
+              { "$ref": "#/$defs/CommandEdgeConfig" },
               { "$ref": "#/$defs/CommandSandboxConfig" }
             ]
           },
-          "description": "Caller-specific policies. Use the reserved caller session for direct session invocation."
+          "description": "Caller-specific policies. Use the reserved caller session for direct session invocation. Values may be \"deny\", a bare sandbox shorthand, or an edge object with sandbox and invocation_policy."
         },
         "intercept": {
           "type": "array",
@@ -1041,18 +1109,25 @@
         }
       }
     },
+    "CommandEdgeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox"],
+      "properties": {
+        "sandbox": {
+          "$ref": "#/$defs/CommandSandboxConfig",
+          "description": "Child sandbox selected for this caller edge."
+        },
+        "invocation_policy": {
+          "$ref": "#/$defs/InvocationPolicyConfig",
+          "description": "Optional argv and environment policy evaluated before launching the child command."
+        }
+      }
+    },
     "CommandSandboxConfig": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "runtime": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": ["python3-system"]
-          },
-          "description": "Named explicit runtime fragments for interpreter-based tools. Fragments expand to reviewed runtime grants but are never inherited from the outer session."
-        },
         "fs_read": {
           "type": "array",
           "items": { "type": "string" },
@@ -1078,6 +1153,11 @@
           "items": { "$ref": "#/$defs/CommandPolicyIdentifier" },
           "description": "Credential handles injected into this selected child-tool-sandbox policy."
         },
+        "credentials": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CommandCredentialGrantConfig" },
+          "description": "Credential handles injected into this selected child-tool-sandbox policy, optionally with endpoint policy constraints."
+        },
         "argv_prepend": {
           "type": "array",
           "items": { "type": "string" },
@@ -1094,6 +1174,188 @@
         "allow_raw_file_credentials_in_chained_policy": {
           "type": "boolean",
           "description": "Explicit opt-in allowing raw-file credentials in a non-session caller policy."
+        },
+        "resources": {
+          "$ref": "#/$defs/CommandResourceConfig",
+          "description": "Optional child resource limits. Current runtimes fail closed if requested resources cannot be enforced."
+        },
+        "stdio": {
+          "$ref": "#/$defs/CommandStdioConfig",
+          "description": "Optional stdout/stderr byte limits enforced by brokered stdio."
+        }
+      }
+    },
+    "CommandCredentialGrantConfig": {
+      "oneOf": [
+        { "$ref": "#/$defs/CommandPolicyIdentifier" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/CommandPolicyIdentifier",
+              "description": "Credential handle name."
+            },
+            "endpoint_policy": {
+              "$ref": "#/$defs/EndpointPolicyConfig",
+              "description": "Optional method/path policy for proxy credentials."
+            }
+          }
+        }
+      ]
+    },
+    "EndpointPolicyConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "$ref": "#/$defs/PolicyDecisionConfig" },
+        "deny": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRuleConfig" }
+        },
+        "approve": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRuleConfig" }
+        },
+        "allow": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRuleConfig" }
+        }
+      }
+    },
+    "EndpointRuleConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": { "type": "string" },
+        "path": { "type": "string" },
+        "backend": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+        "reason": { "type": "string" },
+        "timeout_secs": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "InvocationPolicyConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "$ref": "#/$defs/PolicyDecisionConfig" },
+        "deny": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InvocationRuleConfig" }
+        },
+        "approve": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InvocationRuleConfig" }
+        },
+        "allow": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InvocationRuleConfig" }
+        }
+      }
+    },
+    "InvocationRuleConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": { "$ref": "#/$defs/ArgvMatcherConfig" },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/EnvMatcherConfig" }
+        },
+        "backend": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+        "reason": { "type": "string" },
+        "timeout_secs": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "ArgvMatcherConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exact": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "prefix": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "contains": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "EnvMatcherConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "one_of": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "equals": { "type": "string" }
+      }
+    },
+    "PolicyDecisionConfig": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["deny", "approve", "allow"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["decision"],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": ["deny", "approve", "allow"]
+            },
+            "backend": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+            "timeout_secs": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "CommandResourceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["auto", "cgroup", "portable"]
+        },
+        "fallback": {
+          "type": "string",
+          "enum": ["warn_if_weaker", "fail_if_weaker"]
+        },
+        "memory_bytes": { "type": "integer", "minimum": 0 },
+        "cpu_seconds": { "type": "integer", "minimum": 0 },
+        "wall_time_seconds": { "type": "integer", "minimum": 0 },
+        "max_processes": { "type": "integer", "minimum": 0 },
+        "max_file_size_bytes": { "type": "integer", "minimum": 0 },
+        "max_output_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "CommandStdioConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stdout": { "$ref": "#/$defs/CommandStdioStreamConfig" },
+        "stderr": { "$ref": "#/$defs/CommandStdioStreamConfig" }
+      }
+    },
+    "CommandStdioStreamConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_bytes"],
+      "properties": {
+        "max_bytes": { "type": "integer", "minimum": 1 },
+        "on_limit": {
+          "type": "string",
+          "enum": ["truncate", "terminate", "deny"]
         }
       }
     },
@@ -1101,6 +1363,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "allow_all": {
+          "type": "boolean",
+          "description": "Allow unrestricted child network access."
+        },
         "allow_domain": {
           "type": "array",
           "items": { "type": "string" },

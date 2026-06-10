@@ -6,6 +6,7 @@
 //! legacy patch namespace or legacy security subkeys will fail here.
 
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 fn load_schema() -> Value {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -13,6 +14,19 @@ fn load_schema() -> Value {
         .join("nono-profile.schema.json");
     let content = std::fs::read_to_string(&path).expect("read embedded profile schema");
     serde_json::from_str(&content).expect("embedded profile schema is valid JSON")
+}
+
+fn assert_schema_properties(schema: &Value, def_name: &str, expected: &[&str]) {
+    let props = schema
+        .pointer(&format!("/$defs/{def_name}/properties"))
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{def_name}.properties is an object"));
+    let actual = props.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual, expected,
+        "{def_name}.properties must match the Rust command-policy model"
+    );
 }
 
 #[test]
@@ -76,6 +90,165 @@ fn test_schema_commands_has_allow_and_deny() {
         .expect("CommandsConfig.properties is an object");
     assert!(props.contains_key("allow"), "CommandsConfig.allow missing");
     assert!(props.contains_key("deny"), "CommandsConfig.deny missing");
+}
+
+#[test]
+fn test_schema_command_policies_match_tool_sandbox_guide_shape() {
+    let schema = load_schema();
+    assert_schema_properties(
+        &schema,
+        "CommandPoliciesConfig",
+        &[
+            "approval_backends",
+            "approval_defaults",
+            "allow_writable_executables",
+            "commands",
+            "credentials",
+            "deny_direct_exec_bypass",
+            "entrypoint",
+            "executable_dirs",
+        ],
+    );
+    assert_schema_properties(
+        &schema,
+        "ApprovalDefaultsConfig",
+        &["backend", "timeout_secs"],
+    );
+    assert_schema_properties(
+        &schema,
+        "ApprovalBackendConfig",
+        &["backends", "mode", "timeout_secs", "type", "url"],
+    );
+    assert_schema_properties(
+        &schema,
+        "CommandCredentialConfig",
+        &[
+            "base_url_env_var",
+            "credential_format",
+            "credential_key",
+            "env_var",
+            "inject_header",
+            "mode",
+            "path",
+            "source",
+            "tls_ca",
+            "tls_client_cert",
+            "tls_client_key",
+            "type",
+            "upstream",
+        ],
+    );
+    assert_schema_properties(&schema, "InterceptRuleConfig", &["action", "args"]);
+    assert_schema_properties(
+        &schema,
+        "CommandPolicyConfig",
+        &[
+            "allow_direct_exec_bypass",
+            "allow_direct_exec_bypass_with_credentials",
+            "allow_writable_executable",
+            "can_use",
+            "executable",
+            "from",
+            "intercept",
+            "sandbox",
+        ],
+    );
+    assert_schema_properties(
+        &schema,
+        "CommandEdgeConfig",
+        &["invocation_policy", "sandbox"],
+    );
+    assert_schema_properties(
+        &schema,
+        "CommandSandboxConfig",
+        &[
+            "allow_raw_file_credentials_in_chained_policy",
+            "argv_prepend",
+            "credentials",
+            "environment",
+            "fs_read",
+            "fs_read_file",
+            "fs_write",
+            "fs_write_file",
+            "network",
+            "resources",
+            "stdio",
+            "use_credentials",
+        ],
+    );
+    assert_schema_properties(
+        &schema,
+        "EndpointPolicyConfig",
+        &["allow", "approve", "default", "deny"],
+    );
+    assert_schema_properties(
+        &schema,
+        "EndpointRuleConfig",
+        &["backend", "method", "path", "reason", "timeout_secs"],
+    );
+    assert_schema_properties(
+        &schema,
+        "InvocationPolicyConfig",
+        &["allow", "approve", "default", "deny"],
+    );
+    assert_schema_properties(
+        &schema,
+        "InvocationRuleConfig",
+        &["argv", "backend", "env", "reason", "timeout_secs"],
+    );
+    assert_schema_properties(
+        &schema,
+        "ArgvMatcherConfig",
+        &["contains", "exact", "prefix"],
+    );
+    assert_schema_properties(&schema, "EnvMatcherConfig", &["equals", "one_of"]);
+    assert_schema_properties(
+        &schema,
+        "CommandResourceConfig",
+        &[
+            "backend",
+            "cpu_seconds",
+            "fallback",
+            "max_file_size_bytes",
+            "max_output_bytes",
+            "max_processes",
+            "memory_bytes",
+            "wall_time_seconds",
+        ],
+    );
+    assert_schema_properties(&schema, "CommandStdioConfig", &["stderr", "stdout"]);
+    assert_schema_properties(
+        &schema,
+        "CommandStdioStreamConfig",
+        &["max_bytes", "on_limit"],
+    );
+    assert_schema_properties(
+        &schema,
+        "CommandNetworkConfig",
+        &[
+            "allow_all",
+            "allow_domain",
+            "tcp_bind_ports",
+            "tcp_connect_ports",
+        ],
+    );
+    assert_schema_properties(
+        &schema,
+        "CommandEnvironmentConfig",
+        &["allow_vars", "set_vars"],
+    );
+
+    let from_variants = schema
+        .pointer("/$defs/CommandPolicyConfig/properties/from/additionalProperties/oneOf")
+        .and_then(Value::as_array)
+        .expect("CommandPolicyConfig.from variants are listed");
+    assert!(
+        from_variants
+            .iter()
+            .any(|variant| variant.pointer("/$ref").and_then(Value::as_str)
+                == Some("#/$defs/CommandEdgeConfig")),
+        "CommandPolicyConfig.from must allow edge objects with sandbox and invocation_policy"
+    );
 }
 
 #[test]

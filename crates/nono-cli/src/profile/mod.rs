@@ -7022,6 +7022,99 @@ mod tests {
     }
 
     #[test]
+    fn test_schema_validates_tool_sandbox_edge_policy() {
+        let json = r#"{
+            "meta": {
+                "name": "tool-sandbox-edge-test"
+            },
+            "command_policies": {
+                "approval_backends": {
+                    "human": {
+                        "type": "terminal"
+                    }
+                },
+                "approval_defaults": {
+                    "backend": "human",
+                    "timeout_secs": 30
+                },
+                "credentials": {
+                    "github-api": {
+                        "type": "proxy",
+                        "upstream": "https://api.github.com",
+                        "credential_key": "env://GH_TOKEN",
+                        "env_var": "GH_TOKEN",
+                        "inject_header": "Authorization",
+                        "credential_format": "Bearer {}"
+                    }
+                },
+                "commands": {
+                    "gh": {
+                        "from": {
+                            "session": {
+                                "sandbox": {
+                                    "fs_read": ["."],
+                                    "credentials": [
+                                        {
+                                            "name": "github-api",
+                                            "endpoint_policy": {
+                                                "default": "deny",
+                                                "allow": [
+                                                    {
+                                                        "method": "GET",
+                                                        "path": "/repos/always-further/nono/issues"
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    ],
+                                    "network": {
+                                        "allow_domain": ["api.github.com"]
+                                    },
+                                    "stdio": {
+                                        "stdout": {
+                                            "max_bytes": 1048576,
+                                            "on_limit": "truncate"
+                                        }
+                                    }
+                                },
+                                "invocation_policy": {
+                                    "default": "deny",
+                                    "approve": [
+                                        {
+                                            "argv": {
+                                                "prefix": ["issue", "comment"]
+                                            },
+                                            "backend": "human",
+                                            "timeout_secs": 10
+                                        }
+                                    ],
+                                    "allow": [
+                                        {
+                                            "argv": {
+                                                "prefix": ["issue", "view"]
+                                            },
+                                            "env": {
+                                                "GH_HOST": {
+                                                    "equals": "github.com"
+                                                }
+                                            },
+                                            "reason": "agents may view GitHub issues"
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        validate_against_schema(json)
+            .expect("documented tool-sandbox edge policy should pass schema validation");
+        serde_json::from_str::<Profile>(json)
+            .expect("documented tool-sandbox edge policy should parse as a profile");
+    }
+
+    #[test]
     fn test_schema_validates_builtin_profiles_in_policy_json() {
         // Validate that all built-in profiles in policy.json conform to the schema
         let policy_str = include_str!("../../data/policy.json");

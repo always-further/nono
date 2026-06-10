@@ -385,6 +385,7 @@ pub enum InterceptActionConfig {
 /// is a catch-all and must appear last in the list. If no rule matches the
 /// default action is `Passthrough`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct InterceptRuleConfig {
     /// Argument prefix to match against argv[1..] of the shim invocation.
     /// An empty list is a catch-all.
@@ -1195,6 +1196,13 @@ fn validate_intercept_rules(
                 }
             }
         }
+        if let InterceptActionConfig::Approve { timeout_secs } = &rule.action {
+            validate_positive_timeout(
+                &format!("commands.{command_name}.intercept[{i}].action.timeout_secs"),
+                *timeout_secs,
+                report,
+            );
+        }
     }
 }
 
@@ -1333,6 +1341,11 @@ fn validate_approval_defaults(
             );
         }
     }
+    validate_positive_timeout(
+        "approval_defaults.timeout_secs",
+        config.approval_defaults.timeout_secs,
+        report,
+    );
 }
 
 fn validate_approval_backend(
@@ -1416,6 +1429,11 @@ fn validate_approval_backend(
             format!("approval backend '{name}' url contains NUL"),
         );
     }
+    validate_positive_timeout(
+        &format!("approval backend '{name}' timeout_secs"),
+        backend.timeout_secs,
+        report,
+    );
 }
 
 fn validate_policy_default(
@@ -1432,6 +1450,7 @@ fn validate_policy_default(
         PolicyDecisionConfig::RoutedApproval(route) => {
             if route.decision == PolicyDecision::Approve {
                 validate_backend_reference(label, route.backend.as_deref(), true, config, report);
+                validate_positive_timeout(label, route.timeout_secs, report);
             } else if route.backend.is_some() || route.timeout_secs.is_some() {
                 report.error(
                     "invalid_approval_route",
@@ -1509,6 +1528,7 @@ fn validate_invocation_rule(
     report: &mut CommandPolicyValidationReport,
 ) {
     validate_rule_backend(label, bucket, rule.backend.as_deref(), config, report);
+    validate_positive_timeout(label, rule.timeout_secs, report);
 
     if let Some(argv) = &rule.argv {
         let matcher_count = usize::from(argv.exact.is_some())
@@ -1584,6 +1604,7 @@ fn validate_endpoint_policy(
                 "command '{command_name}' from.{caller} credential '{credential_name}' endpoint_policy.{bucket}[{index}]"
             );
             validate_rule_backend(&label, bucket, rule.backend.as_deref(), config, report);
+            validate_positive_timeout(&label, rule.timeout_secs, report);
             if rule.method.is_empty() || rule.path.is_empty() {
                 report.error(
                     "invalid_endpoint_policy",
@@ -1594,6 +1615,19 @@ fn validate_endpoint_policy(
                 report.error("invalid_endpoint_policy", format!("{label} contains NUL"));
             }
         }
+    }
+}
+
+fn validate_positive_timeout(
+    label: &str,
+    timeout_secs: Option<u64>,
+    report: &mut CommandPolicyValidationReport,
+) {
+    if matches!(timeout_secs, Some(0)) {
+        report.error(
+            "invalid_approval_timeout",
+            format!("{label} must be greater than zero"),
+        );
     }
 }
 
@@ -3459,6 +3493,95 @@ mod tests {
                 .iter()
                 .any(|f| f.code == "intercept_respond_stdout_too_large"),
             "expected intercept_respond_stdout_too_large error"
+        );
+    }
+
+    #[test]
+    fn intercept_rule_rejects_unknown_fields() {
+        let err = serde_json::from_str::<InterceptRuleConfig>(
+            r#"{"args":[],"action":{"type":"passthrough"},"unknown":true}"#,
+        )
+        .expect_err("unknown intercept fields should be rejected");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn approval_timeouts_must_be_nonzero() {
+        let mut config = active_git_config();
+        config.approval_defaults = ApprovalDefaultsConfig {
+            backend: Some("human".to_string()),
+            timeout_secs: Some(0),
+        };
+        config.approval_backends.insert(
+            "human".to_string(),
+            ApprovalBackendConfig {
+                backend_type: ApprovalBackendType::Terminal,
+                url: None,
+                timeout_secs: Some(0),
+                mode: None,
+                backends: Vec::new(),
+            },
+        );
+
+        if let Some(git) = config.commands.get_mut("git") {
+            git.sandbox = None;
+            git.intercept = vec![InterceptRuleConfig {
+                args: vec!["push".to_string()],
+                action: InterceptActionConfig::Approve {
+                    timeout_secs: Some(0),
+                },
+            }];
+            git.from.insert(
+                "session".to_string(),
+                CommandFromConfig::Edge(Box::new(CommandEdgeConfig {
+                    sandbox: CommandSandboxConfig {
+                        credentials: vec![CommandCredentialGrantConfig::Policy(
+                            CommandCredentialGrantPolicyConfig {
+                                name: "github-api".to_string(),
+                                endpoint_policy: Some(EndpointPolicyConfig {
+                                    allow: vec![EndpointRuleConfig {
+                                        method: "GET".to_string(),
+                                        path: "/repos/always-further/nono/issues".to_string(),
+                                        backend: None,
+                                        reason: None,
+                                        timeout_secs: Some(0),
+                                    }],
+                                    ..Default::default()
+                                }),
+                            },
+                        )],
+                        ..Default::default()
+                    },
+                    invocation_policy: Some(InvocationPolicyConfig {
+                        approve: vec![InvocationRuleConfig {
+                            argv: Some(ArgvMatcherConfig {
+                                prefix: Some(vec!["issue".to_string(), "comment".to_string()]),
+                                exact: None,
+                                contains: None,
+                            }),
+                            env: BTreeMap::new(),
+                            backend: Some("human".to_string()),
+                            reason: None,
+                            timeout_secs: Some(0),
+                        }],
+                        ..Default::default()
+                    }),
+                })),
+            );
+        }
+
+        let report = validate_command_policies(Some(&config), CommandPolicyValidationScope::Syntax);
+        let timeout_errors = report
+            .errors
+            .iter()
+            .filter(|finding| finding.code == "invalid_approval_timeout")
+            .count();
+        assert_eq!(
+            timeout_errors, 5,
+            "expected timeout validation on defaults, backend, invocation, endpoint, and intercept"
         );
     }
 
