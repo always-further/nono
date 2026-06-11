@@ -91,6 +91,9 @@ pub(crate) struct ProxyLaunchOptions {
     /// Propagated to `ProxyConfig.strict_filter` so the filter denies
     /// unlisted hosts instead of falling back to allow-all.
     pub(crate) network_block: bool,
+    /// Per-credential endpoint restrictions from `--allow-endpoint SERVICE:METHOD:PATH`,
+    /// pre-parsed into `(service_name, rule)` pairs.
+    pub(crate) allow_endpoint: Vec<(String, nono_proxy::config::EndpointRule)>,
 }
 
 #[derive(Clone)]
