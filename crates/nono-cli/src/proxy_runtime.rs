@@ -187,6 +187,13 @@ fn parse_allow_endpoint_arg(
     if service.is_empty() || method.is_empty() || path.is_empty() {
         return Err(err());
     }
+    if !path.starts_with('/') {
+        return Err(nono::NonoError::ConfigParse(format!(
+            "--allow-endpoint '{}': path pattern must start with '/' \
+             (e.g., '/repos/*/issues', not 'repos/*/issues')",
+            entry
+        )));
+    }
     Ok((
         service.to_string(),
         nono_proxy::config::EndpointRule {
@@ -649,6 +656,17 @@ mod tests {
     #[test]
     fn test_parse_allow_endpoint_arg_empty_path() {
         assert!(parse_allow_endpoint_arg("github:GET:").is_err());
+    }
+
+    #[test]
+    fn test_parse_allow_endpoint_arg_path_must_start_with_slash() {
+        let result = parse_allow_endpoint_arg("github:GET:repos/*/issues");
+        assert!(result.is_err());
+        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            err.contains("must start with '/'"),
+            "error should explain the leading slash requirement, got: {err}"
+        );
     }
 
     fn ep(service: &str, method: &str, path: &str) -> (String, nono_proxy::config::EndpointRule) {
