@@ -453,10 +453,13 @@ fn schema_fields_are_categorized() {
     let table = mapping_table();
     let opaque: BTreeSet<&str> = opaque_structs().iter().copied().collect();
 
+    // Type-graph traversal: every struct reachable from `Profile` must have
+    // its fields categorized. Order doesn't matter (visit-once via `reachable`),
+    // so a stack via `Vec::pop` is sufficient — avoids a `VecDeque` import.
     let known_structs: BTreeSet<&str> = parsed.keys().map(String::as_str).collect();
     let mut reachable: BTreeSet<String> = BTreeSet::new();
-    let mut queue: Vec<String> = vec!["Profile".to_string()];
-    while let Some(s) = queue.pop() {
+    let mut stack: Vec<String> = vec!["Profile".to_string()];
+    while let Some(s) = stack.pop() {
         if !reachable.insert(s.clone()) {
             continue;
         }
@@ -469,7 +472,7 @@ fn schema_fields_are_categorized() {
         for f in fields {
             for ident in &f.type_idents {
                 if known_structs.contains(ident.as_str()) && !reachable.contains(ident) {
-                    queue.push(ident.clone());
+                    stack.push(ident.clone());
                 }
             }
         }
@@ -662,8 +665,8 @@ struct SecretLeaf {
 
     let known: BTreeSet<&str> = parsed.keys().map(String::as_str).collect();
     let mut reachable: BTreeSet<String> = BTreeSet::new();
-    let mut queue = vec!["Profile".to_string()];
-    while let Some(s) = queue.pop() {
+    let mut stack = vec!["Profile".to_string()];
+    while let Some(s) = stack.pop() {
         if !reachable.insert(s.clone()) {
             continue;
         }
@@ -673,7 +676,7 @@ struct SecretLeaf {
         for f in fields {
             for ident in &f.type_idents {
                 if known.contains(ident.as_str()) && !reachable.contains(ident) {
-                    queue.push(ident.clone());
+                    stack.push(ident.clone());
                 }
             }
         }

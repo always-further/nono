@@ -384,16 +384,16 @@ fn merge_rollback_excludes(
     cli_exclude: &[String],
     cli_exclude_glob: &[String],
 ) -> (Vec<String>, Vec<String>) {
-    let (cli_exclude_globs, cli_exclude_patterns): (Vec<_>, Vec<_>) = cli_exclude
-        .iter()
-        .cloned()
-        .partition(|v| v.contains('*') || v.contains('?') || v.contains('['));
-
     let mut exclude_patterns = profile_patterns.to_vec();
-    exclude_patterns.extend(cli_exclude_patterns);
-
     let mut exclude_globs = profile_globs.to_vec();
-    exclude_globs.extend(cli_exclude_globs);
+
+    for entry in cli_exclude {
+        if entry.contains('*') || entry.contains('?') || entry.contains('[') {
+            exclude_globs.push(entry.clone());
+        } else {
+            exclude_patterns.push(entry.clone());
+        }
+    }
     exclude_globs.extend(cli_exclude_glob.iter().cloned());
 
     (exclude_patterns, exclude_globs)
