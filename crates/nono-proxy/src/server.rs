@@ -333,7 +333,10 @@ struct ProxyState {
 ///
 /// Returns a `ProxyHandle` with the assigned port and session token.
 /// The server runs until the handle is dropped or `shutdown()` is called.
-pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
+pub async fn start(
+    config: ProxyConfig,
+    capture_tx: Option<crate::CaptureSender>,
+) -> Result<ProxyHandle> {
     // Generate session token
     let session_token = token::generate_session_token()?;
 
@@ -397,7 +400,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     let credential_store = if config.routes.is_empty() {
         CredentialStore::empty()
     } else {
-        CredentialStore::load(&config.routes, &tls_connector)?
+        CredentialStore::load(&config.routes, &tls_connector, capture_tx)?
     };
     let loaded_routes = credential_store.loaded_prefixes();
 
@@ -479,17 +482,10 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     // checked here (rather than relying solely on the CLI's decision) so a
     // misconfigured `intercept_ca_dir` without intercept-bearing routes
     // doesn't generate a useless CA on disk.
-    let any_intercept_route = route_store
-        .route_upstream_hosts()
-        .iter()
-        .any(|hp| route_store.has_intercept_route(hp));
+    let any_intercept_route = route_store.has_any_intercept_route();
     let (cert_cache, intercept_ca_path) = match (&config.intercept_ca_dir, any_intercept_route) {
         (Some(dir), true) => {
-            let intercept_route_count = route_store
-                .route_upstream_hosts()
-                .iter()
-                .filter(|hp| route_store.has_intercept_route(hp))
-                .count();
+            let intercept_route_count = route_store.intercept_route_count();
             let ca_result = if let Some(ref preloaded) = config.preloaded_ca {
                 EphemeralCa::from_existing(&preloaded.key_der, &preloaded.cert_pem)
             } else {
@@ -877,7 +873,7 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_starts_and_binds() {
         let config = ProxyConfig::default();
-        let handle = start(config).await.unwrap();
+        let handle = start(config, None).await.unwrap();
 
         // Port should be non-zero (OS-assigned)
         assert!(handle.port > 0);
@@ -923,7 +919,7 @@ mod tests {
                 intercept_ca_dir: Some(dir.path().to_path_buf()),
                 ..Default::default()
             };
-            let handle = start(config).await.unwrap();
+            let handle = start(config, None).await.unwrap();
             assert!(
                 handle.intercept_ca_path().is_some(),
                 "intercept-eligible route + intercept_ca_dir → bundle path should be Some"
@@ -987,7 +983,7 @@ mod tests {
             intercept_ca_dir: Some(dir.path().to_path_buf()),
             ..Default::default()
         };
-        let handle = start(config).await.unwrap();
+        let handle = start(config, None).await.unwrap();
         assert!(
             handle.intercept_ca_path().is_none(),
             "no L7-bearing route → no CA should be generated"
@@ -1033,7 +1029,7 @@ mod tests {
             intercept_ca_dir: Some(missing_dir),
             ..Default::default()
         };
-        let handle = start(config.clone()).await.unwrap();
+        let handle = start(config.clone(), None).await.unwrap();
         assert!(
             handle.intercept_ca_path().is_none(),
             "intercept setup failure should disable interception instead of aborting startup"
@@ -1098,7 +1094,7 @@ mod tests {
             intercept_ca_dir: Some(dir.path().to_path_buf()),
             ..Default::default()
         };
-        let handle = start(config.clone()).await.unwrap();
+        let handle = start(config.clone(), None).await.unwrap();
         let rows = handle.route_diagnostics(&config);
         assert_eq!(rows.len(), 2);
 
@@ -1121,7 +1117,7 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_env_vars() {
         let config = ProxyConfig::default();
-        let handle = start(config).await.unwrap();
+        let handle = start(config, None).await.unwrap();
 
         let vars = handle.env_vars();
         let http_proxy = vars.iter().find(|(k, _)| k == "HTTP_PROXY");
@@ -1169,7 +1165,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let handle = start(config.clone()).await.unwrap();
+        let handle = start(config.clone(), None).await.unwrap();
 
         let vars = handle.credential_env_vars(&config);
         assert_eq!(vars.len(), 1);
@@ -1610,7 +1606,7 @@ mod tests {
             allowed_hosts: vec!["github.com".to_string()],
             ..Default::default()
         };
-        let handle = start(config).await.unwrap();
+        let handle = start(config, None).await.unwrap();
 
         let vars = handle.env_vars();
         let no_proxy = vars.iter().find(|(k, _)| k == "NO_PROXY").unwrap();
@@ -1633,7 +1629,7 @@ mod tests {
             direct_connect_ports: vec![443],
             ..Default::default()
         };
-        let handle = start(config).await.unwrap();
+        let handle = start(config, None).await.unwrap();
 
         let vars = handle.env_vars();
         let no_proxy = vars.iter().find(|(k, _)| k == "NO_PROXY").unwrap();
@@ -1661,7 +1657,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             ..ProxyConfig::default()
         };
-        let handle = start(config).await.unwrap();
+        let handle = start(config, None).await.unwrap();
         let addr = format!("127.0.0.1:{}", handle.port);
 
         let mut stream = TcpStream::connect(&addr).await.unwrap();

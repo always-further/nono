@@ -16,12 +16,13 @@
 
 use crate::audit;
 use crate::config::InjectMode;
-use crate::credential::{CredentialStore, LoadedCredential};
+use crate::credential::{CaptureRequestContext, CmdRouteConfig, CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
 use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
 use crate::route::RouteStore;
 use crate::token;
+use base64::Engine;
 use std::net::SocketAddr;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -33,7 +34,9 @@ use zeroize::Zeroizing;
 /// Maximum request body size (16 MiB). Prevents DoS from malicious Content-Length.
 const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
 
-fn auth_mechanism_for_inject_mode(mode: &InjectMode) -> nono::undo::NetworkAuditAuthMechanism {
+pub(crate) fn auth_mechanism_for_inject_mode(
+    mode: &InjectMode,
+) -> nono::undo::NetworkAuditAuthMechanism {
     match mode {
         InjectMode::Header | InjectMode::BasicAuth => {
             nono::undo::NetworkAuditAuthMechanism::PhantomHeader
@@ -43,7 +46,7 @@ fn auth_mechanism_for_inject_mode(mode: &InjectMode) -> nono::undo::NetworkAudit
     }
 }
 
-fn audit_injection_mode_for_inject_mode(
+pub(crate) fn audit_injection_mode_for_inject_mode(
     mode: &InjectMode,
 ) -> nono::undo::NetworkAuditInjectionMode {
     match mode {
@@ -130,11 +133,19 @@ pub async fn handle_reverse_proxy(
         })?;
     let static_cred = ctx.credential_store.get(&service);
     let oauth2_route = ctx.credential_store.get_oauth2(&service);
+    let cmd_route = ctx.credential_store.get_cmd_route(&service);
     let managed_ctx = static_cred.map(|cred| {
         managed_credential_event_ctx(
             &service,
             &cred.proxy_inject_mode,
             audit_injection_mode_for_inject_mode(&cred.inject_mode),
+        )
+    });
+    let cmd_ctx = cmd_route.map(|cmd_cfg| {
+        managed_credential_event_ctx(
+            &service,
+            &cmd_cfg.proxy_inject_mode,
+            audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode),
         )
     });
     let oauth2_ctx = oauth2_route.map(|_| audit::EventContext {
@@ -146,6 +157,7 @@ pub async fn handle_reverse_proxy(
     });
     let route_ctx = managed_ctx
         .clone()
+        .or_else(|| cmd_ctx.clone())
         .or_else(|| oauth2_ctx.clone())
         .unwrap_or_else(|| audit::EventContext {
             route_id: Some(&service),
@@ -153,7 +165,10 @@ pub async fn handle_reverse_proxy(
             ..audit::EventContext::default()
         });
 
-    if route.missing_managed_credential(static_cred.is_some(), oauth2_route.is_some()) {
+    if route.missing_managed_credential(
+        static_cred.is_some() || cmd_route.is_some(),
+        oauth2_route.is_some(),
+    ) {
         let reason = format!(
             "managed credential unavailable for service '{}': route is configured for proxy-supplied auth",
             service
@@ -208,6 +223,23 @@ pub async fn handle_reverse_proxy(
     if let Some(oauth2_route) = oauth2_route {
         return handle_oauth2_credential(
             oauth2_route,
+            route,
+            &service,
+            &upstream_path,
+            &method,
+            &version,
+            stream,
+            remaining_header,
+            buffered_body,
+            ctx,
+        )
+        .await;
+    }
+
+    // cmd:// credential: resolve lazily via supervisor capture channel
+    if let Some(cmd_cfg) = cmd_route {
+        return handle_cmd_credential(
+            cmd_cfg,
             route,
             &service,
             &upstream_path,
@@ -616,6 +648,285 @@ async fn handle_oauth2_credential(
     Ok(())
 }
 
+/// Handle a `cmd://` credential route: validate phantom token, resolve credential
+/// lazily via the supervisor capture channel, inject and forward.
+#[allow(clippy::too_many_arguments)]
+async fn handle_cmd_credential(
+    cmd_cfg: &CmdRouteConfig,
+    route: &crate::route::LoadedRoute,
+    service: &str,
+    upstream_path: &str,
+    method: &str,
+    version: &str,
+    stream: &mut TcpStream,
+    remaining_header: &[u8],
+    buffered_body: &[u8],
+    ctx: &ReverseProxyCtx<'_>,
+) -> Result<()> {
+    // Validate phantom token using the cmd route's proxy inject mode
+    if let Err(e) = validate_phantom_token_for_mode(
+        &cmd_cfg.proxy_inject_mode,
+        remaining_header,
+        upstream_path,
+        &cmd_cfg.proxy_header_name,
+        cmd_cfg.proxy_path_pattern.as_deref(),
+        cmd_cfg.proxy_query_param_name.as_deref(),
+        ctx.session_token,
+    ) {
+        let deny_ctx = audit::EventContext {
+            route_id: Some(service),
+            auth_mechanism: Some(auth_mechanism_for_inject_mode(&cmd_cfg.proxy_inject_mode)),
+            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+            managed_credential_active: Some(true),
+            injection_mode: Some(audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode)),
+            denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
+        };
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            &deny_ctx,
+            service,
+            0,
+            &e.to_string(),
+        );
+        send_error(stream, 401, "Unauthorized").await?;
+        return Ok(());
+    }
+
+    // A wildcard upstream has no concrete forward target and is intercept-only.
+    // It must never be served via the reverse-proxy path: the upstream URL
+    // (`https://*.domain`) cannot be parsed into a host to forward to. Reject
+    // before resolving the credential so we don't run the capture command with
+    // an empty `NONO_REQUEST_HOST` and poison the per-host cache.
+    let Some(upstream_host) = route.upstream_host_matcher.as_exact() else {
+        let reason = format!(
+            "wildcard upstream for service '{}' cannot be served via the reverse proxy; \
+             it is only reachable through TLS interception (CONNECT)",
+            service
+        );
+        warn!("{}", reason);
+        let deny_ctx = audit::EventContext {
+            route_id: Some(service),
+            denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+            ..audit::EventContext::default()
+        };
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            &deny_ctx,
+            service,
+            0,
+            &reason,
+        );
+        send_error(stream, 502, "Bad Gateway").await?;
+        return Ok(());
+    };
+
+    // Resolve the credential via the supervisor capture channel
+    let request_context = CaptureRequestContext {
+        host: upstream_host.to_string(),
+        path: upstream_path.to_string(),
+        method: method.to_string(),
+    };
+    let resolved = match ctx
+        .credential_store
+        .resolve_cmd_credential(service, ctx.session_token.as_str(), Some(&request_context))
+        .await
+    {
+        Ok(cred) => cred,
+        Err(e) => {
+            warn!(
+                "cmd:// credential resolution failed for '{}': {}",
+                service, e
+            );
+            let deny_ctx = audit::EventContext {
+                route_id: Some(service),
+                auth_mechanism: Some(auth_mechanism_for_inject_mode(&cmd_cfg.inject_mode)),
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                managed_credential_active: Some(true),
+                injection_mode: Some(audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode)),
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                ),
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                service,
+                0,
+                &e.to_string(),
+            );
+            send_error(stream, 503, "Service Unavailable").await?;
+            return Ok(());
+        }
+    };
+
+    // For `output: "json"` credentials the value is a header map, not a secret
+    // to format into a single header. Parse and validate it up front so a bad
+    // map fails closed before we build the upstream request. Header-map routes
+    // are header-mode only (enforced at profile-validation time), so no path
+    // transform applies.
+    let header_map = if resolved.is_header_map {
+        match parse_header_map(&resolved.value) {
+            Ok(headers) => Some(headers),
+            Err(e) => {
+                warn!("cmd:// JSON header map invalid for '{}': {}", service, e);
+                let deny_ctx = audit::EventContext {
+                    route_id: Some(service),
+                    auth_mechanism: Some(auth_mechanism_for_inject_mode(&cmd_cfg.inject_mode)),
+                    auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                    managed_credential_active: Some(true),
+                    injection_mode: Some(audit_injection_mode_for_inject_mode(
+                        &cmd_cfg.inject_mode,
+                    )),
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                    ),
+                };
+                audit::log_denied(
+                    ctx.audit_log,
+                    audit::ProxyMode::Reverse,
+                    &deny_ctx,
+                    service,
+                    0,
+                    &e.to_string(),
+                );
+                send_error(stream, 503, "Service Unavailable").await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let credential = &resolved.value;
+
+    // Build upstream URL
+    let upstream_url = format!("{}{}", route.upstream.trim_end_matches('/'), upstream_path);
+    debug!("cmd:// forwarding to upstream: {} {}", method, upstream_url);
+
+    let (upstream_scheme, upstream_host, upstream_port, upstream_path_full) =
+        parse_upstream_url(&upstream_url)?;
+
+    // DNS resolve + host check
+    let check = ctx.filter.check_host(&upstream_host, upstream_port).await?;
+    if !check.result.is_allowed() {
+        let reason = check.result.reason();
+        warn!("Upstream host denied by filter: {}", reason);
+        send_error(stream, 403, "Forbidden").await?;
+        return Ok(());
+    }
+    if let Err(reason) =
+        validate_http_upstream_target(upstream_scheme, &upstream_host, &check.resolved_addrs)
+    {
+        warn!("{}", reason);
+        send_error(stream, 502, "Bad Gateway").await?;
+        return Ok(());
+    }
+
+    // Strip proxy artifacts and build the cleaned upstream path
+    let cleaned_path = strip_proxy_artifacts(
+        &upstream_path_full,
+        &cmd_cfg.proxy_inject_mode,
+        &cmd_cfg.inject_mode,
+        cmd_cfg.proxy_path_pattern.as_deref(),
+        cmd_cfg.proxy_query_param_name.as_deref(),
+    );
+    let final_path = transform_path_for_mode(
+        &cmd_cfg.inject_mode,
+        &cleaned_path,
+        cmd_cfg.path_pattern.as_deref(),
+        cmd_cfg.path_replacement.as_deref(),
+        cmd_cfg.query_param_name.as_deref(),
+        credential,
+    )?;
+
+    // Filter headers (strip the header carrying the phantom token), then strip
+    // any client-supplied copy of every header the proxy itself injects so the
+    // agent cannot smuggle its own value alongside the injected one.
+    let mut filtered_headers = filter_headers(remaining_header, &cmd_cfg.proxy_header_name);
+    let injected_names = injected_header_names(cmd_cfg, &header_map);
+    filtered_headers.retain(|(name, _)| !injected_names.contains(&name.to_lowercase()));
+    let content_length = extract_content_length(remaining_header);
+
+    // Read request body
+    let body = match read_request_body(stream, content_length, buffered_body).await? {
+        Some(body) => body,
+        None => return Ok(()),
+    };
+
+    // Build upstream request
+    let upstream_authority = format_host_header(upstream_scheme, &upstream_host, upstream_port);
+    let mut request = Zeroizing::new(format!(
+        "{} {} {}\r\nHost: {}\r\n",
+        method, final_path, version, upstream_authority
+    ));
+
+    // Inject real credential (intermediates wrapped in Zeroizing to prevent leaks)
+    inject_cmd_credential(&mut request, cmd_cfg, credential, &header_map);
+
+    // Forward filtered headers
+    for (name, value) in &filtered_headers {
+        request.push_str(&format!("{}: {}\r\n", name, value));
+    }
+
+    if !body.is_empty() {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+
+    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
+    let upstream_spec = UpstreamSpec {
+        scheme: upstream_scheme,
+        host: &upstream_host,
+        port: upstream_port,
+        strategy: UpstreamStrategy::Direct {
+            resolved_addrs: &check.resolved_addrs,
+        },
+        tls_connector: connector,
+    };
+    let audit_ctx = AuditCtx {
+        log: ctx.audit_log,
+        mode: audit::ProxyMode::Reverse,
+        event_ctx: audit::EventContext {
+            route_id: Some(service),
+            auth_mechanism: Some(auth_mechanism_for_inject_mode(&cmd_cfg.inject_mode)),
+            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
+            managed_credential_active: Some(true),
+            injection_mode: Some(audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode)),
+            denial_category: None,
+        },
+        target: service,
+        method,
+        path: upstream_path,
+    };
+    if let Err(e) =
+        forward::forward_request(stream, request.as_bytes(), &body, upstream_spec, audit_ctx).await
+    {
+        warn!("Upstream connection failed: {}", e);
+        send_error(stream, 502, "Bad Gateway").await?;
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::Reverse,
+            &audit::EventContext {
+                route_id: Some(service),
+                auth_mechanism: Some(auth_mechanism_for_inject_mode(&cmd_cfg.inject_mode)),
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
+                managed_credential_active: Some(true),
+                injection_mode: Some(audit_injection_mode_for_inject_mode(&cmd_cfg.inject_mode)),
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
+                ),
+            },
+            service,
+            0,
+            &e.to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 /// Read request body from the client stream with size limit.
 ///
 /// `buffered_body` contains bytes the BufReader read ahead beyond headers.
@@ -778,6 +1089,185 @@ pub(crate) fn filter_headers(header_bytes: &[u8], cred_header: &str) -> Vec<(Str
     }
 
     headers
+}
+
+/// Header names that a `cmd://` JSON header map (`output: "json"`) may not set.
+///
+/// These are framing / hop-by-hop / proxy-auth headers whose values the proxy
+/// controls. Allowing a capture command to override them would let it corrupt
+/// request framing or smuggle requests. Compared case-insensitively.
+const FORBIDDEN_INJECTED_HEADERS: &[&str] = &[
+    "host",
+    "content-length",
+    "connection",
+    "transfer-encoding",
+    "content-encoding",
+    "trailer",
+    "te",
+    "upgrade",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+];
+
+/// Check whether `name` is a valid HTTP token (RFC 7230 field-name).
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '!' | '#'
+                        | '$'
+                        | '%'
+                        | '&'
+                        | '\''
+                        | '*'
+                        | '+'
+                        | '-'
+                        | '.'
+                        | '^'
+                        | '_'
+                        | '`'
+                        | '|'
+                        | '~'
+                )
+        })
+}
+
+/// A validated set of headers injected from a `cmd://` JSON header map.
+///
+/// Values are wrapped in [`Zeroizing`] because they are credential material:
+/// `serde_json` parses the secret out of the (zeroized) raw output into plain
+/// `String`s, and without this wrapper those copies would linger in memory
+/// past use, contrary to the project's zeroize convention.
+pub(crate) type HeaderMap = Vec<(String, Zeroizing<String>)>;
+
+/// Parse and validate a `cmd://` JSON header map (`output: "json"`).
+///
+/// `raw` must be a JSON object whose values are all strings. Each entry is
+/// validated: the name must be a valid HTTP token that is not in
+/// [`FORBIDDEN_INJECTED_HEADERS`], and neither name nor value may contain CR or
+/// LF (header-injection guard). The map must be non-empty.
+///
+/// Returns the validated `(name, value)` pairs (values zeroized), or a
+/// [`ProxyError::Credential`] describing the first failure. The error never
+/// includes header *values*.
+pub(crate) fn parse_header_map(raw: &str) -> Result<HeaderMap> {
+    let parsed: serde_json::Value = serde_json::from_str(raw.trim()).map_err(|_| {
+        ProxyError::Credential(
+            "cmd:// credential with output \"json\" did not produce valid JSON".to_string(),
+        )
+    })?;
+
+    let serde_json::Value::Object(map) = parsed else {
+        return Err(ProxyError::Credential(
+            "cmd:// credential with output \"json\" must be a JSON object of header → value"
+                .to_string(),
+        ));
+    };
+
+    if map.is_empty() {
+        return Err(ProxyError::Credential(
+            "cmd:// credential with output \"json\" produced an empty header map".to_string(),
+        ));
+    }
+
+    let mut headers: HeaderMap = Vec::with_capacity(map.len());
+    for (name, value) in map {
+        let serde_json::Value::String(value) = value else {
+            return Err(ProxyError::Credential(format!(
+                "cmd:// JSON header map value for '{}' must be a string",
+                name
+            )));
+        };
+        // Wrap immediately so the secret lives only inside Zeroizing from here.
+        let value = Zeroizing::new(value);
+        if !is_valid_header_name(&name) {
+            return Err(ProxyError::Credential(format!(
+                "cmd:// JSON header map contains invalid header name '{}'",
+                name
+            )));
+        }
+        if FORBIDDEN_INJECTED_HEADERS.contains(&name.to_lowercase().as_str()) {
+            return Err(ProxyError::Credential(format!(
+                "cmd:// JSON header map may not set the reserved header '{}'",
+                name
+            )));
+        }
+        if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
+            return Err(ProxyError::Credential(format!(
+                "cmd:// JSON header map entry '{}' contains CR/LF",
+                name
+            )));
+        }
+        headers.push((name, value));
+    }
+
+    Ok(headers)
+}
+
+/// Lowercased names of every header the proxy will inject for a `cmd://` route.
+///
+/// These must be stripped from forwarded client headers so the sandboxed agent
+/// cannot smuggle its own copy alongside the injected value. For a JSON header
+/// map, that is every mapped name; for single header/basic-auth injection, the
+/// configured `header_name`; for path/query modes, nothing (no header injected).
+pub(crate) fn injected_header_names(
+    cmd_cfg: &CmdRouteConfig,
+    header_map: &Option<HeaderMap>,
+) -> Vec<String> {
+    match header_map {
+        Some(headers) => headers.iter().map(|(n, _)| n.to_lowercase()).collect(),
+        None => match cmd_cfg.inject_mode {
+            InjectMode::Header | InjectMode::BasicAuth => vec![cmd_cfg.header_name.to_lowercase()],
+            InjectMode::UrlPath | InjectMode::QueryParam => Vec::new(),
+        },
+    }
+}
+
+/// Inject the resolved `cmd://` credential into `request`.
+///
+/// When `header_map` is present (`output: "json"`), each validated header is
+/// injected verbatim. Otherwise the single `credential` is injected per
+/// `inject_mode` (`header`/`basic_auth`); path/query modes inject nothing here
+/// (the credential is already in the transformed path). Every line is wrapped
+/// in [`Zeroizing`] so secret-bearing intermediates do not linger in memory.
+pub(crate) fn inject_cmd_credential(
+    request: &mut Zeroizing<String>,
+    cmd_cfg: &CmdRouteConfig,
+    credential: &Zeroizing<String>,
+    header_map: &Option<HeaderMap>,
+) {
+    if let Some(headers) = header_map {
+        for (name, value) in headers {
+            request.push_str(&Zeroizing::new(format!("{}: {}\r\n", name, value.as_str())));
+        }
+        return;
+    }
+    match cmd_cfg.inject_mode {
+        InjectMode::Header => {
+            let header_value = Zeroizing::new(cmd_cfg.credential_format.replace("{}", credential));
+            request.push_str(&Zeroizing::new(format!(
+                "{}: {}\r\n",
+                cmd_cfg.header_name,
+                header_value.as_str()
+            )));
+        }
+        InjectMode::BasicAuth => {
+            let encoded = Zeroizing::new(
+                base64::engine::general_purpose::STANDARD.encode(credential.as_bytes()),
+            );
+            request.push_str(&Zeroizing::new(format!(
+                "{}: Basic {}\r\n",
+                cmd_cfg.header_name,
+                encoded.as_str()
+            )));
+        }
+        InjectMode::UrlPath | InjectMode::QueryParam => {
+            // Credential already injected into the path via transform_path_for_mode.
+        }
+    }
 }
 
 /// Extract Content-Length value from raw headers.
@@ -1901,5 +2391,79 @@ mod tests {
             transform_path_for_mode(&InjectMode::Header, &cleaned, None, None, None, &credential)
                 .unwrap();
         assert_eq!(transformed, "/api/v1/pods?limit=100");
+    }
+
+    #[test]
+    fn test_parse_header_map_valid() {
+        let raw = r#"{"Authorization": "Bearer abc", "X-Api-Key": "key-1"}"#;
+        let headers = parse_header_map(raw).unwrap();
+        assert_eq!(headers.len(), 2);
+        // Order is not guaranteed; check by lookup.
+        let map: std::collections::HashMap<_, _> = headers
+            .into_iter()
+            .map(|(n, v)| (n, v.to_string()))
+            .collect();
+        assert_eq!(
+            map.get("Authorization").map(String::as_str),
+            Some("Bearer abc")
+        );
+        assert_eq!(map.get("X-Api-Key").map(String::as_str), Some("key-1"));
+    }
+
+    #[test]
+    fn test_parse_header_map_trims_surrounding_whitespace() {
+        let raw = "  \n{\"X-Token\": \"v\"}\n  ";
+        let headers = parse_header_map(raw).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "X-Token");
+        assert_eq!(headers[0].1.as_str(), "v");
+    }
+
+    #[test]
+    fn test_parse_header_map_rejects_non_object() {
+        assert!(parse_header_map(r#""just-a-string""#).is_err());
+        assert!(parse_header_map(r#"["a", "b"]"#).is_err());
+        assert!(parse_header_map("not json at all").is_err());
+    }
+
+    #[test]
+    fn test_parse_header_map_rejects_empty_object() {
+        assert!(parse_header_map("{}").is_err());
+    }
+
+    #[test]
+    fn test_parse_header_map_rejects_non_string_value() {
+        assert!(parse_header_map(r#"{"X-Num": 123}"#).is_err());
+        assert!(parse_header_map(r#"{"X-Obj": {"a": "b"}}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_header_map_rejects_forbidden_headers() {
+        for name in [
+            "Host",
+            "content-length",
+            "Connection",
+            "Transfer-Encoding",
+            "Proxy-Authorization",
+        ] {
+            let raw = format!(r#"{{"{}": "x"}}"#, name);
+            assert!(
+                parse_header_map(&raw).is_err(),
+                "expected '{}' to be rejected",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_header_map_rejects_invalid_name() {
+        // Space is not a valid HTTP token character.
+        assert!(parse_header_map(r#"{"Bad Header": "x"}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_header_map_rejects_crlf_in_value() {
+        // JSON-escaped CRLF in the value must be rejected (header-injection guard).
+        assert!(parse_header_map(r#"{"X-Evil": "a\r\nInjected: yes"}"#).is_err());
     }
 }

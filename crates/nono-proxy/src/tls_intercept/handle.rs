@@ -13,7 +13,7 @@
 
 use crate::audit;
 use crate::config::InjectMode;
-use crate::credential::CredentialStore;
+use crate::credential::{CaptureRequestContext, CmdRouteConfig, CredentialStore};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
 use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
@@ -176,18 +176,29 @@ where
         return Ok(());
     }
 
-    let mut matches: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
-    let mut catch_all: Option<(&str, &crate::route::LoadedRoute)> = None;
+    // Partition the (already most-specific-tier) candidates:
+    //   *_cred        — routes that inject a managed credential
+    //   *_passthrough — endpoint-only authorization routes (no credential)
+    //   matched_*     — routes whose endpoint rules matched this request
+    //   catchall_*    — routes with no endpoint rules (apply to every path)
+    let mut matched_cred: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
+    let mut matched_passthrough: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
+    let mut catchall_cred: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
+    let mut catchall_passthrough: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
     let mut has_endpoint_only_route = false;
     let mut endpoint_authorized = false;
     for (prefix, route) in &candidates {
         if route.endpoint_rules.is_empty() {
-            if catch_all.is_none() {
-                catch_all = Some((prefix, route));
+            if route.requires_managed_credential {
+                catchall_cred.push((prefix, route));
+            } else {
+                catchall_passthrough.push((prefix, route));
             }
         } else if route.endpoint_rules.is_allowed(&method, &path) {
-            matches.push((prefix, route));
-            if !route.requires_managed_credential {
+            if route.requires_managed_credential {
+                matched_cred.push((prefix, route));
+            } else {
+                matched_passthrough.push((prefix, route));
                 endpoint_authorized = true;
             }
         } else if !route.requires_managed_credential {
@@ -220,22 +231,28 @@ where
         return Ok(());
     }
 
-    // Ambiguous route check only applies to credential-injection routes.
-    // Multiple endpoint-only authorization routes matching the same request
-    // is fine (they all just allow it); ambiguity is a problem only when the
-    // proxy must choose which credential to inject.
-    let credential_matches: Vec<_> = matches
-        .iter()
-        .filter(|(_, route)| route.requires_managed_credential)
-        .collect();
-    if credential_matches.len() > 1 {
-        let names: Vec<_> = credential_matches.iter().map(|(p, _)| *p).collect();
+    // Endpoint-rule matches are more specific than catch-all routes (no rules)
+    // and shadow them: a catch-all credential acts only as a fallback for paths
+    // no endpoint route covers. Within whichever layer is active, a credential
+    // route is preferred, and two credential routes in the same layer are
+    // ambiguous — the proxy must not silently pick one. This catches both
+    // overlapping endpoint credential routes and overlapping catch-all
+    // credential routes (e.g. two equally-specific wildcard upstreams).
+    let endpoint_layer_active = !matched_cred.is_empty() || !matched_passthrough.is_empty();
+    let credential_layer: &[(&str, &crate::route::LoadedRoute)] = if endpoint_layer_active {
+        &matched_cred
+    } else {
+        &catchall_cred
+    };
+
+    if credential_layer.len() > 1 {
+        let names: Vec<_> = credential_layer.iter().map(|(p, _)| *p).collect();
         let reason = format!(
             "ambiguous route: {} {} matched {} credential routes: {:?}. \
-             Narrow endpoint_rules so each request matches exactly one route.",
+             Give each a distinct upstream or non-overlapping endpoint_rules.",
             method,
             path,
-            credential_matches.len(),
+            credential_layer.len(),
             names
         );
         warn!("tls_intercept: {}", reason);
@@ -254,13 +271,19 @@ where
         return Ok(());
     }
 
-    // Prefer the credential route over endpoint-only authorization routes.
-    let selected = matches
-        .iter()
-        .find(|(_, route)| route.requires_managed_credential)
-        .or(matches.first())
-        .copied()
-        .or(catch_all);
+    // Prefer the credential route over endpoint-only authorization routes,
+    // staying within the active (endpoint vs catch-all) layer.
+    let selected = if endpoint_layer_active {
+        matched_cred
+            .first()
+            .or(matched_passthrough.first())
+            .copied()
+    } else {
+        catchall_cred
+            .first()
+            .or(catchall_passthrough.first())
+            .copied()
+    };
     let service: Option<&str> = selected.map(|(s, _)| s);
     let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
     match service {
@@ -276,9 +299,13 @@ where
 
     let cred = service.and_then(|s| ctx.credential_store.get(s));
     let oauth2_route = service.and_then(|s| ctx.credential_store.get_oauth2(s));
+    let cmd_route = service.and_then(|s| ctx.credential_store.get_cmd_route(s));
 
     if let Some(rt) = route
-        && rt.missing_managed_credential(cred.is_some(), oauth2_route.is_some())
+        && rt.missing_managed_credential(
+            cred.is_some() || cmd_route.is_some(),
+            oauth2_route.is_some(),
+        )
     {
         let svc = service.unwrap_or("unknown");
         let reason = format!(
@@ -305,6 +332,23 @@ where
         );
         reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
         return Ok(());
+    }
+
+    // cmd:// credential: resolve lazily via supervisor capture channel
+    if let Some(cmd_cfg) = cmd_route {
+        return handle_cmd_intercept(
+            cmd_cfg,
+            route,
+            service,
+            &method,
+            &path,
+            &version,
+            &header_bytes,
+            &buffered,
+            tls_stream,
+            ctx,
+        )
+        .await;
     }
 
     // --- Path / credential transformation ---
@@ -460,6 +504,258 @@ where
                     InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
                     InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
                 }),
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
+                ),
+            },
+            ctx.host,
+            ctx.port,
+            &e.to_string(),
+        );
+        let _ = reverse::send_error_generic(tls_stream, 502, "Bad Gateway").await;
+    }
+    Ok(())
+}
+
+/// Handle a `cmd://` credential in the TLS intercept path: resolve the credential
+/// lazily via the supervisor capture channel, inject and forward upstream.
+#[allow(clippy::too_many_arguments)]
+async fn handle_cmd_intercept<S>(
+    cmd_cfg: &CmdRouteConfig,
+    route: Option<&crate::route::LoadedRoute>,
+    service: Option<&str>,
+    method: &str,
+    path: &str,
+    version: &str,
+    header_bytes: &[u8],
+    buffered: &[u8],
+    tls_stream: &mut S,
+    ctx: &InterceptCtx<'_>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let svc = service.unwrap_or("unknown");
+
+    // Resolve the credential via the supervisor capture channel
+    let request_context = CaptureRequestContext {
+        host: ctx.host.to_string(),
+        path: path.to_string(),
+        method: method.to_string(),
+    };
+    let resolved = match ctx
+        .credential_store
+        .resolve_cmd_credential(svc, ctx.session_token.as_str(), Some(&request_context))
+        .await
+    {
+        Ok(cred) => cred,
+        Err(e) => {
+            warn!(
+                "tls_intercept: cmd:// credential resolution failed for '{}': {}",
+                svc, e
+            );
+            let deny_ctx = audit::EventContext {
+                route_id: service,
+                auth_mechanism: Some(reverse::auth_mechanism_for_inject_mode(
+                    &cmd_cfg.inject_mode,
+                )),
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                managed_credential_active: Some(true),
+                injection_mode: Some(reverse::audit_injection_mode_for_inject_mode(
+                    &cmd_cfg.inject_mode,
+                )),
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                ),
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::ConnectIntercept,
+                &deny_ctx,
+                ctx.host,
+                ctx.port,
+                &e.to_string(),
+            );
+            reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
+            return Ok(());
+        }
+    };
+
+    // For `output: "json"` credentials the value is a header map. Parse and
+    // validate it up front so a bad map fails closed. Header-map routes are
+    // header-mode only (enforced at profile-validation time).
+    let header_map = if resolved.is_header_map {
+        match reverse::parse_header_map(&resolved.value) {
+            Ok(headers) => Some(headers),
+            Err(e) => {
+                warn!(
+                    "tls_intercept: cmd:// JSON header map invalid for '{}': {}",
+                    svc, e
+                );
+                let deny_ctx = audit::EventContext {
+                    route_id: service,
+                    auth_mechanism: Some(reverse::auth_mechanism_for_inject_mode(
+                        &cmd_cfg.inject_mode,
+                    )),
+                    auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                    managed_credential_active: Some(true),
+                    injection_mode: Some(reverse::audit_injection_mode_for_inject_mode(
+                        &cmd_cfg.inject_mode,
+                    )),
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                    ),
+                };
+                audit::log_denied(
+                    ctx.audit_log,
+                    audit::ProxyMode::ConnectIntercept,
+                    &deny_ctx,
+                    ctx.host,
+                    ctx.port,
+                    &e.to_string(),
+                );
+                reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let credential = &resolved.value;
+
+    debug!("tls_intercept: cmd:// credential resolved for '{}'", svc);
+
+    // Strip proxy artifacts and build the cleaned upstream path
+    let cleaned_path = reverse::strip_proxy_artifacts(
+        path,
+        &cmd_cfg.proxy_inject_mode,
+        &cmd_cfg.inject_mode,
+        cmd_cfg.proxy_path_pattern.as_deref(),
+        cmd_cfg.proxy_query_param_name.as_deref(),
+    );
+    let final_path = reverse::transform_path_for_mode(
+        &cmd_cfg.inject_mode,
+        &cleaned_path,
+        cmd_cfg.path_pattern.as_deref(),
+        cmd_cfg.path_replacement.as_deref(),
+        cmd_cfg.query_param_name.as_deref(),
+        credential,
+    )?;
+
+    // Resolve upstream IPs (DNS-rebind-safe via filter)
+    let check = ctx.filter.check_host(ctx.host, ctx.port).await?;
+    if !check.result.is_allowed() {
+        let reason = check.result.reason();
+        warn!("tls_intercept: upstream host denied by filter: {}", reason);
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::ConnectIntercept,
+            &audit::EventContext {
+                route_id: service,
+                managed_credential_active: Some(true),
+                injection_mode: Some(reverse::audit_injection_mode_for_inject_mode(
+                    &cmd_cfg.inject_mode,
+                )),
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
+                ..audit::EventContext::default()
+            },
+            ctx.host,
+            ctx.port,
+            &reason,
+        );
+        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
+        return Ok(());
+    }
+
+    // Filter headers (strip the header carrying the phantom token), then strip
+    // any client-supplied copy of every header the proxy injects.
+    let mut filtered_headers = reverse::filter_headers(header_bytes, &cmd_cfg.proxy_header_name);
+    let injected_names = reverse::injected_header_names(cmd_cfg, &header_map);
+    filtered_headers.retain(|(name, _)| !injected_names.contains(&name.to_lowercase()));
+    let content_length = reverse::extract_content_length(header_bytes);
+
+    // Read request body
+    let body = match reverse::read_request_body(tls_stream, content_length, buffered).await? {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+
+    // Build upstream request
+    let upstream_authority = reverse::format_host_header(UpstreamScheme::Https, ctx.host, ctx.port);
+    let mut request = Zeroizing::new(format!(
+        "{} {} {}\r\nHost: {}\r\n",
+        method, final_path, version, upstream_authority
+    ));
+
+    // Inject real credential
+    reverse::inject_cmd_credential(&mut request, cmd_cfg, credential, &header_map);
+
+    // Forward filtered headers (client copies of injected headers already stripped)
+    for (name, value) in &filtered_headers {
+        request.push_str(&format!("{}: {}\r\n", name, value));
+    }
+
+    request.push_str("Connection: close\r\n");
+    if !body.is_empty() {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+
+    // Forward via shared pipeline
+    let connector = route
+        .and_then(|r| r.tls_connector.as_ref())
+        .unwrap_or(ctx.tls_connector);
+    let upstream_spec = UpstreamSpec {
+        scheme: UpstreamScheme::Https,
+        host: ctx.host,
+        port: ctx.port,
+        strategy: UpstreamStrategy::Direct {
+            resolved_addrs: &check.resolved_addrs,
+        },
+        tls_connector: connector,
+    };
+    let audit_ctx = AuditCtx {
+        log: ctx.audit_log,
+        mode: audit::ProxyMode::ConnectIntercept,
+        event_ctx: audit::EventContext {
+            route_id: service,
+            auth_mechanism: Some(reverse::auth_mechanism_for_inject_mode(
+                &cmd_cfg.inject_mode,
+            )),
+            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
+            managed_credential_active: Some(true),
+            injection_mode: Some(reverse::audit_injection_mode_for_inject_mode(
+                &cmd_cfg.inject_mode,
+            )),
+            denial_category: None,
+        },
+        target: ctx.host,
+        method,
+        path,
+    };
+    if let Err(e) = forward::forward_request(
+        tls_stream,
+        request.as_bytes(),
+        &body,
+        upstream_spec,
+        audit_ctx,
+    )
+    .await
+    {
+        warn!("tls_intercept: cmd:// upstream forwarding failed: {}", e);
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::ConnectIntercept,
+            &audit::EventContext {
+                route_id: service,
+                auth_mechanism: Some(reverse::auth_mechanism_for_inject_mode(
+                    &cmd_cfg.inject_mode,
+                )),
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
+                managed_credential_active: Some(true),
+                injection_mode: Some(reverse::audit_injection_mode_for_inject_mode(
+                    &cmd_cfg.inject_mode,
+                )),
                 denial_category: Some(
                     nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
                 ),

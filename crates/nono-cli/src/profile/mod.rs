@@ -302,7 +302,7 @@ pub struct CustomCredentialDef {
     /// When set, the proxy uses this as the SDK API key env var instead of
     /// deriving it from `credential_key.to_uppercase()`. Required when
     /// `credential_key` is a URI manager reference (`op://`, `bw://`,
-    /// `apple-password://`, or `file://`).
+    /// `apple-password://`, `file://`, or `cmd://`).
     #[serde(default)]
     pub env_var: Option<String>,
 
@@ -344,6 +344,78 @@ fn default_inject_header() -> String {
     "Authorization".to_string()
 }
 
+/// Profile entry for a credential capture command.
+///
+/// Maps a logical credential name to a host-side CLI command that produces
+/// the credential on stdout. Resolved via the supervisor channel at runtime.
+///
+/// # JSON format
+///
+/// ```json
+/// {
+///   "credential_capture": {
+///     "github": {
+///       "command": ["gh", "auth", "token"],
+///       "timeout_secs": 5,
+///       "ttl_secs": 900
+///     }
+///   }
+/// }
+/// ```
+///
+/// Only `command` is required; `timeout_secs` defaults to 5 and `ttl_secs`
+/// to 900 (15 minutes).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialCaptureEntry {
+    /// Command and arguments (e.g., `["gh", "auth", "token"]`).
+    /// The first element is resolved to an absolute path at profile-load time.
+    pub command: Vec<String>,
+    /// Timeout for command execution in seconds (default: 5, range: 1–300).
+    #[serde(default = "default_capture_timeout")]
+    pub timeout_secs: u64,
+    /// Cache TTL in seconds (default: 900 = 15 min, range: 0–3600).
+    #[serde(default = "default_capture_ttl")]
+    pub ttl_secs: u64,
+    /// Optional regex applied to the request path (`NONO_REQUEST_PATH`).
+    /// The first capture group becomes part of the cache key, enabling
+    /// per-path-segment credential caching. No pattern means the cache
+    /// key is just the credential name (one cached value per route).
+    #[serde(default)]
+    pub cache_path_pattern: Option<String>,
+    /// How the command's stdout is interpreted (default: `string`).
+    ///
+    /// - `string`: stdout is a single secret value, injected via the route's
+    ///   `inject_header` / `credential_format` / `inject_mode` (the original
+    ///   behavior).
+    /// - `json`: stdout must be a JSON object mapping header name → string
+    ///   value (e.g. `{"Authorization": "Bearer x", "X-Api-Key": "y"}`). The
+    ///   proxy injects each entry as a literal header. The route's
+    ///   `credential_format` is not applied. Only valid for routes whose
+    ///   `inject_mode` is `header`.
+    #[serde(default)]
+    pub output: CaptureOutput,
+}
+
+/// Interpretation of a credential capture command's stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureOutput {
+    /// stdout is a single secret value (default; original behavior).
+    #[default]
+    String,
+    /// stdout is a JSON object mapping header name → string value.
+    Json,
+}
+
+fn default_capture_timeout() -> u64 {
+    5
+}
+
+fn default_capture_ttl() -> u64 {
+    900
+}
+
 /// Check if a character is a valid HTTP token character per RFC 7230.
 fn is_http_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
@@ -375,6 +447,7 @@ fn is_http_token_char(c: char) -> bool {
 /// - An Apple Passwords `apple-password://` URI
 /// - A `file://` URI pointing to an absolute path (validated by `nono::keystore::validate_file_uri`)
 /// - An `env://` URI referencing a host environment variable (validated by `nono::keystore::validate_env_uri`)
+/// - A `cmd://` URI referencing a credential_capture entry (validated by `nono::keystore::validate_cmd_uri`)
 fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(NonoError::ProfileParse(format!(
@@ -419,12 +492,19 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
                 context_name, e
             ))
         })
+    } else if nono::keystore::is_cmd_uri(key) {
+        nono::keystore::validate_cmd_uri(key).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "invalid cmd:// URI for custom credential '{}': {}",
+                context_name, e
+            ))
+        })
     } else {
         // Validate as keyring account name (alphanumeric + underscore)
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(NonoError::ProfileParse(format!(
                 "credential_key '{}' for custom credential '{}' must contain only \
-                 alphanumeric characters and underscores (or use op:// / bw:// / apple-password:// / file:// / env:// URI)",
+                 alphanumeric characters and underscores (or use op:// / bw:// / apple-password:// / file:// / env:// / cmd:// URI)",
                 key, context_name
             )));
         }
@@ -436,7 +516,7 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
 ///
 /// Checks:
 /// - `credential_key` must be alphanumeric + underscores only, or a valid
-///   `op://` / `bw://` / `apple-password://` / `file://` / `env://` URI
+///   `op://` / `bw://` / `apple-password://` / `file://` / `env://` / `cmd://` URI
 /// - `upstream` must be HTTPS (or HTTP for loopback only)
 /// - Mode-specific validation:
 ///   - `header`: inject_header must be valid HTTP token; effective format (see field doc) must not contain CR/LF
@@ -803,6 +883,28 @@ fn validate_query_param_mode(name: &str, cred: &CustomCredentialDef) -> Result<(
 /// - `0.0.0.0` (unspecified IPv4, binds to all interfaces)
 /// - `::` (unspecified IPv6)
 fn validate_upstream_url(url: &str, service_name: &str) -> Result<()> {
+    // Wildcard upstreams (e.g. "https://*.example.com") match many hosts under
+    // TLS interception. `*` is not a valid URL host character, so url::Url
+    // would reject them — validate the shape directly. HTTPS-only, since a
+    // wildcard has no concrete forward target and only works intercepted.
+    if let Some((scheme, rest)) = url.split_once("://*.") {
+        if scheme != "https" {
+            return Err(NonoError::ProfileParse(format!(
+                "Wildcard upstream for custom credential '{}' must use HTTPS: {}",
+                service_name, url
+            )));
+        }
+        let domain = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
+        if domain.is_empty() || !domain.contains('.') {
+            return Err(NonoError::ProfileParse(format!(
+                "Invalid wildcard upstream for custom credential '{}': \
+                 expected 'https://*.<domain>': {}",
+                service_name, url
+            )));
+        }
+        return Ok(());
+    }
+
     let parsed = url::Url::parse(url).map_err(|e| {
         NonoError::ProfileParse(format!(
             "Invalid upstream URL for custom credential '{}': {}",
@@ -843,6 +945,25 @@ fn validate_upstream_url(url: &str, service_name: &str) -> Result<()> {
 fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
     for (name, cred) in &profile.network.custom_credentials {
         validate_custom_credential(name, cred)?;
+
+        // A `cmd://` route whose capture command emits a JSON header map
+        // (`output: "json"`) injects header *names* itself, so the route must
+        // be in header mode — url_path/query_param injection is incoherent
+        // with a header map.
+        if let Some(cap_name) = cred
+            .credential_key
+            .as_deref()
+            .and_then(|k| k.strip_prefix("cmd://"))
+            && let Some(entry) = profile.credential_capture.get(cap_name)
+            && entry.output == CaptureOutput::Json
+            && cred.inject_mode != InjectMode::Header
+        {
+            return Err(NonoError::ProfileParse(format!(
+                "custom credential '{}' uses cmd://{} with output: \"json\" but \
+                 inject_mode is '{:?}'; JSON header-map output requires inject_mode 'header'",
+                name, cap_name, cred.inject_mode
+            )));
+        }
     }
     Ok(())
 }
@@ -1611,6 +1732,12 @@ pub struct Profile {
     /// Supports variable expansion (e.g. `$NONO_PACKAGES`).
     #[serde(default)]
     pub command_args: Vec<String>,
+    /// Credential capture commands resolved by the supervisor on behalf of the proxy.
+    ///
+    /// Maps logical credential names to host-side CLI commands. Used with
+    /// `credential_key: "cmd://<name>"` in route configuration.
+    #[serde(default)]
+    pub credential_capture: HashMap<String, CredentialCaptureEntry>,
     /// Raw macOS-only Seatbelt S-expression rules applied verbatim to the sandbox policy.
     ///
     /// Expert escape hatch for capability gaps. Each entry must be a valid Seatbelt
@@ -1686,6 +1813,8 @@ struct ProfileDeserialize {
     #[serde(alias = "brokered_commands")]
     command_args: Vec<String>,
     #[serde(default)]
+    credential_capture: HashMap<String, CredentialCaptureEntry>,
+    #[serde(default)]
     unsafe_macos_seatbelt_rules: Vec<String>,
 }
 
@@ -1721,6 +1850,7 @@ impl From<ProfileDeserialize> for Profile {
             packs: raw.packs,
             binary: raw.binary,
             command_args: raw.command_args,
+            credential_capture: raw.credential_capture,
             unsafe_macos_seatbelt_rules: raw.unsafe_macos_seatbelt_rules,
         };
 
@@ -2700,6 +2830,11 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
         packs: dedup_append(&base.packs, &child.packs),
         binary: child.binary.or(base.binary),
         command_args: dedup_append(&base.command_args, &child.command_args),
+        credential_capture: {
+            let mut merged = base.credential_capture;
+            merged.extend(child.credential_capture);
+            merged
+        },
         unsafe_macos_seatbelt_rules: dedup_append(
             &base.unsafe_macos_seatbelt_rules,
             &child.unsafe_macos_seatbelt_rules,
@@ -3123,6 +3258,116 @@ mod tests {
         let profile: Profile = serde_json::from_str(json).expect("parse");
         assert_eq!(profile.commands.allow, vec!["pip"]);
         assert_eq!(profile.commands.deny, vec!["docker"]);
+    }
+
+    #[test]
+    fn test_credential_capture_deserializes() {
+        let json = r#"{
+            "meta": {"name": "t"},
+            "credential_capture": {
+                "github": {"command": ["gh", "auth", "token"], "timeout_secs": 5, "ttl_secs": 300},
+                "gcloud": {"command": ["gcloud", "auth", "print-access-token"]}
+            }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse");
+        assert_eq!(profile.credential_capture.len(), 2);
+
+        let github = &profile.credential_capture["github"];
+        assert_eq!(github.command, vec!["gh", "auth", "token"]);
+        assert_eq!(github.timeout_secs, 5);
+        assert_eq!(github.ttl_secs, 300);
+
+        let gcloud = &profile.credential_capture["gcloud"];
+        assert_eq!(gcloud.command, vec!["gcloud", "auth", "print-access-token"]);
+        assert_eq!(gcloud.timeout_secs, 5); // default
+        assert_eq!(gcloud.ttl_secs, 900); // default
+    }
+
+    #[test]
+    fn test_capture_output_defaults_to_string() {
+        let json = r#"{
+            "meta": {"name": "t"},
+            "credential_capture": {
+                "github": {"command": ["gh", "auth", "token"]}
+            }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            profile.credential_capture["github"].output,
+            CaptureOutput::String
+        );
+    }
+
+    #[test]
+    fn test_capture_output_json_deserializes() {
+        let json = r#"{
+            "meta": {"name": "t"},
+            "credential_capture": {
+                "multi": {"command": ["get-headers"], "output": "json"}
+            }
+        }"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            profile.credential_capture["multi"].output,
+            CaptureOutput::Json
+        );
+    }
+
+    #[test]
+    fn test_capture_output_json_with_header_mode_ok() {
+        let json = br#"{
+            "meta": {"name": "t"},
+            "network": {
+                "custom_credentials": {
+                    "multi": {
+                        "upstream": "https://api.example.com",
+                        "credential_key": "cmd://multi",
+                        "env_var": "MULTI_TOKEN",
+                        "inject_header": "Authorization"
+                    }
+                }
+            },
+            "credential_capture": {
+                "multi": {"command": ["get-headers"], "output": "json"}
+            }
+        }"#;
+        parse_profile_bytes(json).expect("json output with header mode should validate");
+    }
+
+    #[test]
+    fn test_capture_output_json_with_non_header_mode_rejected() {
+        // url_path mode is incoherent with a JSON header map → must be rejected.
+        let json = br#"{
+            "meta": {"name": "t"},
+            "network": {
+                "custom_credentials": {
+                    "multi": {
+                        "upstream": "https://api.example.com",
+                        "credential_key": "cmd://multi",
+                        "env_var": "MULTI_TOKEN",
+                        "inject_mode": "url_path",
+                        "path_pattern": "/bot{}/"
+                    }
+                }
+            },
+            "credential_capture": {
+                "multi": {"command": ["get-headers"], "output": "json"}
+            }
+        }"#;
+        let err = parse_profile_bytes(json)
+            .expect_err("json output with url_path mode should be rejected");
+        assert!(
+            err.to_string().contains("JSON header-map output requires"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_credential_capture_defaults_when_absent() {
+        let json = r#"{"meta": {"name": "t"}}"#;
+        let profile: Profile = serde_json::from_str(json).expect("parse");
+        assert!(profile.credential_capture.is_empty());
     }
 
     // Note: in-process unit tests covering the drain (legacy → canonical)
@@ -3885,6 +4130,32 @@ mod tests {
         let result = validate_custom_credential("test", &cred);
         let err = result.expect_err("HTTP to remote should be rejected");
         assert!(err.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_wildcard_upstream_allowed() {
+        let mut cred = header_cred_builder();
+        cred.upstream = "https://*.example.com".to_string();
+        assert!(validate_custom_credential("example", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_credential_wildcard_http_rejected() {
+        let mut cred = header_cred_builder();
+        cred.upstream = "http://*.example.com".to_string();
+        let err = validate_custom_credential("example", &cred)
+            .expect_err("HTTP wildcard should be rejected");
+        assert!(err.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_wildcard_bare_domain_rejected() {
+        // "*." must be followed by a dotted domain.
+        let mut cred = header_cred_builder();
+        cred.upstream = "https://*.localhost".to_string();
+        let err = validate_custom_credential("example", &cred)
+            .expect_err("wildcard without a dotted domain should be rejected");
+        assert!(err.to_string().contains("wildcard"));
     }
 
     #[test]
@@ -4666,6 +4937,7 @@ mod tests {
             packs: vec![],
             binary: None,
             command_args: vec![],
+            credential_capture: HashMap::new(),
             unsafe_macos_seatbelt_rules: vec![],
         }
     }
@@ -4747,6 +5019,7 @@ mod tests {
             packs: vec![],
             binary: None,
             command_args: vec![],
+            credential_capture: HashMap::new(),
             unsafe_macos_seatbelt_rules: vec![],
         }
     }

@@ -19,6 +19,76 @@ use std::sync::Arc;
 use tracing::debug;
 use zeroize::Zeroizing;
 
+/// How a route's upstream `host:port` is matched against a request.
+///
+/// Computed once at load time from the route's `upstream` URL so the hot path
+/// does a cheap comparison rather than re-parsing per request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpstreamHostMatcher {
+    /// Exact `host:port` match (e.g. `"api.openai.com:443"`).
+    Exact(String),
+    /// Wildcard subdomain match (e.g. `suffix = ".example.com"`, `port = 443`).
+    ///
+    /// Matches any host that ends in `suffix` on the given port, requiring the
+    /// host to be strictly longer than the suffix — so `*.example.com` matches
+    /// `api.example.com` but **not** `example.com`. Mirrors the suffix semantics
+    /// of `HostFilter` and `BypassMatcher`. Only meaningful for TLS-intercept
+    /// routes: the connection targets the real intercepted host, so the
+    /// pattern only needs to *select* the route, not name a forward target.
+    Wildcard { suffix: String, port: u16 },
+}
+
+impl UpstreamHostMatcher {
+    /// Whether `host_port` (e.g. `"api.example.com:443"`) matches this pattern.
+    /// Matching is case-insensitive.
+    #[must_use]
+    pub fn matches(&self, host_port: &str) -> bool {
+        self.match_specificity(host_port).is_some()
+    }
+
+    /// If `host_port` matches, return a specificity score (higher = more
+    /// specific): an exact match outranks every wildcard, and among wildcards a
+    /// longer suffix outranks a shorter one. `None` when it does not match.
+    /// Matching is case-insensitive.
+    ///
+    /// Used so the most specific route wins when several match the same host —
+    /// e.g. an exact `api.admin.dev.example.com` shadows a wildcard
+    /// `*.dev.example.com`, which in turn shadows `*.example.com`.
+    #[must_use]
+    pub fn match_specificity(&self, host_port: &str) -> Option<usize> {
+        self.match_specificity_normalised(&host_port.to_lowercase())
+    }
+
+    /// Like [`match_specificity`](Self::match_specificity) but assumes
+    /// `normalised` is already lowercased. Used on the per-request hot path so
+    /// callers iterating every route lowercase the input once, not once per
+    /// route.
+    #[must_use]
+    fn match_specificity_normalised(&self, normalised: &str) -> Option<usize> {
+        match self {
+            UpstreamHostMatcher::Exact(hp) => (normalised == hp).then_some(usize::MAX),
+            UpstreamHostMatcher::Wildcard { suffix, port } => {
+                let (host, port_str) = normalised.rsplit_once(':')?;
+                if port_str.parse::<u16>().ok() != Some(*port) {
+                    return None;
+                }
+                (host.ends_with(suffix.as_str()) && host.len() > suffix.len())
+                    .then_some(suffix.len())
+            }
+        }
+    }
+
+    /// The concrete `host:port` for an `Exact` matcher, or `None` for a
+    /// `Wildcard` (which has no single concrete host).
+    #[must_use]
+    pub fn as_exact(&self) -> Option<&str> {
+        match self {
+            UpstreamHostMatcher::Exact(hp) => Some(hp.as_str()),
+            UpstreamHostMatcher::Wildcard { .. } => None,
+        }
+    }
+}
+
 /// Route-level configuration loaded at proxy startup.
 ///
 /// Contains everything needed to forward and filter a request for a route,
@@ -28,10 +98,10 @@ pub struct LoadedRoute {
     /// Upstream URL (e.g., "https://api.openai.com")
     pub upstream: String,
 
-    /// Pre-normalised `host:port` extracted from `upstream` at load time.
-    /// Used for O(1) lookups in `is_route_upstream()` without per-request
-    /// URL parsing. `None` if the upstream URL cannot be parsed.
-    pub upstream_host_port: Option<String>,
+    /// Matcher for the upstream `host:port`, derived from `upstream` at load
+    /// time. `Exact` for concrete hosts; `Wildcard` for `*.domain` patterns
+    /// (intercept-only). Used for lookups without per-request URL parsing.
+    pub upstream_host_matcher: UpstreamHostMatcher,
 
     /// Pre-compiled L7 endpoint rules for method+path filtering.
     /// When non-empty, only matching requests are allowed (default-deny).
@@ -69,7 +139,7 @@ impl std::fmt::Debug for LoadedRoute {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoadedRoute")
             .field("upstream", &self.upstream)
-            .field("upstream_host_port", &self.upstream_host_port)
+            .field("upstream_host_matcher", &self.upstream_host_matcher)
             .field("endpoint_rules", &self.endpoint_rules)
             .field("has_custom_tls_ca", &self.tls_connector.is_some())
             .field("requires_intercept", &self.requires_intercept)
@@ -175,7 +245,14 @@ impl RouteStore {
                 None
             };
 
-            let upstream_host_port = extract_host_port(&route.upstream);
+            let upstream_host_matcher = extract_host_port(&route.upstream).ok_or_else(|| {
+                ProxyError::Config(format!(
+                    "route '{}': invalid upstream URL '{}': expected https:// \
+                     (or http:// loopback), optionally with a leading *.domain \
+                     wildcard label",
+                    normalized_prefix, route.upstream
+                ))
+            })?;
 
             // A route needs L7 visibility if it carries credentials to inject
             // (`credential_key` or `oauth2`) or if it enforces method/path
@@ -183,10 +260,15 @@ impl RouteStore {
             // they exist to provide a `*_BASE_URL` env var or appear in
             // `route_upstream_hosts()` — and CONNECT to those still gets
             // blocked with 403 (the "force SDK cooperation" path).
+            //
+            // A wildcard upstream has no concrete forward target, so it only
+            // works under TLS interception (the connection targets the real
+            // intercepted host). Force interception for such routes.
             let requires_managed_credential =
                 route.credential_key.is_some() || route.oauth2.is_some();
-            let requires_intercept =
-                requires_managed_credential || !route.endpoint_rules.is_empty();
+            let requires_intercept = requires_managed_credential
+                || !route.endpoint_rules.is_empty()
+                || matches!(upstream_host_matcher, UpstreamHostMatcher::Wildcard { .. });
             let managed_auth_mechanism = auth_mechanism_for_route(route);
             let managed_injection_mode = injection_mode_for_route(route);
 
@@ -194,7 +276,7 @@ impl RouteStore {
                 normalized_prefix,
                 LoadedRoute {
                     upstream: route.upstream.clone(),
-                    upstream_host_port,
+                    upstream_host_matcher,
                     endpoint_rules,
                     tls_connector,
                     requires_intercept,
@@ -242,67 +324,118 @@ impl RouteStore {
         let normalised = host_port.to_lowercase();
         self.routes.values().any(|route| {
             route
-                .upstream_host_port
-                .as_ref()
-                .is_some_and(|hp| *hp == normalised)
+                .upstream_host_matcher
+                .match_specificity_normalised(&normalised)
+                .is_some()
         })
     }
 
-    /// Return the first route matching `host:port`, or `None`.
+    /// Return the *most specific* route matching `host:port`, or `None`.
     ///
-    /// Prefer [`lookup_all_by_upstream`](Self::lookup_all_by_upstream)
-    /// when multiple routes may share the same upstream.
+    /// When several routes match (e.g. an exact upstream and a covering
+    /// wildcard), the highest [`match_specificity`](UpstreamHostMatcher::match_specificity)
+    /// wins; ties break by prefix for determinism. Prefer
+    /// [`lookup_all_by_upstream`](Self::lookup_all_by_upstream) when multiple
+    /// routes may legitimately share the same upstream tier.
     #[must_use]
     pub fn lookup_by_upstream(&self, host_port: &str) -> Option<(&str, &LoadedRoute)> {
         let normalised = host_port.to_lowercase();
-        self.routes.iter().find_map(|(prefix, route)| {
-            route
-                .upstream_host_port
-                .as_ref()
-                .filter(|hp| **hp == normalised)
-                .map(|_| (prefix.as_str(), route))
-        })
+        self.routes
+            .iter()
+            .filter_map(|(prefix, route)| {
+                route
+                    .upstream_host_matcher
+                    .match_specificity_normalised(&normalised)
+                    .map(|score| (score, prefix.as_str(), route))
+            })
+            // Max specificity wins; on a tie, the lexicographically smaller
+            // prefix wins so the result is deterministic.
+            .min_by(|(a_score, a_prefix, _), (b_score, b_prefix, _)| {
+                b_score.cmp(a_score).then_with(|| a_prefix.cmp(b_prefix))
+            })
+            .map(|(_, prefix, route)| (prefix, route))
     }
 
-    /// Return all routes whose upstream matches `host:port`, sorted by
-    /// prefix for deterministic iteration.
+    /// Return the routes that match `host:port` at the **most specific** tier,
+    /// sorted by prefix for deterministic iteration.
+    ///
+    /// Routes are ranked by [`match_specificity`](UpstreamHostMatcher::match_specificity):
+    /// an exact upstream shadows a wildcard, and a longer wildcard suffix
+    /// shadows a shorter one. Only routes at the single best tier are returned,
+    /// so a host with its own exact route never also sees a covering wildcard.
+    /// Multiple routes sharing the same exact upstream (e.g. several org-scoped
+    /// GitHub routes) all sit at `usize::MAX` and are all returned.
     #[must_use]
     pub fn lookup_all_by_upstream(&self, host_port: &str) -> Vec<(&str, &LoadedRoute)> {
         let normalised = host_port.to_lowercase();
-        let mut matches: Vec<_> = self
+        let mut scored: Vec<_> = self
             .routes
             .iter()
-            .filter(|(_, route)| {
+            .filter_map(|(prefix, route)| {
                 route
-                    .upstream_host_port
-                    .as_ref()
-                    .is_some_and(|hp| *hp == normalised)
+                    .upstream_host_matcher
+                    .match_specificity_normalised(&normalised)
+                    .map(|score| (score, prefix.as_str(), route))
             })
-            .map(|(prefix, route)| (prefix.as_str(), route))
             .collect();
-        matches.sort_by_key(|(prefix, _)| *prefix);
-        matches
+
+        let Some(best) = scored.iter().map(|(score, _, _)| *score).max() else {
+            return Vec::new();
+        };
+        scored.retain(|(score, _, _)| *score == best);
+        scored.sort_by_key(|(_, prefix, _)| *prefix);
+        scored
+            .into_iter()
+            .map(|(_, prefix, route)| (prefix, route))
+            .collect()
     }
 
-    /// Whether any route for `host:port` requires TLS interception.
+    /// Whether the route selected for `host:port` requires TLS interception.
+    ///
+    /// Only the most-specific matching tier is considered — the same set
+    /// [`lookup_all_by_upstream`](Self::lookup_all_by_upstream) returns and that
+    /// the intercept handler selects from. This keeps the server's
+    /// intercept-eligibility decision consistent with selection: a less
+    /// specific wildcard that requires interception must not force interception
+    /// for a host that is owned by a more specific, non-intercept exact route
+    /// (the wildcard is shadowed and would never be selected anyway).
     #[must_use]
     pub fn has_intercept_route(&self, host_port: &str) -> bool {
-        let normalised = host_port.to_lowercase();
-        self.routes.values().any(|route| {
-            route
-                .upstream_host_port
-                .as_ref()
-                .is_some_and(|hp| *hp == normalised)
-                && route.requires_intercept
-        })
+        self.lookup_all_by_upstream(host_port)
+            .iter()
+            .any(|(_, route)| route.requires_intercept)
     }
 
-    /// All unique upstream `host:port` strings across loaded routes.
+    /// Whether any loaded route requires TLS interception, independent of host.
+    ///
+    /// Unlike [`has_intercept_route`](Self::has_intercept_route), this does not
+    /// take a `host:port` — it is used at startup to decide whether to generate
+    /// the interception CA. Wildcard routes (which have no concrete host in
+    /// [`route_upstream_hosts`](Self::route_upstream_hosts)) are counted here.
+    #[must_use]
+    pub fn has_any_intercept_route(&self) -> bool {
+        self.routes.values().any(|route| route.requires_intercept)
+    }
+
+    /// Number of loaded routes that require TLS interception (includes
+    /// wildcard-upstream routes, which have no concrete host).
+    #[must_use]
+    pub fn intercept_route_count(&self) -> usize {
+        self.routes
+            .values()
+            .filter(|route| route.requires_intercept)
+            .count()
+    }
+
+    /// All unique **concrete** upstream `host:port` strings across loaded
+    /// routes. Wildcard upstreams have no single concrete host and are
+    /// excluded — they never enter the NO_PROXY / allowlist set, so traffic to
+    /// them always traverses the proxy.
     #[must_use]
     pub fn route_upstream_hosts(&self) -> std::collections::HashSet<String> {
         self.routes
             .values()
-            .filter_map(|route| route.upstream_host_port.clone())
+            .filter_map(|route| route.upstream_host_matcher.as_exact().map(str::to_string))
             .collect()
     }
 }
@@ -320,11 +453,38 @@ impl LoadedRoute {
     }
 }
 
-/// Extract and normalise `host:port` from a URL string.
+/// Build an [`UpstreamHostMatcher`] from a route's `upstream` URL.
 ///
-/// Defaults to port 443 for `https://` and 80 for `http://` when no
-/// explicit port is present. Returns `None` if the URL cannot be parsed.
-fn extract_host_port(url: &str) -> Option<String> {
+/// Defaults to port 443 for `https://` and 80 for `http://` when no explicit
+/// port is present. Returns `None` if the URL cannot be parsed.
+///
+/// A leading `*.` host label (e.g. `https://*.example.com`) produces a
+/// [`UpstreamHostMatcher::Wildcard`]. Wildcards are HTTPS-only: `*` is not a
+/// valid URL host character, so we substitute a probe label, parse with the
+/// `url` crate to recover the scheme/port safely, then take the suffix from
+/// the original string.
+fn extract_host_port(url: &str) -> Option<UpstreamHostMatcher> {
+    if let Some((_, rest)) = url.split_once("://*.") {
+        let probe = url.replacen("://*.", "://wildcard-probe.", 1);
+        let parsed = url::Url::parse(&probe).ok()?;
+        // Wildcards only make sense under interception (HTTPS); reject http.
+        if parsed.scheme() != "https" {
+            return None;
+        }
+        let port = parsed.port().unwrap_or(443);
+        // Domain part of the original pattern, up to a port or path separator.
+        let domain = rest.split(['/', ':', '?', '#']).next()?;
+        // Require a multi-label domain (e.g. `*.example.com`, not `*.localhost`),
+        // matching the profile-level validation in `validate_upstream_url`.
+        if !domain.contains('.') {
+            return None;
+        }
+        return Some(UpstreamHostMatcher::Wildcard {
+            suffix: format!(".{}", domain.to_lowercase()),
+            port,
+        });
+    }
+
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
     let default_port = match parsed.scheme() {
@@ -333,7 +493,11 @@ fn extract_host_port(url: &str) -> Option<String> {
         _ => return None,
     };
     let port = parsed.port().unwrap_or(default_port);
-    Some(format!("{}:{}", host.to_lowercase(), port))
+    Some(UpstreamHostMatcher::Exact(format!(
+        "{}:{}",
+        host.to_lowercase(),
+        port
+    )))
 }
 
 /// Read a PEM file, producing a clear `ProxyError::Config` for common failure modes.
@@ -682,7 +846,7 @@ mod tests {
     fn test_extract_host_port_https() {
         assert_eq!(
             extract_host_port("https://api.openai.com"),
-            Some("api.openai.com:443".to_string())
+            Some(UpstreamHostMatcher::Exact("api.openai.com:443".to_string()))
         );
     }
 
@@ -690,7 +854,9 @@ mod tests {
     fn test_extract_host_port_with_port() {
         assert_eq!(
             extract_host_port("https://api.example.com:8443"),
-            Some("api.example.com:8443".to_string())
+            Some(UpstreamHostMatcher::Exact(
+                "api.example.com:8443".to_string()
+            ))
         );
     }
 
@@ -698,7 +864,9 @@ mod tests {
     fn test_extract_host_port_http() {
         assert_eq!(
             extract_host_port("http://internal-service"),
-            Some("internal-service:80".to_string())
+            Some(UpstreamHostMatcher::Exact(
+                "internal-service:80".to_string()
+            ))
         );
     }
 
@@ -706,15 +874,89 @@ mod tests {
     fn test_extract_host_port_normalises_case() {
         assert_eq!(
             extract_host_port("https://API.Example.COM"),
-            Some("api.example.com:443".to_string())
+            Some(UpstreamHostMatcher::Exact(
+                "api.example.com:443".to_string()
+            ))
         );
+    }
+
+    #[test]
+    fn test_extract_host_port_wildcard_basic() {
+        assert_eq!(
+            extract_host_port("https://*.example.com"),
+            Some(UpstreamHostMatcher::Wildcard {
+                suffix: ".example.com".to_string(),
+                port: 443,
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_wildcard_with_port() {
+        assert_eq!(
+            extract_host_port("https://*.internal.corp:8443"),
+            Some(UpstreamHostMatcher::Wildcard {
+                suffix: ".internal.corp".to_string(),
+                port: 8443,
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_wildcard_normalises_case() {
+        assert_eq!(
+            extract_host_port("https://*.Example.COM"),
+            Some(UpstreamHostMatcher::Wildcard {
+                suffix: ".example.com".to_string(),
+                port: 443,
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_wildcard_http_rejected() {
+        // Wildcards are only meaningful under interception (HTTPS).
+        assert_eq!(extract_host_port("http://*.internal.local"), None);
+    }
+
+    #[test]
+    fn test_extract_host_port_wildcard_single_label_rejected() {
+        // A single-label wildcard domain (`*.localhost`) is rejected, matching
+        // the profile-level validation. Must contain a dot.
+        assert_eq!(extract_host_port("https://*.localhost"), None);
+    }
+
+    #[test]
+    fn test_wildcard_matcher_matches_strict_subdomains_only() {
+        let m = UpstreamHostMatcher::Wildcard {
+            suffix: ".example.com".to_string(),
+            port: 443,
+        };
+        assert!(m.matches("api.example.com:443"));
+        assert!(m.matches("app.example.com:443"));
+        assert!(m.matches("API.EXAMPLE.COM:443")); // case-insensitive
+        assert!(!m.matches("example.com:443")); // not the bare domain
+        assert!(!m.matches("api.example.com:8443")); // port mismatch
+        assert!(!m.matches("evilexample.com:443")); // no dot boundary
+        assert!(!m.matches("api.example.com")); // missing port
+    }
+
+    #[test]
+    fn test_exact_matcher_as_exact_and_wildcard_none() {
+        let exact = UpstreamHostMatcher::Exact("api.openai.com:443".to_string());
+        assert_eq!(exact.as_exact(), Some("api.openai.com:443"));
+        let wild = UpstreamHostMatcher::Wildcard {
+            suffix: ".example.com".to_string(),
+            port: 443,
+        };
+        assert_eq!(wild.as_exact(), None);
     }
 
     #[test]
     fn test_loaded_route_debug() {
         let route = LoadedRoute {
             upstream: "https://api.openai.com".to_string(),
-            upstream_host_port: Some("api.openai.com:443".to_string()),
+            upstream_host_matcher: UpstreamHostMatcher::Exact("api.openai.com:443".to_string()),
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
             tls_connector: None,
             requires_intercept: false,
@@ -830,7 +1072,7 @@ mod tests {
     fn test_missing_managed_credential_policy() {
         let managed = LoadedRoute {
             upstream: "https://api.openai.com".to_string(),
-            upstream_host_port: Some("api.openai.com:443".to_string()),
+            upstream_host_matcher: UpstreamHostMatcher::Exact("api.openai.com:443".to_string()),
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
             tls_connector: None,
             requires_intercept: true,
@@ -844,7 +1086,9 @@ mod tests {
 
         let l7_only = LoadedRoute {
             upstream: "https://internal.example.com".to_string(),
-            upstream_host_port: Some("internal.example.com:443".to_string()),
+            upstream_host_matcher: UpstreamHostMatcher::Exact(
+                "internal.example.com:443".to_string(),
+            ),
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
             tls_connector: None,
             requires_intercept: true,
@@ -951,6 +1195,214 @@ mod tests {
         assert!(store.lookup_all_by_upstream("other.com:443").is_empty());
     }
 
+    /// Build a minimal route with the given prefix and upstream URL.
+    fn route_with_upstream(prefix: &str, upstream: &str, credential: Option<&str>) -> RouteConfig {
+        RouteConfig {
+            prefix: prefix.to_string(),
+            upstream: upstream.to_string(),
+            credential_key: credential.map(str::to_string),
+            inject_mode: Default::default(),
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+        }
+    }
+
+    #[test]
+    fn test_wildcard_upstream_forces_intercept() {
+        // A wildcard upstream with no credential and no endpoint rules still
+        // requires interception (it has no concrete forward target).
+        let routes = vec![route_with_upstream(
+            "example",
+            "https://*.example.com",
+            None,
+        )];
+        let store = RouteStore::load(&routes).unwrap();
+        let route = store.get("example").unwrap();
+        assert!(route.requires_intercept);
+        assert!(!route.requires_managed_credential);
+        assert!(store.has_any_intercept_route());
+    }
+
+    #[test]
+    fn test_wildcard_upstream_matches_subdomains() {
+        let routes = vec![route_with_upstream(
+            "example",
+            "https://*.example.com",
+            Some("cmd://token"),
+        )];
+        let store = RouteStore::load(&routes).unwrap();
+
+        assert!(store.is_route_upstream("api.example.com:443"));
+        assert!(store.is_route_upstream("login.us.example.com:443"));
+        assert!(store.has_intercept_route("api.example.com:443"));
+        // Bare domain and wrong port do not match.
+        assert!(!store.is_route_upstream("example.com:443"));
+        assert!(!store.is_route_upstream("api.example.com:8443"));
+
+        let hit = store.lookup_by_upstream("api.example.com:443").unwrap();
+        assert_eq!(hit.0, "example");
+    }
+
+    #[test]
+    fn test_wildcard_and_exact_routes_coexist() {
+        let routes = vec![
+            route_with_upstream("example", "https://*.example.com", Some("cmd://token")),
+            route_with_upstream("openai", "https://api.openai.com", Some("openai_key")),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+
+        let example = store.lookup_all_by_upstream("tenant.example.com:443");
+        assert_eq!(example.len(), 1);
+        assert_eq!(example[0].0, "example");
+
+        let openai = store.lookup_all_by_upstream("api.openai.com:443");
+        assert_eq!(openai.len(), 1);
+        assert_eq!(openai[0].0, "openai");
+    }
+
+    #[test]
+    fn test_route_upstream_hosts_excludes_wildcards() {
+        let routes = vec![
+            route_with_upstream("example", "https://*.example.com", Some("cmd://token")),
+            route_with_upstream("openai", "https://api.openai.com", Some("openai_key")),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+        let hosts = store.route_upstream_hosts();
+        // Only the concrete (exact) upstream is present.
+        assert!(hosts.contains("api.openai.com:443"));
+        assert_eq!(hosts.len(), 1);
+    }
+
+    #[test]
+    fn test_invalid_upstream_rejected_at_load() {
+        let routes = vec![route_with_upstream("bad", "ftp://example.com", None)];
+        assert!(RouteStore::load(&routes).is_err());
+    }
+
+    #[test]
+    fn test_match_specificity_ranking() {
+        let exact = UpstreamHostMatcher::Exact("api.admin.dev.example.com:443".to_string());
+        let wide = UpstreamHostMatcher::Wildcard {
+            suffix: ".example.com".to_string(),
+            port: 443,
+        };
+        let narrow = UpstreamHostMatcher::Wildcard {
+            suffix: ".dev.example.com".to_string(),
+            port: 443,
+        };
+        let host = "api.admin.dev.example.com:443";
+
+        // Exact outranks every wildcard; longer suffix outranks shorter.
+        assert_eq!(exact.match_specificity(host), Some(usize::MAX));
+        assert!(narrow.match_specificity(host) > wide.match_specificity(host));
+        // Non-match → None.
+        assert_eq!(wide.match_specificity("api.other.net:443"), None);
+    }
+
+    #[test]
+    fn test_exact_upstream_shadows_covering_wildcard() {
+        // Reproduces the reported layer0 config: an exact route fully covered
+        // by a wildcard must win for its own host, while the wildcard still
+        // serves every other host under the parent domain.
+        let routes = vec![
+            route_with_upstream(
+                "layer0_dev",
+                "https://api.admin.dev.a0core.net",
+                Some("cmd://layer0_dev"),
+            ),
+            route_with_upstream(
+                "k8s_admin_dev",
+                "https://*.dev.a0core.net",
+                Some("cmd://k8s_admin_dev"),
+            ),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+
+        // Exact host → only the exact route, despite the wildcard also matching.
+        let exact = store.lookup_all_by_upstream("api.admin.dev.a0core.net:443");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].0, "layer0_dev");
+        assert_eq!(
+            store
+                .lookup_by_upstream("api.admin.dev.a0core.net:443")
+                .unwrap()
+                .0,
+            "layer0_dev"
+        );
+
+        // Any other subdomain → the wildcard fallback.
+        let wild = store.lookup_all_by_upstream("foo.dev.a0core.net:443");
+        assert_eq!(wild.len(), 1);
+        assert_eq!(wild[0].0, "k8s_admin_dev");
+    }
+
+    #[test]
+    fn test_has_intercept_route_respects_specificity() {
+        // A declarative exact route (no credential, no endpoint rules → no
+        // interception) shadows a covering intercept wildcard for its own host.
+        // `has_intercept_route` must agree with selection: the exact route wins
+        // and does NOT require interception, so the server must not intercept.
+        let exact_declarative = route_with_upstream("exact", "https://api.dev.a0core.net", None);
+        let wildcard_cred = route_with_upstream(
+            "wild",
+            "https://*.dev.a0core.net",
+            Some("cmd://k8s_admin_dev"),
+        );
+        let store = RouteStore::load(&[exact_declarative, wildcard_cred]).unwrap();
+
+        // Exact host is owned by the declarative route → no interception, and
+        // selection returns only that route.
+        assert!(!store.has_intercept_route("api.dev.a0core.net:443"));
+        let sel = store.lookup_all_by_upstream("api.dev.a0core.net:443");
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].0, "exact");
+
+        // A different subdomain falls to the wildcard → interception required.
+        assert!(store.has_intercept_route("other.dev.a0core.net:443"));
+    }
+
+    #[test]
+    fn test_longer_wildcard_suffix_shadows_shorter() {
+        let routes = vec![
+            route_with_upstream("broad", "https://*.a0core.net", Some("cmd://broad")),
+            route_with_upstream("narrow", "https://*.dev.a0core.net", Some("cmd://narrow")),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+
+        // Host under the narrower suffix → only the narrower route.
+        let narrowed = store.lookup_all_by_upstream("x.dev.a0core.net:443");
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].0, "narrow");
+
+        // Host only under the broad suffix → the broad route.
+        let broadened = store.lookup_all_by_upstream("x.prod.a0core.net:443");
+        assert_eq!(broadened.len(), 1);
+        assert_eq!(broadened[0].0, "broad");
+    }
+
+    #[test]
+    fn test_same_tier_wildcards_both_returned() {
+        // Two equally-specific wildcard upstreams both match → both returned,
+        // so the selection layer can flag the ambiguity (runtime 403).
+        let routes = vec![
+            route_with_upstream("a", "https://*.dev.a0core.net", Some("cmd://a")),
+            route_with_upstream("b", "https://*.dev.a0core.net", Some("cmd://b")),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+        let hits = store.lookup_all_by_upstream("x.dev.a0core.net:443");
+        assert_eq!(hits.len(), 2);
+    }
+
     /// Models a real multi-org GitHub profile. Mirrors the selection
     /// loop in `tls_intercept::handle`:
     ///   1 match  → inject that route's credential
@@ -990,25 +1442,47 @@ mod tests {
             Ambiguous(Vec<&'a str>),
         }
 
+        // Mirror of the layered selection in `tls_intercept::handle`:
+        // endpoint-rule matches shadow catch-all routes; within the active
+        // layer a credential route is preferred and two credential routes are
+        // ambiguous.
         fn select<'a>(
             candidates: &'a [(&'a str, &'a LoadedRoute)],
             method: &str,
             path: &str,
         ) -> Selection<'a> {
-            let mut matches: Vec<&str> = Vec::new();
-            let mut catch_all: Option<&str> = None;
+            let mut matched_cred: Vec<&str> = Vec::new();
+            let mut matched_pass: Vec<&str> = Vec::new();
+            let mut catchall_cred: Vec<&str> = Vec::new();
+            let mut catchall_pass: Vec<&str> = Vec::new();
             for (prefix, route) in candidates {
                 if route.endpoint_rules.is_empty() {
-                    if catch_all.is_none() {
-                        catch_all = Some(*prefix);
+                    if route.requires_managed_credential {
+                        catchall_cred.push(prefix);
+                    } else {
+                        catchall_pass.push(prefix);
                     }
                 } else if route.endpoint_rules.is_allowed(method, path) {
-                    matches.push(prefix);
+                    if route.requires_managed_credential {
+                        matched_cred.push(prefix);
+                    } else {
+                        matched_pass.push(prefix);
+                    }
                 }
             }
-            if matches.len() > 1 {
-                Selection::Ambiguous(matches)
-            } else if let Some(svc) = matches.into_iter().next().or(catch_all) {
+            let endpoint_layer_active = !matched_cred.is_empty() || !matched_pass.is_empty();
+            let (cred_layer, pass_layer) = if endpoint_layer_active {
+                (matched_cred, matched_pass)
+            } else {
+                (catchall_cred, catchall_pass)
+            };
+            if cred_layer.len() > 1 {
+                Selection::Ambiguous(cred_layer)
+            } else if let Some(svc) = cred_layer
+                .into_iter()
+                .next()
+                .or_else(|| pass_layer.into_iter().next())
+            {
                 Selection::Route(svc)
             } else {
                 Selection::Passthrough
@@ -1068,6 +1542,28 @@ mod tests {
         assert_eq!(
             select(&candidates2, "GET", "/always-further/nono.git/info/refs"),
             Selection::Route("github_https_all")
+        );
+
+        // --- Catch-all credential routes (no endpoint_rules) on a shared
+        // upstream: a lone one is selected; two are ambiguous. ---
+        let single_catchall = vec![route_with_upstream(
+            "solo",
+            "https://shared.example.com",
+            Some("cmd://solo"),
+        )];
+        let store3 = RouteStore::load(&single_catchall).unwrap();
+        let c3 = store3.lookup_all_by_upstream("shared.example.com:443");
+        assert_eq!(select(&c3, "GET", "/anything"), Selection::Route("solo"));
+
+        let two_catchall = vec![
+            route_with_upstream("one", "https://shared.example.com", Some("cmd://one")),
+            route_with_upstream("two", "https://shared.example.com", Some("cmd://two")),
+        ];
+        let store4 = RouteStore::load(&two_catchall).unwrap();
+        let c4 = store4.lookup_all_by_upstream("shared.example.com:443");
+        assert_eq!(
+            select(&c4, "GET", "/anything"),
+            Selection::Ambiguous(vec!["one", "two"])
         );
     }
 

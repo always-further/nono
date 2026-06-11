@@ -65,6 +65,10 @@ const ENV_URI_PREFIX: &str = "env://";
 /// Read once at startup before sandbox activation; contents zeroed on drop.
 const FILE_URI_PREFIX: &str = "file://";
 
+/// The `cmd://` URI scheme prefix, indicating a CLI-command credential source.
+/// Resolved only through the supervisor channel in supervised execution mode.
+const CMD_URI_PREFIX: &str = "cmd://";
+
 /// Environment variable names that must never be loaded via `env://`.
 ///
 /// These control linker, interpreter, or shell behavior. Allowing them as
@@ -182,6 +186,13 @@ pub fn load_secrets(
 /// internal buffers.
 #[must_use = "loaded secret should be used or explicitly dropped"]
 pub fn load_secret_by_ref(service: &str, credential_ref: &str) -> Result<Zeroizing<String>> {
+    if credential_ref.starts_with(CMD_URI_PREFIX) {
+        return Err(crate::NonoError::KeystoreAccess(
+            "cmd:// credentials can only be resolved through the supervisor channel \
+             in supervised execution mode"
+                .to_string(),
+        ));
+    }
     if credential_ref.starts_with(FILE_URI_PREFIX) {
         load_from_file(credential_ref)
     } else if credential_ref.starts_with(ENV_URI_PREFIX) {
@@ -651,6 +662,31 @@ pub fn is_env_uri(credential_ref: &str) -> bool {
 #[must_use]
 pub fn is_file_uri(credential_ref: &str) -> bool {
     credential_ref.starts_with(FILE_URI_PREFIX)
+}
+
+/// Check if a credential reference uses the `cmd://` scheme.
+#[must_use]
+pub fn is_cmd_uri(credential_ref: &str) -> bool {
+    credential_ref.starts_with(CMD_URI_PREFIX)
+}
+
+/// Validate a `cmd://<name>` URI.
+///
+/// The name portion must be non-empty and contain only ASCII alphanumeric
+/// characters and underscores (`[A-Za-z0-9_]+`).
+pub fn validate_cmd_uri(uri: &str) -> Result<()> {
+    let name = uri.strip_prefix(CMD_URI_PREFIX).unwrap_or("");
+    if name.is_empty() {
+        return Err(NonoError::ConfigParse(
+            "cmd:// URI must include a credential name (e.g., cmd://github)".to_string(),
+        ));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(NonoError::ConfigParse(format!(
+            "cmd:// credential name '{name}' must contain only alphanumeric characters and underscores"
+        )));
+    }
+    Ok(())
 }
 
 /// Validate an `env://VAR_NAME` URI.
@@ -3426,6 +3462,24 @@ mod tests {
         assert_eq!(*result.expect("should load"), "dispatched_ok");
 
         unsafe { std::env::remove_var(test_var) };
+    }
+
+    #[test]
+    fn test_load_secret_by_ref_rejects_cmd_uri() {
+        let result = load_secret_by_ref("nono", "cmd://github");
+        assert!(result.is_err(), "cmd:// must be rejected by the keystore");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::NonoError::KeystoreAccess(_)),
+            "expected KeystoreAccess, got: {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("supervisor channel"),
+            "error should mention supervisor channel: {}",
+            msg
+        );
     }
 
     // --- env:// in build_mappings_from_list ---

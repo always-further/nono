@@ -180,6 +180,7 @@ impl ProfileDef {
             packs: self.packs.clone(),
             binary: None,
             command_args: self.command_args.clone(),
+            credential_capture: std::collections::HashMap::new(),
             unsafe_macos_seatbelt_rules: self.unsafe_macos_seatbelt_rules.clone(),
         }
     }

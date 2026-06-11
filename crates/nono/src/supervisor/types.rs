@@ -75,6 +75,25 @@ pub struct AuditEntry {
     pub duration_ms: u64,
 }
 
+/// A request to capture a credential by running an allow-listed command.
+///
+/// Used by the proxy→supervisor in-process channel to request just-in-time
+/// credential resolution for `cmd://` routes. The child never sends this
+/// directly — it makes HTTP requests through the proxy, which handles
+/// credential injection transparently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialCaptureRequest {
+    /// Unique identifier for this request (for replay protection and audit)
+    pub request_id: String,
+    /// Logical credential name from the profile (e.g., "github", "gcloud").
+    /// The supervisor maps this to an allow-listed command, not the child.
+    pub credential_name: String,
+    /// PID of the requesting process
+    pub child_pid: u32,
+    /// Session identifier for correlating requests within a single run
+    pub session_id: String,
+}
+
 /// A request from the sandboxed child to open a URL in the user's browser.
 ///
 /// Sent over the supervisor Unix socket when the child needs to launch a

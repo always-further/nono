@@ -18,6 +18,7 @@ pub(crate) struct PreparedProfile {
     pub(crate) allow_domain: Vec<profile::AllowDomainEntry>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
+    pub(crate) credential_capture: HashMap<String, profile::CredentialCaptureEntry>,
     pub(crate) upstream_proxy: Option<String>,
     pub(crate) upstream_bypass: Vec<String>,
     pub(crate) listen_ports: Vec<u16>,
@@ -542,6 +543,10 @@ fn prepare_profile_with_options(
         custom_credentials: loaded_profile
             .as_ref()
             .map(|profile| profile.network.custom_credentials.clone())
+            .unwrap_or_default(),
+        credential_capture: loaded_profile
+            .as_ref()
+            .map(|profile| profile.credential_capture.clone())
             .unwrap_or_default(),
         upstream_proxy: loaded_profile
             .as_ref()

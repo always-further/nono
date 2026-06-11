@@ -72,6 +72,7 @@ tokio = { version = "1", features = ["rt"] }
 ureq = { version = "3", features = ["platform-verifier"] }
 semver = "1"
 
+regex = "1"
 zeroize.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
