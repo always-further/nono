@@ -2004,12 +2004,17 @@ fn handle_pty_suspension(pty: Option<&mut crate::pty_proxy::PtyProxy>, child: Pi
     // SIGSTOP doesn't give the child a chance to clean up its terminal state.
     // When resumed, TUI apps (opencode, vim, htop) don't know they need to
     // redraw because they missed the TSTP/CONT cycle they normally rely on.
-    // Sending SIGWINCH triggers a full redraw in practically all TUI apps.
+    // Sending SIGWINCH triggers a full redraw.
     //
-    // The PTY proxy's SIGWINCH handler (setup_signal_forwarding) also forwards
-    // window-size ioctls to the PTY master, keeping the child's view of the
-    // terminal dimensions in sync after the suspend/resume cycle.
-    let _ = signal::kill(child, Signal::SIGWINCH);
+    // Send SIGWINCH to the foreground process group of the PTY, not just the
+    // immediate child. A shell (bash) that is running a nested TUI (vim) will
+    // have put that TUI in its own foreground PG. Sending to the PG ensures
+    // both the shell and any nested TUI receive the redraw signal.
+    if let Ok(pgid) = nix::unistd::tcgetpgrp(&pty.master) {
+        let _ = signal::kill(Pid::from_raw(-pgid.as_raw()), Signal::SIGWINCH);
+    } else {
+        let _ = signal::kill(child, Signal::SIGWINCH);
+    }
 }
 
 struct SignalForwardingGuard;
