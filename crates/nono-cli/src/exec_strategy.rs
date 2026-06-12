@@ -41,6 +41,7 @@ use tracing::{debug, info, warn};
 pub(crate) use env_sanitization::is_dangerous_env_var;
 use env_sanitization::should_skip_env_var;
 pub(crate) use env_sanitization::validate_env_var_patterns;
+pub(crate) use env_sanitization::validate_set_vars;
 
 /// Resolve a program name to its absolute path.
 ///
@@ -244,6 +245,10 @@ pub struct ExecConfig<'a> {
     /// name or prefix pattern (e.g. `"GITHUB_*"`) are stripped even if they
     /// also appear in `allowed_env_vars`. Nono-injected credentials bypass this.
     pub denied_env_vars: Option<Vec<String>>,
+    /// Static environment variables (`environment.set_vars`) injected after host
+    /// env filtering and before `env_vars` (credentials/proxy/hooks). Values are
+    /// already variable-expanded. Bypasses allow/deny filtering by design.
+    pub set_vars: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -365,6 +370,12 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<()> {
     }
 
     cmd.args(cmd_args).env("NONO_CAP_FILE", config.cap_file);
+
+    // Static profile vars (set_vars): after host filtering, before credentials
+    // so injected credentials win on conflict.
+    for (key, value) in &config.set_vars {
+        cmd.env(key, value);
+    }
 
     for (key, value) in &config.env_vars {
         cmd.env(key, value);
@@ -507,6 +518,18 @@ pub fn execute_supervised(
         && let Ok(cstr) = CString::new(format!("NONO_CAP_FILE={}", cap_file_str))
     {
         env_c.push(cstr);
+    }
+
+    // Static profile vars (set_vars): after host filtering, before credentials
+    // so injected credentials win on conflict.
+    for (key, value) in &config.set_vars {
+        let mut kv = Vec::with_capacity(key.len() + 1 + value.len() + 1);
+        kv.extend_from_slice(key.as_bytes());
+        kv.push(b'=');
+        kv.extend_from_slice(value.as_bytes());
+        if let Ok(cstr) = CString::new(kv) {
+            env_c.push(cstr);
+        }
     }
 
     // Add user-specified environment variables (secrets, etc.)
