@@ -360,7 +360,7 @@ operation name to your profile. To silence all post-run diagnostics instead,
 use `--no-diagnostics`.
 
 <Note>
-  `filesystem`, `groups`, and `commands` fields are additive across inheritance. A child profile's `filesystem.deny` is merged with the base profile's `filesystem.deny`, and `groups.exclude` from both levels are combined.
+  `filesystem`, `groups`, `commands`, and `diagnostics` fields are additive across inheritance. A child profile's `filesystem.deny` is merged with the base profile's `filesystem.deny`, `groups.exclude` from both levels are combined, and `diagnostics.suppress_system_services` entries from both profiles are appended and deduplicated.
 </Note>
 
 ### Network Configuration
