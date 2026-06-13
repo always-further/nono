@@ -52,7 +52,7 @@ brew install nono
 
 ## Run it!
 
-Search for an agent in the registry and then a simple run command:
+Search for an agent in the registry, then run it:
 
 ```bash
 $ nono search opencode
