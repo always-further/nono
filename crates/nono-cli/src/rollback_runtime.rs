@@ -187,6 +187,7 @@ fn enforce_rollback_limits(silent: bool) {
 }
 
 fn create_session_dir(root: &Path, session_id: &str) -> Result<PathBuf> {
+    validate_runtime_session_id(session_id)?;
     let session_dir = root.join(session_id);
     std::fs::create_dir_all(&session_dir).map_err(|e| {
         nono::NonoError::Snapshot(format!(
@@ -208,14 +209,30 @@ fn create_session_dir(root: &Path, session_id: &str) -> Result<PathBuf> {
     Ok(session_dir)
 }
 
-/// Create a new audit session directory with a unique ID.
-fn ensure_audit_session_dir() -> Result<(String, PathBuf)> {
-    let session_id = format!(
-        "{}-{}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S"),
-        std::process::id()
-    );
+fn validate_runtime_session_id(session_id: &str) -> Result<()> {
+    let valid = !session_id.is_empty()
+        && session_id.len() <= 64
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err(nono::NonoError::Snapshot(format!(
+            "invalid session ID: {session_id}"
+        )))
+    }
+}
 
+/// Create a new audit session directory with a unique ID.
+fn ensure_audit_session_dir(session_id: Option<&str>) -> Result<(String, PathBuf)> {
+    let session_id = session_id.map(str::to_string).unwrap_or_else(|| {
+        format!(
+            "{}-{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S"),
+            std::process::id()
+        )
+    });
     let audit_root = crate::audit_session::audit_root()?;
     let session_dir = create_session_dir(&audit_root, &session_id)?;
 
@@ -236,12 +253,13 @@ fn ensure_rollback_session_dir(
 pub(crate) fn create_audit_state(
     audit_disabled: bool,
     _rollback_destination: Option<&PathBuf>,
+    session_id: Option<&str>,
 ) -> Result<Option<AuditState>> {
     if audit_disabled {
         return Ok(None);
     }
 
-    let (session_id, session_dir) = ensure_audit_session_dir()?;
+    let (session_id, session_dir) = ensure_audit_session_dir(session_id)?;
 
     Ok(Some(AuditState {
         session_id,
@@ -615,7 +633,7 @@ mod tests {
 
     #[test]
     fn create_audit_state_returns_none_when_disabled() {
-        let result = create_audit_state(true, None).unwrap();
+        let result = create_audit_state(true, None, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -626,11 +644,26 @@ mod tests {
         let home = tmp.path().to_string_lossy().to_string();
         let _env = EnvVarGuard::set_all(&[("HOME", &home)]);
         let audit_root = crate::audit_session::audit_root().unwrap();
-        let state = create_audit_state(false, None).unwrap().unwrap();
+        let state = create_audit_state(false, None, None).unwrap().unwrap();
 
         assert!(!state.session_id.is_empty());
         assert!(state.session_dir.exists());
         assert!(state.session_dir.starts_with(audit_root));
+    }
+
+    #[test]
+    fn create_audit_state_uses_supplied_session_id() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_string_lossy().to_string();
+        let _env = EnvVarGuard::set_all(&[("HOME", &home)]);
+
+        let state = create_audit_state(false, None, Some("capture-session-123"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(state.session_id, "capture-session-123");
+        assert!(state.session_dir.exists());
     }
 
     #[test]

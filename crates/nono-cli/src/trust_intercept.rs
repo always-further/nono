@@ -399,9 +399,13 @@ fn format_outcome(outcome: &VerificationOutcome) -> String {
 mod tests {
     use super::*;
 
+    fn test_tempdir() -> tempfile::TempDir {
+        tempfile::tempdir_in("/tmp").unwrap()
+    }
+
     #[test]
     fn interceptor_ignores_non_instruction_files() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_tempdir();
         let policy = TrustPolicy::default();
         let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
 
@@ -419,7 +423,7 @@ mod tests {
 
     #[test]
     fn interceptor_ignores_bundle_sidecars() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_tempdir();
         let policy = TrustPolicy::default();
         let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
 
@@ -437,7 +441,7 @@ mod tests {
 
     #[test]
     fn interceptor_checks_instruction_files() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_tempdir();
         let skills = dir.path().join("SKILLS.md");
         std::fs::write(&skills, "# Skills").unwrap();
 
@@ -454,7 +458,7 @@ mod tests {
 
     #[test]
     fn interceptor_caches_results() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_tempdir();
         let skills = dir.path().join("SKILLS.md");
         std::fs::write(&skills, "# Skills").unwrap();
 
@@ -475,7 +479,7 @@ mod tests {
 
     #[test]
     fn interceptor_cache_invalidates_on_modify() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_tempdir();
         let skills = dir.path().join("SKILLS.md");
         std::fs::write(&skills, "# Skills v1").unwrap();
 
@@ -500,7 +504,7 @@ mod tests {
 
     #[test]
     fn interceptor_blocklist_blocks_regardless_of_enforcement() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_tempdir();
         let content = b"evil content";
         let skills = dir.path().join("SKILLS.md");
         std::fs::write(&skills, content).unwrap();

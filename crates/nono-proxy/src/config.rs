@@ -108,6 +108,11 @@ pub struct ProxyConfig {
     /// Set by CLI `--proxy-ca-validity` flag.
     #[serde(default, skip)]
     pub ca_validity: Option<std::time::Duration>,
+
+    /// Optional leaf certificate validity override for TLS interception.
+    /// Leaf expiry is capped by the issuer CA expiry.
+    #[serde(default, skip)]
+    pub leaf_validity: Option<std::time::Duration>,
 }
 
 /// Pre-generated CA key material for cross-session CA reuse.
@@ -159,6 +164,7 @@ impl Default for ProxyConfig {
             intercept_parent_ca_pems: None,
             preloaded_ca: None,
             ca_validity: None,
+            leaf_validity: None,
         }
     }
 }
@@ -243,6 +249,14 @@ pub struct RouteConfig {
     #[serde(default)]
     pub endpoint_rules: Vec<EndpointRule>,
 
+    /// Optional L7 endpoint policy with explicit allow/deny/approve routes.
+    ///
+    /// When omitted, `endpoint_rules` preserves the legacy behavior:
+    /// empty means allow-all, non-empty means default-deny with matching
+    /// rules allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_policy: Option<EndpointPolicyConfig>,
+
     /// Optional path to a PEM-encoded CA certificate file for upstream TLS.
     ///
     /// When set, the proxy trusts this CA in addition to the system roots
@@ -324,6 +338,65 @@ pub struct EndpointRule {
     pub path: String,
 }
 
+/// L7 endpoint action used by route endpoint policies.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointPolicyDecision {
+    #[default]
+    Deny,
+    Approve,
+    Allow,
+}
+
+/// Default endpoint-policy action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointPolicyDefault {
+    pub decision: EndpointPolicyDecision,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+impl Default for EndpointPolicyDefault {
+    fn default() -> Self {
+        Self {
+            decision: EndpointPolicyDecision::Deny,
+            backend: None,
+            timeout_secs: None,
+        }
+    }
+}
+
+/// An endpoint policy rule with optional approval routing metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointPolicyRule {
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Explicit L7 endpoint policy for a route.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointPolicyConfig {
+    #[serde(default)]
+    pub default: EndpointPolicyDefault,
+    #[serde(default)]
+    pub deny: Vec<EndpointPolicyRule>,
+    #[serde(default)]
+    pub approve: Vec<EndpointPolicyRule>,
+    #[serde(default)]
+    pub allow: Vec<EndpointPolicyRule>,
+}
+
 /// Pre-compiled endpoint rules for the request hot path.
 ///
 /// Built once at proxy startup from `EndpointRule` definitions. Holds
@@ -336,6 +409,41 @@ pub struct CompiledEndpointRules {
 struct CompiledRule {
     method: String,
     matcher: globset::GlobMatcher,
+}
+
+/// Compiled explicit endpoint policy for the request hot path.
+pub struct CompiledEndpointPolicy {
+    default: EndpointPolicyDefault,
+    deny: Vec<CompiledPolicyRule>,
+    approve: Vec<CompiledPolicyRule>,
+    allow: Vec<CompiledPolicyRule>,
+    explicit: bool,
+}
+
+struct CompiledPolicyRule {
+    method: String,
+    path: String,
+    matcher: globset::GlobMatcher,
+    backend: Option<String>,
+    reason: Option<String>,
+    timeout_secs: Option<u64>,
+}
+
+/// Result of evaluating a compiled endpoint policy.
+pub enum EndpointPolicyOutcome<'a> {
+    Allow {
+        rule_label: String,
+    },
+    Deny {
+        reason: Option<&'a str>,
+        rule_label: String,
+    },
+    Approve {
+        backend: Option<&'a str>,
+        reason: Option<&'a str>,
+        timeout_secs: Option<u64>,
+        rule_label: String,
+    },
 }
 
 impl CompiledEndpointRules {
@@ -371,6 +479,155 @@ impl CompiledEndpointRules {
             (r.method == "*" || r.method.eq_ignore_ascii_case(method))
                 && r.matcher.is_match(&normalized)
         })
+    }
+}
+
+impl CompiledEndpointPolicy {
+    /// Compile the route endpoint policy, preserving legacy endpoint_rules
+    /// behavior when no explicit policy is configured.
+    pub fn compile(
+        policy: Option<&EndpointPolicyConfig>,
+        legacy_rules: &[EndpointRule],
+    ) -> Result<Self, String> {
+        if let Some(policy) = policy {
+            return Self::compile_explicit(policy);
+        }
+
+        let allow = legacy_rules
+            .iter()
+            .map(|rule| EndpointPolicyRule {
+                method: rule.method.clone(),
+                path: rule.path.clone(),
+                backend: None,
+                reason: None,
+                timeout_secs: None,
+            })
+            .collect::<Vec<_>>();
+        let default = if allow.is_empty() {
+            EndpointPolicyDefault {
+                decision: EndpointPolicyDecision::Allow,
+                backend: None,
+                timeout_secs: None,
+            }
+        } else {
+            EndpointPolicyDefault::default()
+        };
+        Self::compile_explicit(&EndpointPolicyConfig {
+            default,
+            deny: Vec::new(),
+            approve: Vec::new(),
+            allow,
+        })
+        .map(|mut compiled| {
+            compiled.explicit = false;
+            compiled
+        })
+    }
+
+    fn compile_explicit(policy: &EndpointPolicyConfig) -> Result<Self, String> {
+        Ok(Self {
+            default: policy.default.clone(),
+            deny: compile_policy_rules(&policy.deny)?,
+            approve: compile_policy_rules(&policy.approve)?,
+            allow: compile_policy_rules(&policy.allow)?,
+            explicit: true,
+        })
+    }
+
+    /// `true` when the policy does not require L7 visibility.
+    #[must_use]
+    pub fn allows_all_without_l7(&self) -> bool {
+        self.deny.is_empty()
+            && self.approve.is_empty()
+            && self.allow.is_empty()
+            && self.default.decision == EndpointPolicyDecision::Allow
+    }
+
+    /// `true` when this was authored as an explicit endpoint policy.
+    #[must_use]
+    pub fn is_explicit(&self) -> bool {
+        self.explicit
+    }
+
+    /// Evaluate method+path using deny, approve, allow, default precedence.
+    #[must_use]
+    pub fn evaluate<'a>(&'a self, method: &str, path: &str) -> EndpointPolicyOutcome<'a> {
+        let normalized = normalize_path(path);
+        if let Some(rule) = first_policy_match(&self.deny, method, &normalized) {
+            return EndpointPolicyOutcome::Deny {
+                reason: rule.reason.as_deref(),
+                rule_label: format!("endpoint_policy.deny[{} {}]", rule.method, rule.path),
+            };
+        }
+        if let Some(rule) = first_policy_match(&self.approve, method, &normalized) {
+            return EndpointPolicyOutcome::Approve {
+                backend: rule.backend.as_deref(),
+                reason: rule.reason.as_deref(),
+                timeout_secs: rule.timeout_secs,
+                rule_label: format!("endpoint_policy.approve[{} {}]", rule.method, rule.path),
+            };
+        }
+        if let Some(rule) = first_policy_match(&self.allow, method, &normalized) {
+            return EndpointPolicyOutcome::Allow {
+                rule_label: format!("endpoint_policy.allow[{} {}]", rule.method, rule.path),
+            };
+        }
+
+        match self.default.decision {
+            EndpointPolicyDecision::Allow => EndpointPolicyOutcome::Allow {
+                rule_label: "endpoint_policy.default".to_string(),
+            },
+            EndpointPolicyDecision::Deny => EndpointPolicyOutcome::Deny {
+                reason: None,
+                rule_label: "endpoint_policy.default".to_string(),
+            },
+            EndpointPolicyDecision::Approve => EndpointPolicyOutcome::Approve {
+                backend: self.default.backend.as_deref(),
+                reason: None,
+                timeout_secs: self.default.timeout_secs,
+                rule_label: "endpoint_policy.default".to_string(),
+            },
+        }
+    }
+}
+
+fn compile_policy_rules(rules: &[EndpointPolicyRule]) -> Result<Vec<CompiledPolicyRule>, String> {
+    let mut compiled = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let glob = Glob::new(&rule.path)
+            .map_err(|e| format!("invalid endpoint path pattern '{}': {}", rule.path, e))?;
+        compiled.push(CompiledPolicyRule {
+            method: rule.method.clone(),
+            path: rule.path.clone(),
+            matcher: glob.compile_matcher(),
+            backend: rule.backend.clone(),
+            reason: rule.reason.clone(),
+            timeout_secs: rule.timeout_secs,
+        });
+    }
+    Ok(compiled)
+}
+
+fn first_policy_match<'a>(
+    rules: &'a [CompiledPolicyRule],
+    method: &str,
+    normalized_path: &str,
+) -> Option<&'a CompiledPolicyRule> {
+    rules.iter().find(|r| {
+        (r.method == "*" || r.method.eq_ignore_ascii_case(method))
+            && r.matcher.is_match(normalized_path)
+    })
+}
+
+impl std::fmt::Debug for CompiledEndpointPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledEndpointPolicy")
+            .field("default", &self.default)
+            .field("deny_count", &self.deny.len())
+            .field("approve_count", &self.approve.len())
+            .field("allow_count", &self.allow.len())
+            .field("explicit", &self.explicit)
+            .finish()
     }
 }
 
@@ -719,6 +976,90 @@ mod tests {
             path: "/api/[invalid".to_string(),
         }];
         assert!(CompiledEndpointRules::compile(&rules).is_err());
+    }
+
+    #[test]
+    fn test_compiled_endpoint_policy_preserves_legacy_allow_list() {
+        let rules = vec![EndpointRule {
+            method: "GET".to_string(),
+            path: "/v1/tasks/**".to_string(),
+        }];
+        let policy = CompiledEndpointPolicy::compile(None, &rules).unwrap();
+
+        assert!(matches!(
+            policy.evaluate("GET", "/v1/tasks/123"),
+            EndpointPolicyOutcome::Allow { .. }
+        ));
+        assert!(matches!(
+            policy.evaluate("POST", "/v1/tasks/123"),
+            EndpointPolicyOutcome::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn test_compiled_endpoint_policy_deny_beats_approve_and_allow() {
+        let policy = EndpointPolicyConfig {
+            default: EndpointPolicyDefault {
+                decision: EndpointPolicyDecision::Allow,
+                backend: None,
+                timeout_secs: None,
+            },
+            deny: vec![EndpointPolicyRule {
+                method: "POST".to_string(),
+                path: "/v1/tasks/*/comments".to_string(),
+                backend: None,
+                reason: Some("blocked".to_string()),
+                timeout_secs: None,
+            }],
+            approve: vec![EndpointPolicyRule {
+                method: "POST".to_string(),
+                path: "/v1/tasks/*/comments".to_string(),
+                backend: Some("terminal".to_string()),
+                reason: None,
+                timeout_secs: Some(5),
+            }],
+            allow: vec![EndpointPolicyRule {
+                method: "POST".to_string(),
+                path: "/v1/tasks/*/comments".to_string(),
+                backend: None,
+                reason: None,
+                timeout_secs: None,
+            }],
+        };
+        let compiled = CompiledEndpointPolicy::compile(Some(&policy), &[]).unwrap();
+
+        assert!(matches!(
+            compiled.evaluate("POST", "/v1/tasks/123/comments"),
+            EndpointPolicyOutcome::Deny {
+                reason: Some("blocked"),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_compiled_endpoint_policy_approve_route_carries_backend() {
+        let policy = EndpointPolicyConfig {
+            approve: vec![EndpointPolicyRule {
+                method: "GET".to_string(),
+                path: "/v1/secrets/**".to_string(),
+                backend: Some("terminal".to_string()),
+                reason: Some("sensitive endpoint".to_string()),
+                timeout_secs: Some(10),
+            }],
+            ..EndpointPolicyConfig::default()
+        };
+        let compiled = CompiledEndpointPolicy::compile(Some(&policy), &[]).unwrap();
+
+        assert!(matches!(
+            compiled.evaluate("GET", "/v1/secrets/token"),
+            EndpointPolicyOutcome::Approve {
+                backend: Some("terminal"),
+                reason: Some("sensitive endpoint"),
+                timeout_secs: Some(10),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -144,9 +144,20 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     let trust = &flags.trust;
     let proxy = &flags.proxy;
     let session = &flags.session;
+    let tool_sandbox_active = flags
+        .command_policies
+        .as_ref()
+        .is_some_and(crate::command_policy::CommandPoliciesConfig::is_active);
+    if tool_sandbox_active {
+        validate_command_policy_execution_support()?;
+    }
 
-    if let Some(blocked) =
-        config::check_blocked_command(&program, caps.allowed_commands(), caps.blocked_commands())?
+    if !tool_sandbox_active
+        && let Some(blocked) = config::check_blocked_command(
+            &program,
+            caps.allowed_commands(),
+            caps.blocked_commands(),
+        )?
     {
         return Err(NonoError::BlockedCommand {
             command: blocked,
@@ -229,6 +240,11 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     }
 
     let strategy = flags.strategy;
+    if tool_sandbox_active && !matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
+        return Err(NonoError::ConfigParse(
+            "tool-sandbox command_policies require supervised execution".to_string(),
+        ));
+    }
 
     if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
         output::print_supervised_info(flags.silent, rollback.requested, proxy.active);
@@ -236,11 +252,99 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
 
     let active_proxy = start_proxy_runtime(proxy, &mut caps)?;
     let proxy_env_vars = active_proxy.env_vars;
+    let tool_sandbox_proxy_credential_env_vars = active_proxy.tool_sandbox_credential_env_vars;
+    let tool_sandbox_trust_bundle_paths = active_proxy.tool_sandbox_trust_bundle_paths;
     let proxy_handle = active_proxy.handle;
 
-    let current_dir = execution_start_dir(&flags.workdir, &caps)?;
+    let requested_workdir =
+        flags
+            .workdir
+            .canonicalize()
+            .map_err(|e| NonoError::PathCanonicalization {
+                path: flags.workdir.to_path_buf(),
+                source: e,
+            })?;
+    let current_dir = if tool_sandbox_active {
+        requested_workdir.clone()
+    } else {
+        execution_start_dir(&flags.workdir, &caps)?
+    };
+    #[cfg(target_os = "linux")]
+    let tool_sandbox_runtime = if let Some(command_policies) = flags
+        .command_policies
+        .as_ref()
+        .filter(|config| config.is_active())
+    {
+        let runtime = crate::tool_sandbox::PreparedToolSandboxRuntime::prepare(
+            crate::tool_sandbox::ToolSandboxPrepare {
+                config: command_policies,
+                audit_context: crate::tool_sandbox::ToolSandboxAuditContext::new(
+                    flags.profile_display_name.clone(),
+                    flags.redaction_policy.clone(),
+                ),
+                allowed_commands: caps.allowed_commands(),
+                blocked_commands: caps.blocked_commands(),
+                outer_caps: &caps,
+                policy_root: &requested_workdir,
+                proxy_credential_env_vars: &tool_sandbox_proxy_credential_env_vars,
+                proxy_trust_bundle_paths: &tool_sandbox_trust_bundle_paths,
+            },
+        )?;
+        runtime.grant_outer_caps(&mut caps)?;
+        Some(runtime)
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let tool_sandbox_runtime = if let Some(command_policies) = flags
+        .command_policies
+        .as_ref()
+        .filter(|config| config.is_active())
+    {
+        let runtime = crate::tool_sandbox::PreparedToolSandboxRuntime::prepare(
+            crate::tool_sandbox::ToolSandboxPrepare {
+                config: command_policies,
+                audit_context: crate::tool_sandbox::ToolSandboxAuditContext::new(
+                    flags.profile_display_name.clone(),
+                    flags.redaction_policy.clone(),
+                ),
+                allowed_commands: caps.allowed_commands(),
+                blocked_commands: caps.blocked_commands(),
+                outer_caps: &caps,
+                policy_root: &requested_workdir,
+                proxy_credential_env_vars: &tool_sandbox_proxy_credential_env_vars,
+                proxy_trust_bundle_paths: &tool_sandbox_trust_bundle_paths,
+            },
+        )?;
+        runtime.grant_outer_caps(&mut caps)?;
+        Some(runtime)
+    } else {
+        None
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let tool_sandbox_runtime: Option<crate::tool_sandbox::PreparedToolSandboxRuntime> = None;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let tool_sandbox_initial_shim = tool_sandbox_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.shim_for_initial_command(&command[0]))
+        .map(std::path::Path::to_path_buf);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let exec_resolved_program = tool_sandbox_initial_shim
+        .clone()
+        .unwrap_or_else(|| resolved_program.clone());
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let exec_resolved_program = resolved_program.clone();
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(runtime) = tool_sandbox_runtime.as_ref()
+        && let Some(err) = runtime.validate_initial_exec(&command[0], &resolved_program)?
+    {
+        return Err(err);
+    }
+
     let executable_identity = if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
-        Some(compute_executable_identity(&resolved_program)?)
+        Some(compute_executable_identity(&exec_resolved_program)?)
     } else {
         None
     };
@@ -250,6 +354,19 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
             "--audit-sign-key requires supervised execution".to_string(),
         ));
     }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if tool_sandbox_runtime.is_some()
+        && !loaded_secrets.is_empty()
+        && tool_sandbox_initial_shim.is_none()
+    {
+        return Err(NonoError::ConfigParse(
+            "tool-sandbox brokered credentials require the initial command to run through an tool-sandbox shim; \
+             direct exec bypass cannot resolve broker tokens"
+                .to_string(),
+        ));
+    }
+
     apply_pre_fork_sandbox(strategy, &caps, flags.silent)?;
 
     // Session id shared across before- and after-hook so paired setup/teardown
@@ -292,11 +409,39 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
     #[cfg(not(unix))]
     let hook_env_vars_owned: Vec<(String, String)> = Vec::new();
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let brokered_secret_env_vars = if let Some(runtime) = tool_sandbox_runtime.as_ref() {
+        runtime.broker_secret_env_vars(&loaded_secrets)?
+    } else {
+        Vec::new()
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut env_vars: Vec<(&str, &str)> = if tool_sandbox_runtime.is_some() {
+        brokered_secret_env_vars
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect()
+    } else {
+        loaded_secrets
+            .iter()
+            .map(|secret| (secret.env_var.as_str(), secret.value.as_str()))
+            .collect()
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let mut env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()
         .map(|secret| (secret.env_var.as_str(), secret.value.as_str()))
         .collect();
     for (key, value) in &proxy_env_vars {
+        env_vars.push((key.as_str(), value.as_str()));
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let tool_sandbox_env_vars = tool_sandbox_runtime
+        .as_ref()
+        .map(crate::tool_sandbox::PreparedToolSandboxRuntime::env_overrides)
+        .unwrap_or_default();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    for (key, value) in &tool_sandbox_env_vars {
         env_vars.push((key.as_str(), value.as_str()));
     }
 
@@ -370,12 +515,13 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
 
     let config = exec_strategy::ExecConfig {
         command: &command,
-        resolved_program: &resolved_program,
+        resolved_program: &exec_resolved_program,
         caps: &caps,
         env_vars,
         cap_file: &cap_file_path,
         current_dir: &current_dir,
         no_diagnostics: flags.no_diagnostics || flags.silent,
+        diagnostic_verbosity: flags.diagnostic_verbosity,
         threading,
         protected_paths: &trust.protected_paths,
         profile_save_base: flags
@@ -400,6 +546,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         af_unix_mediation: flags.af_unix_mediation,
         allowed_env_vars: flags.allowed_env_vars,
         denied_env_vars: flags.denied_env_vars,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        tool_sandbox_runtime: tool_sandbox_runtime.as_ref(),
     };
 
     match strategy {
@@ -408,7 +556,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
             unreachable!("execute_direct only returns on error");
         }
         exec_strategy::ExecStrategy::Supervised => {
-            let exit_code = execute_supervised_runtime(SupervisedRuntimeContext {
+            let exit_result = execute_supervised_runtime(SupervisedRuntimeContext {
                 config: &config,
                 caps: &caps,
                 command: &command,
@@ -421,7 +569,17 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 audit_signer: audit_signer.as_ref(),
                 redaction_policy: &flags.redaction_policy,
                 silent: flags.silent,
-            })?;
+            });
+
+            // Runtime dir cleanup must run on both Ok and Err paths because
+            // `process::exit` (below for Ok, in main.rs for Err) bypasses Drop
+            // chains, leaking the per-invocation /run/user/$UID/nono-tool-sandbox-* or
+            // /tmp/nono-tool-sandbox-* dir otherwise.
+            if let Some(rt) = tool_sandbox_runtime.as_ref() {
+                rt.cleanup_runtime_dir();
+            }
+
+            let exit_code = exit_result?;
 
             // ---- After-hook execution (Unix-only) ----
             #[cfg(unix)]
@@ -443,8 +601,23 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
             // session directory under `~/.nono/sessions/`. Without this
             // every supervised-mode session leaks a file + directory.
             drop(proxy_handle);
+            crate::tool_sandbox::log_main_total();
             std::process::exit(exit_code);
         }
+    }
+}
+
+fn validate_command_policy_execution_support() -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(NonoError::UnsupportedPlatform(
+            "tool-sandbox command_policies are only supported on Linux and macOS".to_string(),
+        ))
     }
 }
 
@@ -503,7 +676,10 @@ fn write_capability_state_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_executable_identity, recommended_builtin_profile};
+    use super::{
+        compute_executable_identity, recommended_builtin_profile,
+        validate_command_policy_execution_support,
+    };
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::Path;
@@ -539,5 +715,11 @@ mod tests {
             binary.canonicalize().expect("canonical")
         );
         assert_eq!(identity.sha256.as_bytes(), &<[u8; 32]>::from(expected));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn command_policy_execution_supported_on_current_platform() {
+        assert!(validate_command_policy_execution_support().is_ok());
     }
 }

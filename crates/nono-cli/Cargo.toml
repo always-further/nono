@@ -82,6 +82,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
 globset = "0.4"
+regex = "1"
 urlencoding = "2"
 tempfile.workspace = true
 vt100 = "0.16.2"
@@ -110,6 +111,7 @@ serde.workspace = true
 [dev-dependencies]
 jsonschema = "0.46"
 proptest = "1"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [lints]
 workspace = true

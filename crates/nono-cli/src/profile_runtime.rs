@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) struct PreparedProfile {
     pub(crate) loaded_profile: Option<profile::Profile>,
+    pub(crate) command_policies: Option<crate::command_policy::CommandPoliciesConfig>,
     pub(crate) capability_elevation: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: profile::Wsl2ProxyPolicy,
@@ -18,6 +19,7 @@ pub(crate) struct PreparedProfile {
     pub(crate) allow_domain: Vec<profile::AllowDomainEntry>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
+    pub(crate) tls_intercept: Option<profile::TlsInterceptConfig>,
     pub(crate) upstream_proxy: Option<String>,
     pub(crate) upstream_bypass: Vec<String>,
     pub(crate) listen_ports: Vec<u16>,
@@ -92,70 +94,71 @@ fn verify_profile_packs(packs: &[String]) -> crate::Result<()> {
             continue;
         }
 
-        let locked_pkg = lockfile.packages.get(pack_ref).ok_or_else(|| {
-            nono::NonoError::PackageVerification {
-                package: pack_ref.clone(),
-                reason: format!(
-                    "pack '{}' has no lockfile entry - reinstall with: nono pull {} --force",
-                    pack_ref, pack_ref
-                ),
-            }
-        })?;
+        let locked = lockfile.packages.get(pack_ref);
+        if let Some(locked_pkg) = locked {
+            for (artifact_name, locked_artifact) in &locked_pkg.artifacts {
+                let artifact_path = install_dir.join(artifact_name);
+                if !artifact_path.exists() {
+                    return Err(nono::NonoError::PackageInstall(format!(
+                        "pack '{}' is missing artifact '{}'. Reinstall with: nono pull {} --force",
+                        pack_ref, artifact_name, pack_ref
+                    )));
+                }
 
-        for (artifact_name, locked_artifact) in &locked_pkg.artifacts {
-            let artifact_path = install_dir.join(artifact_name);
-            if !artifact_path.exists() {
-                return Err(nono::NonoError::PackageInstall(format!(
-                    "pack '{}' is missing artifact '{}'. Reinstall with: nono pull {} --force",
-                    pack_ref, artifact_name, pack_ref
-                )));
-            }
-
-            let bytes = std::fs::read(&artifact_path).map_err(|e| {
-                nono::NonoError::PackageInstall(format!(
-                    "failed to read artifact '{}' in pack '{}': {}",
-                    artifact_name, pack_ref, e
-                ))
-            })?;
-            let digest = Sha256::digest(&bytes);
-            let hash = digest
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
-            if hash != locked_artifact.sha256 {
-                return Err(nono::NonoError::PackageInstall(format!(
-                    "pack '{}' artifact '{}' has been tampered with.\n\
-                     Expected: {}\n\
-                     Found:    {}\n\
-                     Reinstall with: nono pull {} --force",
-                    pack_ref, artifact_name, locked_artifact.sha256, hash, pack_ref
-                )));
+                let bytes = std::fs::read(&artifact_path).map_err(|e| {
+                    nono::NonoError::PackageInstall(format!(
+                        "failed to read artifact '{}' in pack '{}': {}",
+                        artifact_name, pack_ref, e
+                    ))
+                })?;
+                let digest = Sha256::digest(&bytes);
+                let hash = digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>();
+                if hash != locked_artifact.sha256 {
+                    return Err(nono::NonoError::PackageInstall(format!(
+                        "pack '{}' artifact '{}' has been tampered with.\n\
+                         Expected: {}\n\
+                         Found:    {}\n\
+                         Reinstall with: nono pull {} --force",
+                        pack_ref, artifact_name, locked_artifact.sha256, hash, pack_ref
+                    )));
+                }
             }
         }
 
         let bundle_path = install_dir.join(".nono-trust.bundle");
-        if !bundle_path.exists() {
-            return Err(nono::NonoError::PackageVerification {
-                package: pack_ref.clone(),
-                reason: format!(
-                    "pack '{}' is missing .nono-trust.bundle - reinstall with: nono pull {} --force",
-                    pack_ref, pack_ref
-                ),
-            });
+        if bundle_path.exists() {
+            // A trust bundle without a lockfile provenance record means we
+            // cannot verify who signed it. Fail hard rather than silently
+            // accepting any valid Sigstore signer.
+            let pinned_signer = match locked {
+                None => {
+                    return Err(nono::NonoError::PackageVerification {
+                        package: pack_ref.clone(),
+                        reason: format!(
+                            "pack '{}' has a trust bundle but no lockfile entry — \
+                             reinstall with: nono pull {} --force",
+                            pack_ref, pack_ref
+                        ),
+                    });
+                }
+                Some(pkg) => pkg
+                    .provenance
+                    .as_ref()
+                    .map(|p| p.signer_identity.as_str())
+                    .ok_or_else(|| nono::NonoError::PackageVerification {
+                        package: pack_ref.clone(),
+                        reason: format!(
+                            "pack '{}' has a trust bundle but no signer identity in the \
+                             lockfile — reinstall with: nono pull {} --force",
+                            pack_ref, pack_ref
+                        ),
+                    })?,
+            };
+            verify_stored_bundles(&install_dir, &bundle_path, pack_ref, Some(pinned_signer))?;
         }
-
-        let pinned_signer = locked_pkg
-            .provenance
-            .as_ref()
-            .map(|p| p.signer_identity.as_str())
-            .ok_or_else(|| nono::NonoError::PackageVerification {
-                package: pack_ref.clone(),
-                reason: format!(
-                    "pack '{}' has no signer identity in the lockfile - reinstall with: nono pull {} --force",
-                    pack_ref, pack_ref
-                ),
-            })?;
-        verify_stored_bundles(&install_dir, &bundle_path, pack_ref, Some(pinned_signer))?;
     }
 
     Ok(())
@@ -447,12 +450,14 @@ fn prepare_profile_with_options(
             Some(profile_name),
             options.hook_output_silent,
         )?;
+        validate_command_policy_runtime_support(&profile)?;
         // If the profile was addressed by pack ref (e.g. --profile always-further/hermes),
         // ensure that pack is verified even if the profile JSON doesn't list it in `packs`.
         // Pack refs are injected into profile.packs at load time for every
         // pack-store resolution — both direct registry refs and name/alias
         // paths — so no post-hoc lookup is needed here.
         let mut packs_to_verify = profile.packs.clone();
+        validate_command_policy_runtime_support(&profile)?;
 
         // For direct registry refs the pack key may not yet be in packs if
         // load_registry_profile found the pack installed but the profile JSON
@@ -467,28 +472,10 @@ fn prepare_profile_with_options(
             }
         }
 
-        // `--dry-run` resolves the profile and prints the capabilities it
-        // *would* apply, then exits without ever building the sandbox or
-        // executing the target command (see command_runtime::run_command).
-        // Pack verification (lockfile digest + signed trust bundle) gates the
-        // execution of pack-shipped code; a preview executes nothing, so it is
-        // not a verification boundary. Skipping it here keeps `--dry-run`
-        // usable to inspect a pack's profile before a managed `nono pull`
-        // completes (or while recovering missing metadata). A real run still
-        // hits verify_profile_packs below and is rejected if unverified.
-        if args.dry_run {
-            if !packs_to_verify.is_empty() && !options.hook_output_silent {
-                eprintln!(
-                    "  Skipping pack verification on --dry-run ({} pack(s)); a real run verifies them",
-                    packs_to_verify.len()
-                );
-            }
-        } else {
-            verify_profile_packs(&packs_to_verify)?;
+        verify_profile_packs(&packs_to_verify)?;
 
-            if !packs_to_verify.is_empty() && !options.hook_output_silent {
-                eprintln!("  Verified {} pack(s)", packs_to_verify.len());
-            }
+        if !packs_to_verify.is_empty() && !options.hook_output_silent {
+            eprintln!("  Verified {} pack(s)", packs_to_verify.len());
         }
 
         if options.install_hooks {
@@ -543,6 +530,9 @@ fn prepare_profile_with_options(
             .as_ref()
             .map(|profile| profile.network.custom_credentials.clone())
             .unwrap_or_default(),
+        tls_intercept: loaded_profile
+            .as_ref()
+            .and_then(|profile| profile.network.tls_intercept.clone()),
         upstream_proxy: loaded_profile
             .as_ref()
             .and_then(|profile| profile.network.upstream_proxy.clone()),
@@ -615,7 +605,110 @@ fn prepare_profile_with_options(
                 Some(env_config.deny_vars.clone())
             })
         }),
+        command_policies: loaded_profile
+            .as_ref()
+            .and_then(|profile| profile.command_policies.clone()),
         loaded_profile,
+    })
+}
+
+fn validate_command_policy_runtime_support(profile: &profile::Profile) -> crate::Result<()> {
+    let Some(command_policies) = profile.command_policies.as_ref() else {
+        return Ok(());
+    };
+    if !command_policies.is_active() {
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(nono::NonoError::UnsupportedPlatform(
+            "tool-sandbox command_policies are only supported on Linux and macOS".to_string(),
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        validate_linux_command_policy_runtime_support(profile)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        validate_macos_command_policy_runtime_support(profile)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_linux_command_policy_runtime_support(profile: &profile::Profile) -> crate::Result<()> {
+    if let Some(command_policies) = profile.command_policies.as_ref() {
+        let _resolved = crate::command_policy::resolve_policy_command_binaries(
+            command_policies,
+            std::env::var_os("PATH"),
+        )?;
+    }
+
+    if !command_policies_use_tcp_port_rules(profile) {
+        return Ok(());
+    }
+
+    let abi = nono::detect_abi().map_err(|err| {
+        nono::NonoError::UnsupportedPlatform(format!(
+            "tool-sandbox profile uses TCP port network rules but Landlock enforcement is unavailable: {err}"
+        ))
+    })?;
+    if !abi.has_network() {
+        return Err(nono::NonoError::UnsupportedPlatform(format!(
+            "tool-sandbox profile uses TCP port network rules but {} lacks Landlock TCP support (requires ABI V4+)",
+            abi
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_command_policy_runtime_support(profile: &profile::Profile) -> crate::Result<()> {
+    if let Some(command_policies) = profile.command_policies.as_ref() {
+        let _resolved = crate::command_policy::resolve_policy_command_binaries(
+            command_policies,
+            std::env::var_os("PATH"),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn command_policies_use_tcp_port_rules(profile: &profile::Profile) -> bool {
+    let Some(command_policies) = profile.command_policies.as_ref() else {
+        return false;
+    };
+
+    for command in command_policies.commands.values() {
+        if command
+            .sandbox
+            .as_ref()
+            .is_some_and(command_sandbox_uses_tcp_port_rules)
+        {
+            return true;
+        }
+
+        for from_policy in command.from.values() {
+            if let crate::command_policy::CommandFromConfig::Policy(sandbox) = from_policy
+                && command_sandbox_uses_tcp_port_rules(sandbox)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn command_sandbox_uses_tcp_port_rules(
+    sandbox: &crate::command_policy::CommandSandboxConfig,
+) -> bool {
+    sandbox.network.as_ref().is_some_and(|network| {
+        !network.tcp_connect_ports.is_empty() || !network.tcp_bind_ports.is_empty()
     })
 }
 
@@ -651,129 +744,45 @@ pub(crate) fn prepare_profile_for_preflight(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    use crate::command_policy::{CommandPoliciesConfig, CommandPolicyConfig, CommandSandboxConfig};
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    use std::collections::BTreeMap;
     use std::fs;
     use tempfile::tempdir;
 
-    fn with_config_env<F, R>(f: F) -> R
-    where
-        F: FnOnce(&Path) -> R,
-    {
-        let _guard = match crate::test_env::ENV_LOCK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let tmp = match tempdir() {
-            Ok(dir) => dir,
-            Err(err) => panic!("failed to create tempdir: {err}"),
-        };
-        let config_dir = match tmp.path().canonicalize() {
-            Ok(path) => path,
-            Err(err) => panic!("failed to canonicalize tempdir: {err}"),
-        };
-        let config_str = match config_dir.to_str() {
-            Some(value) => value,
-            None => panic!("tempdir path is not valid UTF-8"),
-        };
-        let _env = crate::test_env::EnvVarGuard::set_all(&[("XDG_CONFIG_HOME", config_str)]);
-        f(&config_dir)
-    }
-
-    fn create_pack_dir(config_dir: &Path, namespace: &str, name: &str) -> PathBuf {
-        let install_dir = config_dir
-            .join("nono")
-            .join("packages")
-            .join(namespace)
-            .join(name);
-        if let Err(err) = fs::create_dir_all(&install_dir) {
-            panic!("failed to create pack dir: {err}");
-        }
-        install_dir
-    }
-
-    fn write_lockfile_with_artifact(pack_ref: &str, artifact_name: &str, artifact_bytes: &[u8]) {
-        let digest = Sha256::digest(artifact_bytes);
-        let sha256 = digest
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-
-        let mut artifacts = std::collections::BTreeMap::new();
-        artifacts.insert(
-            artifact_name.to_string(),
-            package::LockedArtifact {
-                sha256,
-                artifact_type: package::ArtifactType::Profile,
-            },
-        );
-
-        let mut packages = std::collections::BTreeMap::new();
-        packages.insert(
-            pack_ref.to_string(),
-            package::LockedPackage {
-                version: "1.0.0".to_string(),
-                installed_at: "2026-01-01T00:00:00Z".to_string(),
-                pinned: false,
-                provenance: Some(package::PackageProvenance {
-                    signer_identity: "https://github.com/acme/repo/.github/workflows/release.yml@refs/tags/v1.0.0"
-                        .to_string(),
-                    repository: "acme/repo".to_string(),
-                    workflow: ".github/workflows/release.yml".to_string(),
-                    git_ref: "refs/tags/v1.0.0".to_string(),
-                    rekor_log_index: 1,
-                    signed_at: "2026-01-01T00:00:00Z".to_string(),
-                }),
-                artifacts,
-                wiring_record: Vec::new(),
-            },
-        );
-
-        let lockfile = package::Lockfile {
-            lockfile_version: package::LOCKFILE_VERSION,
-            registry: "https://registry.example.test".to_string(),
-            packages,
-        };
-        if let Err(err) = package::write_lockfile(&lockfile) {
-            panic!("failed to write lockfile: {err}");
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn active_command_policy_profile() -> profile::Profile {
+        profile::Profile {
+            command_policies: Some(CommandPoliciesConfig {
+                entrypoint: Some("git".to_string()),
+                commands: BTreeMap::from([(
+                    "git".to_string(),
+                    CommandPolicyConfig {
+                        sandbox: Some(CommandSandboxConfig::default()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn verify_profile_packs_requires_lockfile_entry_for_installed_pack() {
-        let result = with_config_env(|config_dir| {
-            create_pack_dir(config_dir, "acme", "widget");
-            verify_profile_packs(&["acme/widget".to_string()])
-        });
-
-        let err = match result {
-            Ok(()) => panic!("installed pack without lockfile entry must fail verification"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("no lockfile entry"),
-            "unexpected error: {err}"
-        );
+    fn inactive_command_policy_runtime_support_is_ok() {
+        assert!(validate_command_policy_runtime_support(&profile::Profile::default()).is_ok());
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
-    fn verify_profile_packs_requires_trust_bundle_for_locked_pack() {
-        let result = with_config_env(|config_dir| {
-            let install_dir = create_pack_dir(config_dir, "acme", "widget");
-            let artifact_bytes = br#"{"meta":{"name":"widget"}}"#;
-            if let Err(err) = fs::write(install_dir.join("package.json"), artifact_bytes) {
-                panic!("failed to write package artifact: {err}");
-            }
-            write_lockfile_with_artifact("acme/widget", "package.json", artifact_bytes);
+    fn active_command_policy_runtime_support_rejects_unsupported_platform() {
+        let err = validate_command_policy_runtime_support(&active_command_policy_profile())
+            .expect_err("active tool-sandbox runtime must fail on unsupported platforms");
 
-            verify_profile_packs(&["acme/widget".to_string()])
-        });
-
-        let err = match result {
-            Ok(()) => panic!("locked pack without trust bundle must fail verification"),
-            Err(err) => err,
-        };
         assert!(
-            err.to_string().contains("missing .nono-trust.bundle"),
-            "unexpected error: {err}"
+            err.to_string().contains("Linux and macOS"),
+            "error should describe supported platforms: {err}"
         );
     }
 

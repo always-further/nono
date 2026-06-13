@@ -12,7 +12,8 @@
 //! inner requests are not required to carry a token.
 
 use crate::audit;
-use crate::config::InjectMode;
+use crate::capture::CredentialCaptureBackend;
+use crate::config::{EndpointPolicyOutcome, InjectMode};
 use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
@@ -44,6 +45,8 @@ pub struct InterceptCtx<'a> {
     pub tls_connector: &'a tokio_rustls::TlsConnector,
     pub filter: &'a ProxyFilter,
     pub audit_log: Option<&'a audit::SharedAuditLog>,
+    pub approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+    pub credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
 }
 
 /// Handle a CONNECT request that matched a route requiring L7 visibility.
@@ -181,17 +184,276 @@ where
     let mut has_endpoint_only_route = false;
     let mut endpoint_authorized = false;
     for (prefix, route) in &candidates {
-        if route.endpoint_rules.is_empty() {
+        if route.endpoint_policy.allows_all_without_l7() {
             if catch_all.is_none() {
                 catch_all = Some((prefix, route));
             }
-        } else if route.endpoint_rules.is_allowed(&method, &path) {
-            matches.push((prefix, route));
-            if !route.requires_managed_credential {
-                endpoint_authorized = true;
+            continue;
+        }
+        match route.endpoint_policy.evaluate(&method, &path) {
+            EndpointPolicyOutcome::Allow { rule_label } => {
+                audit::log_l7_policy_decision(
+                    ctx.audit_log,
+                    audit::ProxyMode::ConnectIntercept,
+                    &audit::EventContext {
+                        route_id: Some(prefix),
+                        endpoint_policy_action: Some("allow"),
+                        endpoint_policy_rule: Some(&rule_label),
+                        upstream: Some(&route.upstream),
+                        ..audit::EventContext::default()
+                    },
+                    ctx.host,
+                    Some(ctx.port),
+                    &method,
+                    &path,
+                    nono::undo::NetworkAuditDecision::Allow,
+                    "allow",
+                    &rule_label,
+                    None,
+                );
+                matches.push((prefix, route));
+                if !route.requires_managed_credential {
+                    endpoint_authorized = true;
+                }
             }
-        } else if !route.requires_managed_credential {
-            has_endpoint_only_route = true;
+            EndpointPolicyOutcome::Approve {
+                backend,
+                reason,
+                timeout_secs,
+                rule_label,
+            } => {
+                let Some(approval_backends) = ctx.approval_backends.clone() else {
+                    let deny_reason = format!(
+                        "endpoint approval required by {} but no approval backend is configured",
+                        rule_label
+                    );
+                    warn!("tls_intercept: {}", deny_reason);
+                    audit::log_denied(
+                        ctx.audit_log,
+                        audit::ProxyMode::ConnectIntercept,
+                        &audit::EventContext {
+                            denial_category: Some(
+                                nono::undo::NetworkAuditDenialCategory::EndpointPolicy,
+                            ),
+                            route_id: Some(prefix),
+                            endpoint_policy_action: Some("approve"),
+                            endpoint_policy_rule: Some(&rule_label),
+                            upstream: Some(&route.upstream),
+                            ..audit::EventContext::default()
+                        },
+                        ctx.host,
+                        ctx.port,
+                        &deny_reason,
+                    );
+                    reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
+                    return Ok(());
+                };
+                let (backend_name, backend) = match approval_backends.resolve(backend) {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        let deny_reason =
+                            format!("endpoint approval backend resolution failed: {err}");
+                        warn!("tls_intercept: {}", deny_reason);
+                        audit::log_l7_policy_decision(
+                            ctx.audit_log,
+                            audit::ProxyMode::ConnectIntercept,
+                            &audit::EventContext {
+                                denial_category: Some(
+                                    nono::undo::NetworkAuditDenialCategory::EndpointPolicy,
+                                ),
+                                route_id: Some(prefix),
+                                endpoint_policy_action: Some("approve"),
+                                endpoint_policy_rule: Some(&rule_label),
+                                upstream: Some(&route.upstream),
+                                ..audit::EventContext::default()
+                            },
+                            ctx.host,
+                            Some(ctx.port),
+                            &method,
+                            &path,
+                            nono::undo::NetworkAuditDecision::ApproveError,
+                            "approve",
+                            &rule_label,
+                            Some(&deny_reason),
+                        );
+                        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
+                        return Ok(());
+                    }
+                };
+                let request_reason = reason.map(str::to_string).unwrap_or_else(|| {
+                    format!(
+                        "endpoint approval required by {} for {} {}",
+                        rule_label, method, path
+                    )
+                });
+                let approval_ctx = audit::EventContext {
+                    route_id: Some(prefix),
+                    endpoint_policy_action: Some("approve"),
+                    endpoint_policy_rule: Some(&rule_label),
+                    approval_backend: Some(&backend_name),
+                    upstream: Some(&route.upstream),
+                    ..audit::EventContext::default()
+                };
+                audit::log_l7_policy_decision(
+                    ctx.audit_log,
+                    audit::ProxyMode::ConnectIntercept,
+                    &approval_ctx,
+                    ctx.host,
+                    Some(ctx.port),
+                    &method,
+                    &path,
+                    nono::undo::NetworkAuditDecision::ApproveRequested,
+                    "approve",
+                    &rule_label,
+                    Some(&request_reason),
+                );
+                let request = nono::supervisor::ApprovalRequest::Endpoint {
+                    request_id: format!("proxy-endpoint-approval-{}-{}", ctx.host, ctx.port),
+                    route_id: (*prefix).to_string(),
+                    upstream: route.upstream.clone(),
+                    method: method.clone(),
+                    path: path.clone(),
+                    rule_label: rule_label.clone(),
+                    reason: Some(request_reason),
+                    child_pid: 0,
+                    session_id: "proxy".to_string(),
+                };
+                let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(60));
+                let decision = tokio::time::timeout(
+                    timeout,
+                    tokio::task::spawn_blocking(move || backend.request_approval(&request)),
+                )
+                .await;
+                match decision {
+                    Ok(Ok(Ok(decision))) if decision.is_granted() => {
+                        audit::log_l7_policy_decision(
+                            ctx.audit_log,
+                            audit::ProxyMode::ConnectIntercept,
+                            &approval_ctx,
+                            ctx.host,
+                            Some(ctx.port),
+                            &method,
+                            &path,
+                            nono::undo::NetworkAuditDecision::ApproveGranted,
+                            "approve",
+                            &rule_label,
+                            None,
+                        );
+                        matches.push((prefix, route));
+                        if !route.requires_managed_credential {
+                            endpoint_authorized = true;
+                        }
+                    }
+                    Ok(Ok(Ok(_))) => {
+                        audit::log_l7_policy_decision(
+                            ctx.audit_log,
+                            audit::ProxyMode::ConnectIntercept,
+                            &approval_ctx,
+                            ctx.host,
+                            Some(ctx.port),
+                            &method,
+                            &path,
+                            nono::undo::NetworkAuditDecision::ApproveDenied,
+                            "approve",
+                            &rule_label,
+                            Some("endpoint approval denied"),
+                        );
+                        if !route.requires_managed_credential {
+                            has_endpoint_only_route = true;
+                        }
+                    }
+                    Ok(Ok(Err(err))) => {
+                        let deny_reason = format!("endpoint approval backend error: {err}");
+                        audit::log_l7_policy_decision(
+                            ctx.audit_log,
+                            audit::ProxyMode::ConnectIntercept,
+                            &approval_ctx,
+                            ctx.host,
+                            Some(ctx.port),
+                            &method,
+                            &path,
+                            nono::undo::NetworkAuditDecision::ApproveError,
+                            "approve",
+                            &rule_label,
+                            Some(&deny_reason),
+                        );
+                        warn!("{}", deny_reason);
+                        if !route.requires_managed_credential {
+                            has_endpoint_only_route = true;
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        let deny_reason = format!("endpoint approval task failed: {err}");
+                        audit::log_l7_policy_decision(
+                            ctx.audit_log,
+                            audit::ProxyMode::ConnectIntercept,
+                            &approval_ctx,
+                            ctx.host,
+                            Some(ctx.port),
+                            &method,
+                            &path,
+                            nono::undo::NetworkAuditDecision::ApproveError,
+                            "approve",
+                            &rule_label,
+                            Some(&deny_reason),
+                        );
+                        warn!("{}", deny_reason);
+                        if !route.requires_managed_credential {
+                            has_endpoint_only_route = true;
+                        }
+                    }
+                    Err(_) => {
+                        let deny_reason = format!(
+                            "endpoint approval timed out by {}: {} {} on route '{}'",
+                            rule_label, method, path, prefix
+                        );
+                        audit::log_l7_policy_decision(
+                            ctx.audit_log,
+                            audit::ProxyMode::ConnectIntercept,
+                            &approval_ctx,
+                            ctx.host,
+                            Some(ctx.port),
+                            &method,
+                            &path,
+                            nono::undo::NetworkAuditDecision::ApproveTimeout,
+                            "approve",
+                            &rule_label,
+                            Some(&deny_reason),
+                        );
+                        warn!("{}", deny_reason);
+                        if !route.requires_managed_credential {
+                            has_endpoint_only_route = true;
+                        }
+                    }
+                }
+            }
+            EndpointPolicyOutcome::Deny { reason, rule_label } => {
+                let deny_reason = reason.unwrap_or("endpoint denied by policy");
+                audit::log_l7_policy_decision(
+                    ctx.audit_log,
+                    audit::ProxyMode::ConnectIntercept,
+                    &audit::EventContext {
+                        route_id: Some(prefix),
+                        denial_category: Some(
+                            nono::undo::NetworkAuditDenialCategory::EndpointPolicy,
+                        ),
+                        endpoint_policy_action: Some("deny"),
+                        endpoint_policy_rule: Some(&rule_label),
+                        upstream: Some(&route.upstream),
+                        ..audit::EventContext::default()
+                    },
+                    ctx.host,
+                    Some(ctx.port),
+                    &method,
+                    &path,
+                    nono::undo::NetworkAuditDecision::Deny,
+                    "deny",
+                    &rule_label,
+                    Some(deny_reason),
+                );
+                reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
+                return Ok(());
+            }
         }
     }
 
@@ -274,11 +536,16 @@ where
         ),
     }
 
-    let cred = service.and_then(|s| ctx.credential_store.get(s));
+    let static_cred = service.and_then(|s| ctx.credential_store.get(s));
+    let cmd_route = service.and_then(|s| ctx.credential_store.get_cmd(s));
     let oauth2_route = service.and_then(|s| ctx.credential_store.get_oauth2(s));
 
     if let Some(rt) = route
-        && rt.missing_managed_credential(cred.is_some(), oauth2_route.is_some())
+        && rt.missing_managed_credential(
+            static_cred.is_some()
+                || (cmd_route.is_some() && ctx.credential_capture_backend.is_some()),
+            oauth2_route.is_some(),
+        )
     {
         let svc = service.unwrap_or("unknown");
         let reason = format!(
@@ -298,6 +565,7 @@ where
                 denial_category: Some(
                     nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
                 ),
+                ..audit::EventContext::default()
             },
             ctx.host,
             ctx.port,
@@ -306,6 +574,54 @@ where
         reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
         return Ok(());
     }
+
+    let captured_credential = if let (Some(svc), Some(cmd)) = (service, cmd_route)
+        && static_cred.is_none()
+    {
+        match reverse::capture_cmd_credential(
+            cmd,
+            svc,
+            route.map(|r| r.upstream.as_str()).unwrap_or(""),
+            &path,
+            &method,
+            ctx.host,
+            ctx.port,
+            audit::ProxyMode::ConnectIntercept,
+            ctx.audit_log,
+            ctx.credential_capture_backend.clone(),
+        )
+        .await
+        {
+            Ok(credential) => Some(credential),
+            Err(err) => {
+                let reason = err.to_string();
+                warn!("tls_intercept: {}", reason);
+                audit::log_denied(
+                    ctx.audit_log,
+                    audit::ProxyMode::ConnectIntercept,
+                    &audit::EventContext {
+                        route_id: service,
+                        auth_mechanism: route.and_then(|r| r.managed_auth_mechanism.clone()),
+                        auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                        managed_credential_active: Some(false),
+                        injection_mode: route.and_then(|r| r.managed_injection_mode.clone()),
+                        denial_category: Some(
+                            nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                        ),
+                        ..audit::EventContext::default()
+                    },
+                    ctx.host,
+                    ctx.port,
+                    &reason,
+                );
+                reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let cred = static_cred.or(captured_credential.as_ref());
 
     // --- Path / credential transformation ---
     let transformed_path = if let Some(cred) = cred {
@@ -375,11 +691,11 @@ where
     if let Some(cred) = cred {
         reverse::inject_credential_for_mode(cred, &mut request);
     }
-    let auth_header_lower = cred.map(|c| c.header_name.to_lowercase());
+    let injected_header_names = reverse::injected_credential_header_names(cred);
     for (name, value) in &filtered_headers {
-        if let (Some(cred), Some(hdr)) = (cred, auth_header_lower.as_ref())
-            && matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
-            && name.to_lowercase() == *hdr
+        if injected_header_names
+            .iter()
+            .any(|header| name.eq_ignore_ascii_case(header))
         {
             continue;
         }
@@ -425,6 +741,7 @@ where
                 InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
             }),
             denial_category: None,
+            ..audit::EventContext::default()
         },
         target: ctx.host,
         method: &method,
@@ -463,6 +780,7 @@ where
                 denial_category: Some(
                     nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
                 ),
+                ..audit::EventContext::default()
             },
             ctx.host,
             ctx.port,

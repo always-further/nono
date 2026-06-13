@@ -417,6 +417,8 @@ struct PendingCwdAccessRequest {
 pub(crate) struct PreparedSandbox {
     pub(crate) caps: CapabilitySet,
     pub(crate) secrets: Vec<nono::LoadedSecret>,
+    pub(crate) profile_display_name: Option<String>,
+    pub(crate) command_policies: Option<crate::command_policy::CommandPoliciesConfig>,
     pub(crate) session_hooks: profile::SessionHooks,
     pub(crate) rollback_exclude_patterns: Vec<String>,
     pub(crate) rollback_exclude_globs: Vec<String>,
@@ -424,6 +426,8 @@ pub(crate) struct PreparedSandbox {
     pub(crate) allow_domain: Vec<profile::AllowDomainEntry>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
+    pub(crate) credential_capture: HashMap<String, profile::CredentialCaptureEntry>,
+    pub(crate) tls_intercept: Option<profile::TlsInterceptConfig>,
     pub(crate) upstream_proxy: Option<String>,
     pub(crate) upstream_bypass: Vec<String>,
     pub(crate) listen_ports: Vec<u16>,
@@ -1050,6 +1054,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             PreparedSandbox {
                 caps,
                 secrets: Vec::new(),
+                profile_display_name: None,
+                command_policies: None,
                 session_hooks: profile::SessionHooks::default(),
                 rollback_exclude_patterns,
                 rollback_exclude_globs,
@@ -1057,6 +1063,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 allow_domain,
                 credentials,
                 custom_credentials: HashMap::new(),
+                credential_capture: HashMap::new(),
+                tls_intercept: None,
                 upstream_proxy: None,
                 upstream_bypass: Vec::new(),
                 listen_ports: Vec::new(),
@@ -1084,6 +1092,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
     let prepared_profile = prepare_profile(args, silent, &workdir)?;
     let crate::profile_runtime::PreparedProfile {
         loaded_profile,
+        command_policies,
         capability_elevation,
         #[cfg(target_os = "linux")]
         wsl2_proxy_policy,
@@ -1096,6 +1105,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         allow_domain: profile_allow_domain,
         credentials: profile_credentials,
         custom_credentials: profile_custom_credentials,
+        tls_intercept: profile_tls_intercept,
         upstream_proxy: profile_upstream_proxy,
         upstream_bypass: profile_upstream_bypass,
         listen_ports: profile_listen_ports,
@@ -1353,7 +1363,16 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
     let network_block_requested = args.block_net || profile_network_block;
 
     let profile_secrets = loaded_profile
-        .map(|profile| profile.env_credentials.mappings)
+        .as_ref()
+        .map(|profile| profile.env_credentials.mappings.clone())
+        .unwrap_or_default();
+    let profile_display_name = loaded_profile
+        .as_ref()
+        .map(|profile| profile.meta.name.clone())
+        .filter(|name| !name.is_empty());
+    let profile_credential_capture = loaded_profile
+        .as_ref()
+        .map(|profile| profile.credential_capture.clone())
         .unwrap_or_default();
     let loaded_secrets = load_env_credentials(args, &profile_secrets, silent)?;
 
@@ -1361,6 +1380,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         PreparedSandbox {
             caps,
             secrets: loaded_secrets,
+            profile_display_name,
+            command_policies,
             session_hooks,
             rollback_exclude_patterns: profile_rollback_patterns,
             rollback_exclude_globs: profile_rollback_globs,
@@ -1368,6 +1389,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             allow_domain: profile_allow_domain,
             credentials: profile_credentials,
             custom_credentials: profile_custom_credentials,
+            credential_capture: profile_credential_capture,
+            tls_intercept: profile_tls_intercept,
             upstream_proxy: profile_upstream_proxy,
             upstream_bypass: profile_upstream_bypass,
             listen_ports: profile_listen_ports,

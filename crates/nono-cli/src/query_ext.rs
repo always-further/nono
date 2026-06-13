@@ -71,6 +71,15 @@ pub enum QueryResult {
         #[serde(skip_serializing_if = "Option::is_none")]
         endpoint_rules: Option<Vec<crate::sandbox_state::EndpointRuleState>>,
     },
+    /// The operation requires an approval decision.
+    #[serde(rename = "approval_required")]
+    ApprovalRequired {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        policy_source: Option<String>,
+    },
     /// Not running inside a sandbox
     #[serde(rename = "not_sandboxed")]
     NotSandboxed { message: String },
@@ -529,6 +538,20 @@ pub fn print_result(result: &QueryResult) {
                 for rule in rules {
                     println!("    {} {}", rule.method, rule.path);
                 }
+            }
+        }
+        QueryResult::ApprovalRequired {
+            reason,
+            details,
+            policy_source,
+        } => {
+            println!("{}", "APPROVAL REQUIRED".yellow().bold());
+            println!("  Reason: {}", reason);
+            if let Some(d) = details {
+                println!("  Details: {}", d);
+            }
+            if let Some(policy) = policy_source {
+                println!("  Policy: {}", policy);
             }
         }
         QueryResult::NotSandboxed { message } => {

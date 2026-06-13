@@ -7,7 +7,7 @@ use crate::sandbox_prepare::{
 use crate::{exec_strategy, instruction_deny, profile, trust_scan};
 use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use tracing::{info, warn};
@@ -38,6 +38,7 @@ pub(crate) struct LaunchPlan {
 
 #[derive(Clone, Default)]
 pub(crate) struct SessionLaunchOptions {
+    pub(crate) session_id: Option<String>,
     pub(crate) detached_start: bool,
     pub(crate) session_name: Option<String>,
     pub(crate) profile_name: Option<String>,
@@ -73,10 +74,15 @@ pub(crate) struct TrustLaunchOptions {
 #[derive(Clone, Default)]
 pub(crate) struct ProxyLaunchOptions {
     pub(crate) active: bool,
+    pub(crate) session_id: String,
     pub(crate) network_profile: Option<String>,
     pub(crate) allow_domain: Vec<profile::AllowDomainEntry>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
+    pub(crate) credential_capture: HashMap<String, profile::CredentialCaptureEntry>,
+    pub(crate) proxy_source_env_vars: HashMap<String, String>,
+    pub(crate) tool_sandbox_base_url_env_vars: HashMap<String, String>,
+    pub(crate) tool_sandbox_proxy_credentials: HashSet<String>,
     pub(crate) upstream_proxy: Option<String>,
     pub(crate) upstream_bypass: Vec<String>,
     pub(crate) allow_bind_ports: Vec<u16>,
@@ -91,6 +97,8 @@ pub(crate) struct ProxyLaunchOptions {
     /// Propagated to `ProxyConfig.strict_filter` so the filter denies
     /// unlisted hosts instead of falling back to allow-all.
     pub(crate) network_block: bool,
+    pub(crate) proxy_leaf_validity: Option<std::time::Duration>,
+    pub(crate) command_policies: Option<crate::command_policy::CommandPoliciesConfig>,
 }
 
 #[derive(Clone)]
@@ -98,6 +106,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) strategy: exec_strategy::ExecStrategy,
     pub(crate) workdir: PathBuf,
     pub(crate) no_diagnostics: bool,
+    pub(crate) diagnostic_verbosity: u8,
     pub(crate) silent: bool,
     pub(crate) capability_elevation: bool,
     #[cfg(target_os = "linux")]
@@ -107,6 +116,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) bypass_protection_paths: Vec<PathBuf>,
     pub(crate) ignored_denial_paths: Vec<PathBuf>,
     pub(crate) suppressed_system_service_operations: Vec<String>,
+    pub(crate) profile_display_name: Option<String>,
     pub(crate) session: SessionLaunchOptions,
     pub(crate) rollback: RollbackLaunchOptions,
     pub(crate) trust: TrustLaunchOptions,
@@ -116,6 +126,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) allowed_env_vars: Option<Vec<String>>,
     pub(crate) denied_env_vars: Option<Vec<String>>,
     pub(crate) startup_timeout_secs: Option<u64>,
+    pub(crate) command_policies: Option<crate::command_policy::CommandPoliciesConfig>,
 }
 
 impl ExecutionFlags {
@@ -125,6 +136,7 @@ impl ExecutionFlags {
             workdir: std::env::current_dir()
                 .map_err(|e| NonoError::SandboxInit(format!("Failed to get cwd: {e}")))?,
             no_diagnostics: false,
+            diagnostic_verbosity: 0,
             silent,
             capability_elevation: false,
             #[cfg(target_os = "linux")]
@@ -134,6 +146,7 @@ impl ExecutionFlags {
             bypass_protection_paths: Vec::new(),
             ignored_denial_paths: Vec::new(),
             suppressed_system_service_operations: Vec::new(),
+            profile_display_name: None,
             session: SessionLaunchOptions::default(),
             rollback: RollbackLaunchOptions::default(),
             trust: TrustLaunchOptions {
@@ -147,6 +160,7 @@ impl ExecutionFlags {
             allowed_env_vars: None,
             denied_env_vars: None,
             startup_timeout_secs: None,
+            command_policies: None,
         })
     }
 }
@@ -168,6 +182,15 @@ pub(crate) fn prepare_run_launch_plan(
     let audit_sign_key = run_args.audit_sign_key.clone();
     let trust_override = run_args.trust_override;
     let startup_timeout_secs = run_args.startup_timeout_secs;
+
+    if no_audit && !silent {
+        eprintln!("  [nono] Warning: --no-audit disables session and command-policy audit events.");
+    }
+    if no_audit_integrity && !silent {
+        eprintln!(
+            "  [nono] Warning: --no-audit-integrity disables Merkle audit integrity; audit events are written without an integrity summary."
+        );
+    }
 
     if audit_sign_key
         .as_deref()
@@ -225,7 +248,11 @@ pub(crate) fn prepare_run_launch_plan(
         prepared.caps.set_extensions_enabled(true);
     }
 
-    let proxy = prepare_proxy_launch_options(&args, &prepared, silent)?;
+    let session_id = std::env::var(crate::DETACHED_SESSION_ID_ENV)
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(crate::session::generate_session_id);
+    let proxy = prepare_proxy_launch_options(&args, &prepared, silent, session_id.clone())?;
     let rollback_options = prepare_rollback_launch_options(
         &run_args.rollback_exclude,
         run_args.rollback_all,
@@ -251,6 +278,7 @@ pub(crate) fn prepare_run_launch_plan(
             strategy,
             workdir: resolve_requested_workdir(args.workdir.as_ref()),
             no_diagnostics,
+            diagnostic_verbosity: args.verbose,
             silent,
             capability_elevation: prepared.capability_elevation,
             #[cfg(target_os = "linux")]
@@ -260,7 +288,9 @@ pub(crate) fn prepare_run_launch_plan(
             bypass_protection_paths: prepared.bypass_protection_paths,
             ignored_denial_paths: prepared.ignored_denial_paths,
             suppressed_system_service_operations: prepared.suppressed_system_service_operations,
+            profile_display_name: prepared.profile_display_name,
             session: SessionLaunchOptions {
+                session_id: Some(session_id),
                 detached_start: run_args.detached,
                 session_name: run_args.name,
                 profile_name: args.profile.clone(),
@@ -284,6 +314,7 @@ pub(crate) fn prepare_run_launch_plan(
             allowed_env_vars: prepared.allowed_env_vars,
             denied_env_vars: prepared.denied_env_vars,
             startup_timeout_secs,
+            command_policies: prepared.command_policies,
         },
     })
 }
