@@ -56,11 +56,11 @@ expect_failure "nonexistent profile exits non-zero" \
 expect_output_contains "dry-run output shows Capabilities section" "Capabilities:" \
     "$NONO_BIN" run --profile default --dry-run -- echo "test"
 
-# node-dev pulls the `node_runtime` capability group (paths like
-# ~/.npm, ~/.nvm). Those live inside the collapsed system/group
-# block in the default dry-run output and only show with -v.
-expect_output_contains "node-dev profile lists Node runtime paths in dry-run -v" ".npm" \
-    "$NONO_BIN" run -v --profile node-dev --dry-run -- echo "test"
+# node-dev pulls the `node_runtime` capability group (paths like ~/.npm,
+# ~/.nvm). Dry-run only renders resolved paths that exist on the host, so
+# assert the profile content through the manifest form instead.
+expect_output_contains "node-dev profile manifest includes Node runtime paths" ".npm" \
+    "$NONO_BIN" profile show node-dev --format manifest
 
 # =============================================================================
 # Profile Enforcement

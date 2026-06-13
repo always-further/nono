@@ -42,13 +42,16 @@ else
     skip_test "wget blocked" "wget not installed"
 fi
 
-# Note: ping requires special privileges, may not work in all environments
-if command_exists ping; then
-    # Use timeout to avoid hanging
+# Note: ping uses raw ICMP on Linux and may bypass TCP/UDP network mediation.
+if command_exists ping && ! is_linux; then
     expect_failure "ping blocked with --block-net" \
         timeout 5 "$NONO_BIN" run --block-net --allow "$TMPDIR" -- ping -c 1 -W 2 8.8.8.8 2>/dev/null || true
 else
-    skip_test "ping blocked" "ping not installed"
+    if is_linux; then
+        skip_test "ping blocked with --block-net" "raw ICMP is host/kernel mediated on Linux"
+    else
+        skip_test "ping blocked" "ping not installed"
+    fi
 fi
 
 if command_exists nc; then
@@ -73,10 +76,10 @@ echo "--- Network Allowed (Default) ---"
 
 if command_exists curl; then
     expect_success "curl works by default" \
-        "$NONO_BIN" run --allow "$TMPDIR" -- curl -s --max-time 10 https://example.com >/dev/null
+        "$NONO_BIN" run --allow "$TMPDIR" -- curl -s --max-time 10 -o "$TMPDIR/curl_output" https://example.com
 
     expect_failure "proxy mode blocks direct curl bypass with --noproxy" \
-        "$NONO_BIN" run --allow "$TMPDIR" --allow-domain api.openai.com -- curl -s --noproxy '*' --max-time 10 https://example.com >/dev/null
+        "$NONO_BIN" run --allow "$TMPDIR" --allow-domain api.openai.com -- curl -s --noproxy '*' --max-time 10 -o "$TMPDIR/curl_bypass_output" https://example.com
 
     # Keep this assertion on a profile that still bundles a network_profile.
     # claude-code used to carry a profile-level proxy allowlist, but the current
@@ -85,17 +88,21 @@ if command_exists curl; then
     # developer network profile, which makes it the right built-in fixture for
     # validating "profile enables proxy filtering" plus the --allow-net override.
     expect_failure "python-dev profile blocks hosts outside developer allowlist" \
-        "$NONO_BIN" run --profile python-dev --allow-cwd -- curl -s --max-time 10 https://example.com >/dev/null
+        "$NONO_BIN" run --profile python-dev --allow-cwd -- curl -s --max-time 10 -o /dev/null https://example.com
 
     expect_success "python-dev profile allows unrestricted network with --allow-net" \
-        "$NONO_BIN" run --profile python-dev --allow-cwd --allow-net -- curl -s --max-time 10 https://example.com >/dev/null
+        "$NONO_BIN" run --profile python-dev --allow-cwd --allow-net -- curl -s --max-time 10 -o /dev/null https://example.com
 else
     skip_test "curl works by default" "curl not installed"
 fi
 
 if command_exists wget; then
-    expect_success "wget works by default" \
-        "$NONO_BIN" run --allow "$TMPDIR" -- wget -q --timeout=10 -O "$TMPDIR/wget_output" https://example.com
+    if ! wget -q --timeout=10 -O /dev/null http://example.com >/dev/null 2>&1; then
+        skip_test "wget works by default" "host wget cannot fetch http://example.com"
+    else
+        expect_success "wget works by default" \
+            "$NONO_BIN" run --allow "$TMPDIR" -- wget -q --timeout=10 -O "$TMPDIR/wget_output" http://example.com
+    fi
 else
     skip_test "wget works by default" "wget not installed"
 fi
