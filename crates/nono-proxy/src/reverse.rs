@@ -19,7 +19,7 @@ use crate::config::InjectMode;
 use crate::credential::{CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
-use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
+use crate::forward::UpstreamScheme;
 use crate::route::RouteStore;
 use crate::token;
 use std::net::SocketAddr;
@@ -92,6 +92,10 @@ pub struct ReverseProxyCtx<'a> {
     pub filter: &'a ProxyFilter,
     /// Shared TLS connector
     pub tls_connector: &'a TlsConnector,
+    /// Default TLS client config (for routes without custom CA)
+    pub default_tls_config: &'a std::sync::Arc<rustls::ClientConfig>,
+    /// Upstream connection pool (HTTP/1.1 keep-alive + HTTP/2 multiplexing)
+    pub upstream_pool: &'a crate::pool::UpstreamPool,
     /// Shared network audit sink for session metadata capture
     pub audit_log: Option<&'a audit::SharedAuditLog>,
 }
@@ -365,15 +369,26 @@ pub async fn handle_reverse_proxy(
     };
 
     let upstream_authority = format_host_header(upstream_scheme, &upstream_host, upstream_port);
-    let mut request = Zeroizing::new(format!(
-        "{} {} {}\r\nHost: {}\r\n",
-        method, upstream_path_full, version, upstream_authority
-    ));
+    let scheme_str = match upstream_scheme {
+        UpstreamScheme::Https => "https",
+        UpstreamScheme::Http => "http",
+    };
+    let uri = format!(
+        "{}://{}{}",
+        scheme_str, upstream_authority, upstream_path_full
+    );
 
+    let mut req_builder = http::Request::builder()
+        .method(method.as_str())
+        .uri(&uri)
+        .header("Host", &upstream_authority);
+
+    // Inject credential header
     if let Some(cred) = cred {
-        inject_credential_for_mode(cred, &mut request);
+        req_builder = inject_credential_structured(cred, req_builder);
     }
 
+    // Forward filtered headers (skip the auth header we're replacing)
     let auth_header_lower = cred.map(|c| c.header_name.to_lowercase());
     for (name, value) in &filtered_headers {
         if let (Some(cred), Some(header_lower)) = (cred, auth_header_lower.as_ref())
@@ -382,50 +397,60 @@ pub async fn handle_reverse_proxy(
         {
             continue;
         }
-        request.push_str(&format!("{}: {}\r\n", name, value));
+        req_builder = req_builder.header(name.as_str(), value.as_str());
     }
 
-    request.push_str("Connection: close\r\n");
-    if !body.is_empty() {
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    request.push_str("\r\n");
+    let req = req_builder
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| ProxyError::HttpParse(format!("request build error: {}", e)))?;
 
-    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
-    let upstream_spec = UpstreamSpec {
-        scheme: upstream_scheme,
-        host: &upstream_host,
-        port: upstream_port,
-        strategy: UpstreamStrategy::Direct {
-            resolved_addrs: &check.resolved_addrs,
-        },
-        tls_connector: connector,
-    };
-    let audit_ctx = AuditCtx {
-        log: ctx.audit_log,
-        mode: audit::ProxyMode::Reverse,
-        event_ctx: success_ctx.clone(),
-        target: &service,
-        method: &method,
-        path: &upstream_path,
-    };
-    if let Err(e) =
-        forward::forward_request(stream, request.as_bytes(), &body, upstream_spec, audit_ctx).await
+    let tls_config = route
+        .tls_client_config
+        .as_ref()
+        .unwrap_or(ctx.default_tls_config);
+
+    ctx.upstream_pool
+        .pin_host(&upstream_host, &check.resolved_addrs);
+
+    match pool_forward(
+        ctx.upstream_pool,
+        tls_config,
+        req,
+        stream,
+        ctx.filter,
+        ctx.audit_log,
+    )
+    .await
     {
-        warn!("Upstream connection failed: {}", e);
-        send_error(stream, 502, "Bad Gateway").await?;
-        let deny_ctx = audit::EventContext {
-            denial_category: Some(nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed),
-            ..success_ctx.clone()
-        };
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &deny_ctx,
-            &service,
-            0,
-            &e.to_string(),
-        );
+        Ok(status) => {
+            audit::log_l7_request(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &success_ctx,
+                &service,
+                &method,
+                &upstream_path,
+                status,
+            );
+        }
+        Err(e) => {
+            warn!("Upstream connection failed: {}", e);
+            send_error(stream, 502, "Bad Gateway").await?;
+            let deny_ctx = audit::EventContext {
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
+                ),
+                ..success_ctx.clone()
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                &service,
+                0,
+                &e.to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -443,7 +468,7 @@ async fn handle_oauth2_credential(
     service: &str,
     upstream_path: &str,
     method: &str,
-    version: &str,
+    _version: &str,
     stream: &mut TcpStream,
     remaining_header: &[u8],
     buffered_body: &[u8],
@@ -544,74 +569,85 @@ async fn handle_oauth2_credential(
 
     // Build upstream request with Bearer token injection
     let upstream_authority = format_host_header(upstream_scheme, &upstream_host, upstream_port);
-    let mut request = Zeroizing::new(format!(
-        "{} {} {}\r\nHost: {}\r\n",
-        method, upstream_path_full, version, upstream_authority
-    ));
+    let scheme_str = match upstream_scheme {
+        UpstreamScheme::Https => "https",
+        UpstreamScheme::Http => "http",
+    };
+    let uri = format!(
+        "{}://{}{}",
+        scheme_str, upstream_authority, upstream_path_full
+    );
 
-    // Inject OAuth2 access token as Authorization: Bearer
-    request.push_str(&format!(
-        "Authorization: Bearer {}\r\n",
-        access_token.as_str()
-    ));
+    let bearer_value = Zeroizing::new(format!("Bearer {}", access_token.as_str()));
+    let mut req_builder = http::Request::builder()
+        .method(method)
+        .uri(&uri)
+        .header("Host", &upstream_authority)
+        .header("Authorization", bearer_value.as_str());
 
-    // Forward filtered headers (auth headers already stripped by filter_headers)
     for (name, value) in &filtered_headers {
-        request.push_str(&format!("{}: {}\r\n", name, value));
+        req_builder = req_builder.header(name.as_str(), value.as_str());
     }
 
-    if !body.is_empty() {
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    request.push_str("\r\n");
+    let req = req_builder
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| ProxyError::HttpParse(format!("request build error: {}", e)))?;
 
-    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
-    let upstream_spec = UpstreamSpec {
-        scheme: upstream_scheme,
-        host: &upstream_host,
-        port: upstream_port,
-        strategy: UpstreamStrategy::Direct {
-            resolved_addrs: &check.resolved_addrs,
-        },
-        tls_connector: connector,
+    let tls_config = route
+        .tls_client_config
+        .as_ref()
+        .unwrap_or(ctx.default_tls_config);
+
+    ctx.upstream_pool
+        .pin_host(&upstream_host, &check.resolved_addrs);
+
+    let success_event = audit::EventContext {
+        route_id: Some(service),
+        auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
+        auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
+        managed_credential_active: Some(true),
+        injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
+        denial_category: None,
     };
-    let audit_ctx = AuditCtx {
-        log: ctx.audit_log,
-        mode: audit::ProxyMode::Reverse,
-        event_ctx: audit::EventContext {
-            route_id: Some(service),
-            auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
-            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
-            managed_credential_active: Some(true),
-            injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
-            denial_category: None,
-        },
-        target: service,
-        method,
-        path: upstream_path,
-    };
-    if let Err(e) =
-        forward::forward_request(stream, request.as_bytes(), &body, upstream_spec, audit_ctx).await
+
+    match pool_forward(
+        ctx.upstream_pool,
+        tls_config,
+        req,
+        stream,
+        ctx.filter,
+        ctx.audit_log,
+    )
+    .await
     {
-        warn!("Upstream connection failed: {}", e);
-        send_error(stream, 502, "Bad Gateway").await?;
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &audit::EventContext {
-                route_id: Some(service),
-                auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
-                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
-                managed_credential_active: Some(true),
-                injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
-                denial_category: Some(
-                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
-                ),
-            },
-            service,
-            0,
-            &e.to_string(),
-        );
+        Ok(status) => {
+            audit::log_l7_request(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &success_event,
+                service,
+                method,
+                upstream_path,
+                status,
+            );
+        }
+        Err(e) => {
+            warn!("Upstream connection failed: {}", e);
+            send_error(stream, 502, "Bad Gateway").await?;
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &audit::EventContext {
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
+                    ),
+                    ..success_event
+                },
+                service,
+                0,
+                &e.to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -665,6 +701,200 @@ where
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+/// Maximum number of redirects to follow before giving up.
+const MAX_REDIRECTS: u8 = 5;
+
+/// Forward a request through the upstream pool and stream the response back
+/// to the inbound client as HTTP/1.1.
+///
+/// Handles both the pool send and writing the full HTTP/1.1 response (status
+/// line, headers, body) back to the raw TCP stream. Returns the response
+/// status code on success.
+///
+/// If the upstream returns a 3xx redirect, follows it transparently (up to
+/// [`MAX_REDIRECTS`] hops) without forwarding credentials. This prevents
+/// clients that don't strip auth headers on cross-domain redirects (e.g.
+/// Maven) from leaking credentials to presigned URLs.
+async fn pool_forward(
+    pool: &crate::pool::UpstreamPool,
+    tls_config: &std::sync::Arc<rustls::ClientConfig>,
+    req: http::Request<http_body_util::Full<bytes::Bytes>>,
+    inbound: &mut TcpStream,
+    filter: &ProxyFilter,
+    audit_log: Option<&audit::SharedAuditLog>,
+) -> Result<u16> {
+    use http_body_util::BodyExt;
+
+    let mut response = pool.send(tls_config, req).await?;
+    let mut redirects: u8 = 0;
+
+    // Follow 3xx redirects transparently (stripping credentials)
+    while response.status().is_redirection() && redirects < MAX_REDIRECTS {
+        let location = match response.headers().get(http::header::LOCATION) {
+            Some(loc) => match loc.to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => break,
+            },
+            None => break,
+        };
+
+        debug!(
+            "pool: following redirect ({}) to {}",
+            response.status(),
+            location
+        );
+
+        // Drain the redirect response body to release the connection
+        drop(response);
+
+        // Parse redirect URL and validate scheme
+        let redirect_uri: http::Uri = match location.parse() {
+            Ok(uri) => uri,
+            Err(_) => {
+                return Err(ProxyError::HttpParse(format!(
+                    "invalid redirect Location: {}",
+                    location
+                )));
+            }
+        };
+
+        let scheme = match redirect_uri.scheme_str() {
+            Some("https") => UpstreamScheme::Https,
+            Some("http") => UpstreamScheme::Http,
+            other => {
+                let reason = format!(
+                    "redirect to unsupported scheme '{}': {}",
+                    other.unwrap_or("<none>"),
+                    location
+                );
+                warn!("pool: {}", reason);
+                audit::log_denied(
+                    audit_log,
+                    audit::ProxyMode::Reverse,
+                    &audit::EventContext {
+                        denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
+                        ..audit::EventContext::default()
+                    },
+                    &location,
+                    0,
+                    &reason,
+                );
+                return Err(ProxyError::HttpParse(reason));
+            }
+        };
+
+        let host = match redirect_uri.host() {
+            Some(h) => h.to_string(),
+            None => {
+                return Err(ProxyError::HttpParse(format!(
+                    "redirect Location missing host: {}",
+                    location
+                )));
+            }
+        };
+        let port = redirect_uri.port_u16().unwrap_or(match scheme {
+            UpstreamScheme::Http => 80,
+            UpstreamScheme::Https => 443,
+        });
+
+        // Validate redirect target against security filter (DNS rebinding protection)
+        let check = filter.check_host(&host, port).await?;
+        if !check.result.is_allowed() {
+            let reason = format!(
+                "redirect target denied by filter: {} ({})",
+                host,
+                check.result.reason()
+            );
+            warn!("pool: {}", reason);
+            audit::log_denied(
+                audit_log,
+                audit::ProxyMode::Reverse,
+                &audit::EventContext {
+                    denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
+                    ..audit::EventContext::default()
+                },
+                &host,
+                port,
+                &reason,
+            );
+            return Err(ProxyError::UpstreamConnect { host, reason });
+        }
+
+        // Reject HTTP redirects to non-loopback addresses
+        if let Err(reason) = validate_http_upstream_target(scheme, &host, &check.resolved_addrs) {
+            warn!("pool: redirect blocked: {}", reason);
+            audit::log_denied(
+                audit_log,
+                audit::ProxyMode::Reverse,
+                &audit::EventContext {
+                    denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
+                    ..audit::EventContext::default()
+                },
+                &host,
+                port,
+                &reason,
+            );
+            return Err(ProxyError::UpstreamConnect { host, reason });
+        }
+
+        pool.pin_host(&host, &check.resolved_addrs);
+
+        // Build a simple GET to the redirect URL (no auth headers)
+        let redirect_req = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(&location)
+            .header("Host", &host)
+            .body(http_body_util::Full::new(bytes::Bytes::new()))
+            .map_err(|e| ProxyError::HttpParse(format!("redirect request build: {}", e)))?;
+
+        response = pool.send(tls_config, redirect_req).await?;
+        redirects += 1;
+    }
+
+    let status = response.status().as_u16();
+    let version = response.version();
+
+    debug!("pool: upstream responded {} via {:?}", status, version);
+
+    // Write HTTP/1.1 status line
+    let reason = response.status().canonical_reason().unwrap_or("OK");
+    let status_line = format!("HTTP/1.1 {} {}\r\n", status, reason);
+    inbound.write_all(status_line.as_bytes()).await?;
+
+    // Write response headers
+    for (name, value) in response.headers() {
+        // Skip h2-specific pseudo-headers and connection-level headers
+        let name_str = name.as_str();
+        if name_str == "transfer-encoding" || name_str == "connection" {
+            continue;
+        }
+        inbound
+            .write_all(format!("{}: {}\r\n", name, value.to_str().unwrap_or("")).as_bytes())
+            .await?;
+    }
+    inbound.write_all(b"\r\n").await?;
+
+    // Stream body frames without buffering
+    let mut body = response.into_body();
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Some(data) = frame.data_ref() {
+                    inbound.write_all(data).await?;
+                }
+            }
+            Some(Err(e)) => {
+                debug!("pool: response body read error: {}", e);
+                break;
+            }
+            None => break,
+        }
+    }
+    inbound.flush().await?;
+
+    Ok(status)
 }
 
 /// Parse an HTTP request line into (method, path, version).
@@ -1294,6 +1524,19 @@ fn strip_proxy_query_param(path: &str, param_name: &str) -> String {
 ///
 /// For header/basic_auth modes, adds the credential header.
 /// For url_path/query_param modes, the credential is already in the path.
+/// Inject credential into a structured `http::Request` builder.
+fn inject_credential_structured(
+    cred: &LoadedCredential,
+    builder: http::request::Builder,
+) -> http::request::Builder {
+    match cred.inject_mode {
+        InjectMode::Header | InjectMode::BasicAuth => {
+            builder.header(cred.header_name.as_str(), cred.header_value.as_str())
+        }
+        InjectMode::UrlPath | InjectMode::QueryParam => builder,
+    }
+}
+
 pub(crate) fn inject_credential_for_mode(cred: &LoadedCredential, request: &mut Zeroizing<String>) {
     match cred.inject_mode {
         InjectMode::Header | InjectMode::BasicAuth => {
@@ -1901,5 +2144,311 @@ mod tests {
             transform_path_for_mode(&InjectMode::Header, &cleaned, None, None, None, &credential)
                 .unwrap();
         assert_eq!(transformed, "/api/v1/pods?limit=100");
+    }
+
+    #[tokio::test]
+    async fn pool_forward_follows_redirect_without_credentials() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream as TokioTcpStream};
+
+        // Start the redirect target server (returns 200 and captures headers)
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+
+        let target_handle = tokio::spawn(async move {
+            let (mut stream, _) = target_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let request_text = String::from_utf8_lossy(&buf[..n]).to_string();
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+            stream.write_all(response).await.unwrap();
+            stream.flush().await.unwrap();
+            request_text
+        });
+
+        // Start the origin server (returns 302 → redirect target)
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let redirect_location = format!("http://127.0.0.1:{}/artifact.jar", target_addr.port());
+
+        let origin_handle = tokio::spawn(async move {
+            let (mut stream, _) = origin_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _n = stream.read(&mut buf).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\n\r\n",
+                redirect_location
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+        });
+
+        // Set up pool and TLS config (plain HTTP, no actual TLS needed)
+        let tls_config = Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+        );
+        let pool = crate::pool::UpstreamPool::new(Arc::clone(&tls_config), false);
+        pool.pin_host("127.0.0.1", &[origin_addr]);
+
+        // Build request with an Authorization header (simulating credential injection)
+        let req = http::Request::builder()
+            .method("GET")
+            .uri(format!(
+                "http://127.0.0.1:{}/maven/artifact.jar",
+                origin_addr.port()
+            ))
+            .header("Host", "127.0.0.1")
+            .header("Authorization", "Bearer sk-secret-credential")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        // Create a dummy inbound stream to receive the proxied response
+        let inbound_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let inbound_addr = inbound_listener.local_addr().unwrap();
+
+        let client_handle = tokio::spawn(async move {
+            let (mut stream, _) = inbound_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let mut inbound = TokioTcpStream::connect(inbound_addr).await.unwrap();
+
+        let filter = crate::filter::ProxyFilter::allow_all();
+        let status = pool_forward(&pool, &tls_config, req, &mut inbound, &filter, None)
+            .await
+            .unwrap();
+
+        // Should have followed the redirect and returned 200
+        assert_eq!(
+            status, 200,
+            "pool_forward should follow 302 and return final 200"
+        );
+
+        // Verify the redirect target did NOT receive the Authorization header
+        let target_request = target_handle.await.unwrap();
+        assert!(
+            !target_request.contains("Authorization"),
+            "credentials must NOT be forwarded on redirect: {}",
+            target_request
+        );
+
+        origin_handle.await.unwrap();
+
+        // Read the response written to the inbound stream
+        let response_text = client_handle.await.unwrap();
+        assert!(
+            response_text.contains("200"),
+            "inbound should see 200 response"
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_forward_rejects_redirect_with_invalid_scheme() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream as TokioTcpStream};
+
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+
+        let origin_handle = tokio::spawn(async move {
+            let (mut stream, _) = origin_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _n = stream.read(&mut buf).await.unwrap();
+            let response =
+                b"HTTP/1.1 302 Found\r\nLocation: gopher://evil.com/data\r\nContent-Length: 0\r\n\r\n";
+            stream.write_all(response).await.unwrap();
+            stream.flush().await.unwrap();
+        });
+
+        let tls_config = Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+        );
+        let pool = crate::pool::UpstreamPool::new(Arc::clone(&tls_config), false);
+        pool.pin_host("127.0.0.1", &[origin_addr]);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{}/file", origin_addr.port()))
+            .header("Host", "127.0.0.1")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        let inbound_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let inbound_addr = inbound_listener.local_addr().unwrap();
+        // Spawn a reader so inbound connect doesn't fail
+        tokio::spawn(async move {
+            let (mut s, _) = inbound_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = s.read(&mut buf).await;
+        });
+
+        let mut inbound = TokioTcpStream::connect(inbound_addr).await.unwrap();
+        let filter = crate::filter::ProxyFilter::allow_all();
+        let result = pool_forward(&pool, &tls_config, req, &mut inbound, &filter, None).await;
+
+        assert!(result.is_err(), "redirect to gopher:// must be rejected");
+
+        origin_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_forward_rejects_redirect_to_denied_host() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream as TokioTcpStream};
+
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+
+        // Redirect to a host not in the allowlist
+        let origin_handle = tokio::spawn(async move {
+            let (mut stream, _) = origin_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _n = stream.read(&mut buf).await.unwrap();
+            let response = b"HTTP/1.1 302 Found\r\nLocation: https://evil.attacker.com/steal\r\nContent-Length: 0\r\n\r\n";
+            stream.write_all(response).await.unwrap();
+            stream.flush().await.unwrap();
+        });
+
+        let tls_config = Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+        );
+        let pool = crate::pool::UpstreamPool::new(Arc::clone(&tls_config), false);
+        pool.pin_host("127.0.0.1", &[origin_addr]);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{}/artifact", origin_addr.port()))
+            .header("Host", "127.0.0.1")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        let inbound_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let inbound_addr = inbound_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = inbound_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = s.read(&mut buf).await;
+        });
+
+        let mut inbound = TokioTcpStream::connect(inbound_addr).await.unwrap();
+        // Filter that only allows api.openai.com — evil.attacker.com should be denied
+        let filter = crate::filter::ProxyFilter::new(&["api.openai.com".to_string()]);
+        let result = pool_forward(&pool, &tls_config, req, &mut inbound, &filter, None).await;
+
+        assert!(
+            result.is_err(),
+            "redirect to non-allowed host must be rejected"
+        );
+
+        origin_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_forward_stops_at_max_redirects() {
+        use bytes::Bytes;
+        use http_body_util::Full;
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream as TokioTcpStream};
+
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin_listener.local_addr().unwrap();
+
+        // Server that always returns 302 back to itself (infinite loop)
+        let port = origin_addr.port();
+        let origin_handle = tokio::spawn(async move {
+            for _ in 0..10 {
+                let (mut stream, _) = match origin_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/loop\r\nContent-Length: 0\r\n\r\n",
+                    port
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            }
+        });
+
+        let tls_config = Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth(),
+        );
+        let pool = crate::pool::UpstreamPool::new(Arc::clone(&tls_config), false);
+        pool.pin_host("127.0.0.1", &[origin_addr]);
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{}/start", port))
+            .header("Host", "127.0.0.1")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        let inbound_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let inbound_addr = inbound_listener.local_addr().unwrap();
+        let client_handle = tokio::spawn(async move {
+            let (mut s, _) = inbound_listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = s.read(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let mut inbound = TokioTcpStream::connect(inbound_addr).await.unwrap();
+        let filter = crate::filter::ProxyFilter::allow_all();
+        let status = pool_forward(&pool, &tls_config, req, &mut inbound, &filter, None)
+            .await
+            .unwrap();
+
+        // After MAX_REDIRECTS (5), pool_forward should stop and return the
+        // last 302 response status rather than following infinitely
+        assert_eq!(
+            status, 302,
+            "should stop following after MAX_REDIRECTS and return the redirect status"
+        );
+
+        let response_text = client_handle.await.unwrap();
+        assert!(
+            response_text.contains("302"),
+            "inbound should see final 302"
+        );
+
+        origin_handle.abort();
     }
 }

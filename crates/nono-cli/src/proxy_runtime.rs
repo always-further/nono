@@ -92,6 +92,7 @@ pub(crate) fn prepare_proxy_launch_options(
         open_url_origins: prepared.open_url_origins.clone(),
         open_url_allow_localhost: prepared.open_url_allow_localhost,
         allow_launch_services_active: prepared.allow_launch_services_active,
+        enable_h2: args.allow_http2,
         #[cfg(target_os = "macos")]
         trust_proxy_ca: args.trust_proxy_ca,
         proxy_ca_validity: args
@@ -223,6 +224,7 @@ pub(crate) fn build_proxy_config_from_flags(
         proxy_config.bind_port = port;
     }
 
+    proxy_config.enable_h2 = proxy.enable_h2;
     proxy_config.ca_validity = proxy.proxy_ca_validity;
 
     Ok(proxy_config)

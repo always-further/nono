@@ -2208,8 +2208,11 @@ name = "nono-proxy"
 version = "0.62.0"
 dependencies = [
  "base64",
+ "bytes",
  "getrandom 0.4.2",
  "globset",
+ "h2",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-rustls",
@@ -2227,6 +2230,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tower-service",
  "tracing",
  "url",
  "urlencoding",
