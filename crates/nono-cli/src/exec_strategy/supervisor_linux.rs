@@ -818,13 +818,6 @@ pub(super) fn handle_network_notification(
 
     let notif = recv_notif(notify_fd)?;
 
-    // Rate limit to prevent flooding
-    if !rate_limiter.try_acquire() {
-        debug!("Rate limited network seccomp notification, denying");
-        let _ = deny_notif(notify_fd, notif.id);
-        return Ok(());
-    }
-
     // Read sockaddr from child's memory: args[1] = sockaddr*, args[2] = addrlen
     let sockaddr = match read_notif_sockaddr(notif.pid, notif.data.args[1], notif.data.args[2]) {
         Ok(info) => info,
@@ -838,6 +831,17 @@ pub(super) fn handle_network_notification(
     // TOCTOU check
     if !notif_id_valid(notify_fd, notif.id)? {
         debug!("Network seccomp notification expired (TOCTOU check)");
+        return Ok(());
+    }
+
+    // Rate-limit only notifications that do pathname AF_UNIX or proxy policy
+    // work. AF_UNIX-only mediation traps every connect()/bind(), but once we
+    // read the sockaddr, non-AF_UNIX traffic is resumed without further
+    // checks — that passthrough must not consume the supervisor token bucket
+    // shared with expansion prompts.
+    if network_notification_should_rate_limit(&sockaddr, config) && !rate_limiter.try_acquire() {
+        debug!("Rate limited network seccomp notification, denying");
+        let _ = deny_notif(notify_fd, notif.id);
         return Ok(());
     }
 
@@ -860,6 +864,28 @@ pub(super) fn handle_network_notification(
     }
 
     Ok(())
+}
+
+/// Whether a trapped connect/bind should consume the supervisor rate limiter.
+///
+/// The limiter caps expansion-prompt flooding, not routine network I/O.
+/// AF_UNIX-only mediation notifies on every connect/bind, but non-AF_UNIX
+/// syscalls are allowed as soon as the sockaddr family is known; only
+/// AF_UNIX pathname checks (and all proxy-mode notifications) count against
+/// the bucket.
+fn network_notification_should_rate_limit(
+    sockaddr: &nono::sandbox::SockaddrInfo,
+    config: &SupervisorConfig<'_>,
+) -> bool {
+    use crate::exec_strategy::LinuxNetworkNotifyMode;
+
+    if matches!(
+        config.linux_network_notify_mode,
+        LinuxNetworkNotifyMode::AfUnixOnly
+    ) {
+        return sockaddr.family == libc::AF_UNIX as u16;
+    }
+    true
 }
 
 fn record_af_unix_ipc_denial(
@@ -1640,6 +1666,41 @@ mod tests {
                 decide_network_notification(test_pid(), SYS_BIND, &inet_loopback(4000), &config),
                 NetworkDecision::Allow
             );
+        }
+
+        #[test]
+        fn af_unix_only_mode_skips_rate_limit_for_non_af_unix_passthrough() {
+            let backend = DenyAllBackend;
+            let config = make_af_unix_only_config(&backend, &[]);
+            assert!(
+                !super::network_notification_should_rate_limit(&inet_external(8080), &config),
+                "TCP passthrough must not consume the expansion rate limiter"
+            );
+            assert!(
+                !super::network_notification_should_rate_limit(&inet_loopback(4000), &config),
+                "loopback passthrough must not consume the expansion rate limiter"
+            );
+        }
+
+        #[test]
+        fn af_unix_only_mode_rate_limits_af_unix_notifications() {
+            let backend = DenyAllBackend;
+            let config = make_af_unix_only_config(&backend, &[]);
+            let dir = tempfile::tempdir().expect("tempdir");
+            assert!(super::network_notification_should_rate_limit(
+                &unix_pathname(&socket_path(&dir, "test.sock")),
+                &config
+            ));
+        }
+
+        #[test]
+        fn proxy_mode_rate_limits_all_notifications() {
+            let backend = DenyAllBackend;
+            let config = make_config(&backend, 8080, vec![], &[]);
+            assert!(super::network_notification_should_rate_limit(
+                &inet_external(8080),
+                &config
+            ));
         }
     }
 }
