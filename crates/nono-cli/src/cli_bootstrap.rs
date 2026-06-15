@@ -84,7 +84,48 @@ pub(crate) fn init_theme(cli: &Cli) {
     theme::init(cli.theme.as_deref(), config_theme.as_deref());
 }
 
+/// Initialize tracing for an internal re-exec entrypoint (e.g. the tool-sandbox
+/// child launcher), which returns from `main()` before [`init_tracing`] runs and
+/// therefore has no subscriber of its own.
+///
+/// Honors `RUST_LOG` only (forwarded from the parent by `prepare_launcher_command`)
+/// and writes to stderr. This is what surfaces the library's
+/// `debug!("Generated Seatbelt profile…")` for a brokered child under
+/// `RUST_LOG=debug`. It is a no-op when `RUST_LOG` is unset or empty, so normal
+/// runs stay silent. Errors from a double-init are swallowed: the launcher only
+/// ever calls this once, but `try_init` keeps it defensive.
+pub(crate) fn init_internal_entrypoint_tracing() {
+    let Some(filter) = std::env::var_os("RUST_LOG") else {
+        return;
+    };
+    if filter.is_empty() {
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
+        .with_target(false)
+        .with_writer(io::stderr)
+        .try_init();
+}
+
 pub(crate) fn init_tracing(cli: &Cli) {
+    // Export the resolved CLI verbosity into RUST_LOG (unless already set) so it
+    // propagates to internal re-exec subprocesses — notably the tool-sandbox
+    // child launcher, which forwards RUST_LOG and inits its own subscriber. This
+    // makes `-vv` surface the brokered child's generated Seatbelt profile too,
+    // not just the parent's logs.
+    if let Some(level) = cli_log_override(cli)
+        && std::env::var_os("RUST_LOG").is_none()
+    {
+        // SAFETY: called during single-threaded CLI bootstrap, before any
+        // threads are spawned (same contract as copy_legacy_env_var).
+        #[allow(clippy::disallowed_methods)]
+        unsafe {
+            std::env::set_var("RUST_LOG", level)
+        };
+    }
     match cli.log_file.as_deref() {
         Some(path) => match SharedFileMakeWriter::new(path) {
             Ok(writer) => {

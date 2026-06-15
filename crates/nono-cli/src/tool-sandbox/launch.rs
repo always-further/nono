@@ -16,6 +16,29 @@ pub(crate) fn prepare_launcher_command(spec_path: &Path) -> Result<Command> {
     command
         .env_clear()
         .env(TOOL_SANDBOX_LAUNCH_SPEC_ENV, spec_path);
+    // Forward HOME to the launcher process (NOT the sandboxed child — the child
+    // is execve'd with the filtered `spec.env`, so this HOME never reaches it).
+    // SECURITY-CRITICAL: the launcher is what calls `Sandbox::apply`, and the
+    // library's macOS profile generation reads HOME to recognize user keychain
+    // DBs (`$HOME/Library/Keychains/{login,metadata}.keychain-db`) via
+    // `has_explicit_keychain_db_access`. That check decides whether to skip the
+    // securityd/secd/keychaind mach-lookup denies. With HOME cleared the user
+    // keychains go unrecognized, the mach denies stay in, and keychain access
+    // over Mach IPC is blocked even when the DB files are explicitly granted —
+    // breaking parity with the directly-launched (supervisor) path, which always
+    // has HOME set. See has_explicit_keychain_db_access in nono/src/sandbox/macos.rs.
+    if let Some(value) = std::env::var_os("HOME") {
+        command.env("HOME", value);
+    }
+    // Forward RUST_LOG so the launcher process can initialize a tracing
+    // subscriber at the same level as the parent. The launcher re-exec returns
+    // from main() before init_tracing() runs, so without this the library's
+    // `debug!("Generated Seatbelt profile…")` emitted during Sandbox::apply has
+    // neither a subscriber nor a filter and is silently dropped — which is why
+    // the child's profile never appears under `-vv`/RUST_LOG=debug.
+    if let Some(value) = std::env::var_os("RUST_LOG") {
+        command.env("RUST_LOG", value);
+    }
     if let Some(value) = std::env::var_os("TOOL_SANDBOX_PROFILE_HOTPATH") {
         command.env("TOOL_SANDBOX_PROFILE_HOTPATH", value);
     }

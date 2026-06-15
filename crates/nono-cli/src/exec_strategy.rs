@@ -2578,6 +2578,8 @@ fn run_supervisor_loop(
     let listener_raw_fd = url_listener.map(|l| l.as_raw_fd());
     let tool_sandbox_runtime = config.tool_sandbox_runtime;
     let tool_sandbox_listener_fd = tool_sandbox_runtime.map(|runtime| runtime.listener_fd());
+    let tool_sandbox_url_listener_fd =
+        tool_sandbox_runtime.and_then(|runtime| runtime.url_listener_fd());
     let mut rate_limiter = supervisor_linux::RateLimiter::new(10, 5);
     let mut denials = Vec::new();
     let mut ipc_denials = Vec::new();
@@ -2611,6 +2613,15 @@ fn run_supervisor_loop(
             idx
         });
         let tool_sandbox_idx = tool_sandbox_listener_fd.map(|fd| {
+            let idx = pfds.len();
+            pfds.push(libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+            idx
+        });
+        let tool_sandbox_url_idx = tool_sandbox_url_listener_fd.map(|fd| {
             let idx = pfds.len();
             pfds.push(libc::pollfd {
                 fd,
@@ -2752,6 +2763,18 @@ fn run_supervisor_loop(
                     )
                 {
                     debug!("Error handling tool-sandbox shim request: {}", e);
+                }
+
+                if let (Some(tool_sandbox_url_idx), Some(runtime)) =
+                    (tool_sandbox_url_idx, tool_sandbox_runtime)
+                    && pfds[tool_sandbox_url_idx].revents & libc::POLLIN != 0
+                    && let Err(e) = runtime.handle_url_listener(
+                        child.as_raw() as u32,
+                        config.session_id,
+                        config.audit_recorder.clone(),
+                    )
+                {
+                    debug!("Error handling tool-sandbox URL request: {}", e);
                 }
 
                 if let Some(ref mut p) = pty
@@ -3220,7 +3243,8 @@ fn record_capability_audit(
 }
 
 /// Maximum URL length to prevent abuse via oversized URLs.
-const MAX_URL_LENGTH: usize = 8192;
+#[cfg(test)]
+const MAX_URL_LENGTH: usize = crate::url_open::MAX_URL_LENGTH;
 
 /// Validate a URL against the profile's allowed origins, then open it in the user's browser.
 ///
@@ -3231,95 +3255,21 @@ fn validate_and_open_url(
     config: &SupervisorConfig<'_>,
 ) -> std::result::Result<(), String> {
     validate_url(url, config)?;
-    open_url_in_browser(url)
+    crate::url_open::open_url_in_browser(url)
 }
 
 /// Validate a URL against the profile's allowed origins and scheme rules.
 ///
-/// Returns `Ok(())` if the URL passes all checks. Does not open the browser.
+/// Thin wrapper over [`crate::url_open::validate_url`] that sources the
+/// allow-list from the supervisor config. The shared implementation is the
+/// single source of truth for this security-critical check so the supervisor
+/// and the tool-sandbox runtime cannot diverge.
 fn validate_url(url: &str, config: &SupervisorConfig<'_>) -> std::result::Result<(), String> {
-    // Length check
-    if url.len() > MAX_URL_LENGTH {
-        return Err(format!(
-            "URL exceeds maximum length ({} > {})",
-            url.len(),
-            MAX_URL_LENGTH
-        ));
-    }
-
-    // Parse URL to extract origin
-    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
-
-    let scheme = parsed.scheme();
-    let host = parsed.host_str().unwrap_or("");
-
-    // Check localhost first
-    let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "::1";
-    if is_localhost {
-        if scheme != "http" && scheme != "https" {
-            return Err(format!(
-                "Localhost URL must use http or https scheme, got: {scheme}"
-            ));
-        }
-        if !config.open_url_allow_localhost {
-            return Err("Localhost URLs are not allowed by this profile".to_string());
-        }
-    } else {
-        // Non-localhost: must be https
-        if scheme != "https" {
-            return Err(format!(
-                "Only https:// URLs are allowed (got {scheme}://). \
-                 file://, javascript:, data:, and other schemes are blocked."
-            ));
-        }
-
-        // Check against allowed origins
-        let url_origin = parsed.origin().unicode_serialization();
-        let origin_allowed = config.open_url_origins.contains(&url_origin);
-
-        if !origin_allowed {
-            return Err(format!(
-                "Origin {url_origin} is not in the profile's open_urls.allow_origins list"
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-/// Open a URL in the user's default browser.
-///
-/// Uses `open` on macOS and `xdg-open` on Linux. Runs in the unsandboxed
-/// parent process so the browser has full system access.
-fn open_url_in_browser(url: &str) -> std::result::Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open")
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    #[cfg(target_os = "linux")]
-    let result = std::process::Command::new("xdg-open")
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let result: std::result::Result<std::process::ExitStatus, std::io::Error> =
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "URL opening not supported on this platform",
-        ));
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("Browser opener exited with status: {status}")),
-        Err(e) => Err(format!("Failed to launch browser: {e}")),
-    }
+    crate::url_open::validate_url(
+        url,
+        config.open_url_origins,
+        config.open_url_allow_localhost,
+    )
 }
 
 /// Clear `FD_CLOEXEC` on a file descriptor so it survives `execve()`.

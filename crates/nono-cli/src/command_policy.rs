@@ -167,6 +167,24 @@ impl CommandPoliciesConfig {
         !self.commands.is_empty()
     }
 
+    /// True if any command's sandbox (session-level or any `from` edge) declares
+    /// an `open_urls` policy. Used to decide whether the tool-sandbox runtime
+    /// needs to bind a URL-open listener socket at all.
+    #[cfg(any(test, target_os = "linux", target_os = "macos"))]
+    pub(crate) fn any_command_allows_url_open(&self) -> bool {
+        self.commands.values().any(|command| {
+            command
+                .sandbox
+                .as_ref()
+                .is_some_and(|sandbox| sandbox.open_urls.is_some())
+                || command
+                    .from
+                    .values()
+                    .filter_map(|from| from.sandbox())
+                    .any(|sandbox| sandbox.open_urls.is_some())
+        })
+    }
+
     fn has_non_command_fields(&self) -> bool {
         !self.executable_dirs.is_empty()
             || self.allow_writable_executables
@@ -540,6 +558,19 @@ pub struct CommandSandboxConfig {
     pub resources: Option<CommandResourceConfig>,
     #[serde(default)]
     pub stdio: Option<CommandStdioConfig>,
+    /// Supervisor-delegated URL opening for this command (e.g. OAuth2 login).
+    ///
+    /// When set, the brokered child may ask the unsandboxed tool-sandbox runtime
+    /// to open URLs whose origin matches `allow_origins`. When `None`, inherits
+    /// from the base profile; when `Some`, replaces the base entirely so derived
+    /// profiles can narrow it. An empty `allow_origins` means no URLs are allowed.
+    #[serde(default)]
+    pub open_urls: Option<crate::profile::OpenUrlConfig>,
+    /// macOS-only opt-in to let this command open URLs directly via
+    /// LaunchServices instead of through the runtime-delegated browser shim.
+    /// Ignored on Linux. Defaults to `false`.
+    #[serde(default)]
+    pub allow_launch_services: bool,
 }
 
 impl CommandSandboxConfig {
@@ -559,6 +590,10 @@ impl CommandSandboxConfig {
                 || child.allow_raw_file_credentials_in_chained_policy,
             resources: self.resources.clone().or_else(|| child.resources.clone()),
             stdio: self.stdio.clone().or_else(|| child.stdio.clone()),
+            // `open_urls` is replace-not-merge: a child that specifies it
+            // narrows (or widens) wholesale, matching root-profile semantics.
+            open_urls: child.open_urls.clone().or_else(|| self.open_urls.clone()),
+            allow_launch_services: self.allow_launch_services || child.allow_launch_services,
         }
     }
 }
@@ -1255,6 +1290,36 @@ fn validate_sandbox(
 
     if let Some(stdio) = &sandbox.stdio {
         validate_stdio(command_name, caller, stdio, report);
+    }
+
+    if let Some(open_urls) = &sandbox.open_urls {
+        if let Err(err) = crate::profile::validate_open_url_config(open_urls) {
+            report.error(
+                "invalid_open_urls",
+                format!("command '{command_name}' from.{caller} {err}"),
+            );
+        }
+        if sandbox.allow_launch_services {
+            report.warning(
+                "open_urls_with_launch_services",
+                format!(
+                    "command '{command_name}' from.{caller} sets both open_urls and \
+                     allow_launch_services; on macOS allow_launch_services bypasses the \
+                     origin-validated browser shim, so open_urls.allow_origins is not enforced \
+                     for direct LaunchServices opens"
+                ),
+            );
+        }
+    }
+
+    if sandbox.allow_launch_services && !cfg!(target_os = "macos") {
+        report.info(
+            "allow_launch_services_macos_only",
+            format!(
+                "command '{command_name}' from.{caller} sets allow_launch_services, which only \
+                 has an effect on macOS and is ignored on this platform"
+            ),
+        );
     }
 
     if scope == CommandPolicyValidationScope::Resolved {
@@ -2560,6 +2625,180 @@ mod tests {
                 .iter()
                 .any(|finding| finding.code == "ambiguous_session_policy")
         );
+    }
+
+    #[test]
+    fn any_command_allows_url_open_detects_session_and_edges() {
+        // No open_urls anywhere.
+        let config = active_git_config();
+        assert!(!config.any_command_allows_url_open());
+
+        // Session-level sandbox open_urls.
+        let mut session_config = active_git_config();
+        if let Some(git) = session_config.commands.get_mut("git") {
+            git.sandbox = Some(CommandSandboxConfig {
+                open_urls: Some(crate::profile::OpenUrlConfig {
+                    allow_origins: vec!["https://github.com".to_string()],
+                    allow_localhost: false,
+                }),
+                ..Default::default()
+            });
+        }
+        assert!(session_config.any_command_allows_url_open());
+
+        // from-edge sandbox open_urls.
+        let mut edge_config = active_git_config();
+        if let Some(git) = edge_config.commands.get_mut("git") {
+            git.from.insert(
+                "session".to_string(),
+                CommandFromConfig::Policy(Box::new(CommandSandboxConfig {
+                    open_urls: Some(crate::profile::OpenUrlConfig {
+                        allow_origins: vec!["https://github.com".to_string()],
+                        allow_localhost: true,
+                    }),
+                    ..Default::default()
+                })),
+            );
+        }
+        assert!(edge_config.any_command_allows_url_open());
+    }
+
+    #[test]
+    fn open_urls_valid_origins_pass_validation() {
+        let mut config = active_git_config();
+        if let Some(git) = config.commands.get_mut("git") {
+            git.sandbox = Some(CommandSandboxConfig {
+                open_urls: Some(crate::profile::OpenUrlConfig {
+                    allow_origins: vec!["https://github.com".to_string()],
+                    allow_localhost: true,
+                }),
+                ..Default::default()
+            });
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            !report
+                .errors
+                .iter()
+                .any(|finding| finding.code == "invalid_open_urls"),
+            "valid origins should not produce invalid_open_urls: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn open_urls_invalid_origin_is_error() {
+        let mut config = active_git_config();
+        if let Some(git) = config.commands.get_mut("git") {
+            git.sandbox = Some(CommandSandboxConfig {
+                open_urls: Some(crate::profile::OpenUrlConfig {
+                    // No scheme/host — rejected by validate_open_url_config.
+                    allow_origins: vec!["not-a-valid-origin".to_string()],
+                    allow_localhost: false,
+                }),
+                ..Default::default()
+            });
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|finding| finding.code == "invalid_open_urls")
+        );
+    }
+
+    #[test]
+    fn open_urls_with_launch_services_warns() {
+        let mut config = active_git_config();
+        if let Some(git) = config.commands.get_mut("git") {
+            git.sandbox = Some(CommandSandboxConfig {
+                open_urls: Some(crate::profile::OpenUrlConfig {
+                    allow_origins: vec!["https://github.com".to_string()],
+                    allow_localhost: false,
+                }),
+                allow_launch_services: true,
+                ..Default::default()
+            });
+        }
+
+        let report =
+            validate_command_policies(Some(&config), CommandPolicyValidationScope::Resolved);
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|finding| finding.code == "open_urls_with_launch_services")
+        );
+    }
+
+    #[test]
+    fn command_sandbox_rejects_unknown_field() {
+        // deny_unknown_fields must still reject typos even with the new fields.
+        let json = r#"{ "open_url": { "allow_origins": [] } }"#;
+        let parsed: std::result::Result<CommandSandboxConfig, _> = serde_json::from_str(json);
+        assert!(
+            parsed.is_err(),
+            "unknown field 'open_url' must be rejected by deny_unknown_fields"
+        );
+    }
+
+    #[test]
+    fn command_sandbox_open_urls_round_trips() {
+        let json = r#"{
+            "open_urls": { "allow_origins": ["https://github.com"], "allow_localhost": true },
+            "allow_launch_services": true
+        }"#;
+        let parsed: CommandSandboxConfig =
+            serde_json::from_str(json).expect("valid open_urls config should parse");
+        let open_urls = parsed.open_urls.expect("open_urls should be present");
+        assert_eq!(open_urls.allow_origins, vec!["https://github.com"]);
+        assert!(open_urls.allow_localhost);
+        assert!(parsed.allow_launch_services);
+    }
+
+    #[test]
+    fn command_sandbox_open_urls_merge_child_replaces() {
+        let base = CommandSandboxConfig {
+            open_urls: Some(crate::profile::OpenUrlConfig {
+                allow_origins: vec!["https://base.example.com".to_string()],
+                allow_localhost: false,
+            }),
+            ..Default::default()
+        };
+        let child = CommandSandboxConfig {
+            open_urls: Some(crate::profile::OpenUrlConfig {
+                allow_origins: vec!["https://child.example.com".to_string()],
+                allow_localhost: true,
+            }),
+            ..Default::default()
+        };
+        let merged = base.merge_child(&child);
+        let open_urls = merged.open_urls.expect("merged open_urls present");
+        assert_eq!(open_urls.allow_origins, vec!["https://child.example.com"]);
+        assert!(open_urls.allow_localhost);
+    }
+
+    #[test]
+    fn command_sandbox_open_urls_merge_child_absent_inherits_base() {
+        let base = CommandSandboxConfig {
+            open_urls: Some(crate::profile::OpenUrlConfig {
+                allow_origins: vec!["https://base.example.com".to_string()],
+                allow_localhost: false,
+            }),
+            ..Default::default()
+        };
+        let child = CommandSandboxConfig::default();
+        let merged = base.merge_child(&child);
+        let open_urls = merged.open_urls.expect("merged should inherit base");
+        assert_eq!(open_urls.allow_origins, vec!["https://base.example.com"]);
     }
 
     #[test]

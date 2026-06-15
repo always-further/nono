@@ -1011,7 +1011,7 @@ fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
     Ok(())
 }
 
-fn validate_open_url_config(config: &OpenUrlConfig) -> Result<()> {
+pub(crate) fn validate_open_url_config(config: &OpenUrlConfig) -> Result<()> {
     for origin in &config.allow_origins {
         if origin.trim().is_empty() || origin.contains('\0') {
             return Err(NonoError::ProfileParse(

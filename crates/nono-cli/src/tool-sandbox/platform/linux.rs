@@ -10,7 +10,7 @@ use crate::profile;
 use crate::tool_sandbox::credentials::{ResolvedCredential, resolve_credentials};
 use crate::tool_sandbox::env::{
     apply_environment_set_vars, default_env_allow_patterns, effective_argv,
-    inject_chaining_control_env, split_env_entry,
+    inject_chaining_control_env, inject_url_open_env, split_env_entry,
 };
 use crate::tool_sandbox::launch::{
     exit_status_code, prepare_launcher_command, remove_launch_spec, write_launch_spec,
@@ -18,9 +18,10 @@ use crate::tool_sandbox::launch::{
 use crate::tool_sandbox::protocol::{
     ChildCapsSpec, FsGrantSpec, StdioFds, StdioLimitActionSpec, StdioLimitSpec,
     StdioStreamLimitSpec, TOOL_SANDBOX_LAUNCH_SPEC_ENV, TOOL_SANDBOX_SHIM_DIR_ENV,
-    TOOL_SANDBOX_SOCKET_ENV, ToolSandboxChildLaunchSpec, ToolSandboxShimRequest,
-    ToolSandboxShimResponse, UnixSocketGrantSpec, read_frame, recv_stdio_fds, send_stdio_fds,
-    validate_ipc_request, write_frame, write_response,
+    TOOL_SANDBOX_SOCKET_ENV, TOOL_SANDBOX_URL_IO_TIMEOUT, TOOL_SANDBOX_URL_SOCKET_ENV,
+    ToolSandboxChildLaunchSpec, ToolSandboxOpenUrlRequest, ToolSandboxOpenUrlResponse,
+    ToolSandboxShimRequest, ToolSandboxShimResponse, UnixSocketGrantSpec, read_frame,
+    recv_stdio_fds, send_stdio_fds, validate_ipc_request, write_frame, write_response,
 };
 use landlock::{
     AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
@@ -87,12 +88,21 @@ pub(crate) fn log_main_total() {
 pub(crate) struct PreparedToolSandboxRuntime {
     inner: Arc<ToolSandboxState>,
     listener: Arc<UnixListener>,
+    /// URL-open listener, present only when a command declares `open_urls`.
+    url_listener: Option<Arc<UnixListener>>,
 }
 
 struct ToolSandboxState {
     runtime_dir: PathBuf,
     socket_path: PathBuf,
+    /// Dedicated URL-open listener socket path, present only when a command
+    /// declares `open_urls`. Kept separate from `socket_path` so the shim
+    /// handshake protocol is untouched.
+    url_socket_path: Option<PathBuf>,
     shim_dir: PathBuf,
+    /// The browser-open shim (a copy of the nono binary named `open`),
+    /// materialized only when a command declares `open_urls`.
+    url_open_shim: Option<ShimIdentity>,
     session_path: String,
     profile_display_name: Option<String>,
     redaction_policy: nono::ScrubPolicy,
@@ -150,7 +160,7 @@ struct FileId {
     ino: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Caller {
     Session { pid: u32 },
     Command { command: String, pid: u32 },
@@ -159,6 +169,11 @@ enum Caller {
 struct ActiveChild {
     command: String,
     pidfd: OwnedFd,
+    /// The caller this command was launched under (its policy edge). A URL-open
+    /// request from this command resolves its policy via this caller, not via a
+    /// fresh ancestry walk — which would treat the command as its own caller and
+    /// check a nonexistent `<cmd>.can_use[<cmd>]` self-edge.
+    launch_caller: Caller,
 }
 
 struct ChildLaunchResult {
@@ -238,6 +253,14 @@ impl PreparedToolSandboxRuntime {
         let mut runtime_cleanup = RuntimeDirCleanup::new(runtime_dir.clone());
         let socket_path = runtime_dir.join("supervisor.sock");
         let listener = bind_runtime_socket(&socket_path)?;
+        // Bind a dedicated URL-open listener only when a command needs it.
+        let (url_socket_path, url_listener) = if config.any_command_allows_url_open() {
+            let url_socket_path = runtime_dir.join("url.sock");
+            let url_listener = bind_runtime_socket(&url_socket_path)?;
+            (Some(url_socket_path), Some(Arc::new(url_listener)))
+        } else {
+            (None, None)
+        };
         let shim_dir = create_shim_dir(&runtime_dir)?;
         let session_path = build_session_path(&shim_dir);
         tool_sandbox_profile_log!(
@@ -263,6 +286,16 @@ impl PreparedToolSandboxRuntime {
             let identity = materialize_shim(&shim_source, &shim_dir, &name)?;
             shims_by_command.insert(name, identity);
         }
+        // Materialize the browser-open shim only when URL opening is enabled.
+        let url_open_shim = if url_socket_path.is_some() {
+            Some(materialize_shim(
+                &shim_source,
+                &shim_dir,
+                crate::tool_sandbox::url_shim::URL_OPEN_SHIM_NAME,
+            )?)
+        } else {
+            None
+        };
         seal_shim_dir(&shim_dir)?;
         tool_sandbox_profile_log!(
             "prepare:materialize_shims: {:?} ({} shims)",
@@ -271,8 +304,11 @@ impl PreparedToolSandboxRuntime {
         );
 
         let start_outer_exec = std::time::Instant::now();
-        let allowed_outer_exec_files =
-            build_outer_exec_files(shims_by_command.values(), &plan, &shim_source)?;
+        let allowed_outer_exec_files = build_outer_exec_files(
+            shims_by_command.values().chain(url_open_shim.iter()),
+            &plan,
+            &shim_source,
+        )?;
         tool_sandbox_profile_log!(
             "prepare:build_outer_exec_files: {:?} ({} paths)",
             start_outer_exec.elapsed(),
@@ -280,7 +316,11 @@ impl PreparedToolSandboxRuntime {
         );
 
         let start_baseline_cache = std::time::Instant::now();
-        let baseline_cache = build_baseline_cache(&plan, &shims_by_command, &shim_source)?;
+        let baseline_cache = build_baseline_cache(
+            &plan,
+            shims_by_command.values().chain(url_open_shim.iter()),
+            &shim_source,
+        )?;
         tool_sandbox_profile_log!(
             "build_baseline_cache: {:?} ({} closures cached)",
             start_baseline_cache.elapsed(),
@@ -292,7 +332,9 @@ impl PreparedToolSandboxRuntime {
             inner: Arc::new(ToolSandboxState {
                 runtime_dir,
                 socket_path,
+                url_socket_path,
                 shim_dir,
+                url_open_shim,
                 session_path,
                 profile_display_name: audit_context.profile_display_name,
                 redaction_policy: audit_context.redaction_policy,
@@ -312,6 +354,7 @@ impl PreparedToolSandboxRuntime {
                 approval_backends,
             }),
             listener: Arc::new(listener),
+            url_listener,
         };
         runtime_cleanup.disarm();
         tool_sandbox_profile_log!("prepare:total: {:?}", start_total.elapsed());
@@ -454,6 +497,43 @@ impl PreparedToolSandboxRuntime {
         self.listener.as_raw_fd()
     }
 
+    /// Raw fd of the URL-open listener, if one was bound (a command declares
+    /// `open_urls`). Polled by the supervisor loop alongside `listener_fd`.
+    pub(crate) fn url_listener_fd(&self) -> Option<i32> {
+        self.url_listener.as_ref().map(|l| l.as_raw_fd())
+    }
+
+    /// Drain pending URL-open connections (level-triggered poll dispatch).
+    pub(crate) fn handle_url_listener(
+        &self,
+        session_root_pid: u32,
+        session_id: &str,
+        audit_recorder: Option<Arc<Mutex<AuditRecorder>>>,
+    ) -> Result<()> {
+        let Some(url_listener) = self.url_listener.as_ref() else {
+            return Ok(());
+        };
+        loop {
+            match url_listener.accept() {
+                Ok((stream, _addr)) => {
+                    handle_url_open_stream(
+                        &self.inner,
+                        stream,
+                        session_root_pid,
+                        session_id,
+                        audit_recorder.clone(),
+                    );
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+                Err(err) => {
+                    return Err(NonoError::SandboxInit(format!(
+                        "tool-sandbox URL listener accept failed: {err}"
+                    )));
+                }
+            }
+        }
+    }
+
     pub(crate) fn emitted_error_response(&self) -> bool {
         self.inner.emitted_error_response.load(Ordering::SeqCst)
     }
@@ -550,6 +630,13 @@ impl Drop for RuntimeDirCleanup {
 pub(crate) fn maybe_run_internal_tool_sandbox_entrypoint() -> bool {
     if std::env::var_os(TOOL_SANDBOX_LAUNCH_SPEC_ENV).is_some() {
         exit_from_result(run_child_launcher());
+        return true;
+    }
+
+    // The browser-open shim is also a copy of the nono binary; detect it before
+    // the generic shim path since it does not use the shim handshake socket.
+    if crate::tool_sandbox::url_shim::current_exe_is_url_open_shim() {
+        exit_from_result(crate::tool_sandbox::url_shim::run_url_open_shim());
         return true;
     }
 
@@ -696,6 +783,11 @@ fn run_shim() -> Result<()> {
 }
 
 fn run_child_launcher() -> Result<()> {
+    // The launcher re-exec returns from main() before init_tracing() runs, so
+    // install a stderr subscriber here (honoring the forwarded RUST_LOG) — this
+    // surfaces the library's generated-ruleset debug log for the brokered child.
+    // No-op unless RUST_LOG is set.
+    crate::cli_bootstrap::init_internal_entrypoint_tracing();
     let start_launcher = std::time::Instant::now();
     let spec_path = std::env::var_os(TOOL_SANDBOX_LAUNCH_SPEC_ENV)
         .map(PathBuf::from)
@@ -941,6 +1033,123 @@ fn open_and_verify_binary(path: &OsStr, spec: &ToolSandboxChildLaunchSpec) -> Re
     }
 
     Ok(fd)
+}
+
+/// Handle a single URL-open request on the dedicated URL listener socket.
+///
+/// The requesting command is resolved from the connecting PID via the same
+/// trusted ancestry walk used for shim requests; the `command` field on the
+/// request is advisory only. The command's `open_urls` policy gates the open;
+/// the browser is launched by this unsandboxed runtime process.
+fn handle_url_open_stream(
+    state: &ToolSandboxState,
+    mut stream: UnixStream,
+    session_root_pid: u32,
+    session_id: &str,
+    audit_recorder: Option<Arc<Mutex<AuditRecorder>>>,
+) {
+    // Bound the time a single client can hold this handler. On Linux this runs
+    // on the single-threaded supervisor loop, so an idle/slow client would
+    // otherwise stall signal handling, other shims, and PTY traffic.
+    if stream
+        .set_read_timeout(Some(TOOL_SANDBOX_URL_IO_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(TOOL_SANDBOX_URL_IO_TIMEOUT)))
+        .is_err()
+    {
+        debug!("tool-sandbox URL open: failed to set socket timeout");
+        return;
+    }
+
+    let peer_pid = match peer_credentials(stream.as_raw_fd()) {
+        Ok(creds) => creds.pid,
+        Err(err) => {
+            debug!("tool-sandbox URL open: peer pid resolution failed: {err}");
+            return;
+        }
+    };
+
+    let request: ToolSandboxOpenUrlRequest = match read_frame(&mut stream) {
+        Ok(request) => request,
+        Err(err) => {
+            debug!("tool-sandbox URL open: malformed request: {err}");
+            return;
+        }
+    };
+
+    let (success, error) = match validate_url_open(state, peer_pid, session_root_pid, &request.url)
+    {
+        Ok(()) => match crate::url_open::open_url_in_browser(&request.url) {
+            Ok(()) => (true, None),
+            Err(reason) => (false, Some(reason)),
+        },
+        Err(reason) => (false, Some(reason)),
+    };
+
+    // Surface the outcome on the runtime's (unsandboxed) stderr. The brokered
+    // child collapses every shim failure into exit 126 and the calling tool
+    // often captures the shim's stderr, so this is the only place an operator
+    // can see WHY an open was denied (e.g. an origin missing from allow_origins).
+    match &error {
+        Some(reason) => warn!(
+            "tool-sandbox URL open denied (pid {peer_pid}): {} — {reason}",
+            request.url
+        ),
+        None => debug!(
+            "tool-sandbox URL open allowed (pid {peer_pid}): {}",
+            request.url
+        ),
+    }
+
+    let response = ToolSandboxOpenUrlResponse {
+        success,
+        error: error.clone(),
+    };
+    if let Err(err) = write_frame(&mut stream, &response) {
+        debug!("tool-sandbox URL open: failed to send response: {err}");
+    }
+
+    if let Some(recorder) = audit_recorder.as_ref()
+        && let Ok(mut recorder) = recorder.lock()
+    {
+        let _ = recorder.record_open_url(
+            nono::supervisor::types::UrlOpenRequest {
+                request_id: format!("tool-sandbox-url-{peer_pid}"),
+                url: request.url,
+                child_pid: peer_pid,
+                session_id: session_id.to_string(),
+            },
+            success,
+            error,
+        );
+    }
+}
+
+/// Resolve the requesting command from the connecting PID and validate the URL
+/// against that command's `open_urls` policy. Returns `Ok(())` if permitted, or
+/// a denial reason otherwise. Does not open the browser.
+fn validate_url_open(
+    state: &ToolSandboxState,
+    peer_pid: u32,
+    _session_root_pid: u32,
+    url: &str,
+) -> std::result::Result<(), String> {
+    // The URL-open shim is a child of the requesting command (e.g. gk). Resolve
+    // that command and the caller IT was launched under, then select the
+    // command's own running policy. Using the command as its own caller would
+    // check a nonexistent `<cmd>.can_use[<cmd>]` self-edge.
+    let (command_name, launch_caller) = resolve_url_open_command(peer_pid, state)
+        .map_err(|err| format!("caller resolution failed: {err}"))?
+        .ok_or_else(|| "URL open is only permitted from an active brokered command".to_string())?;
+
+    let policy = select_effective_policy(&state.plan.config, &command_name, &launch_caller)
+        .map_err(|err| format!("policy resolution failed: {err}"))?;
+
+    let open_urls = policy
+        .open_urls
+        .as_ref()
+        .ok_or_else(|| format!("command '{command_name}' does not permit opening URLs"))?;
+
+    crate::url_open::validate_url(url, &open_urls.allow_origins, open_urls.allow_localhost)
 }
 
 fn handle_shim_stream(
@@ -1392,7 +1601,7 @@ fn handle_shim_stream_inner(
         }
         let result = (|| {
             let launch = build_child_launch_spec(state, &request, policy)?;
-            launch_child_with_capture(state, &request.command, launch, stdio)
+            launch_child_with_capture(state, &request.command, &caller, launch, stdio)
         })();
         state.active_count.fetch_sub(1, Ordering::SeqCst);
         return match result {
@@ -1480,7 +1689,7 @@ fn handle_shim_stream_inner(
         }
         let result = (|| {
             let launch = build_child_launch_spec(state, &request, policy)?;
-            launch_child_with_capture(state, &request.command, launch, stdio)
+            launch_child_with_capture(state, &request.command, &caller, launch, stdio)
         })();
         state.active_count.fetch_sub(1, Ordering::SeqCst);
         match &result {
@@ -1552,7 +1761,7 @@ fn handle_shim_stream_inner(
 
     let result = (|| {
         let launch = build_child_launch_spec(state, &request, policy)?;
-        launch_child(state, &request.command, launch, stdio)
+        launch_child(state, &request.command, &caller, launch, stdio)
     })();
     state.active_count.fetch_sub(1, Ordering::SeqCst);
     match result {
@@ -1678,6 +1887,13 @@ fn resolve_caller(
 }
 
 fn live_active_child_command(pid: u32, state: &ToolSandboxState) -> Result<Option<String>> {
+    Ok(live_active_child(pid, state)?.map(|(command, _)| command))
+}
+
+/// Like [`live_active_child_command`] but also returns the caller the command
+/// was launched under. Used by the URL-open path to resolve the requesting
+/// command's own running policy.
+fn live_active_child(pid: u32, state: &ToolSandboxState) -> Result<Option<(String, Caller)>> {
     let map = state
         .active_children
         .lock()
@@ -1686,10 +1902,32 @@ fn live_active_child_command(pid: u32, state: &ToolSandboxState) -> Result<Optio
         return Ok(None);
     };
     if active_child_is_live(pid, active)? {
-        Ok(Some(active.command.clone()))
+        Ok(Some((active.command.clone(), active.launch_caller.clone())))
     } else {
         Ok(None)
     }
+}
+
+/// Resolve the active command that owns the URL-open shim at `peer_pid`, along
+/// with the caller that command was launched under. Walks the process ancestry
+/// the same way [`resolve_caller`] does, but returns the command's launch caller
+/// so its own running policy can be selected — resolving the command as its own
+/// caller would check a nonexistent `<cmd>.can_use[<cmd>]` self-edge.
+fn resolve_url_open_command(
+    peer_pid: u32,
+    state: &ToolSandboxState,
+) -> Result<Option<(String, Caller)>> {
+    let mut pid = peer_pid;
+    for _ in 0..ANCESTRY_DEPTH_LIMIT {
+        if let Some(found) = live_active_child(pid, state)? {
+            return Ok(Some(found));
+        }
+        if pid <= 1 {
+            break;
+        }
+        pid = parent_pid(pid)?;
+    }
+    Ok(None)
 }
 
 fn active_child_is_live(pid: u32, active: &ActiveChild) -> Result<bool> {
@@ -2823,6 +3061,14 @@ fn build_child_launch_spec(
     for shim in state.shims_by_command.values() {
         allowed_exec_paths.push(shim.path.as_os_str().as_bytes().to_vec());
     }
+    // Allow execing the browser-open shim only when this command may open URLs
+    // without direct LaunchServices (which is macOS-only and a no-op here).
+    if policy.open_urls.is_some()
+        && !policy.allow_launch_services
+        && let Some(shim) = state.url_open_shim.as_ref()
+    {
+        allowed_exec_paths.push(shim.path.as_os_str().as_bytes().to_vec());
+    }
     // All shims are hard links to the same nono binary; include the shim's
     // ELF dependency closure once so the dynamic linker can be exec'd when
     // a child process (e.g. sh) execs a shim.
@@ -2902,7 +3148,35 @@ fn build_child_caps(
     add_policy_proxy_network(&mut caps, state, request, policy)?;
     add_proxy_trust_bundle_caps(&mut caps, state, policy)?;
     add_policy_credentials(&mut caps, state, policy)?;
+    add_url_open_caps(&mut caps, state, policy)?;
     Ok(caps)
+}
+
+/// Grant the brokered child connect access to the URL listener socket and read
+/// access to the open shim, when the command declares `open_urls` and did not
+/// opt into direct LaunchServices. The shim is added to the Landlock execute
+/// allowlist in `build_child_launch_spec`.
+fn add_url_open_caps(
+    caps: &mut CapabilitySet,
+    state: &ToolSandboxState,
+    policy: &CommandSandboxConfig,
+) -> Result<()> {
+    if policy.open_urls.is_none() || policy.allow_launch_services {
+        return Ok(());
+    }
+    let (Some(url_socket_path), Some(shim)) =
+        (state.url_socket_path.as_ref(), state.url_open_shim.as_ref())
+    else {
+        return Ok(());
+    };
+    caps.add_unix_socket(UnixSocketCapability::new_file(
+        url_socket_path,
+        UnixSocketMode::Connect,
+    )?);
+    caps.add_fs(FsCapability::new_file(url_socket_path, AccessMode::Read)?);
+    caps.add_fs(FsCapability::new_file(&shim.path, AccessMode::Read)?);
+    add_runtime_baseline(caps, &state.baseline_cache, &shim.path)?;
+    Ok(())
 }
 
 fn add_executable_shape_baseline(
@@ -3131,9 +3405,9 @@ fn add_runtime_baseline(
     Ok(())
 }
 
-fn build_baseline_cache(
+fn build_baseline_cache<'a>(
     plan: &ResolvedToolSandboxPlan,
-    shims_by_command: &BTreeMap<String, ShimIdentity>,
+    shims: impl IntoIterator<Item = &'a ShimIdentity>,
     shim_source: &Path,
 ) -> Result<BaselineCache> {
     let system_files = compute_system_baseline_files()?;
@@ -3161,7 +3435,7 @@ fn build_baseline_cache(
     }
 
     let shim_closure = elf_dependency_closure(shim_source)?;
-    for shim in shims_by_command.values() {
+    for shim in shims {
         closures.insert(shim.path.clone(), shim_closure.clone());
     }
 
@@ -3266,6 +3540,12 @@ fn filter_child_env(
         env.push(format!("PATH={}", state.session_path).into_bytes());
     }
     inject_chaining_control_env(&mut env, &state.socket_path, &state.shim_dir);
+    inject_url_open_env(
+        &mut env,
+        policy,
+        state.url_socket_path.as_deref(),
+        state.url_open_shim.as_ref().map(|shim| shim.path.as_path()),
+    );
     apply_environment_set_vars(&mut env, policy)?;
     for handle in super::policy_credential_names(policy) {
         match state.credential_handles.get(handle) {
@@ -3314,6 +3594,7 @@ fn filter_child_env(
 fn launch_child(
     state: &ToolSandboxState,
     command_name: &str,
+    launch_caller: &Caller,
     spec: ToolSandboxChildLaunchSpec,
     stdio: StdioFds,
 ) -> Result<ChildLaunchResult> {
@@ -3323,8 +3604,15 @@ fn launch_child(
     tool_sandbox_profile_log!("launch_child:write_spec: {:?}", start_write.elapsed());
     let start_spawn_wait = std::time::Instant::now();
     let result = match spec.stdio_mode.as_str() {
-        "pty" => launch_child_with_pty(state, command_name, &spec_path, stdio),
-        "direct_fds" => launch_child_with_direct_fds(state, command_name, &spec_path, &spec, stdio),
+        "pty" => launch_child_with_pty(state, command_name, launch_caller, &spec_path, stdio),
+        "direct_fds" => launch_child_with_direct_fds(
+            state,
+            command_name,
+            launch_caller,
+            &spec_path,
+            &spec,
+            stdio,
+        ),
         other => Err(NonoError::ConfigParse(format!(
             "invalid tool-sandbox stdio mode '{other}'"
         ))),
@@ -3341,12 +3629,20 @@ fn launch_child(
 fn launch_child_with_direct_fds(
     state: &ToolSandboxState,
     command_name: &str,
+    launch_caller: &Caller,
     spec_path: &Path,
     spec: &ToolSandboxChildLaunchSpec,
     stdio: StdioFds,
 ) -> Result<ChildLaunchResult> {
     if spec.stdio_limits.is_some() {
-        return launch_child_with_brokered_stdio(state, command_name, spec_path, spec, stdio);
+        return launch_child_with_brokered_stdio(
+            state,
+            command_name,
+            launch_caller,
+            spec_path,
+            spec,
+            stdio,
+        );
     }
     let mut command = prepare_launcher_command(spec_path)?;
     command
@@ -3355,7 +3651,7 @@ fn launch_child_with_direct_fds(
         .stderr(Stdio::from(File::from(stdio.stderr)));
     let mut child = command.spawn().map_err(NonoError::CommandExecution)?;
     drop(command);
-    let exit_code = wait_for_tracked_child(state, command_name, &mut child)?;
+    let exit_code = wait_for_tracked_child(state, command_name, launch_caller, &mut child)?;
     Ok(ChildLaunchResult {
         exit_code,
         stdio: None,
@@ -3366,6 +3662,7 @@ fn launch_child_with_direct_fds(
 fn launch_child_with_brokered_stdio(
     state: &ToolSandboxState,
     command_name: &str,
+    launch_caller: &Caller,
     spec_path: &Path,
     spec: &ToolSandboxChildLaunchSpec,
     stdio: StdioFds,
@@ -3389,7 +3686,7 @@ fn launch_child_with_brokered_stdio(
 
     let mut child = command.spawn().map_err(NonoError::CommandExecution)?;
     drop(command);
-    track_spawned_child(state, command_name, &mut child)?;
+    track_spawned_child(state, command_name, launch_caller, &mut child)?;
 
     let exceeded = Arc::new(AtomicBool::new(false));
     let stdout_exceeded = exceeded.clone();
@@ -3614,6 +3911,7 @@ fn nonce_stdout(nonce: String) -> Vec<u8> {
 fn launch_child_with_capture(
     state: &ToolSandboxState,
     command_name: &str,
+    launch_caller: &Caller,
     spec: ToolSandboxChildLaunchSpec,
     stdio: StdioFds,
 ) -> Result<(i32, Vec<u8>)> {
@@ -3646,7 +3944,7 @@ fn launch_child_with_capture(
     // the parent, so reading from pipe_read will yield EOF when the child
     // closes its stdout (on exit or explicit close).
 
-    if let Err(err) = track_spawned_child(state, command_name, &mut child) {
+    if let Err(err) = track_spawned_child(state, command_name, launch_caller, &mut child) {
         remove_launch_spec(&spec_path);
         return Err(err);
     }
@@ -3677,6 +3975,7 @@ fn launch_child_with_capture(
 fn launch_child_with_pty(
     state: &ToolSandboxState,
     command_name: &str,
+    launch_caller: &Caller,
     spec_path: &Path,
     stdio: StdioFds,
 ) -> Result<ChildLaunchResult> {
@@ -3698,7 +3997,7 @@ fn launch_child_with_pty(
     let mut child = command.spawn().map_err(NonoError::CommandExecution)?;
     drop(command);
     drop(pty.slave);
-    track_spawned_child(state, command_name, &mut child)?;
+    track_spawned_child(state, command_name, launch_caller, &mut child)?;
     let status = relay_pty_and_wait(&mut child, pty.master, stdio);
     untrack_child(state, child.id())?;
     Ok(ChildLaunchResult {
@@ -3711,9 +4010,10 @@ fn launch_child_with_pty(
 fn wait_for_tracked_child(
     state: &ToolSandboxState,
     command_name: &str,
+    launch_caller: &Caller,
     child: &mut Child,
 ) -> Result<i32> {
-    track_spawned_child(state, command_name, child)?;
+    track_spawned_child(state, command_name, launch_caller, child)?;
     let status = child.wait().map_err(NonoError::CommandExecution);
     untrack_child(state, child.id())?;
     status.map(exit_status_code)
@@ -3722,9 +4022,10 @@ fn wait_for_tracked_child(
 fn track_spawned_child(
     state: &ToolSandboxState,
     command_name: &str,
+    launch_caller: &Caller,
     child: &mut Child,
 ) -> Result<()> {
-    if let Err(err) = track_child(state, child.id(), command_name) {
+    if let Err(err) = track_child(state, child.id(), command_name, launch_caller) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(err);
@@ -3732,7 +4033,12 @@ fn track_spawned_child(
     Ok(())
 }
 
-fn track_child(state: &ToolSandboxState, child_pid: u32, command_name: &str) -> Result<()> {
+fn track_child(
+    state: &ToolSandboxState,
+    child_pid: u32,
+    command_name: &str,
+    launch_caller: &Caller,
+) -> Result<()> {
     let pidfd = open_pidfd(child_pid)?;
     let mut map = state
         .active_children
@@ -3743,6 +4049,7 @@ fn track_child(state: &ToolSandboxState, child_pid: u32, command_name: &str) -> 
         ActiveChild {
             command: command_name.to_string(),
             pidfd,
+            launch_caller: launch_caller.clone(),
         },
     );
     Ok(())

@@ -41,6 +41,8 @@ mod policy;
 mod protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod token_broker;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod url_shim;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) struct ToolSandboxPrepare<'a> {

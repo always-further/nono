@@ -162,6 +162,7 @@ fn test_schema_command_policies_match_tool_sandbox_guide_shape() {
         &schema,
         "CommandSandboxConfig",
         &[
+            "allow_launch_services",
             "allow_raw_file_credentials_in_chained_policy",
             "argv_prepend",
             "credentials",
@@ -171,6 +172,7 @@ fn test_schema_command_policies_match_tool_sandbox_guide_shape() {
             "fs_write",
             "fs_write_file",
             "network",
+            "open_urls",
             "resources",
             "stdio",
             "use_credentials",

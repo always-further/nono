@@ -81,6 +81,7 @@ mod trust_intercept;
 mod trust_keystore;
 mod trust_scan;
 mod update_check;
+mod url_open;
 mod why_runtime;
 mod wiring;
 

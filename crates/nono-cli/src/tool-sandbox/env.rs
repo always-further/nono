@@ -1,7 +1,7 @@
 use crate::command_policy::{CommandSandboxConfig, ResolvedCommandBinary};
 use crate::tool_sandbox::protocol::{
     TOOL_SANDBOX_LAUNCH_SPEC_ENV, TOOL_SANDBOX_SHIM_DIR_ENV, TOOL_SANDBOX_SOCKET_ENV,
-    ToolSandboxShimRequest,
+    TOOL_SANDBOX_URL_SOCKET_ENV, ToolSandboxShimRequest,
 };
 use nono::{NonoError, Result};
 use std::os::unix::ffi::OsStrExt;
@@ -101,6 +101,40 @@ pub(crate) fn inject_chaining_control_env(
     });
     env.push(format!("{TOOL_SANDBOX_SOCKET_ENV}={}", socket_path.display()).into_bytes());
     env.push(format!("{TOOL_SANDBOX_SHIM_DIR_ENV}={}", shim_dir.display()).into_bytes());
+}
+
+/// Inject the URL-open socket env var and `BROWSER` for a brokered child whose
+/// command declares `open_urls` and did not opt into direct LaunchServices.
+///
+/// Both vars are stripped first (a child cannot smuggle its own) then set to
+/// the runtime's URL socket and the open shim path. No-op when URL opening is
+/// not enabled for this command.
+pub(crate) fn inject_url_open_env(
+    env: &mut Vec<Vec<u8>>,
+    policy: &CommandSandboxConfig,
+    url_socket_path: Option<&Path>,
+    url_open_shim_path: Option<&Path>,
+) {
+    if policy.open_urls.is_none() || policy.allow_launch_services {
+        return;
+    }
+    let (Some(url_socket_path), Some(shim_path)) = (url_socket_path, url_open_shim_path) else {
+        return;
+    };
+
+    let socket_prefix = format!("{TOOL_SANDBOX_URL_SOCKET_ENV}=").into_bytes();
+    env.retain(|entry| !entry.starts_with(&socket_prefix));
+    let mut socket_entry = socket_prefix;
+    socket_entry.extend_from_slice(url_socket_path.as_os_str().as_bytes());
+    env.push(socket_entry);
+
+    // Point BROWSER at the open shim so libraries that honour it route through
+    // the runtime instead of attempting a (denied) direct browser launch.
+    let browser_prefix = b"BROWSER=".to_vec();
+    env.retain(|entry| !entry.starts_with(&browser_prefix));
+    let mut browser_entry = browser_prefix;
+    browser_entry.extend_from_slice(shim_path.as_os_str().as_bytes());
+    env.push(browser_entry);
 }
 
 pub(crate) fn split_env_entry(entry: &[u8]) -> Option<(&[u8], &[u8])> {

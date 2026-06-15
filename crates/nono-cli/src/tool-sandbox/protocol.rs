@@ -9,6 +9,34 @@ use std::os::unix::net::UnixStream;
 pub(crate) const TOOL_SANDBOX_SOCKET_ENV: &str = "NONO_TOOL_SANDBOX_SOCKET";
 pub(crate) const TOOL_SANDBOX_SHIM_DIR_ENV: &str = "NONO_TOOL_SANDBOX_SHIM_DIR";
 pub(crate) const TOOL_SANDBOX_LAUNCH_SPEC_ENV: &str = "NONO_TOOL_SANDBOX_LAUNCH_SPEC";
+/// Path to the runtime's dedicated URL-open listener socket. Injected into the
+/// brokered child so the open-url helper can reach the unsandboxed runtime.
+pub(crate) const TOOL_SANDBOX_URL_SOCKET_ENV: &str = "NONO_TOOL_SANDBOX_URL_SOCKET";
+
+/// Read/write timeout the runtime applies to an accepted URL-open connection so
+/// a slow or idle client cannot stall the handler (and, on Linux, the
+/// single-threaded supervisor loop that drives it).
+pub(crate) const TOOL_SANDBOX_URL_IO_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+/// Request from a brokered child to open a URL in the user's browser.
+///
+/// Sent on the dedicated URL listener socket (one message per connection, no
+/// fd passing). `command` is the brokered command name, used by the runtime to
+/// look up that command's `open_urls` policy for per-command origin validation.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ToolSandboxOpenUrlRequest {
+    pub(crate) command: String,
+    pub(crate) url: String,
+}
+
+/// Response to a [`ToolSandboxOpenUrlRequest`].
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ToolSandboxOpenUrlResponse {
+    pub(crate) success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
 
 const MAX_FRAME: usize = 1024 * 1024;
 const MAX_ARGC: usize = 4096;
