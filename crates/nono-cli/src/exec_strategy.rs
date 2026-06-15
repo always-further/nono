@@ -727,6 +727,9 @@ pub fn execute_supervised(
     match fork_result {
         Ok(ForkResult::Child) => {
             #[cfg(target_os = "linux")]
+            let mut close_child_supervisor_socket_before_exec = false;
+
+            #[cfg(target_os = "linux")]
             let mut child_caps = config.caps.clone();
             #[cfg(target_os = "linux")]
             child_caps.remap_procfs_self_references(std::process::id(), None);
@@ -926,9 +929,11 @@ pub fn execute_supervised(
                             }
                             _ => false,
                         };
-                        nono::sandbox::install_seccomp_proxy_filter(has_bind)
+                        nono::sandbox::install_seccomp_proxy_filter_with_bootstrap_sendmsg_fd(
+                            has_bind, fd,
+                        )
                     } else {
-                        nono::sandbox::install_seccomp_af_unix_filter()
+                        nono::sandbox::install_seccomp_af_unix_filter_with_bootstrap_sendmsg_fd(fd)
                     };
 
                     match notify_result {
@@ -950,6 +955,11 @@ pub fn execute_supervised(
                                     );
                                     libc::_exit(126);
                                 }
+                            }
+                            if config.seccomp_proxy_fallback
+                                || config.af_unix_mediation.is_pathname()
+                            {
+                                close_child_supervisor_socket_before_exec = true;
                             }
                         }
                         Err(e) => {
@@ -1001,6 +1011,14 @@ pub fn execute_supervised(
             }
 
             // Close inherited FDs (but keep stdin/stdout/stderr and supervisor socket)
+            #[cfg(target_os = "linux")]
+            if close_child_supervisor_socket_before_exec && let Some(fd) = child_sock_fd {
+                // All seccomp notify fds have already been sent to the parent,
+                // so the child must not inherit the bootstrap fd-number
+                // exemption into the sandboxed program.
+                child_keep_fds.retain(|keep_fd| *keep_fd != fd);
+            }
+
             close_inherited_fds(max_fd, &child_keep_fds);
 
             // SAFETY: `current_dir_c` was prepared before fork and remains valid

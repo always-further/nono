@@ -1964,6 +1964,55 @@ fn build_seccomp_proxy_filter(_has_bind_ports: bool) -> Vec<SockFilterInsn> {
     ]
 }
 
+fn build_seccomp_proxy_filter_with_bootstrap_sendmsg_fd(
+    has_bind_ports: bool,
+    bootstrap_sendmsg_fd: Option<std::os::fd::RawFd>,
+) -> Vec<SockFilterInsn> {
+    let Some(bootstrap_sendmsg_fd) = bootstrap_sendmsg_fd else {
+        return build_seccomp_proxy_filter(has_bind_ports);
+    };
+
+    let bootstrap_fd = bootstrap_sendmsg_fd as u32;
+    let mut filter = build_seccomp_proxy_filter(has_bind_ports);
+
+    // Redirect SYS_SENDMSG from the shared USER_NOTIF return to the appended
+    // bootstrap-fd check below. This keeps the established proxy filter layout
+    // unchanged when no bootstrap exemption is needed.
+    filter[6].jt = 16; // target 23 from insn 6: 23 - 6 - 1 = 16
+    filter.extend([
+        // 23: ld [args[0]] -- sendmsg fd
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_ARG0_OFFSET,
+        },
+        // 24: jeq bootstrap_fd -> 26 (ALLOW), otherwise 25 (USER_NOTIF)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: bootstrap_fd,
+        },
+        // 25: ret USER_NOTIF
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_USER_NOTIF,
+        },
+        // 26: ret ALLOW -- supervisor notify-fd bootstrap sendmsg only
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+    ]);
+
+    filter
+}
+
 /// Build a BPF filter for opt-in pathname AF_UNIX mediation.
 ///
 /// The filter routes `connect()`, `bind()`, `sendto()`, `sendmsg()`, and `sendmmsg()`
@@ -1987,6 +2036,75 @@ fn build_seccomp_proxy_filter(_has_bind_ports: bool) -> Vec<SockFilterInsn> {
 ///  7: ret USER_NOTIF
 /// ```
 fn build_seccomp_af_unix_filter() -> Vec<SockFilterInsn> {
+    build_seccomp_af_unix_filter_with_bootstrap_sendmsg_fd(None)
+}
+
+fn build_seccomp_af_unix_filter_with_bootstrap_sendmsg_fd(
+    bootstrap_sendmsg_fd: Option<std::os::fd::RawFd>,
+) -> Vec<SockFilterInsn> {
+    let Some(bootstrap_sendmsg_fd) = bootstrap_sendmsg_fd else {
+        return vec![
+            // 0: ld [nr]
+            SockFilterInsn {
+                code: BPF_LD | BPF_W | BPF_ABS,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_DATA_NR_OFFSET,
+            },
+            // 1: jeq SYS_CONNECT -> 7 (jt = 7-1-1 = 5)
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 5,
+                jf: 0,
+                k: SYS_CONNECT as u32,
+            },
+            // 2: jeq SYS_BIND -> 7 (jt = 7-2-1 = 4)
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 4,
+                jf: 0,
+                k: SYS_BIND as u32,
+            },
+            // 3: jeq SYS_SENDTO -> 7 (jt = 7-3-1 = 3)
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 3,
+                jf: 0,
+                k: SYS_SENDTO as u32,
+            },
+            // 4: jeq SYS_SENDMSG -> 7 (jt = 7-4-1 = 2)
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 2,
+                jf: 0,
+                k: SYS_SENDMSG as u32,
+            },
+            // 5: jeq SYS_SENDMMSG -> 7 (jt = 7-5-1 = 1)
+            SockFilterInsn {
+                code: BPF_JMP | BPF_JEQ | BPF_K,
+                jt: 1,
+                jf: 0,
+                k: SYS_SENDMMSG as u32,
+            },
+            // 6: ret ALLOW
+            SockFilterInsn {
+                code: BPF_RET | BPF_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ALLOW,
+            },
+            // 7: ret USER_NOTIF
+            SockFilterInsn {
+                code: BPF_RET | BPF_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_USER_NOTIF,
+            },
+        ];
+    };
+
+    let bootstrap_fd = bootstrap_sendmsg_fd as u32;
+
     vec![
         // 0: ld [nr]
         SockFilterInsn {
@@ -1995,24 +2113,24 @@ fn build_seccomp_af_unix_filter() -> Vec<SockFilterInsn> {
             jf: 0,
             k: SECCOMP_DATA_NR_OFFSET,
         },
-        // 1: jeq SYS_CONNECT -> 7 (jt = 7-1-1 = 5)
+        // 1: jeq SYS_CONNECT -> 9 (jt = 9-1-1 = 7)
         SockFilterInsn {
             code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: 5,
+            jt: 7,
             jf: 0,
             k: SYS_CONNECT as u32,
         },
-        // 2: jeq SYS_BIND -> 7 (jt = 7-2-1 = 4)
+        // 2: jeq SYS_BIND -> 9 (jt = 9-2-1 = 6)
         SockFilterInsn {
             code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: 4,
+            jt: 6,
             jf: 0,
             k: SYS_BIND as u32,
         },
-        // 3: jeq SYS_SENDTO -> 7 (jt = 7-3-1 = 3)
+        // 3: jeq SYS_SENDTO -> 9 (jt = 9-3-1 = 5)
         SockFilterInsn {
             code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: 3,
+            jt: 5,
             jf: 0,
             k: SYS_SENDTO as u32,
         },
@@ -2023,10 +2141,10 @@ fn build_seccomp_af_unix_filter() -> Vec<SockFilterInsn> {
             jf: 0,
             k: SYS_SENDMSG as u32,
         },
-        // 5: jeq SYS_SENDMMSG -> 7 (jt = 7-5-1 = 1)
+        // 5: jeq SYS_SENDMMSG -> 9 (jt = 9-5-1 = 3)
         SockFilterInsn {
             code: BPF_JMP | BPF_JEQ | BPF_K,
-            jt: 1,
+            jt: 3,
             jf: 0,
             k: SYS_SENDMMSG as u32,
         },
@@ -2037,12 +2155,33 @@ fn build_seccomp_af_unix_filter() -> Vec<SockFilterInsn> {
             jf: 0,
             k: SECCOMP_RET_ALLOW,
         },
-        // 7: ret USER_NOTIF
+        // 7: ld [args[0]] -- sendmsg fd
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_ARG0_OFFSET,
+        },
+        // 8: jeq bootstrap_fd -> 10 (ALLOW), otherwise 9 (USER_NOTIF)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: bootstrap_fd,
+        },
+        // 9: ret USER_NOTIF
         SockFilterInsn {
             code: BPF_RET | BPF_K,
             jt: 0,
             jf: 0,
             k: SECCOMP_RET_USER_NOTIF,
+        },
+        // 10: ret ALLOW -- supervisor notify-fd bootstrap sendmsg only
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
         },
     ]
 }
@@ -2062,6 +2201,29 @@ pub fn install_seccomp_proxy_filter(has_bind_ports: bool) -> Result<std::os::fd:
     install_seccomp_notify_filter(&build_seccomp_proxy_filter(has_bind_ports), "proxy filter")
 }
 
+/// Install a proxy-only network filter that allows one bootstrap `sendmsg(2)`
+/// fd to pass without notification.
+///
+/// The child uses that private supervisor socket fd to pass this filter's
+/// notify fd to the parent via `SCM_RIGHTS`. The fd should be closed before
+/// exec so the exemption cannot be reused by the sandboxed program.
+///
+/// # Errors
+///
+/// Returns an error if the seccomp syscall fails.
+pub fn install_seccomp_proxy_filter_with_bootstrap_sendmsg_fd(
+    has_bind_ports: bool,
+    bootstrap_sendmsg_fd: std::os::fd::RawFd,
+) -> Result<std::os::fd::OwnedFd> {
+    install_seccomp_notify_filter(
+        &build_seccomp_proxy_filter_with_bootstrap_sendmsg_fd(
+            has_bind_ports,
+            Some(bootstrap_sendmsg_fd),
+        ),
+        "proxy filter",
+    )
+}
+
 /// Install a seccomp-notify BPF filter for pathname AF_UNIX mediation.
 ///
 /// # Errors
@@ -2069,6 +2231,26 @@ pub fn install_seccomp_proxy_filter(has_bind_ports: bool) -> Result<std::os::fd:
 /// Returns an error if the seccomp syscall fails.
 pub fn install_seccomp_af_unix_filter() -> Result<std::os::fd::OwnedFd> {
     install_seccomp_notify_filter(&build_seccomp_af_unix_filter(), "AF_UNIX mediation filter")
+}
+
+/// Install a pathname AF_UNIX mediation filter that allows one bootstrap
+/// `sendmsg(2)` fd to pass without notification.
+///
+/// The supervised child uses `sendmsg(SCM_RIGHTS)` on its private supervisor
+/// socket to pass this filter's notify fd to the parent. Without this narrow
+/// exemption the bootstrap sendmsg itself is trapped, but the parent cannot
+/// service the notification until it receives the notify fd.
+///
+/// # Errors
+///
+/// Returns an error if the seccomp syscall fails.
+pub fn install_seccomp_af_unix_filter_with_bootstrap_sendmsg_fd(
+    bootstrap_sendmsg_fd: std::os::fd::RawFd,
+) -> Result<std::os::fd::OwnedFd> {
+    install_seccomp_notify_filter(
+        &build_seccomp_af_unix_filter_with_bootstrap_sendmsg_fd(Some(bootstrap_sendmsg_fd)),
+        "AF_UNIX mediation filter",
+    )
 }
 
 fn install_seccomp_notify_filter(
@@ -3481,6 +3663,22 @@ mod tests {
     }
 
     #[test]
+    fn test_build_seccomp_proxy_filter_bootstrap_sendmsg_exemption() {
+        let filter = build_seccomp_proxy_filter_with_bootstrap_sendmsg_fd(false, Some(42));
+        assert_eq!(filter.len(), 27);
+
+        // sendmsg no longer jumps to the shared USER_NOTIF return at 21; it
+        // checks the bootstrap fd first.
+        assert_eq!(filter[6].k, SYS_SENDMSG as u32);
+        assert_eq!(filter[6].jt, 16);
+        assert_eq!(filter[23].code, BPF_LD | BPF_W | BPF_ABS);
+        assert_eq!(filter[23].k, SECCOMP_DATA_ARG0_OFFSET);
+        assert_eq!(filter[24].k, 42);
+        assert_eq!(filter[25].k, SECCOMP_RET_USER_NOTIF);
+        assert_eq!(filter[26].k, SECCOMP_RET_ALLOW);
+    }
+
+    #[test]
     fn test_build_seccomp_af_unix_filter_notifies_connect_bind_sendto_sendmsg_sendmmsg() {
         let filter = build_seccomp_af_unix_filter();
         assert_eq!(filter.len(), 8);
@@ -3493,6 +3691,19 @@ mod tests {
         assert_eq!(filter[5].k, SYS_SENDMMSG as u32);
         assert_eq!(filter[6].k, SECCOMP_RET_ALLOW);
         assert_eq!(filter[7].k, SECCOMP_RET_USER_NOTIF);
+    }
+
+    #[test]
+    fn test_build_seccomp_af_unix_filter_bootstrap_sendmsg_exemption() {
+        let filter = build_seccomp_af_unix_filter_with_bootstrap_sendmsg_fd(Some(42));
+        assert_eq!(filter.len(), 11);
+        assert_eq!(filter[4].k, SYS_SENDMSG as u32);
+        assert_eq!(filter[4].jt, 2);
+        assert_eq!(filter[7].code, BPF_LD | BPF_W | BPF_ABS);
+        assert_eq!(filter[7].k, SECCOMP_DATA_ARG0_OFFSET);
+        assert_eq!(filter[8].k, 42);
+        assert_eq!(filter[9].k, SECCOMP_RET_USER_NOTIF);
+        assert_eq!(filter[10].k, SECCOMP_RET_ALLOW);
     }
 
     #[test]

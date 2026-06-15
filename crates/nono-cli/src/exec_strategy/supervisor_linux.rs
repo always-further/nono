@@ -544,6 +544,18 @@ pub(super) enum NetworkDecision {
     Deny,
 }
 
+fn should_rate_limit_network_notification(
+    config: &SupervisorConfig<'_>,
+    sockaddrs: &[nono::sandbox::SockaddrInfo],
+) -> bool {
+    match config.linux_network_notify_mode {
+        LinuxNetworkNotifyMode::ProxyOnly => true,
+        LinuxNetworkNotifyMode::AfUnixOnly => sockaddrs
+            .iter()
+            .any(|sockaddr| sockaddr.family == libc::AF_UNIX as u16),
+    }
+}
+
 /// Pure policy function: given a trapped syscall and the sockaddr the child
 /// passed in, decide whether the supervisor should allow or deny it.
 ///
@@ -825,13 +837,6 @@ pub(super) fn handle_network_notification(
 
     let notif = recv_notif(notify_fd)?;
 
-    // Rate limit to prevent flooding
-    if !rate_limiter.try_acquire() {
-        debug!("Rate limited network seccomp notification, denying");
-        let _ = deny_notif(notify_fd, notif.id);
-        return Ok(());
-    }
-
     // Read sockaddr from child's memory. The location depends on the syscall:
     //   connect(fd, sockaddr*, addrlen):   args[1] = sockaddr*, args[2] = addrlen
     //   bind(fd, sockaddr*, addrlen):       args[1] = sockaddr*, args[2] = addrlen
@@ -969,6 +974,17 @@ pub(super) fn handle_network_notification(
     // TOCTOU check
     if !notif_id_valid(notify_fd, notif.id)? {
         debug!("Network seccomp notification expired (TOCTOU check)");
+        return Ok(());
+    }
+
+    // Rate limit network mediation, but do not charge non-AF_UNIX syscalls
+    // that were trapped only because the AF_UNIX-only seccomp filter cannot
+    // inspect sockaddr memory in BPF. Those requests must continue to the
+    // normal Landlock/network policy path; charging them produces a hard
+    // burst-sized TCP/UDP connect ceiling (#1128).
+    if should_rate_limit_network_notification(config, &sockaddrs) && !rate_limiter.try_acquire() {
+        debug!("Rate limited network seccomp notification, denying");
+        let _ = deny_notif(notify_fd, notif.id);
         return Ok(());
     }
 
@@ -1452,6 +1468,7 @@ mod tests {
     mod network_decision {
         use super::super::{
             LinuxNetworkNotifyMode, NetworkDecision, SupervisorConfig, decide_network_notification,
+            should_rate_limit_network_notification,
         };
         use nix::libc;
         use nono::sandbox::{
@@ -1777,6 +1794,60 @@ mod tests {
                 decide_network_notification(test_pid(), SYS_BIND, &inet_loopback(4000), &config),
                 NetworkDecision::Allow
             );
+        }
+
+        #[test]
+        fn af_unix_only_mode_does_not_rate_limit_non_af_unix_notifications() {
+            let backend = DenyAllBackend;
+            let config = make_af_unix_only_config(&backend, &[]);
+
+            assert!(
+                !should_rate_limit_network_notification(&config, &[inet_external(443)]),
+                "AF_UNIX-only mediation must not spend rate-limit tokens on TCP connect artifacts"
+            );
+            assert!(
+                !should_rate_limit_network_notification(&config, &[inet_loopback(4000)]),
+                "AF_UNIX-only mediation must not spend rate-limit tokens on TCP bind artifacts"
+            );
+        }
+
+        #[test]
+        fn af_unix_only_mode_rate_limits_af_unix_notifications() {
+            let backend = DenyAllBackend;
+            let dir = match tempfile::tempdir() {
+                Ok(dir) => dir,
+                Err(err) => panic!("tempdir failed: {err}"),
+            };
+            let path = socket_path(&dir, "test.sock");
+            let config = make_af_unix_only_config(&backend, &[]);
+
+            assert!(
+                should_rate_limit_network_notification(&config, &[unix_pathname(&path)]),
+                "actual AF_UNIX mediation should remain rate-limited"
+            );
+            assert!(should_rate_limit_network_notification(
+                &config,
+                &[unix_abstract()]
+            ));
+            assert!(should_rate_limit_network_notification(
+                &config,
+                &[unix_unnamed()]
+            ));
+        }
+
+        #[test]
+        fn proxy_only_mode_still_rate_limits_network_notifications() {
+            let backend = DenyAllBackend;
+            let config = make_config(&backend, 8080, Vec::new(), &[]);
+
+            assert!(should_rate_limit_network_notification(
+                &config,
+                &[inet_external(443)]
+            ));
+            assert!(should_rate_limit_network_notification(
+                &config,
+                &[inet_loopback(8080)]
+            ));
         }
 
         // --- sendto/sendmsg/sendmmsg tests (issue #1089) -------------------
