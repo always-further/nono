@@ -1013,13 +1013,9 @@ pub fn execute_supervised(
             // Close inherited FDs (but keep stdin/stdout/stderr and supervisor socket)
             #[cfg(target_os = "linux")]
             if close_child_supervisor_socket_before_exec && let Some(fd) = child_sock_fd {
-                // SAFETY: `fd` is the child end of the private supervisor
-                // socket. All seccomp notify fds have already been sent to
-                // the parent, so the child must not inherit the bootstrap
-                // fd-number exemption into the sandboxed program.
-                unsafe {
-                    libc::close(fd);
-                }
+                // All seccomp notify fds have already been sent to the parent,
+                // so the child must not inherit the bootstrap fd-number
+                // exemption into the sandboxed program.
                 child_keep_fds.retain(|keep_fd| *keep_fd != fd);
             }
 
