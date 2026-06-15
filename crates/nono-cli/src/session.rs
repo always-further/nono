@@ -225,15 +225,20 @@ fn ensure_private_dir(dir: &Path) -> Result<PathBuf> {
         validate_sessions_dir(dir)?;
         return Ok(dir.to_path_buf());
     }
-    std::fs::create_dir_all(dir).map_err(|e| NonoError::ConfigWrite {
-        path: dir.to_path_buf(),
-        source: e,
-    })?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(dir, perms).map_err(|e| NonoError::ConfigWrite {
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(dir).map_err(|e| NonoError::ConfigWrite {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir).map_err(|e| NonoError::ConfigWrite {
             path: dir.to_path_buf(),
             source: e,
         })?;
@@ -318,6 +323,7 @@ pub fn generate_random_name() -> String {
 pub fn list_sessions() -> Result<Vec<SessionRecord>> {
     let mut sessions = Vec::new();
     let mut seen_ids = BTreeSet::new();
+    let legacy_roots = crate::state_paths::LegacyRootSet::resolve()?;
 
     for dir in crate::state_paths::session_registry_dirs_for_read()? {
         if !dir.exists() {
@@ -346,7 +352,7 @@ pub fn list_sessions() -> Result<Vec<SessionRecord>> {
             match load_reconciled_session_file(&path) {
                 Ok(record) => {
                     if seen_ids.insert(record.session_id.clone()) {
-                        crate::state_paths::warn_if_legacy_session_file_read(&path);
+                        legacy_roots.warn_if_legacy_session_file_read(&path);
                         sessions.push(record);
                     }
                 }
@@ -369,6 +375,7 @@ pub fn list_sessions() -> Result<Vec<SessionRecord>> {
 pub fn load_session(query: &str) -> Result<SessionRecord> {
     let mut id_matches = Vec::new();
     let mut name_matches = Vec::new();
+    let legacy_roots = crate::state_paths::LegacyRootSet::resolve()?;
 
     for dir in crate::state_paths::session_registry_dirs_for_read()? {
         if !dir.exists() {
@@ -400,7 +407,7 @@ pub fn load_session(query: &str) -> Result<SessionRecord> {
             if file_name.starts_with(query) {
                 match load_reconciled_session_file(&path) {
                     Ok(record) => {
-                        crate::state_paths::warn_if_legacy_session_file_read(&path);
+                        legacy_roots.warn_if_legacy_session_file_read(&path);
                         id_matches.push(record);
                     }
                     Err(e) => debug!("Skipping corrupt session file {}: {}", path.display(), e),
@@ -409,7 +416,7 @@ pub fn load_session(query: &str) -> Result<SessionRecord> {
                 match load_reconciled_session_file(&path) {
                     Ok(record) => {
                         if record.name.as_deref() == Some(query) {
-                            crate::state_paths::warn_if_legacy_session_file_read(&path);
+                            legacy_roots.warn_if_legacy_session_file_read(&path);
                             name_matches.push(record);
                         }
                     }

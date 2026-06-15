@@ -19,7 +19,6 @@ pub(crate) fn append_session(metadata: &SessionMetadata) -> Result<LedgerRecord>
     validate_ledger_session_id(&metadata.session_id)?;
 
     let root = audit_root()?;
-    state_paths::maybe_migrate_legacy_audit_ledger()?;
     std::fs::create_dir_all(&root).map_err(|e| {
         NonoError::Snapshot(format!(
             "Failed to create audit root {}: {e}",
@@ -29,6 +28,7 @@ pub(crate) fn append_session(metadata: &SessionMetadata) -> Result<LedgerRecord>
 
     let path = root.join(AUDIT_LEDGER_FILENAME);
     let _lock = LedgerLock::acquire(root.join(AUDIT_LEDGER_LOCK_FILENAME))?;
+    state_paths::maybe_migrate_legacy_audit_ledger()?;
     let mut file = OpenOptions::new()
         .create(true)
         .read(true)

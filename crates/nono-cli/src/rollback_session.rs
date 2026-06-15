@@ -41,6 +41,7 @@ pub fn rollback_root() -> Result<PathBuf> {
 pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
     let mut sessions = Vec::new();
     let mut seen_ids = BTreeSet::new();
+    let legacy_roots = state_paths::LegacyRootSet::resolve()?;
 
     for root in state_paths::rollback_discovery_roots()? {
         if !root.exists() {
@@ -74,7 +75,7 @@ pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
                 continue;
             }
 
-            state_paths::warn_if_legacy_rollback_data_read(&dir);
+            legacy_roots.warn_if_legacy_rollback_data_read(&dir);
             sessions.push(build_session_info(dir, metadata));
         }
     }
@@ -90,6 +91,7 @@ pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
 /// verified to be within a rollback root directory.
 pub fn load_session(session_id: &str) -> Result<SessionInfo> {
     validate_session_id(session_id)?;
+    let legacy_roots = state_paths::LegacyRootSet::resolve()?;
 
     for root in state_paths::rollback_discovery_roots()? {
         let dir = root.join(session_id);
@@ -112,7 +114,7 @@ pub fn load_session(session_id: &str) -> Result<SessionInfo> {
         }
 
         let metadata = SnapshotManager::load_session_metadata(&dir)?;
-        state_paths::warn_if_legacy_rollback_data_read(&dir);
+        legacy_roots.warn_if_legacy_rollback_data_read(&dir);
         return Ok(build_session_info(dir, metadata));
     }
 

@@ -35,7 +35,7 @@ fn resolve_xdg_state_base() -> Result<PathBuf> {
         );
     }
 
-    let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+    let home = PathBuf::from(crate::config::validated_home()?);
     Ok(home.join(".local").join("state"))
 }
 
@@ -46,7 +46,7 @@ pub fn user_state_dir() -> Result<PathBuf> {
 
 /// Legacy `~/.nono` root (pre-XDG audit, session, and rollback data).
 pub fn legacy_home_state_root() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or(NonoError::HomeNotFound)?;
+    let home = PathBuf::from(crate::config::validated_home()?);
     Ok(home.join(LEGACY_HOME_SUBDIR))
 }
 
@@ -175,69 +175,68 @@ fn warn_legacy_rollback_path(path: &Path) {
     });
 }
 
-/// Returns true when `path` is under the legacy rollback root (not the canonical one).
-pub fn is_legacy_rollback_path(path: &Path) -> bool {
-    let Ok(legacy) = legacy_rollback_root() else {
-        return false;
-    };
-    let Ok(primary) = rollback_root() else {
-        return false;
-    };
-    if legacy == primary {
-        return false;
-    }
-    path.starts_with(&legacy) && !path.starts_with(&primary)
+/// Pre-canonicalized primary and legacy roots for legacy-path detection.
+///
+/// Resolve once before iterating session directories to avoid repeated env lookups
+/// and to compare paths consistently on macOS (/Users vs /private/Users).
+pub struct LegacyRootSet {
+    primary_audit: PathBuf,
+    legacy_audit: PathBuf,
+    primary_rollback: PathBuf,
+    legacy_rollback: PathBuf,
+    primary_sessions: PathBuf,
+    legacy_sessions: PathBuf,
 }
 
-/// Warn once after successfully reading audit metadata from a legacy tree.
-pub(crate) fn warn_if_legacy_audit_data_read(session_dir: &Path) {
-    if is_legacy_audit_path(session_dir) {
-        let _ = legacy_audit_root().map(|root| warn_legacy_audit_path(&root));
-        return;
+impl LegacyRootSet {
+    pub fn resolve() -> Result<Self> {
+        Ok(Self {
+            primary_audit: try_canonicalize(&audit_root()?),
+            legacy_audit: try_canonicalize(&legacy_audit_root()?),
+            primary_rollback: try_canonicalize(&rollback_root()?),
+            legacy_rollback: try_canonicalize(&legacy_rollback_root()?),
+            primary_sessions: try_canonicalize(&sessions_dir()?),
+            legacy_sessions: try_canonicalize(&legacy_sessions_dir()?),
+        })
     }
-    if is_legacy_rollback_path(session_dir) {
-        let _ = legacy_rollback_root().map(|root| warn_legacy_rollback_path(&root));
-    }
-}
 
-/// Warn once after successfully reading rollback metadata from a legacy tree.
-pub(crate) fn warn_if_legacy_rollback_data_read(session_dir: &Path) {
-    if is_legacy_rollback_path(session_dir) {
-        let _ = legacy_rollback_root().map(|root| warn_legacy_rollback_path(&root));
+    fn is_under_legacy(path: &Path, legacy: &Path, primary: &Path) -> bool {
+        if legacy == primary {
+            return false;
+        }
+        let path = try_canonicalize(path);
+        path.starts_with(legacy) && !path.starts_with(primary)
     }
-}
 
-/// Warn once after successfully reading a session registry file from a legacy tree.
-pub(crate) fn warn_if_legacy_session_file_read(session_file: &Path) {
-    let Ok(legacy) = legacy_sessions_dir() else {
-        return;
-    };
-    let Ok(primary) = sessions_dir() else {
-        return;
-    };
-    if legacy == primary {
-        return;
+    /// Warn once after successfully reading audit metadata from a legacy tree.
+    pub fn warn_if_legacy_audit_data_read(&self, session_dir: &Path) {
+        if Self::is_under_legacy(session_dir, &self.legacy_audit, &self.primary_audit) {
+            warn_legacy_audit_path(&self.legacy_audit);
+            return;
+        }
+        if Self::is_under_legacy(session_dir, &self.legacy_rollback, &self.primary_rollback) {
+            warn_legacy_rollback_path(&self.legacy_rollback);
+        }
     }
-    if session_file.starts_with(&legacy) {
-        warn_legacy_sessions_path(&legacy);
-    }
-}
 
-/// Returns true when `path` is under the legacy audit root (not the canonical one).
-pub fn is_legacy_audit_path(path: &Path) -> bool {
-    let Ok(legacy) = legacy_audit_root() else {
-        return false;
-    };
-    let Ok(primary) = audit_root() else {
-        return false;
-    };
-    if legacy == primary {
-        return false;
+    /// Warn once after successfully reading rollback metadata from a legacy tree.
+    pub fn warn_if_legacy_rollback_data_read(&self, session_dir: &Path) {
+        if Self::is_under_legacy(session_dir, &self.legacy_rollback, &self.primary_rollback) {
+            warn_legacy_rollback_path(&self.legacy_rollback);
+        }
     }
-    path.starts_with(&legacy) && !path.starts_with(&primary)
+
+    /// Warn once after successfully reading a session registry file from a legacy tree.
+    pub fn warn_if_legacy_session_file_read(&self, session_file: &Path) {
+        if Self::is_under_legacy(session_file, &self.legacy_sessions, &self.primary_sessions) {
+            warn_legacy_sessions_path(&self.legacy_sessions);
+        }
+    }
 }
 
 /// Copy a legacy audit ledger into the canonical root on first write, if needed.
+///
+/// Caller must hold the audit ledger lock before calling this function.
 pub fn maybe_migrate_legacy_audit_ledger() -> Result<()> {
     let primary = audit_root()?;
     let legacy = legacy_audit_root()?;
@@ -262,10 +261,28 @@ pub fn maybe_migrate_legacy_audit_ledger() -> Result<()> {
         ))
     })?;
 
-    std::fs::copy(&legacy_ledger, &new_ledger).map_err(|e| {
+    let tmp_ledger = primary.join(format!("{AUDIT_LEDGER_FILENAME}.tmp"));
+    if tmp_ledger.exists() {
+        std::fs::remove_file(&tmp_ledger).map_err(|e| {
+            NonoError::Snapshot(format!(
+                "Failed to remove stale audit ledger migration temp file {}: {e}",
+                tmp_ledger.display()
+            ))
+        })?;
+    }
+
+    std::fs::copy(&legacy_ledger, &tmp_ledger).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_ledger);
         NonoError::Snapshot(format!(
-            "Failed to migrate audit ledger from {} to {}: {e}",
-            legacy_ledger.display(),
+            "Failed to copy legacy audit ledger to temporary file {}: {e}",
+            tmp_ledger.display()
+        ))
+    })?;
+
+    std::fs::rename(&tmp_ledger, &new_ledger).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_ledger);
+        NonoError::Snapshot(format!(
+            "Failed to rename temporary audit ledger to {}: {e}",
             new_ledger.display()
         ))
     })?;
@@ -376,5 +393,30 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert!(roots[0].ends_with("nono/rollbacks"));
         assert!(roots[1].ends_with(".nono/rollbacks"));
+    }
+
+    #[test]
+    fn maybe_migrate_legacy_audit_ledger_copies_via_temp_rename() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let (_env, home) = isolated_env(tmp.path());
+
+        let legacy_ledger = legacy_audit_root().unwrap().join(AUDIT_LEDGER_FILENAME);
+        fs::create_dir_all(legacy_ledger.parent().unwrap()).unwrap();
+        fs::write(&legacy_ledger, b"{\"sequence\":0}\n").unwrap();
+
+        maybe_migrate_legacy_audit_ledger().unwrap();
+
+        let migrated = audit_root().unwrap().join(AUDIT_LEDGER_FILENAME);
+        assert!(migrated.exists());
+        assert!(
+            !audit_root()
+                .unwrap()
+                .join(format!("{AUDIT_LEDGER_FILENAME}.tmp"))
+                .exists()
+        );
+        let content = fs::read_to_string(&migrated).unwrap();
+        assert_eq!(content, "{\"sequence\":0}\n");
+        let _ = home;
     }
 }

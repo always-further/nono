@@ -43,6 +43,7 @@ pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
     let mut sessions = Vec::new();
     let mut seen_ids = BTreeSet::new();
     let primary_root = audit_root()?;
+    let legacy_roots = state_paths::LegacyRootSet::resolve()?;
 
     let mut roots: Vec<PathBuf> = state_paths::audit_discovery_roots()?;
     roots.extend(state_paths::rollback_discovery_roots()?);
@@ -84,7 +85,7 @@ pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
                 continue;
             }
 
-            state_paths::warn_if_legacy_audit_data_read(&dir);
+            legacy_roots.warn_if_legacy_audit_data_read(&dir);
             sessions.push(build_session_info(dir, metadata));
         }
     }
@@ -97,6 +98,7 @@ pub fn discover_sessions() -> Result<Vec<SessionInfo>> {
 pub fn load_session(session_id: &str) -> Result<SessionInfo> {
     validate_session_id(session_id)?;
     let primary_root = audit_root()?;
+    let legacy_roots = state_paths::LegacyRootSet::resolve()?;
     let mut roots: Vec<PathBuf> = state_paths::audit_discovery_roots()?;
     roots.extend(state_paths::rollback_discovery_roots()?);
 
@@ -126,7 +128,7 @@ pub fn load_session(session_id: &str) -> Result<SessionInfo> {
             continue;
         }
 
-        state_paths::warn_if_legacy_audit_data_read(&dir);
+        legacy_roots.warn_if_legacy_audit_data_read(&dir);
         return Ok(build_session_info(dir, metadata));
     }
 
