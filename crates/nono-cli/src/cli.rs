@@ -1136,7 +1136,12 @@ pub struct SandboxArgs {
 
     /// Repository root for $REPO_ROOT expansion in profiles.
     /// Auto-detected via git when unset. Override with NONO_REPO_ROOT env var.
-    #[arg(long, value_name = "DIR", env = "NONO_REPO_ROOT", help_heading = "FILESYSTEM")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "NONO_REPO_ROOT",
+        help_heading = "FILESYSTEM"
+    )]
     pub repo_root: Option<PathBuf>,
 
     // ── Network ──────────────────────────────────────────────────────────
@@ -1480,7 +1485,12 @@ pub struct WrapSandboxArgs {
 
     /// Repository root for $REPO_ROOT expansion in profiles.
     /// Auto-detected via git when unset. Override with NONO_REPO_ROOT env var.
-    #[arg(long, value_name = "DIR", env = "NONO_REPO_ROOT", help_heading = "FILESYSTEM")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "NONO_REPO_ROOT",
+        help_heading = "FILESYSTEM"
+    )]
     pub repo_root: Option<PathBuf>,
 
     // ── Network ──────────────────────────────────────────────────────────
@@ -1926,7 +1936,12 @@ pub struct WhyArgs {
 
     /// Repository root for $REPO_ROOT expansion in profiles.
     /// Auto-detected via git when unset. Override with NONO_REPO_ROOT env var.
-    #[arg(long, value_name = "DIR", env = "NONO_REPO_ROOT", help_heading = "CONTEXT")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "NONO_REPO_ROOT",
+        help_heading = "CONTEXT"
+    )]
     pub repo_root: Option<PathBuf>,
 
     /// Print help
