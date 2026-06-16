@@ -412,7 +412,8 @@
           "/usr/local/go"
         ],
         "readwrite": [
-          "~/.cache/go-build"
+          "~/.cache/go-build",
+          "~/Library/Caches/go-build"
         ]
       }
     },
