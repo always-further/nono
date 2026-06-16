@@ -340,6 +340,14 @@ pub struct CustomCredentialDef {
     /// to the certificate in `tls_client_cert`.
     #[serde(default)]
     pub tls_client_key: Option<String>,
+
+    /// Optional AWS SigV4 signing configuration.
+    ///
+    /// When present, the proxy will sign outbound requests with AWS SigV4
+    /// credentials resolved from the configured profile (or the default
+    /// credential chain). Mutually exclusive with `credential_key` and `auth`.
+    #[serde(default)]
+    pub aws_auth: Option<nono_proxy::config::AwsAuthConfig>,
 }
 
 fn default_inject_header() -> String {
@@ -446,6 +454,15 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
 ///   - `query_param`: query_param_name required, valid query param name
 ///   - `basic_auth`: no additional required fields
 fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<()> {
+    // Mutual exclusion: aws_auth is incompatible with credential_key and auth.
+    if cred.aws_auth.is_some() && (cred.credential_key.is_some() || cred.auth.is_some()) {
+        return Err(NonoError::ProfileParse(format!(
+            "custom credential '{}' has 'aws_auth' set together with 'credential_key' or 'auth'; \
+             aws_auth is mutually exclusive with both — remove the other auth field",
+            name
+        )));
+    }
+
     // Mutual exclusion: credential_key and auth cannot both be set
     if cred.credential_key.is_some() && cred.auth.is_some() {
         return Err(NonoError::ProfileParse(format!(
@@ -455,10 +472,10 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
         )));
     }
 
-    // At least one of credential_key or auth must be set
-    if cred.credential_key.is_none() && cred.auth.is_none() {
+    // At least one of credential_key, auth, or aws_auth must be set
+    if cred.credential_key.is_none() && cred.auth.is_none() && cred.aws_auth.is_none() {
         return Err(NonoError::ProfileParse(format!(
-            "custom credential '{}' must have either 'credential_key' or 'auth' set",
+            "custom credential '{}' must have either 'credential_key', 'auth', or 'aws_auth' set",
             name
         )));
     }
@@ -466,6 +483,11 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
     // Validate OAuth2 auth if present
     if let Some(ref auth) = cred.auth {
         validate_oauth2_auth(name, auth)?;
+    }
+
+    // Validate aws_auth if present
+    if let Some(ref aws) = cred.aws_auth {
+        validate_aws_auth(name, aws)?;
     }
 
     // Validate credential_key if present
@@ -680,6 +702,46 @@ fn validate_oauth2_auth(name: &str, auth: &OAuth2Config) -> Result<()> {
     if auth.client_secret.is_empty() {
         return Err(NonoError::ProfileParse(format!(
             "auth.client_secret for custom credential '{}' cannot be empty",
+            name
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate AWS SigV4 signing configuration subfields.
+///
+/// Checks:
+/// - `profile`: if set, must be a non-empty string
+/// - `region`: if set, must be a non-empty string with no whitespace
+/// - `service`: if set, must be a non-empty string with no whitespace
+fn validate_aws_auth(name: &str, aws: &nono_proxy::config::AwsAuthConfig) -> Result<()> {
+    if let Some(ref profile) = aws.profile
+        && profile.is_empty()
+    {
+        return Err(NonoError::ProfileParse(format!(
+            "aws_auth.profile for custom credential '{}' must not be empty; \
+             omit the field to use the default credential chain",
+            name
+        )));
+    }
+
+    if let Some(ref region) = aws.region
+        && (region.is_empty() || region.contains(char::is_whitespace))
+    {
+        return Err(NonoError::ProfileParse(format!(
+            "aws_auth.region for custom credential '{}' must be a non-empty string \
+             with no whitespace (e.g., \"us-east-1\")",
+            name
+        )));
+    }
+
+    if let Some(ref service) = aws.service
+        && (service.is_empty() || service.contains(char::is_whitespace))
+    {
+        return Err(NonoError::ProfileParse(format!(
+            "aws_auth.service for custom credential '{}' must be a non-empty string \
+             with no whitespace (e.g., \"bedrock\", \"s3\")",
             name
         )));
     }
@@ -3998,6 +4060,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         }
     }
 
@@ -4162,6 +4225,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -4184,6 +4248,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("missing path_pattern should be rejected");
@@ -4208,6 +4273,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("pattern without {} should be rejected");
@@ -4232,6 +4298,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -4254,6 +4321,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("replacement without {} should be rejected");
@@ -4278,6 +4346,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(validate_custom_credential("google_maps", &cred).is_ok());
     }
@@ -4300,6 +4369,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("missing query_param_name should be rejected");
@@ -4324,6 +4394,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("empty query_param_name should be rejected");
@@ -4348,6 +4419,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         // BasicAuth mode doesn't require additional fields
         // Credential value is expected to be "username:password" format
@@ -4549,6 +4621,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         }
     }
 
@@ -5113,6 +5186,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -5135,6 +5209,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -5275,6 +5350,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -5297,6 +5373,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -6762,6 +6839,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(
             validate_custom_credential("example", &cred).is_ok(),
@@ -6787,6 +6865,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI without env_var should be rejected");
@@ -6815,6 +6894,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI with relative path should be rejected");
@@ -6843,6 +6923,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("example", &cred);
         assert!(
@@ -6903,6 +6984,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(validate_custom_credential("example", &cred).is_ok());
     }
@@ -6925,6 +7007,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("example", &cred);
         assert!(result.is_err(), "env://LD_PRELOAD should be rejected");
@@ -7690,5 +7773,248 @@ mod tests {
             Some("/usr/bin/inherited"),
             "child without binary should inherit from base"
         );
+    }
+
+    // ========================================================================
+    // aws_auth validation tests
+    // ========================================================================
+
+    fn aws_auth_cred_builder() -> CustomCredentialDef {
+        CustomCredentialDef {
+            upstream: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+            credential_key: None,
+            auth: None,
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: None,
+            }),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: None,
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+        }
+    }
+
+    #[test]
+    fn test_aws_auth_minimal_valid() {
+        let cred = aws_auth_cred_builder();
+        assert!(validate_custom_credential("bedrock", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_aws_auth_all_fields_valid() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some("my-aws-profile".to_string()),
+                region: Some("us-east-1".to_string()),
+                service: Some("bedrock".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        assert!(validate_custom_credential("bedrock", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_aws_auth_with_http_upstream_rejected() {
+        // AWS routes require HTTPS just like any other credential type.
+        let cred = CustomCredentialDef {
+            upstream: "http://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("https") || msg.contains("HTTPS"),
+            "error should mention https requirement, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_mutually_exclusive_with_credential_key() {
+        let cred = CustomCredentialDef {
+            credential_key: Some("my_aws_key".to_string()),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("aws_auth"),
+            "error should mention aws_auth, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_mutually_exclusive_with_auth_oauth2() {
+        let cred = CustomCredentialDef {
+            auth: Some(OAuth2Config {
+                token_url: "https://auth.example.com/token".to_string(),
+                client_id: "cid".to_string(),
+                client_secret: "env://SECRET".to_string(),
+                scope: String::new(),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("aws_auth"),
+            "error should mention aws_auth, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_none_of_three_rejected() {
+        let cred = CustomCredentialDef {
+            credential_key: None,
+            auth: None,
+            aws_auth: None,
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("credential_key") || msg.contains("auth") || msg.contains("aws_auth"),
+            "error should mention the missing auth fields, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_empty_profile_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some(String::new()),
+                region: None,
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("profile"),
+            "error should mention profile, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_empty_region_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some(String::new()),
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "error should mention region, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_empty_service_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some(String::new()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("service"),
+            "error should mention service, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_region_with_whitespace_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some("us east-1".to_string()),
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "error should mention region, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_service_with_whitespace_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some("bed rock".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("service"),
+            "error should mention service, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_serde_roundtrip_in_custom_cred_def() {
+        let json = r#"{
+            "upstream": "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "aws_auth": {
+                "profile": "my-aws-profile",
+                "region": "us-east-1",
+                "service": "bedrock"
+            }
+        }"#;
+        let cred: CustomCredentialDef = serde_json::from_str(json).unwrap();
+        let aws = cred.aws_auth.as_ref().unwrap();
+        assert_eq!(aws.profile.as_deref(), Some("my-aws-profile"));
+        assert_eq!(aws.region.as_deref(), Some("us-east-1"));
+        assert_eq!(aws.service.as_deref(), Some("bedrock"));
+
+        // Roundtrip
+        let serialized = serde_json::to_string(&cred).unwrap();
+        let deserialized: CustomCredentialDef = serde_json::from_str(&serialized).unwrap();
+        let aws2 = deserialized.aws_auth.unwrap();
+        assert_eq!(aws2.profile.as_deref(), Some("my-aws-profile"));
     }
 }

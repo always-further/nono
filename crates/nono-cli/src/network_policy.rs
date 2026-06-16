@@ -257,6 +257,7 @@ pub fn resolve_credentials(
                     })
                     .transpose()?,
                 oauth2,
+                aws_auth: cred.aws_auth.clone(),
             });
         } else if let Some(cred) = policy.credentials.get(name) {
             // Validate env_var against dangerous variable blocklist
@@ -288,6 +289,7 @@ pub fn resolve_credentials(
                 tls_client_cert: None,
                 tls_client_key: None,
                 oauth2: None,
+                aws_auth: None,
             });
         }
         // We already validated existence above, so this else branch won't be hit
@@ -414,6 +416,7 @@ pub fn partition_allow_domain(
                         tls_client_cert: None,
                         tls_client_key: None,
                         oauth2: None,
+                        aws_auth: None,
                     });
                 }
             }
@@ -567,6 +570,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -607,6 +611,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -643,6 +648,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -689,6 +695,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -775,6 +782,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -808,6 +816,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -841,6 +850,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -879,6 +889,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -1011,6 +1022,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -1099,6 +1111,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -1147,6 +1160,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
