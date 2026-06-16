@@ -307,6 +307,11 @@ pub(crate) fn start_proxy_runtime(
             );
         }
     }
+
+    let proxy_diagnostics = handle.diagnostics();
+    if !proxy_diagnostics.is_empty() {
+        crate::output::print_proxy_diagnostics(proxy_diagnostics);
+    }
     caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
         port,
         bind_ports: proxy.allow_bind_ports.clone(),

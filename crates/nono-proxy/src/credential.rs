@@ -10,6 +10,7 @@
 //! credentials. This module handles only credential-specific concerns.
 
 use crate::config::{InjectMode, RouteConfig};
+use crate::diagnostic::{ProxyDiagnostic, ProxyDiagnosticCode};
 use crate::error::{ProxyError, Result};
 use crate::oauth2::{OAuth2ExchangeConfig, TokenCache};
 use base64::Engine;
@@ -83,6 +84,22 @@ pub struct OAuth2Route {
     pub upstream: String,
 }
 
+/// Result of loading credentials at proxy startup.
+#[derive(Debug)]
+pub struct CredentialLoadOutcome {
+    /// Loaded store; may omit routes whose credentials were unavailable.
+    pub store: CredentialStore,
+    /// Per-route warnings for missing or unavailable credentials.
+    pub diagnostics: Vec<ProxyDiagnostic>,
+}
+
+impl CredentialLoadOutcome {
+    #[must_use]
+    pub fn into_store(self) -> CredentialStore {
+        self.store
+    }
+}
+
 /// Credential store for all configured routes.
 #[derive(Debug)]
 pub struct CredentialStore {
@@ -112,12 +129,16 @@ impl CredentialStore {
     /// The `tls_connector` is required for OAuth2 token exchange HTTPS calls.
     ///
     /// Returns an error only for hard failures (config parse errors,
-    /// non-UTF-8 values). Missing or inaccessible credentials are logged
-    /// as warnings and the route is skipped.
-    pub fn load(routes: &[RouteConfig], tls_connector: &TlsConnector) -> Result<Self> {
+    /// non-UTF-8 values). Missing credentials are logged, recorded in
+    /// `diagnostics`, and the route is skipped.
+    pub fn load_with_diagnostics(
+        routes: &[RouteConfig],
+        tls_connector: &TlsConnector,
+    ) -> Result<CredentialLoadOutcome> {
         let mut credentials = HashMap::new();
         let mut oauth2_routes = HashMap::new();
         let mut aws_routes = HashMap::new();
+        let mut diagnostics = Vec::new();
 
         for route in routes {
             // Normalize prefix: strip leading/trailing slashes so it matches
@@ -134,19 +155,44 @@ impl CredentialStore {
                     Ok(s) => s,
                     Err(nono::NonoError::SecretNotFound(_)) => {
                         let hint = build_credential_miss_hint(key);
-                        warn!(
-                            "Credential '{}' not found for route '{}' — managed-credential requests on this route will be denied until the credential is available.{}",
-                            key, normalized_prefix, hint
+                        let redacted = redact_credential_ref(key);
+                        let message = format!(
+                            "Credential not found for route '{normalized_prefix}' — \
+                             managed-credential requests on this route will be denied until \
+                             the credential is available.{hint}"
+                        );
+                        warn!("{message}");
+                        diagnostics.push(
+                            ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::CredentialNotFound,
+                                &normalized_prefix,
+                                message,
+                            )
+                            .with_credential_ref(redacted)
+                            .with_hint(strip_tip_prefix(&hint)),
                         );
                         continue;
                     }
                     Err(nono::NonoError::KeystoreAccess(msg)) => {
                         let redacted = redact_credential_ref(key);
+                        let message = format!(
+                            "Credential not available for route '{normalized_prefix}': {msg}. \
+                             Managed-credential requests on this route will be denied until the \
+                             credential is available. Set NONO_KEYRING_TIMEOUT_SECS=N \
+                             (default 120) to wait longer for keychain unlock; 0 disables the timeout."
+                        );
                         warn!(
-                            "Credential '{}' not available for route '{}': {}. \
+                            "Credential '{redacted}' not available for route '{normalized_prefix}': {msg}. \
                              Managed-credential requests on this route will be denied until the credential is available. \
-                             Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
-                            redacted, normalized_prefix, msg
+                             Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout."
+                        );
+                        diagnostics.push(
+                            ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::CredentialUnavailable,
+                                &normalized_prefix,
+                                message,
+                            )
+                            .with_credential_ref(redacted),
                         );
                         continue;
                     }
@@ -217,14 +263,48 @@ impl CredentialStore {
                     &oauth2.client_id,
                 ) {
                     Ok(s) => s,
-                    Err(nono::NonoError::SecretNotFound(msg))
-                    | Err(nono::NonoError::KeystoreAccess(msg)) => {
+                    Err(nono::NonoError::SecretNotFound(msg)) => {
                         let redacted = redact_credential_ref(&oauth2.client_id);
+                        let message = format!(
+                            "OAuth2 client_id not available for route '{}': {msg}. \
+                             Managed-credential requests on this route will be denied.",
+                            route.prefix
+                        );
                         warn!(
-                            "OAuth2 client_id '{}' not available for route '{}': {}. \
-                                 Managed-credential requests on this route will be denied. \
-                                 Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
-                            redacted, route.prefix, msg
+                            "OAuth2 client_id '{redacted}' not available for route '{}': {msg}. \
+                             Managed-credential requests on this route will be denied.",
+                            route.prefix
+                        );
+                        diagnostics.push(
+                            ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::OAuthClientIdUnavailable,
+                                &route.prefix,
+                                message,
+                            )
+                            .with_credential_ref(redacted),
+                        );
+                        continue;
+                    }
+                    Err(nono::NonoError::KeystoreAccess(msg)) => {
+                        let redacted = redact_credential_ref(&oauth2.client_id);
+                        let message = format!(
+                            "OAuth2 client_id not available for route '{}': {msg}. \
+                             Managed-credential requests on this route will be denied.",
+                            route.prefix
+                        );
+                        warn!(
+                            "OAuth2 client_id '{redacted}' not available for route '{}': {msg}. \
+                             Managed-credential requests on this route will be denied. \
+                             Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
+                            route.prefix
+                        );
+                        diagnostics.push(
+                            ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::OAuthClientIdUnavailable,
+                                &route.prefix,
+                                message,
+                            )
+                            .with_credential_ref(redacted),
                         );
                         continue;
                     }
@@ -236,14 +316,48 @@ impl CredentialStore {
                     &oauth2.client_secret,
                 ) {
                     Ok(s) => s,
-                    Err(nono::NonoError::SecretNotFound(msg))
-                    | Err(nono::NonoError::KeystoreAccess(msg)) => {
+                    Err(nono::NonoError::SecretNotFound(msg)) => {
                         let redacted = redact_credential_ref(&oauth2.client_secret);
+                        let message = format!(
+                            "OAuth2 client_secret not available for route '{}': {msg}. \
+                             Managed-credential requests on this route will be denied.",
+                            route.prefix
+                        );
                         warn!(
-                            "OAuth2 client_secret '{}' not available for route '{}': {}. \
+                            "OAuth2 client_secret '{redacted}' not available for route '{}': {msg}. \
+                             Managed-credential requests on this route will be denied.",
+                            route.prefix
+                        );
+                        diagnostics.push(
+                            ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::OAuthClientSecretUnavailable,
+                                &route.prefix,
+                                message,
+                            )
+                            .with_credential_ref(redacted),
+                        );
+                        continue;
+                    }
+                    Err(nono::NonoError::KeystoreAccess(msg)) => {
+                        let redacted = redact_credential_ref(&oauth2.client_secret);
+                        let message = format!(
+                            "OAuth2 client_secret not available for route '{}': {msg}. \
+                             Managed-credential requests on this route will be denied.",
+                            route.prefix
+                        );
+                        warn!(
+                            "OAuth2 client_secret '{redacted}' not available for route '{}': {msg}. \
                              Managed-credential requests on this route will be denied. \
                              Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
-                            redacted, route.prefix, msg
+                            route.prefix
+                        );
+                        diagnostics.push(
+                            ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::OAuthClientSecretUnavailable,
+                                &route.prefix,
+                                message,
+                            )
+                            .with_credential_ref(redacted),
                         );
                         continue;
                     }
@@ -268,11 +382,17 @@ impl CredentialStore {
                         );
                     }
                     Err(e) => {
-                        warn!(
-                            "OAuth2 token exchange failed for route '{}': {}. \
+                        let message = format!(
+                            "OAuth2 token exchange failed for route '{}': {e}. \
                              Managed-credential requests on this route will be denied.",
-                            route.prefix, e
+                            route.prefix
                         );
+                        warn!("{message}");
+                        diagnostics.push(ProxyDiagnostic::warning(
+                            ProxyDiagnosticCode::OAuthTokenExchangeFailed,
+                            &route.prefix,
+                            message,
+                        ));
                         continue;
                     }
                 }
@@ -286,11 +406,23 @@ impl CredentialStore {
             }
         }
 
-        Ok(Self {
-            credentials,
-            oauth2_routes,
-            aws_routes,
+        Ok(CredentialLoadOutcome {
+            store: Self {
+                credentials,
+                oauth2_routes,
+                aws_routes,
+            },
+            diagnostics,
         })
+    }
+
+    /// Deprecated wrapper around [`Self::load_with_diagnostics`].
+    #[deprecated(
+        since = "0.64.0",
+        note = "Use `load_with_diagnostics` instead. Will be removed in 1.0.0."
+    )]
+    pub fn load(routes: &[RouteConfig], tls_connector: &TlsConnector) -> Result<CredentialStore> {
+        Self::load_with_diagnostics(routes, tls_connector).map(|outcome| outcome.store)
     }
 
     /// Create an empty credential store (no credential injection).
@@ -353,10 +485,6 @@ impl CredentialStore {
 /// Uses the same constant as `nono::keystore::DEFAULT_SERVICE` to ensure consistency.
 const KEYRING_SERVICE: &str = nono::keystore::DEFAULT_SERVICE;
 
-/// Redact a credential reference for safe display in warnings.
-///
-/// Delegates to the appropriate URI-specific redaction helper so that
-/// secrets (account names, file paths, field names) are never echoed raw.
 fn redact_credential_ref(key: &str) -> String {
     if nono::keystore::is_op_uri(key) {
         nono::keystore::redact_op_uri(key)
@@ -371,6 +499,15 @@ fn redact_credential_ref(key: &str) -> String {
     } else {
         key.to_string()
     }
+}
+
+/// Remove the leading "Tip:" prefix from credential miss hints.
+fn strip_tip_prefix(hint: &str) -> String {
+    hint.trim()
+        .strip_prefix("Tip:")
+        .map(str::trim)
+        .unwrap_or(hint.trim())
+        .to_string()
 }
 
 /// Build a hint for the credential-not-found warning that probes other
@@ -579,6 +716,121 @@ mod tests {
         assert!(debug_output.contains("Authorization"));
     }
 
+    fn oauth2_route_with_refs(
+        prefix: &str,
+        client_id: &str,
+        client_secret: &str,
+        token_url: &str,
+    ) -> RouteConfig {
+        use crate::config::OAuth2Config;
+
+        RouteConfig {
+            prefix: prefix.to_string(),
+            upstream: "https://api.example.com".to_string(),
+            credential_key: None,
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: Some("MY_API_KEY".to_string()),
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: Some(OAuth2Config {
+                token_url: token_url.to_string(),
+                client_id: client_id.to_string(),
+                client_secret: client_secret.to_string(),
+                scope: String::new(),
+            }),
+            aws_auth: None,
+        }
+    }
+
+    #[test]
+    fn test_load_missing_env_credential_records_credential_not_found() {
+        let tls = test_tls_connector();
+        let routes = vec![RouteConfig {
+            prefix: "preview-missing".to_string(),
+            upstream: "https://api.example.com".to_string(),
+            credential_key: Some("env://NONO_PROXY_TEST_MISSING_CRED".to_string()),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+            aws_auth: None,
+        }];
+        let outcome = CredentialStore::load_with_diagnostics(&routes, &tls).expect("load");
+        assert!(outcome.store.is_empty());
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(
+            outcome.diagnostics[0].code,
+            ProxyDiagnosticCode::CredentialNotFound
+        );
+        assert_eq!(
+            outcome.diagnostics[0].credential_ref.as_deref(),
+            Some("env://NONO_PROXY_TEST_MISSING_CRED")
+        );
+    }
+
+    #[test]
+    fn test_redact_credential_ref_op_uri() {
+        assert_eq!(
+            redact_credential_ref("op://vault/item/secret"),
+            "op://vault/item/<redacted>"
+        );
+    }
+
+    #[test]
+    fn test_load_oauth2_missing_client_id_records_diagnostic() {
+        let tls = test_tls_connector();
+        let routes = vec![oauth2_route_with_refs(
+            "my-api",
+            "env://NONO_PROXY_TEST_MISSING_CLIENT_ID",
+            "env://NONO_PROXY_TEST_CLIENT_SECRET",
+            "https://127.0.0.1:1/oauth/token",
+        )];
+        let outcome = CredentialStore::load_with_diagnostics(&routes, &tls).expect("load");
+        assert!(outcome.store.is_empty());
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(
+            outcome.diagnostics[0].code,
+            ProxyDiagnosticCode::OAuthClientIdUnavailable
+        );
+    }
+
+    #[test]
+    fn test_load_oauth2_missing_client_secret_records_diagnostic() {
+        let _lock = ENV_LOCK.lock().expect("env mutex poisoned");
+        let _env = EnvVarGuard::set_all(&[("NONO_PROXY_TEST_CLIENT_ID", "test-client")]);
+        let tls = test_tls_connector();
+        let routes = vec![oauth2_route_with_refs(
+            "my-api",
+            "env://NONO_PROXY_TEST_CLIENT_ID",
+            "env://NONO_PROXY_TEST_MISSING_CLIENT_SECRET",
+            "https://127.0.0.1:1/oauth/token",
+        )];
+        let outcome = CredentialStore::load_with_diagnostics(&routes, &tls).expect("load");
+        assert!(outcome.store.is_empty());
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(
+            outcome.diagnostics[0].code,
+            ProxyDiagnosticCode::OAuthClientSecretUnavailable
+        );
+    }
+
     #[test]
     fn test_load_no_credential_routes() {
         let tls = test_tls_connector();
@@ -601,9 +853,14 @@ mod tests {
             oauth2: None,
             aws_auth: None,
         }];
-        let store = CredentialStore::load(&routes, &tls);
-        assert!(store.is_ok());
-        let store = store.unwrap_or_else(|_| CredentialStore::empty());
+        let outcome = CredentialStore::load_with_diagnostics(&routes, &tls);
+        assert!(outcome.is_ok());
+        let store = outcome
+            .unwrap_or_else(|_| CredentialLoadOutcome {
+                store: CredentialStore::empty(),
+                diagnostics: Vec::new(),
+            })
+            .store;
         assert!(store.is_empty());
     }
 
@@ -694,7 +951,9 @@ mod tests {
             oauth2: None,
             aws_auth: None,
         }];
-        let store = CredentialStore::load(&routes, &tls).expect("credential load");
+        let store = CredentialStore::load_with_diagnostics(&routes, &tls)
+            .expect("credential load")
+            .store;
         let cred = store.get("litellm").expect("route should be loaded");
         assert_eq!(cred.header_name, "x-litellm-api-key");
         assert_eq!(cred.header_value.as_str(), "Bearer sk-litellm-test");
@@ -724,7 +983,9 @@ mod tests {
             oauth2: None,
             aws_auth: None,
         }];
-        let store = CredentialStore::load(&routes, &tls).expect("credential load");
+        let store = CredentialStore::load_with_diagnostics(&routes, &tls)
+            .expect("credential load")
+            .store;
         let cred = store.get("api").expect("route should be loaded");
         assert_eq!(cred.header_value.as_str(), "secret-key");
     }
@@ -766,14 +1027,15 @@ mod tests {
             aws_auth: None,
         }];
 
-        let store = CredentialStore::load(&routes, &tls);
+        let outcome = CredentialStore::load_with_diagnostics(&routes, &tls);
 
         // load() should succeed (route skipped, not hard error)
         assert!(
-            store.is_ok(),
+            outcome.is_ok(),
             "load should not fail on unreachable OAuth2 endpoint"
         );
-        let store = store.unwrap();
+        let outcome = outcome.unwrap();
+        let store = outcome.store;
 
         // The route should have been skipped (token exchange failed)
         assert!(
@@ -781,6 +1043,11 @@ mod tests {
             "unreachable OAuth2 endpoint should result in skipped route"
         );
         assert!(store.get_oauth2("my-api").is_none());
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(
+            outcome.diagnostics[0].code,
+            ProxyDiagnosticCode::OAuthTokenExchangeFailed
+        );
     }
 
     /// Build a test `TokenCache` with a pre-populated token.
