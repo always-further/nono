@@ -266,20 +266,17 @@ fn print_blocked_grants(
     // Group by the deny rule that blocks each path, preserving first-seen order.
     let mut groups: Vec<(String, Vec<&std::path::Path>)> = Vec::new();
     for (path, group) in blocked {
-        let label = group.as_deref().unwrap_or("a deny rule").to_string();
-        match groups.iter_mut().find(|(name, _)| *name == label) {
+        let group_name = group.as_deref().unwrap_or("a deny rule");
+        match groups.iter_mut().find(|(name, _)| name == group_name) {
             Some((_, paths)) => paths.push(path.as_path()),
-            None => groups.push((label, vec![path.as_path()])),
+            None => groups.push((group_name.to_string(), vec![path.as_path()])),
         }
     }
 
     for (name, paths) in &groups {
         eprintln!("       {}", theme::fg(name, t.subtext));
         for path in paths {
-            eprintln!(
-                "         {}",
-                theme::fg(&path.display().to_string(), t.text),
-            );
+            eprintln!("         {}", theme::fg(&path.to_string_lossy(), t.text));
         }
     }
 
@@ -989,12 +986,12 @@ pub fn print_profile_hint(program: &str, profile: &str, silent: bool) {
 
 #[cfg(test)]
 mod tests {
+    use super::theme;
     use super::{
         dry_run_command_line, format_unix_socket_mode_badge, print_blocked_grants,
         print_capabilities, print_profile_hint, render_diagnostic_footer,
         render_terminal_block_for_tty,
     };
-    use super::theme;
     use nono::{CapabilitySet, UnixSocketMode};
     use std::ffi::{OsStr, OsString};
     use tempfile::tempdir;
