@@ -520,20 +520,23 @@ pub struct OAuth2Config {
 #[serde(deny_unknown_fields)]
 pub struct AwsAuthConfig {
     /// AWS profile name to use for credentials.
-    /// If omitted, the default credential chain is used
-    /// (environment variables → AWS_PROFILE → default profile → instance metadata).
+    /// If omitted, the default credential chain is used.
+    /// Must be non-empty with no whitespace if provided (whitespace breaks the
+    /// AWS INI config parser; profile names are case-sensitive).
     #[serde(default)]
     pub profile: Option<String>,
 
     /// Explicit SigV4 signing region (e.g., `"us-east-1"`).
     /// If omitted, auto-detected from the upstream URL.
-    /// Must be non-empty and contain no whitespace if provided.
+    /// Must be non-empty and lowercase if provided (SigV4 credential scope
+    /// requires lowercase region codes).
     #[serde(default)]
     pub region: Option<String>,
 
-    /// Explicit SigV4 service name (e.g., `"bedrock"`, `"s3"`).
+    /// Explicit SigV4 service name (e.g., `"bedrock"`, `"s3"`, `"execute-api"`).
     /// If omitted, auto-detected from the upstream URL.
-    /// Must be non-empty and contain no whitespace if provided.
+    /// Must be non-empty and lowercase if provided (SigV4 credential scope
+    /// requires lowercase service codes).
     #[serde(default)]
     pub service: Option<String>,
 }

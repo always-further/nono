@@ -711,37 +711,42 @@ fn validate_oauth2_auth(name: &str, auth: &OAuth2Config) -> Result<()> {
 
 /// Validate AWS SigV4 signing configuration subfields.
 ///
-/// Checks:
-/// - `profile`: if set, must be a non-empty string
-/// - `region`: if set, must be a non-empty string with no whitespace
-/// - `service`: if set, must be a non-empty string with no whitespace
+/// - `profile`: non-empty, no whitespace (whitespace breaks the AWS INI config
+///   parser; see aws/aws-cli#2806). Mixed case is allowed — profile names are
+///   case-sensitive.
+/// - `region` / `service`: non-empty, lowercase, no whitespace. The SigV4
+///   credential scope requires lowercase region and service codes.
 fn validate_aws_auth(name: &str, aws: &nono_proxy::config::AwsAuthConfig) -> Result<()> {
     if let Some(ref profile) = aws.profile
-        && profile.is_empty()
+        && (profile.is_empty() || profile.contains(char::is_whitespace))
     {
         return Err(NonoError::ProfileParse(format!(
-            "aws_auth.profile for custom credential '{}' must not be empty; \
-             omit the field to use the default credential chain",
+            "aws_auth.profile for custom credential '{}' must be a non-empty string \
+             with no whitespace; omit the field to use the default credential chain",
             name
         )));
     }
 
     if let Some(ref region) = aws.region
-        && (region.is_empty() || region.contains(char::is_whitespace))
+        && (region.is_empty()
+            || region.contains(char::is_whitespace)
+            || region.chars().any(|c| c.is_uppercase()))
     {
         return Err(NonoError::ProfileParse(format!(
-            "aws_auth.region for custom credential '{}' must be a non-empty string \
-             with no whitespace (e.g., \"us-east-1\")",
+            "aws_auth.region for custom credential '{}' must be a non-empty, \
+             lowercase string with no whitespace (e.g., \"us-east-1\")",
             name
         )));
     }
 
     if let Some(ref service) = aws.service
-        && (service.is_empty() || service.contains(char::is_whitespace))
+        && (service.is_empty()
+            || service.contains(char::is_whitespace)
+            || service.chars().any(|c| c.is_uppercase()))
     {
         return Err(NonoError::ProfileParse(format!(
-            "aws_auth.service for custom credential '{}' must be a non-empty string \
-             with no whitespace (e.g., \"bedrock\", \"s3\")",
+            "aws_auth.service for custom credential '{}' must be a non-empty, \
+             lowercase string with no whitespace (e.g., \"bedrock\", \"s3\")",
             name
         )));
     }
@@ -8016,5 +8021,170 @@ mod tests {
         let deserialized: CustomCredentialDef = serde_json::from_str(&serialized).unwrap();
         let aws2 = deserialized.aws_auth.unwrap();
         assert_eq!(aws2.profile.as_deref(), Some("my-aws-profile"));
+    }
+
+    // --- profile whitespace rejection ---
+
+    #[test]
+    fn test_aws_auth_profile_with_space_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some("my profile".to_string()),
+                region: None,
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("profile"),
+            "error should mention profile, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_profile_with_tab_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some("my\tprofile".to_string()),
+                region: None,
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("profile"),
+            "error should mention profile, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_profile_mixed_case_valid() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some("MyCompany-Prod".to_string()),
+                region: None,
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        assert!(validate_custom_credential("bedrock", &cred).is_ok());
+    }
+
+    // --- region lowercase enforcement ---
+
+    #[test]
+    fn test_aws_auth_region_uppercase_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some("US-EAST-1".to_string()),
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "error should mention region, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_region_mixed_case_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some("Us-East-1".to_string()),
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "error should mention region, got: {}",
+            msg
+        );
+    }
+
+    // --- service lowercase enforcement ---
+
+    #[test]
+    fn test_aws_auth_service_uppercase_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some("Bedrock".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("service"),
+            "error should mention service, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_service_all_caps_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some("S3".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("service"),
+            "error should mention service, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_service_with_hyphen_valid() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some("workers-ai".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        assert!(validate_custom_credential("cf", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_aws_auth_execute_api_service_valid() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some("ap-southeast-2".to_string()),
+                service: Some("execute-api".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        assert!(validate_custom_credential("apigw", &cred).is_ok());
     }
 }
