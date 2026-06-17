@@ -1940,6 +1940,11 @@ fn add_executable_shape_baseline(
                 path: interpreter.clone(),
                 source,
             })?;
+    if let Some(bundle) = python_framework_app_bundle_path(&interpreter)
+        && bundle.is_file()
+    {
+        caps.add_fs(FsCapability::new_file(bundle, AccessMode::Read)?);
+    }
     caps.add_fs(FsCapability::new_file(interpreter, AccessMode::Read)?);
     Ok(())
 }
@@ -1993,6 +1998,47 @@ fn add_outer_process_exec_gate(caps: &mut CapabilitySet, state: &ToolSandboxStat
     add_controlled_source_denies(caps, denied)
 }
 
+/// Given the canonical path of a Python framework interpreter binary such as
+/// `.../Frameworks/Python.framework/Versions/3.14/bin/python3.14`, returns the
+/// sibling app bundle executable path:
+/// `.../Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python`.
+fn python_framework_app_bundle_path(interpreter: &Path) -> Option<PathBuf> {
+    let file_name = interpreter.file_name()?;
+    if !file_name.as_bytes().starts_with(b"python") {
+        return None;
+    }
+
+    let bin_dir = interpreter.parent()?;
+    if bin_dir.file_name()? != OsStr::new("bin") {
+        return None;
+    }
+
+    let version_dir = bin_dir.parent()?;
+    let versions_dir = version_dir.parent()?;
+    if versions_dir.file_name()? != OsStr::new("Versions") {
+        return None;
+    }
+
+    let framework_dir = versions_dir.parent()?;
+    if framework_dir.file_name()? != OsStr::new("Python.framework") {
+        return None;
+    }
+
+    let frameworks_dir = framework_dir.parent()?;
+    if frameworks_dir.file_name()? != OsStr::new("Frameworks") {
+        return None;
+    }
+
+    Some(
+        version_dir
+            .join("Resources")
+            .join("Python.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("Python"),
+    )
+}
+
 fn add_child_process_exec_gate_with_policy(
     caps: &mut CapabilitySet,
     state: &ToolSandboxState,
@@ -2001,12 +2047,19 @@ fn add_child_process_exec_gate_with_policy(
 ) -> Result<()> {
     let mut allowed = vec![binary.canonical_path.clone()];
     if let Some(interpreter) = binary.shape.interpreter.as_ref() {
-        allowed.push(interpreter.canonicalize().map_err(|source| {
-            NonoError::PathCanonicalization {
-                path: interpreter.clone(),
-                source,
-            }
-        })?);
+        let interpreter =
+            interpreter
+                .canonicalize()
+                .map_err(|source| NonoError::PathCanonicalization {
+                    path: interpreter.clone(),
+                    source,
+                })?;
+        if let Some(bundle) = python_framework_app_bundle_path(&interpreter)
+            && bundle.is_file()
+        {
+            allowed.push(bundle);
+        }
+        allowed.push(interpreter);
     }
     allowed.extend(
         state
@@ -4119,6 +4172,13 @@ mod tests {
         })
     }
 
+    fn create_dir_all(path: &Path) -> Result<()> {
+        fs::create_dir_all(path).map_err(|source| NonoError::ConfigWrite {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     fn create_executable(path: &Path) -> Result<()> {
         File::create(path).map_err(|source| NonoError::ConfigWrite {
             path: path.to_path_buf(),
@@ -4141,6 +4201,66 @@ mod tests {
             path: link.to_path_buf(),
             source,
         })
+    }
+
+    fn create_python_framework_tree(temp: &Path) -> Result<(PathBuf, PathBuf)> {
+        let version_dir = temp
+            .join("Frameworks")
+            .join("Python.framework")
+            .join("Versions")
+            .join("3.14");
+        let bin_dir = version_dir.join("bin");
+        let bundle_dir = version_dir
+            .join("Resources")
+            .join("Python.app")
+            .join("Contents")
+            .join("MacOS");
+        create_dir_all(&bin_dir)?;
+        create_dir_all(&bundle_dir)?;
+
+        let interpreter = bin_dir.join("python3.14");
+        let bundle = bundle_dir.join("Python");
+        create_executable(&interpreter)?;
+        create_executable(&bundle)?;
+        Ok((interpreter, bundle))
+    }
+
+    fn with_interpreter(
+        mut binary: ResolvedCommandBinary,
+        interpreter: PathBuf,
+    ) -> ResolvedCommandBinary {
+        binary.shape = ResolvedExecutableShape {
+            kind: ResolvedExecutableKind::ShebangScript,
+            interpreter: Some(interpreter),
+            interpreter_args: vec![],
+        };
+        binary
+    }
+
+    fn has_read_file_cap(caps: &CapabilitySet, path: &Path) -> Result<bool> {
+        let canonical = path
+            .canonicalize()
+            .map_err(|source| NonoError::PathCanonicalization {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Ok(caps
+            .fs_capabilities()
+            .iter()
+            .any(|cap| cap.resolved == canonical && cap.is_file && cap.access == AccessMode::Read))
+    }
+
+    fn has_exec_rule(caps: &CapabilitySet, path: &Path) -> Result<bool> {
+        let canonical = path
+            .canonicalize()
+            .map_err(|source| NonoError::PathCanonicalization {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let escaped =
+            crate::policy::escape_seatbelt_path(crate::policy::path_to_utf8(&canonical)?)?;
+        let expected = format!("(allow process-exec* (literal \"{escaped}\"))");
+        Ok(caps.platform_rules().iter().any(|rule| rule == &expected))
     }
 
     #[test]
@@ -4199,6 +4319,95 @@ mod tests {
                 rule.as_str() == "(allow process-exec* (literal \"/private/var/select/sh\"))"
             }));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn python_framework_app_bundle_path_requires_framework_interpreter_shape() {
+        let interpreter = Path::new(
+            "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+        );
+        assert_eq!(
+            python_framework_app_bundle_path(interpreter),
+            Some(PathBuf::from(
+                "/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+            ))
+        );
+
+        assert_eq!(
+            python_framework_app_bundle_path(Path::new("/opt/homebrew/bin/python3")),
+            None
+        );
+        assert_eq!(
+            python_framework_app_bundle_path(Path::new(
+                "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/ruby"
+            )),
+            None
+        );
+        assert_eq!(
+            python_framework_app_bundle_path(Path::new(
+                "/opt/homebrew/Frameworks/Other.framework/Versions/3.14/bin/python3.14"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn executable_shape_baseline_grants_python_framework_app_bundle_read() -> Result<()> {
+        let temp = test_tempdir()?;
+        let command = temp.path().join("tool");
+        create_executable(&command)?;
+        let (interpreter, bundle) = create_python_framework_tree(temp.path())?;
+        let binary = with_interpreter(test_binary("tool", &command)?, interpreter.clone());
+
+        let mut caps = CapabilitySet::new();
+        add_executable_shape_baseline(&mut caps, &binary)?;
+
+        assert!(has_read_file_cap(&caps, &interpreter)?);
+        assert!(has_read_file_cap(&caps, &bundle)?);
+        Ok(())
+    }
+
+    #[test]
+    fn executable_shape_baseline_ignores_missing_python_framework_app_bundle() -> Result<()> {
+        let temp = test_tempdir()?;
+        let command = temp.path().join("tool");
+        create_executable(&command)?;
+        let (interpreter, bundle) = create_python_framework_tree(temp.path())?;
+        fs::remove_file(&bundle).map_err(|source| NonoError::ConfigWrite {
+            path: bundle.clone(),
+            source,
+        })?;
+        let binary = with_interpreter(test_binary("tool", &command)?, interpreter.clone());
+
+        let mut caps = CapabilitySet::new();
+        add_executable_shape_baseline(&mut caps, &binary)?;
+
+        assert!(has_read_file_cap(&caps, &interpreter)?);
+        assert!(!has_read_file_cap(&caps, &bundle).unwrap_or(false));
+        Ok(())
+    }
+
+    #[test]
+    fn child_exec_gate_allows_python_framework_app_bundle_exec() -> Result<()> {
+        let temp = test_tempdir()?;
+        let command = temp.path().join("tool");
+        create_executable(&command)?;
+        let (interpreter, bundle) = create_python_framework_tree(temp.path())?;
+        let binary = with_interpreter(test_binary("tool", &command)?, interpreter.clone());
+
+        let state = test_state();
+        let mut caps = CapabilitySet::new();
+        add_child_process_exec_gate_with_policy(&mut caps, &state, &binary, None)?;
+
+        assert!(
+            caps.platform_rules()
+                .iter()
+                .any(|rule| rule.as_str() == "(deny process-exec*)")
+        );
+        assert!(has_exec_rule(&caps, &command)?);
+        assert!(has_exec_rule(&caps, &interpreter)?);
+        assert!(has_exec_rule(&caps, &bundle)?);
         Ok(())
     }
 
