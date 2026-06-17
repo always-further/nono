@@ -503,9 +503,9 @@ dependencies = [
 
 [[package]]
 name = "cbindgen"
-version = "0.29.3"
+version = "0.29.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c95537b45400390270fae69ac098d057c8f5399001cde9d04f700c105ddfff2d"
+checksum = "2ecb53484c9c167ba674026b656d8a27d7657a58e6066aa902bfb1a4aa00ae20"
 dependencies = [
  "clap",
  "heck",
@@ -2116,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "nono"
-version = "0.62.0"
+version = "0.63.0"
 dependencies = [
  "der",
  "getrandom 0.4.2",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "nono-cli"
-version = "0.62.0"
+version = "0.63.0"
 dependencies = [
  "aws-lc-rs",
  "chrono",
@@ -2202,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "nono-proxy"
-version = "0.62.0"
+version = "0.63.0"
 dependencies = [
  "base64",
  "getrandom 0.4.2",
@@ -3837,7 +3837,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.52.0",
@@ -4682,9 +4682,9 @@ dependencies = [
 
 [[package]]
 name = "which"
-version = "8.0.2"
+version = "8.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81995fafaaaf6ae47a7d0cc83c67caf92aeb7e5331650ae6ff856f7c0c60c459"
+checksum = "c789537cf2f7f55be8e6192f92e464174ee55f91af622777f7f1ceb0dbccd03e"
 dependencies = [
  "libc",
 ]
