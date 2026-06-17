@@ -1927,19 +1927,34 @@ fn handle_pty_detach_request(
     }
 }
 
+/// Send `sig` to the PTY's foreground process group, falling back to `child`.
+///
+/// A shell (bash) running a foreground job (vim) puts that job in its own
+/// process group and makes it the PTY's foreground PG. Job-control signals must
+/// reach that whole group, not just the immediate child, so we query it via
+/// tcgetpgrp on the master fd and signal the negated PGID. On any error we fall
+/// back to the bare child.
+fn signal_pty_foreground_group(pty: &crate::pty_proxy::PtyProxy, child: Pid, sig: Signal) {
+    match nix::unistd::tcgetpgrp(pty.master_fd()) {
+        Ok(pgid) => {
+            let _ = signal::kill(Pid::from_raw(-pgid.as_raw()), sig);
+        }
+        Err(_) => {
+            let _ = signal::kill(child, sig);
+        }
+    }
+}
+
 /// Handle a Ctrl-Z suspension request intercepted by the PtyProxy.
 ///
-/// When the user presses Ctrl-Z, the PTY slave would normally generate
-/// SIGTSTP, but the child's process group is orphaned (setsid() creates a
-/// new session). The kernel refuses to deliver job control signals to
-/// orphaned PGs. We intercept the Ctrl-Z byte (0x1A) at the PtyProxy level
-/// and handle suspension manually:
-///
-/// 1. Send SIGSTOP to child (uncatchable; bash ignores SIGTSTP)
-/// 2. Wait for child to stop
-/// 3. Restore terminal to cooked mode
-/// 4. Stop nono itself via raise(SIGTSTP)
-/// 5. On resume: restore raw mode, forward SIGCONT to child
+/// The handling depends on whether the PTY foreground group is nono's direct
+/// child. A nested job (e.g. vim under `bash -i`) is NOT orphaned — its parent
+/// shell is in the same session — so the kernel delivers normal job-control
+/// signals: we forward a plain SIGTSTP and let the inner shell suspend/resume
+/// it. The direct child is orphaned (setsid() put it in a new session whose
+/// parent, nono, is elsewhere), so the kernel drops SIGTSTP and we must drive
+/// suspension manually: SIGSTOP, restore the terminal, raise(SIGTSTP) on nono
+/// itself, then SIGCONT on resume.
 fn handle_pty_suspension(pty: Option<&mut crate::pty_proxy::PtyProxy>, child: Pid) {
     let pty = match pty {
         Some(p) => p,
@@ -1950,13 +1965,25 @@ fn handle_pty_suspension(pty: Option<&mut crate::pty_proxy::PtyProxy>, child: Pi
         return;
     }
 
-    // SIGSTOP is uncatchable — bash installs a handler for SIGTSTP that
-    // sets internal flags but does not stop the process. SIGSTOP guarantees
-    // the child enters the T (stopped) state immediately.
-    if let Err(e) = signal::kill(child, Signal::SIGSTOP) {
-        debug!("Failed to send SIGSTOP to child: {}", e);
+    let fg_pgid = nix::unistd::tcgetpgrp(pty.master_fd()).ok();
+    let child_is_foreground = match fg_pgid {
+        Some(pgid) => pgid.as_raw() == child.as_raw(),
+        None => true,
+    };
+
+    // Nested job: forward SIGTSTP and let the inner shell handle it. Do not
+    // waitpid() — the stopped job is not our child, and the inner shell is
+    // already blocked waiting on it, so waiting here would hang.
+    if !child_is_foreground {
+        if let Some(pgid) = fg_pgid {
+            let _ = signal::kill(Pid::from_raw(-pgid.as_raw()), Signal::SIGTSTP);
+        }
         return;
     }
+
+    // Direct child (orphaned PG): SIGSTOP is uncatchable, unlike SIGTSTP which
+    // an interactive bash ignores, so it forces the stopped state immediately.
+    signal_pty_foreground_group(pty, child, Signal::SIGSTOP);
 
     loop {
         match waitpid(child, Some(WaitPidFlag::WUNTRACED)) {
@@ -1977,6 +2004,10 @@ fn handle_pty_suspension(pty: Option<&mut crate::pty_proxy::PtyProxy>, child: Pi
     // cooked settings for later detach (restore_terminal consumes them).
     let raw_termios = nix::sys::termios::tcgetattr(std::io::stdin()).ok();
     let cooked_termios = pty.saved_termios.clone();
+
+    // Exit the alternate screen so the shell's "[1]+ Stopped" prompt shows on
+    // the normal screen, then restore cooked mode.
+    pty.leave_screen_for_suspension();
     pty.restore_terminal();
 
     // Stop nono itself. The shell shows "[1]+  Stopped   nono run ..."
@@ -1999,22 +2030,17 @@ fn handle_pty_suspension(pty: Option<&mut crate::pty_proxy::PtyProxy>, child: Pi
     // Restore cooked settings so detach works correctly later.
     pty.saved_termios = cooked_termios;
 
-    let _ = signal::kill(child, Signal::SIGCONT);
+    // Re-enter the alternate screen the child was using before resuming it.
+    pty.reenter_screen_for_resume();
+
+    signal_pty_foreground_group(pty, child, Signal::SIGCONT);
 
     // SIGSTOP doesn't give the child a chance to clean up its terminal state.
     // When resumed, TUI apps (opencode, vim, htop) don't know they need to
     // redraw because they missed the TSTP/CONT cycle they normally rely on.
-    // Sending SIGWINCH triggers a full redraw.
-    //
-    // Send SIGWINCH to the foreground process group of the PTY, not just the
-    // immediate child. A shell (bash) that is running a nested TUI (vim) will
-    // have put that TUI in its own foreground PG. Sending to the PG ensures
-    // both the shell and any nested TUI receive the redraw signal.
-    if let Ok(pgid) = nix::unistd::tcgetpgrp(pty.master_fd()) {
-        let _ = signal::kill(Pid::from_raw(-pgid.as_raw()), Signal::SIGWINCH);
-    } else {
-        let _ = signal::kill(child, Signal::SIGWINCH);
-    }
+    // Sending SIGWINCH to the foreground group triggers a full redraw in both
+    // the shell and any nested TUI.
+    signal_pty_foreground_group(pty, child, Signal::SIGWINCH);
 }
 
 struct SignalForwardingGuard;
