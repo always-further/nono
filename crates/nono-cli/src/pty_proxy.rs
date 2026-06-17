@@ -211,7 +211,7 @@ impl ScreenState {
 /// The running PTY proxy state managed by the supervisor.
 pub struct PtyProxy {
     /// PTY master fd
-    master: OwnedFd,
+    pub(crate) master: OwnedFd,
     /// Session identifier for updating registry state on detach.
     session_id: String,
     /// Attach socket for `nono attach`
