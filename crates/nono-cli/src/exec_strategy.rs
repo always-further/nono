@@ -1967,6 +1967,7 @@ fn handle_pty_suspension(pty: Option<&mut crate::pty_proxy::PtyProxy>, child: Pi
             Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) => {
                 return;
             }
+            Err(nix::errno::Errno::EINTR) => continue,
             Err(_) => return,
             _ => {}
         }
