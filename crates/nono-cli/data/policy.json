@@ -410,9 +410,23 @@
         "read": [
           "~/go",
           "/usr/local/go"
-        ],
+        ]
+      }
+    },
+    "go_runtime_linux": {
+      "description": "Go build cache on Linux",
+      "platform": "linux",
+      "allow": {
         "readwrite": [
-          "~/.cache/go-build",
+          "~/.cache/go-build"
+        ]
+      }
+    },
+    "go_runtime_macos": {
+      "description": "Go build cache on macOS",
+      "platform": "macos",
+      "allow": {
+        "readwrite": [
           "~/Library/Caches/go-build"
         ]
       }
@@ -748,7 +762,7 @@
         "author": "always-further"
       },
       "groups": {
-        "include": ["go_runtime"]
+        "include": ["go_runtime", "go_runtime_linux", "go_runtime_macos"]
       },
       "security": {
         "signal_mode": "isolated"
