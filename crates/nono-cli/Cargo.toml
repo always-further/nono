@@ -110,6 +110,7 @@ serde.workspace = true
 [dev-dependencies]
 jsonschema = "0.46"
 proptest = "1"
+syn = { version = "2", features = ["full"] }
 
 [lints]
 workspace = true
