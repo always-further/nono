@@ -81,7 +81,7 @@ pub(crate) fn prepare_proxy_launch_options(
 
     let (plain_entries, endpoint_entries): (Vec<_>, Vec<_>) = allow_domain
         .into_iter()
-        .partition(|e| matches!(e, crate::profile::AllowDomainEntry::Plain(_)));
+        .partition(|e| !matches!(e, crate::profile::AllowDomainEntry::WithEndpoints { endpoints, .. } if !endpoints.is_empty()));
 
     let domain_filter = if network_profile.is_some() || !plain_entries.is_empty() {
         Some(DomainFilterIntent {
@@ -96,8 +96,8 @@ pub(crate) fn prepare_proxy_launch_options(
         debug_assert!(
             endpoint_entries
                 .iter()
-                .all(|e| matches!(e, crate::profile::AllowDomainEntry::WithEndpoints { .. })),
-            "EndpointFilterIntent invariant violated: all entries must be WithEndpoints"
+                .all(|e| matches!(e, crate::profile::AllowDomainEntry::WithEndpoints { endpoints, .. } if !endpoints.is_empty())),
+            "EndpointFilterIntent invariant violated: all entries must have non-empty endpoints"
         );
         Some(EndpointFilterIntent {
             routes: endpoint_entries,
@@ -674,6 +674,34 @@ mod tests {
             !config.strict_filter,
             "strict_filter must default off when network_block is false"
         );
+    }
+
+    /// `{ "domain": "cdn.example.com" }` (no `endpoints` key) deserializes via serde default
+    /// to `WithEndpoints { endpoints: [] }`, which is semantically identical to `Plain`.
+    /// The partition must route it to `plain_entries` — not `endpoint_entries` — or the
+    /// domain silently disappears from the allowlist.
+    #[test]
+    fn test_object_form_domain_with_no_endpoints_key_is_treated_as_plain() {
+        use crate::profile::AllowDomainEntry;
+
+        // Mirrors exactly: { "network": { "allow_domain": [ { "domain": "cdn.example.com" } ] } }
+        let entries: Vec<AllowDomainEntry> = serde_json::from_str(r#"[
+            "plain.example.com",
+            { "domain": "object.example.com" },
+            { "domain": "filtered.example.com", "endpoints": [{ "method": "GET", "path": "/v1/**" }] }
+        ]"#)
+        .expect("deserialize allow_domain entries");
+
+        let (plain, endpoint): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .partition(|e| !matches!(e, AllowDomainEntry::WithEndpoints { endpoints, .. } if !endpoints.is_empty()));
+
+        assert_eq!(plain.len(), 2, "both Plain and no-endpoints-key object must land in plain bucket");
+        assert_eq!(endpoint.len(), 1, "only the entry with actual endpoint rules goes to endpoint bucket");
+
+        assert!(plain.iter().any(|e| matches!(e, AllowDomainEntry::Plain(d) if d == "plain.example.com")));
+        assert!(plain.iter().any(|e| matches!(e, AllowDomainEntry::WithEndpoints { domain, .. } if domain == "object.example.com")));
+        assert!(endpoint.iter().any(|e| matches!(e, AllowDomainEntry::WithEndpoints { domain, .. } if domain == "filtered.example.com")));
     }
 
     /// A profile with only `custom_credentials` set (no built-in `credentials`,
