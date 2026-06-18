@@ -441,6 +441,8 @@ pub(crate) struct PreparedSandbox {
     pub(crate) suppressed_system_service_operations: Vec<String>,
     pub(crate) allowed_env_vars: Option<Vec<String>>,
     pub(crate) denied_env_vars: Option<Vec<String>>,
+    /// Expanded `environment.set_vars` (key, expanded-value), `None` if absent.
+    pub(crate) set_vars: Option<Vec<(String, String)>>,
     /// True when the profile or CLI requested `network.block`. Carried
     /// through because a CLI proxy flag (e.g. `--credential`) may later
     /// override `caps` to `ProxyOnly`, losing the original intent.
@@ -569,11 +571,12 @@ pub(crate) fn resolve_detached_cwd_prompt_response(
 
 fn finalize_prepared_sandbox(
     prepared: PreparedSandbox,
+    blocked_grants: &[(PathBuf, Option<String>)],
     args: &SandboxArgs,
     silent: bool,
 ) -> Result<PreparedSandbox> {
     output::print_skipped_requested_paths(&collect_missing_cli_requested_paths(args), silent);
-    output::print_capabilities(&prepared.caps, args.verbose, silent);
+    output::print_capabilities(&prepared.caps, blocked_grants, args.verbose, silent);
 
     if let Some(ref profile_name) = args.profile {
         crate::pack_update_hint::show_pack_update_hints(profile_name, silent);
@@ -1074,8 +1077,10 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 suppressed_system_service_operations: Vec::new(),
                 allowed_env_vars: None,
                 denied_env_vars: None,
+                set_vars: None,
                 network_block_requested: args.block_net,
             },
+            &[],
             args,
             silent,
         );
@@ -1109,6 +1114,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         suppressed_system_service_operations,
         allowed_env_vars: profile_allowed_env_vars,
         denied_env_vars: profile_denied_env_vars,
+        set_vars: profile_set_vars,
     } = prepared_profile;
 
     let session_hooks = loaded_profile
@@ -1205,6 +1211,9 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
     // re-run validate_deny_overlaps after CWD/pack grants are added below,
     // because Landlock cannot enforce a deny that lives under a later allow.
     let prepared_deny_paths = prepared.deny_paths;
+    // User grants silently blocked by deny groups (macOS); folded into the
+    // capability summary instead of emitting one warning per path.
+    let blocked_grants = prepared.blocked_grants;
 
     // Apply raw Seatbelt rules from the profile (macOS only).
     #[cfg(target_os = "macos")]
@@ -1385,8 +1394,10 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             suppressed_system_service_operations,
             allowed_env_vars: profile_allowed_env_vars,
             denied_env_vars: profile_denied_env_vars,
+            set_vars: profile_set_vars,
             network_block_requested,
         },
+        &blocked_grants,
         args,
         silent,
     )

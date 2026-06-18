@@ -90,6 +90,10 @@ pub struct CredentialStore {
     credentials: HashMap<String, LoadedCredential>,
     /// Map from route prefix to OAuth2 route (token cache + upstream)
     oauth2_routes: HashMap<String, OAuth2Route>,
+    /// Map from route prefix to AWS SigV4 route (placeholder until full
+    /// SigV4 signing is implemented; value is () because no runtime state
+    /// is needed yet).
+    aws_routes: HashMap<String, ()>,
 }
 
 impl CredentialStore {
@@ -113,6 +117,7 @@ impl CredentialStore {
     pub fn load(routes: &[RouteConfig], tls_connector: &TlsConnector) -> Result<Self> {
         let mut credentials = HashMap::new();
         let mut oauth2_routes = HashMap::new();
+        let mut aws_routes = HashMap::new();
 
         for route in routes {
             // Normalize prefix: strip leading/trailing slashes so it matches
@@ -136,10 +141,12 @@ impl CredentialStore {
                         continue;
                     }
                     Err(nono::NonoError::KeystoreAccess(msg)) => {
+                        let redacted = redact_credential_ref(key);
                         warn!(
                             "Credential '{}' not available for route '{}': {}. \
-                             Managed-credential requests on this route will be denied until the credential is available.",
-                            key, normalized_prefix, msg
+                             Managed-credential requests on this route will be denied until the credential is available. \
+                             Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
+                            redacted, normalized_prefix, msg
                         );
                         continue;
                     }
@@ -205,20 +212,24 @@ impl CredentialStore {
                     route.prefix
                 );
 
-                let client_id =
-                    match nono::keystore::load_secret_by_ref(KEYRING_SERVICE, &oauth2.client_id) {
-                        Ok(s) => s,
-                        Err(nono::NonoError::SecretNotFound(msg))
-                        | Err(nono::NonoError::KeystoreAccess(msg)) => {
-                            warn!(
-                                "OAuth2 client_id not available for route '{}': {}. \
-                                 Managed-credential requests on this route will be denied.",
-                                route.prefix, msg
-                            );
-                            continue;
-                        }
-                        Err(e) => return Err(ProxyError::Credential(e.to_string())),
-                    };
+                let client_id = match nono::keystore::load_secret_by_ref(
+                    KEYRING_SERVICE,
+                    &oauth2.client_id,
+                ) {
+                    Ok(s) => s,
+                    Err(nono::NonoError::SecretNotFound(msg))
+                    | Err(nono::NonoError::KeystoreAccess(msg)) => {
+                        let redacted = redact_credential_ref(&oauth2.client_id);
+                        warn!(
+                            "OAuth2 client_id '{}' not available for route '{}': {}. \
+                                 Managed-credential requests on this route will be denied. \
+                                 Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
+                            redacted, route.prefix, msg
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(ProxyError::Credential(e.to_string())),
+                };
 
                 let client_secret = match nono::keystore::load_secret_by_ref(
                     KEYRING_SERVICE,
@@ -227,10 +238,12 @@ impl CredentialStore {
                     Ok(s) => s,
                     Err(nono::NonoError::SecretNotFound(msg))
                     | Err(nono::NonoError::KeystoreAccess(msg)) => {
+                        let redacted = redact_credential_ref(&oauth2.client_secret);
                         warn!(
-                            "OAuth2 client_secret not available for route '{}': {}. \
-                             Managed-credential requests on this route will be denied.",
-                            route.prefix, msg
+                            "OAuth2 client_secret '{}' not available for route '{}': {}. \
+                             Managed-credential requests on this route will be denied. \
+                             Set NONO_KEYRING_TIMEOUT_SECS=N (default 120) to wait longer for keychain unlock; 0 disables the timeout.",
+                            redacted, route.prefix, msg
                         );
                         continue;
                     }
@@ -263,12 +276,20 @@ impl CredentialStore {
                         continue;
                     }
                 }
+            } else if route.aws_auth.is_some() {
+                // AWS SigV4 path — no credentials to load yet. Register the
+                // prefix so get_aws() returns true and the proxy can return
+                // 501 Not Implemented. The () value is a placeholder; the
+                // real AwsRoute struct will replace it when SigV4 signing is
+                // implemented.
+                aws_routes.insert(normalized_prefix.clone(), ());
             }
         }
 
         Ok(Self {
             credentials,
             oauth2_routes,
+            aws_routes,
         })
     }
 
@@ -278,6 +299,7 @@ impl CredentialStore {
         Self {
             credentials: HashMap::new(),
             oauth2_routes: HashMap::new(),
+            aws_routes: HashMap::new(),
         }
     }
 
@@ -293,25 +315,35 @@ impl CredentialStore {
         self.oauth2_routes.get(prefix)
     }
 
-    /// Check if any credentials (static or OAuth2) are loaded.
+    /// Returns `Some(())` if an AWS SigV4 route is configured for the given
+    /// prefix, `None` otherwise. The `Option<&()>` return mirrors `get_oauth2`
+    /// so call sites can use `.is_some()` uniformly. The value will become
+    /// `Option<&AwsRoute>` when SigV4 signing is implemented.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.credentials.is_empty() && self.oauth2_routes.is_empty()
+    pub fn get_aws(&self, prefix: &str) -> Option<&()> {
+        self.aws_routes.get(prefix)
     }
 
-    /// Number of loaded credentials (static + OAuth2).
+    /// Check if any credentials (static, OAuth2, or AWS) are loaded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.credentials.is_empty() && self.oauth2_routes.is_empty() && self.aws_routes.is_empty()
+    }
+
+    /// Number of loaded credentials (static + OAuth2 + AWS).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.credentials.len() + self.oauth2_routes.len()
+        self.credentials.len() + self.oauth2_routes.len() + self.aws_routes.len()
     }
 
     /// Returns the set of route prefixes that have loaded credentials
-    /// (both static keystore and OAuth2 routes).
+    /// (static keystore, OAuth2, and AWS routes).
     #[must_use]
     pub fn loaded_prefixes(&self) -> std::collections::HashSet<String> {
         self.credentials
             .keys()
             .chain(self.oauth2_routes.keys())
+            .chain(self.aws_routes.keys())
             .cloned()
             .collect()
     }
@@ -320,6 +352,26 @@ impl CredentialStore {
 /// The keyring service name used by nono for all credentials.
 /// Uses the same constant as `nono::keystore::DEFAULT_SERVICE` to ensure consistency.
 const KEYRING_SERVICE: &str = nono::keystore::DEFAULT_SERVICE;
+
+/// Redact a credential reference for safe display in warnings.
+///
+/// Delegates to the appropriate URI-specific redaction helper so that
+/// secrets (account names, file paths, field names) are never echoed raw.
+fn redact_credential_ref(key: &str) -> String {
+    if nono::keystore::is_op_uri(key) {
+        nono::keystore::redact_op_uri(key)
+    } else if nono::keystore::is_apple_password_uri(key) {
+        nono::keystore::redact_apple_password_uri(key)
+    } else if nono::keystore::is_keyring_uri(key) {
+        nono::keystore::redact_keyring_uri(key)
+    } else if nono::keystore::is_bw_uri(key) {
+        nono::keystore::redact_bw_uri(key)
+    } else if nono::keystore::is_file_uri(key) {
+        nono::keystore::redact_file_uri(key)
+    } else {
+        key.to_string()
+    }
+}
 
 /// Build a hint for the credential-not-found warning that probes other
 /// credential sources for the same name.
@@ -547,6 +599,7 @@ mod tests {
             tls_client_cert: None,
             tls_client_key: None,
             oauth2: None,
+            aws_auth: None,
         }];
         let store = CredentialStore::load(&routes, &tls);
         assert!(store.is_ok());
@@ -581,6 +634,7 @@ mod tests {
         let store = CredentialStore {
             credentials: HashMap::new(),
             oauth2_routes,
+            aws_routes: HashMap::new(),
         };
 
         assert!(
@@ -609,6 +663,7 @@ mod tests {
         let store = CredentialStore {
             credentials: HashMap::new(),
             oauth2_routes,
+            aws_routes: HashMap::new(),
         };
 
         let prefixes = store.loaded_prefixes();
@@ -637,6 +692,7 @@ mod tests {
             tls_client_cert: None,
             tls_client_key: None,
             oauth2: None,
+            aws_auth: None,
         }];
         let store = CredentialStore::load(&routes, &tls).expect("credential load");
         let cred = store.get("litellm").expect("route should be loaded");
@@ -666,6 +722,7 @@ mod tests {
             tls_client_cert: None,
             tls_client_key: None,
             oauth2: None,
+            aws_auth: None,
         }];
         let store = CredentialStore::load(&routes, &tls).expect("credential load");
         let cred = store.get("api").expect("route should be loaded");
@@ -706,6 +763,7 @@ mod tests {
                 client_secret: "env://TEST_OAUTH2_CLIENT_SECRET".to_string(),
                 scope: String::new(),
             }),
+            aws_auth: None,
         }];
 
         let store = CredentialStore::load(&routes, &tls);

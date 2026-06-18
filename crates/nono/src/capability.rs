@@ -214,13 +214,21 @@ impl std::fmt::Display for UnixSocketMode {
 /// Kept distinct from [`UnixSocketMode`] so the grant-side (what a
 /// capability permits) and the query-side (what the caller is about to
 /// do) are not conflated. The supervisor's seccomp-notify handler maps
-/// `SYS_CONNECT` → `Connect`, `SYS_BIND` → `Bind`.
+/// `SYS_CONNECT` -> `Connect`, `SYS_BIND` -> `Bind`,
+/// `SYS_SENDTO`/`SYS_SENDMSG`/`SYS_SENDMMSG` -> `Send`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnixSocketOp {
     /// About to call `connect(2)`.
     Connect,
     /// About to call `bind(2)`.
     Bind,
+    /// About to call `sendto(2)`, `sendmsg(2)`, or `sendmmsg(2)` with a
+    /// destination address.
+    ///
+    /// Datagram AF_UNIX sockets use `sendto`/`sendmsg`/`sendmmsg` to specify the
+    /// target per-message instead of calling `connect()` first. This
+    /// variant covers those datagram sends (issue #1089).
+    Send,
 }
 
 impl std::fmt::Display for UnixSocketOp {
@@ -228,6 +236,7 @@ impl std::fmt::Display for UnixSocketOp {
         match self {
             UnixSocketOp::Connect => write!(f, "connect"),
             UnixSocketOp::Bind => write!(f, "bind"),
+            UnixSocketOp::Send => write!(f, "send"),
         }
     }
 }
@@ -1295,14 +1304,15 @@ impl CapabilitySet {
     /// permits `op` on it.
     ///
     /// Used by the Linux supervisor's seccomp-notify handler:
-    /// `SYS_CONNECT` → [`UnixSocketOp::Connect`], `SYS_BIND`
-    /// → [`UnixSocketOp::Bind`].
+    /// `SYS_CONNECT` -> [`UnixSocketOp::Connect`], `SYS_BIND`
+    /// -> [`UnixSocketOp::Bind`], `SYS_SENDTO`/`SYS_SENDMSG`/`SYS_SENDMMSG`
+    /// -> [`UnixSocketOp::Send`].
     #[must_use]
     pub fn unix_socket_allowed(&self, sockaddr_path: &Path, op: UnixSocketOp) -> bool {
         self.unix_sockets.iter().any(|cap| {
             cap.covers(sockaddr_path)
                 && match op {
-                    UnixSocketOp::Connect => true, // any grant allows connect
+                    UnixSocketOp::Connect | UnixSocketOp::Send => true, // any grant allows connect/send
                     UnixSocketOp::Bind => cap.mode.permits_bind(),
                 }
         })
@@ -1546,8 +1556,16 @@ impl CapabilitySet {
                     seen.insert(key, i);
                     // On Linux: preserve symlink original from the removed
                     // entry into the kept entry so `original` stays meaningful.
+                    // Guard: skip if the symlink original is one of the four
+                    // /dev aliases that remap_procfs_self_references() rewrites
+                    // to /proc/{pid}/fd/N — inheriting such an original would
+                    // cause a direct entry (e.g. /dev/null) to be misdirected
+                    // to a PTY slave inode when the remap runs in the child.
                     #[cfg(target_os = "linux")]
-                    if cap.original == cap.resolved && existing.original != existing.resolved {
+                    if cap.original == cap.resolved
+                        && existing.original != existing.resolved
+                        && !is_procfs_remap_original(&existing.original)
+                    {
                         original_updates.push((i, existing.original.clone()));
                     }
                     // Apply merged access to the new (kept) entry
@@ -1557,8 +1575,15 @@ impl CapabilitySet {
                 } else {
                     // On Linux: inherit symlink original from the entry
                     // being discarded into the surviving entry.
+                    // Guard: skip if the discarded entry's original is one of
+                    // the four /dev aliases that remap_procfs_self_references()
+                    // rewrites to /proc/{pid}/fd/N — see the keep_new branch
+                    // above for the rationale.
                     #[cfg(target_os = "linux")]
-                    if existing.original == existing.resolved && cap.original != cap.resolved {
+                    if existing.original == existing.resolved
+                        && cap.original != cap.resolved
+                        && !is_procfs_remap_original(&cap.original)
+                    {
                         original_updates.push((existing_idx, cap.original.clone()));
                     }
                     to_remove.push(i);
@@ -1764,6 +1789,19 @@ impl CapabilitySet {
     }
 }
 
+/// Returns `true` if `path` is any path that [`rewrite_procfs_self_reference`]
+/// would rewrite — i.e. inheriting it as an `original` in
+/// [`CapabilitySet::deduplicate`] would cause a subsequent
+/// `remap_procfs_self_references` call to misdirect the resolved inode.
+///
+/// Implemented by delegating to [`rewrite_procfs_self_reference`] so the two
+/// functions are always in sync: any path added to the rewriter is
+/// automatically covered here without a separate update.
+#[cfg(target_os = "linux")]
+fn is_procfs_remap_original(path: &Path) -> bool {
+    rewrite_procfs_self_reference(path, 0, None).is_some()
+}
+
 fn rewrite_procfs_self_reference(
     original: &Path,
     process_pid: u32,
@@ -1875,6 +1913,66 @@ mod procfs_remap_tests {
         assert_eq!(
             caps.fs_capabilities()[1].resolved,
             PathBuf::from("/proc/4242/fd/1")
+        );
+    }
+
+    /// Regression test for the --detached /dev/null denial bug (issue #1064).
+    ///
+    /// When nono runs in detached mode, stdin/stdout are both /dev/null.
+    /// `system_read_linux_core` therefore adds two capabilities whose
+    /// `resolved` path is `/dev/null`: one with `original = /dev/null`
+    /// (explicit entry) and one with `original = /dev/stdin` (symlink entry
+    /// whose canonicalised target is also `/dev/null`).
+    ///
+    /// Without the fix, `deduplicate()` would update the surviving entry's
+    /// `original` from `/dev/null` to `/dev/stdin`, causing
+    /// `remap_procfs_self_references()` to rewrite `resolved` to
+    /// `/proc/{pid}/fd/0` (the PTY slave), leaving no Landlock rule for
+    /// `/dev/null` itself.
+    ///
+    /// With the fix, the guard in `deduplicate()` prevents a `/dev/stdin`
+    /// original from being inherited, so `original` stays `/dev/null` and
+    /// `remap_procfs_self_references()` leaves `resolved` unchanged.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn remap_preserves_dev_null_when_deduped_with_dev_stdin() {
+        let dev_null = PathBuf::from("/dev/null");
+
+        let mut caps = CapabilitySet::new();
+        // Explicit /dev/null entry (direct — original == resolved).
+        caps.add_fs(FsCapability {
+            original: dev_null.clone(),
+            resolved: dev_null.clone(),
+            access: AccessMode::Read,
+            is_file: true,
+            source: CapabilitySource::Group("system_read_linux_core".to_string()),
+        });
+        // /dev/stdin entry whose canonicalised target is also /dev/null
+        // (happens in detached mode where stdin is redirected to /dev/null).
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/dev/stdin"),
+            resolved: dev_null.clone(),
+            access: AccessMode::Read,
+            is_file: true,
+            source: CapabilitySource::Group("system_read_linux_core".to_string()),
+        });
+
+        // deduplicate() must NOT update original to /dev/stdin.
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        assert_eq!(
+            caps.fs_capabilities()[0].original,
+            dev_null,
+            "deduplicate must not rename /dev/null original to /dev/stdin"
+        );
+
+        // remap_procfs_self_references() must leave resolved as /dev/null,
+        // not rewrite it to /proc/4242/fd/0.
+        caps.remap_procfs_self_references(4242, None);
+        assert_eq!(
+            caps.fs_capabilities()[0].resolved,
+            dev_null,
+            "resolved must remain /dev/null after remap; was misdirected to PTY slave inode"
         );
     }
 }
@@ -2937,6 +3035,13 @@ mod tests {
     }
 
     #[test]
+    fn test_unix_socket_op_display() {
+        assert_eq!(UnixSocketOp::Connect.to_string(), "connect");
+        assert_eq!(UnixSocketOp::Bind.to_string(), "bind");
+        assert_eq!(UnixSocketOp::Send.to_string(), "send");
+    }
+
+    #[test]
     fn test_unix_socket_connect_requires_existing_path() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("ghost.sock");
@@ -3230,6 +3335,28 @@ mod tests {
         assert!(caps.unix_socket_allowed(&direct_child, UnixSocketOp::Connect));
         assert!(caps.unix_socket_allowed(&grandchild, UnixSocketOp::Connect));
         assert!(!caps.unix_socket_allowed(&direct_child, UnixSocketOp::Bind));
+    }
+
+    /// Send (sendto/sendmsg/sendmmsg) is covered by Connect grants (issue #1089).
+    /// A Connect-mode grant allows both connect and datagram send operations.
+    #[test]
+    fn test_capability_set_unix_socket_send_covered_by_connect_grant() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("dgram.sock");
+        fs::write(&sock, b"").unwrap();
+
+        let caps = CapabilitySet::new()
+            .allow_unix_socket(&sock, UnixSocketMode::Connect)
+            .unwrap();
+
+        let resolved = sock.canonicalize().unwrap();
+
+        // Connect grant covers both connect and send
+        assert!(caps.unix_socket_allowed(&resolved, UnixSocketOp::Connect));
+        assert!(caps.unix_socket_allowed(&resolved, UnixSocketOp::Send));
+
+        // Connect-only grant does not cover bind
+        assert!(!caps.unix_socket_allowed(&resolved, UnixSocketOp::Bind));
     }
 
     #[test]

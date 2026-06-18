@@ -2,7 +2,7 @@
 //!
 //! Profiles provide named configurations for common applications like
 //! claude-code, openclaw, and opencode. They can be built-in (compiled
-//! into the binary) or user-defined (in ~/.config/nono/profiles/).
+//! into the binary) or user-defined (in `$XDG_CONFIG_HOME/nono/profiles/`).
 
 pub(crate) mod builtin;
 
@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 // Re-export InjectMode and OAuth2Config from nono-proxy for use in profiles
 pub use nono_proxy::config::{InjectMode, OAuth2Config};
+
+use crate::package::PackageRef;
 
 /// Profile metadata
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -338,6 +340,14 @@ pub struct CustomCredentialDef {
     /// to the certificate in `tls_client_cert`.
     #[serde(default)]
     pub tls_client_key: Option<String>,
+
+    /// Optional AWS SigV4 signing configuration.
+    ///
+    /// When present, the proxy will sign outbound requests with AWS SigV4
+    /// credentials resolved from the configured profile (or the default
+    /// credential chain). Mutually exclusive with `credential_key` and `auth`.
+    #[serde(default)]
+    pub aws_auth: Option<nono_proxy::config::AwsAuthConfig>,
 }
 
 fn default_inject_header() -> String {
@@ -444,6 +454,15 @@ fn validate_credential_key(context_name: &str, key: &str) -> Result<()> {
 ///   - `query_param`: query_param_name required, valid query param name
 ///   - `basic_auth`: no additional required fields
 fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<()> {
+    // Mutual exclusion: aws_auth is incompatible with credential_key and auth.
+    if cred.aws_auth.is_some() && (cred.credential_key.is_some() || cred.auth.is_some()) {
+        return Err(NonoError::ProfileParse(format!(
+            "custom credential '{}' has 'aws_auth' set together with 'credential_key' or 'auth'; \
+             aws_auth is mutually exclusive with both — remove the other auth field",
+            name
+        )));
+    }
+
     // Mutual exclusion: credential_key and auth cannot both be set
     if cred.credential_key.is_some() && cred.auth.is_some() {
         return Err(NonoError::ProfileParse(format!(
@@ -453,10 +472,10 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
         )));
     }
 
-    // At least one of credential_key or auth must be set
-    if cred.credential_key.is_none() && cred.auth.is_none() {
+    // At least one of credential_key, auth, or aws_auth must be set
+    if cred.credential_key.is_none() && cred.auth.is_none() && cred.aws_auth.is_none() {
         return Err(NonoError::ProfileParse(format!(
-            "custom credential '{}' must have either 'credential_key' or 'auth' set",
+            "custom credential '{}' must have either 'credential_key', 'auth', or 'aws_auth' set",
             name
         )));
     }
@@ -464,6 +483,11 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
     // Validate OAuth2 auth if present
     if let Some(ref auth) = cred.auth {
         validate_oauth2_auth(name, auth)?;
+    }
+
+    // Validate aws_auth if present
+    if let Some(ref aws) = cred.aws_auth {
+        validate_aws_auth(name, aws)?;
     }
 
     // Validate credential_key if present
@@ -678,6 +702,51 @@ fn validate_oauth2_auth(name: &str, auth: &OAuth2Config) -> Result<()> {
     if auth.client_secret.is_empty() {
         return Err(NonoError::ProfileParse(format!(
             "auth.client_secret for custom credential '{}' cannot be empty",
+            name
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate AWS SigV4 signing configuration subfields.
+///
+/// - `profile`: non-empty, no whitespace (whitespace breaks the AWS INI config
+///   parser; see aws/aws-cli#2806). Mixed case is allowed — profile names are
+///   case-sensitive.
+/// - `region` / `service`: non-empty, lowercase, no whitespace. The SigV4
+///   credential scope requires lowercase region and service codes.
+fn validate_aws_auth(name: &str, aws: &nono_proxy::config::AwsAuthConfig) -> Result<()> {
+    if let Some(ref profile) = aws.profile
+        && (profile.is_empty() || profile.contains(char::is_whitespace))
+    {
+        return Err(NonoError::ProfileParse(format!(
+            "aws_auth.profile for custom credential '{}' must be a non-empty string \
+             with no whitespace; omit the field to use the default credential chain",
+            name
+        )));
+    }
+
+    if let Some(ref region) = aws.region
+        && (region.is_empty()
+            || region.contains(char::is_whitespace)
+            || region.chars().any(|c| c.is_uppercase()))
+    {
+        return Err(NonoError::ProfileParse(format!(
+            "aws_auth.region for custom credential '{}' must be a non-empty, \
+             lowercase string with no whitespace (e.g., \"us-east-1\")",
+            name
+        )));
+    }
+
+    if let Some(ref service) = aws.service
+        && (service.is_empty()
+            || service.contains(char::is_whitespace)
+            || service.chars().any(|c| c.is_uppercase()))
+    {
+        return Err(NonoError::ProfileParse(format!(
+            "aws_auth.service for custom credential '{}' must be a non-empty, \
+             lowercase string with no whitespace (e.g., \"bedrock\", \"s3\")",
             name
         )));
     }
@@ -1198,6 +1267,14 @@ pub struct SessionHook {
     /// If absent, no timeout is enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+
+    /// Internal state to track which pack (from a registry) the session hook originated
+    /// If set, the value is namespace/pack
+    /// If absent, the key was set by a local (non-registry based) pack
+    /// This needs to be tracked per-hook, because a profile extending another profile can override
+    /// a key. The originating source pack is used to track provenance and $PACK_DIR substitution
+    #[serde(skip)]
+    pub(crate) source_pack: Option<PackageRef>,
 }
 
 /// Session lifecycle hooks for a profile.
@@ -1474,6 +1551,20 @@ pub struct EnvironmentConfig {
     /// Use this to strip specific secrets while keeping everything else inherited.
     #[serde(default)]
     pub deny_vars: Vec<String>,
+
+    /// Static environment variables injected into the sandboxed process.
+    ///
+    /// Maps variable names to values, set after allow/deny filtering and before
+    /// credential injection (so injected credentials win on conflict). Values
+    /// support the same expansion as profile paths (`$HOME`, `~`, `$WORKDIR`,
+    /// `$TMPDIR`, `$XDG_*`, `$NONO_CONFIG`, `$NONO_PACKAGES`).
+    ///
+    /// `PATH` and any `NONO_*` key are reserved and rejected at parse time.
+    /// Unlike inherited host variables, keys here are NOT subject to the
+    /// dangerous-variable blocklist: setting one explicitly is a deliberate,
+    /// auditable operator decision.
+    #[serde(default)]
+    pub set_vars: std::collections::HashMap<String, String>,
 }
 
 /// Configuration for supervisor-delegated URL opening.
@@ -1747,7 +1838,7 @@ impl<'de> Deserialize<'de> for Profile {
 
 /// Check whether a profile name is loaded from a user file rather than the built-in set.
 ///
-/// Returns `true` when a user profile file exists at `~/.config/nono/profiles/<name>.json`,
+/// Returns `true` when a user profile file exists at `$XDG_CONFIG_HOME/nono/profiles/<name>.json`,
 /// which means the user has overridden or shadowed any built-in profile of the same name.
 pub fn is_user_override(name: &str) -> bool {
     if !is_valid_profile_name(name) {
@@ -1817,7 +1908,7 @@ pub fn load_profile_extends(name_or_path: &str) -> Option<Vec<String>> {
 /// treated as a direct file path. Otherwise it is resolved as a profile name.
 ///
 /// Name loading precedence:
-/// 1. User profiles from `~/.config/nono/profiles/<name>.json` — never written
+/// 1. User profiles from `$XDG_CONFIG_HOME/nono/profiles/<name>.json` — never written
 ///    by nono. Users (and Claude's "Option B" guidance) own this directory.
 /// 2. Pack-store scan — any installed pack with a profile artifact whose
 ///    `install_as` matches the requested name. Self-heals Claude Code plugin
@@ -1942,7 +2033,9 @@ fn load_profile_inner(name_or_path: &str) -> Result<Option<Profile>> {
             "Loading pack-store profile from: {}",
             profile_path.display()
         );
-        let mut profile = finalize_profile(load_from_file(&profile_path)?)?;
+        let mut profile = load_from_file(&profile_path)?;
+        resolve_store_pack_session_hooks(&mut profile, &pack_key)?;
+        let mut profile = finalize_profile(profile)?;
         // Inject the source pack ref so it's always present in the
         // verification list, even if the profile JSON doesn't declare it.
         if !profile.packs.contains(&pack_key) {
@@ -2118,6 +2211,31 @@ pub(crate) fn is_file_path_ref(s: &str) -> bool {
     !is_registry_ref(s) && (s.contains('/') || s.ends_with(".json") || s.ends_with(".jsonc"))
 }
 
+/// Stamp store provenance onto a profile's session hooks, and expand $PACK_DIR vars
+/// This function adds provenance data for the session_hooks, so that as any profiles are extended,
+/// the origination of the session hook can be traced back to the registry pack that added it
+/// Additionally, if the hook path starts with $PACK_DIR, the prefix is replaced with the full path to the file
+fn resolve_store_pack_session_hooks(profile: &mut Profile, pack_key: &str) -> Result<()> {
+    let pack_ref = crate::package::parse_package_ref(pack_key)?;
+    let install_dir = crate::package::package_install_dir(&pack_ref.namespace, &pack_ref.name)?;
+
+    for hook in [
+        &mut profile.session_hooks.before,
+        &mut profile.session_hooks.after,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if hook.source_pack.is_none() {
+            hook.source_pack = Some(pack_ref.clone());
+            if let Ok(rest) = hook.script.strip_prefix("$PACK_DIR") {
+                hook.script = install_dir.join(rest);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Load a profile from a registry pack. If the pack isn't installed locally,
 /// pull it first (Docker-style auto-pull with Sigstore verification).
 fn load_registry_profile(name_or_path: &str) -> Result<Profile> {
@@ -2175,7 +2293,9 @@ fn load_registry_profile(name_or_path: &str) -> Result<Profile> {
                 .join(format!("{install_name}.json"));
             if profile_path.exists() {
                 tracing::info!("Loading registry profile from: {}", profile_path.display());
-                return finalize_profile(load_from_file(&profile_path)?);
+                let mut profile = load_from_file(&profile_path)?;
+                resolve_store_pack_session_hooks(&mut profile, &package_ref.key())?;
+                return finalize_profile(profile);
             }
         }
     }
@@ -2295,6 +2415,14 @@ pub(crate) fn parse_profile_bytes(content: &[u8]) -> Result<Profile> {
 
     // Validate env_credentials keys (URI entries need structural validation)
     validate_env_credential_keys(&profile)?;
+
+    // Validate environment.set_vars keys (reserved/invalid keys are fatal)
+    if let Some(env_config) = profile.environment.as_ref()
+        && !env_config.set_vars.is_empty()
+        && let Some(err) = crate::exec_strategy::validate_set_vars(&env_config.set_vars)
+    {
+        return Err(NonoError::ProfileParse(err));
+    }
 
     Ok(profile)
 }
@@ -2419,7 +2547,7 @@ enum ResolvedBase {
 /// This handles the v0.42 → v0.43 upgrade case where a user profile
 /// `extends: ["claude-code"]` and the inbuilt `claude-code` is gone:
 /// instead of an inscrutable "base profile not found" error, the user
-/// sees the same install prompt that `--profile claude-code` would
+/// sees the same install prompt that `--profile always-further/claude` would
 /// produce, with the chain still resolving cleanly on accept.
 fn load_base_profile_raw(
     name: &str,
@@ -2464,8 +2592,9 @@ fn load_base_profile_raw(
     // doesn't declare its own pack.
     if let Some((profile_path, pack_key)) = find_pack_store_profile(name) {
         let mut base = parse_profile_file(&profile_path)?;
+        resolve_store_pack_session_hooks(&mut base, &pack_key)?;
         if !base.packs.contains(&pack_key) {
-            base.packs.push(pack_key);
+            base.packs.push(pack_key.clone());
         }
         return Ok(ResolvedBase::Global(base));
     }
@@ -2493,8 +2622,9 @@ fn load_base_profile_raw(
                 if let Some((profile_path, pack_key)) = find_pack_store_profile(name) {
                     let mut base = parse_profile_file(&profile_path)?;
                     if !base.packs.contains(&pack_key) {
-                        base.packs.push(pack_key);
+                        base.packs.push(pack_key.clone());
                     }
+                    resolve_store_pack_session_hooks(&mut base, &pack_key)?;
                     return Ok(ResolvedBase::Global(base));
                 }
             }
@@ -2655,6 +2785,11 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             (Some(base_env), Some(child_env)) => Some(EnvironmentConfig {
                 allow_vars: dedup_append(&base_env.allow_vars, &child_env.allow_vars),
                 deny_vars: dedup_append(&base_env.deny_vars, &child_env.deny_vars),
+                set_vars: {
+                    let mut merged = base_env.set_vars.clone();
+                    merged.extend(child_env.set_vars.clone());
+                    merged
+                },
             }),
         },
         // NOTE: WorkdirAccess::None serves as both "not specified" and "explicitly no access".
@@ -2780,13 +2915,30 @@ pub(crate) fn resolve_user_profile_path(name: &str) -> Result<PathBuf> {
 }
 
 pub(crate) fn user_profile_dir() -> Result<PathBuf> {
-    Ok(resolve_user_config_dir()?.join("nono").join("profiles"))
+    Ok(crate::package::nono_config_dir()?.join("profiles"))
+}
+
+/// Display hint for `$XDG_CONFIG_HOME/nono` when runtime resolution fails.
+pub const NONO_CONFIG_DIR_HINT: &str = "$XDG_CONFIG_HOME/nono (default ~/.config/nono)";
+
+/// Resolved user profile directory for user-facing output.
+#[must_use]
+pub fn display_user_profiles_dir() -> String {
+    user_profile_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| format!("{NONO_CONFIG_DIR_HINT}/profiles"))
+}
+
+/// Resolved user trust-policy path for user-facing output.
+#[must_use]
+pub fn display_trust_policy_path() -> String {
+    crate::package::nono_config_dir()
+        .map(|p| p.join("trust-policy.json").display().to_string())
+        .unwrap_or_else(|_| format!("{NONO_CONFIG_DIR_HINT}/trust-policy.json"))
 }
 
 pub(crate) fn user_profile_draft_dir() -> Result<PathBuf> {
-    Ok(resolve_user_config_dir()?
-        .join("nono")
-        .join("profile-drafts"))
+    Ok(crate::package::nono_config_dir()?.join("profile-drafts"))
 }
 
 pub(crate) fn get_user_profile_draft_path(name: &str) -> Result<PathBuf> {
@@ -2861,6 +3013,7 @@ pub(crate) fn is_valid_profile_name(name: &str) -> bool {
 /// - $WORKDIR: Working directory (--workdir or cwd)
 /// - $HOME: User's home directory
 /// - $XDG_CONFIG_HOME: XDG config directory
+/// - $NONO_CONFIG: nono config root (`$XDG_CONFIG_HOME/nono`)
 /// - $XDG_DATA_HOME: XDG data directory
 /// - $XDG_STATE_HOME: XDG state directory
 /// - $XDG_CACHE_HOME: XDG cache directory
@@ -2945,7 +3098,11 @@ pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
         expanded = expanded.replace("$XDG_RUNTIME_DIR", rt);
     }
 
-    // Expand $NONO_PACKAGES to the package store directory
+    // Expand $NONO_CONFIG / $NONO_PACKAGES to resolved nono config paths
+    if expanded.contains("$NONO_CONFIG") {
+        let config_dir = crate::package::nono_config_dir()?;
+        expanded = expanded.replace("$NONO_CONFIG", &config_dir.to_string_lossy());
+    }
     if expanded.contains("$NONO_PACKAGES") {
         let packages_dir = crate::package::package_store_dir()?;
         expanded = expanded.replace("$NONO_PACKAGES", &packages_dir.to_string_lossy());
@@ -2979,7 +3136,7 @@ pub fn list_profiles() -> Vec<String> {
     }
 
     // Add pack-store profiles — names exposed by installed packs via
-    // `install_as`. Without this, `--profile claude-code` works (the
+    // `install_as`. Without this, `--profile always-further/claude` works (the
     // resolver finds it) but `nono profile list` doesn't surface it,
     // confusing users who expect a one-stop catalogue.
     for (name, _pack_ref) in list_pack_store_profiles() {
@@ -3217,6 +3374,49 @@ mod tests {
         _env.remove("XDG_STATE_HOME");
         let expanded = expand_vars("$XDG_STATE_HOME/history", &workdir).expect("valid env");
         assert_eq!(expanded, PathBuf::from("/home/user/.local/state/history"));
+    }
+
+    #[test]
+    fn test_expand_vars_xdg_config_home() {
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("HOME", "/home/user"),
+            ("XDG_CONFIG_HOME", "/custom/config"),
+        ]);
+
+        let workdir = PathBuf::from("/projects/myapp");
+        let expanded = expand_vars("$XDG_CONFIG_HOME/nono/profiles", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/custom/config/nono/profiles"));
+
+        _env.remove("XDG_CONFIG_HOME");
+        let expanded = expand_vars("$XDG_CONFIG_HOME/nono/profiles", &workdir).expect("valid env");
+        assert_eq!(expanded, PathBuf::from("/home/user/.config/nono/profiles"));
+    }
+
+    #[test]
+    fn test_expand_vars_nono_config() {
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_home = tmp.path().join("config");
+        std::fs::create_dir_all(&config_home).expect("create config home");
+        let config_home_str = config_home.to_string_lossy().to_string();
+        let _env = crate::test_env::EnvVarGuard::set_all(&[
+            ("HOME", "/home/user"),
+            ("XDG_CONFIG_HOME", &config_home_str),
+        ]);
+
+        let workdir = PathBuf::from("/projects/myapp");
+        let expanded = expand_vars("$NONO_CONFIG/profiles", &workdir).expect("valid env");
+        assert_eq!(
+            nono::try_canonicalize(&expanded),
+            nono::try_canonicalize(&config_home.join("nono").join("profiles"))
+        );
     }
 
     #[test]
@@ -3494,6 +3694,7 @@ mod tests {
             environment: Some(EnvironmentConfig {
                 allow_vars: vec![],
                 deny_vars: vec!["GH_TOKEN".into()],
+                set_vars: Default::default(),
             }),
             ..Default::default()
         };
@@ -3501,6 +3702,7 @@ mod tests {
             environment: Some(EnvironmentConfig {
                 allow_vars: vec![],
                 deny_vars: vec!["ANTHROPIC_API_KEY".into()],
+                set_vars: Default::default(),
             }),
             ..Default::default()
         };
@@ -3517,6 +3719,7 @@ mod tests {
             environment: Some(EnvironmentConfig {
                 allow_vars: vec![],
                 deny_vars: vec!["GH_TOKEN".into(), "ANTHROPIC_API_KEY".into()],
+                set_vars: Default::default(),
             }),
             ..Default::default()
         };
@@ -3524,6 +3727,7 @@ mod tests {
             environment: Some(EnvironmentConfig {
                 allow_vars: vec![],
                 deny_vars: vec!["ANTHROPIC_API_KEY".into()],
+                set_vars: Default::default(),
             }),
             ..Default::default()
         };
@@ -3861,6 +4065,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         }
     }
 
@@ -4025,6 +4230,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -4047,6 +4253,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("missing path_pattern should be rejected");
@@ -4071,6 +4278,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("pattern without {} should be rejected");
@@ -4095,6 +4303,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(validate_custom_credential("telegram", &cred).is_ok());
     }
@@ -4117,6 +4326,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("telegram", &cred);
         let err = result.expect_err("replacement without {} should be rejected");
@@ -4141,6 +4351,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(validate_custom_credential("google_maps", &cred).is_ok());
     }
@@ -4163,6 +4374,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("missing query_param_name should be rejected");
@@ -4187,6 +4399,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("google_maps", &cred);
         let err = result.expect_err("empty query_param_name should be rejected");
@@ -4211,6 +4424,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         // BasicAuth mode doesn't require additional fields
         // Credential value is expected to be "username:password" format
@@ -4412,6 +4626,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         }
     }
 
@@ -4908,10 +5123,12 @@ mod tests {
             before: Some(SessionHook {
                 script: PathBuf::from("/base/before.sh"),
                 timeout_secs: Some(5),
+                source_pack: None,
             }),
             after: Some(SessionHook {
                 script: PathBuf::from("/base/after.sh"),
                 timeout_secs: None,
+                source_pack: None,
             }),
         };
         let mut child = child_profile();
@@ -4919,6 +5136,7 @@ mod tests {
             before: Some(SessionHook {
                 script: PathBuf::from("/child/before.sh"),
                 timeout_secs: None,
+                source_pack: None,
             }),
             after: None,
         };
@@ -4941,6 +5159,7 @@ mod tests {
             before: Some(SessionHook {
                 script: PathBuf::from("/base/before.sh"),
                 timeout_secs: Some(7),
+                source_pack: None,
             }),
             after: None,
         };
@@ -4972,6 +5191,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -4994,6 +5214,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -5134,6 +5355,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -5156,6 +5378,7 @@ mod tests {
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
+                aws_auth: None,
             },
         );
 
@@ -6062,7 +6285,7 @@ mod tests {
     fn test_top_level_schema_field_allowed_in_profile() {
         let profile: Profile = serde_json::from_str(
             r#"{
-                "$schema": "https://nono.dev/schemas/nono-profile.schema.json",
+                "$schema": "https://nono.sh/schemas/nono-profile.schema.json",
                 "meta": { "name": "schema-ok" }
             }"#,
         )
@@ -6621,6 +6844,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(
             validate_custom_credential("example", &cred).is_ok(),
@@ -6646,6 +6870,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI without env_var should be rejected");
@@ -6674,6 +6899,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("example", &cred);
         let err = result.expect_err("file:// URI with relative path should be rejected");
@@ -6702,6 +6928,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("example", &cred);
         assert!(
@@ -6762,6 +6989,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         assert!(validate_custom_credential("example", &cred).is_ok());
     }
@@ -6784,6 +7012,7 @@ mod tests {
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
+            aws_auth: None,
         };
         let result = validate_custom_credential("example", &cred);
         assert!(result.is_err(), "env://LD_PRELOAD should be rejected");
@@ -6912,6 +7141,40 @@ mod tests {
     }
 
     #[test]
+    fn set_vars_parses_valid_keys() {
+        let json = br#"{
+            "meta": { "name": "set-vars-valid" },
+            "environment": {
+                "set_vars": { "RUST_LOG": "debug", "FOO": "$HOME/.config" }
+            }
+        }"#;
+        let profile = parse_profile_bytes(json).expect("valid set_vars should parse");
+        let env = profile.environment.expect("environment present");
+        assert_eq!(env.set_vars.get("RUST_LOG"), Some(&"debug".to_string()));
+        assert_eq!(env.set_vars.get("FOO"), Some(&"$HOME/.config".to_string()));
+    }
+
+    #[test]
+    fn set_vars_rejects_reserved_path_key() {
+        let json = br#"{
+            "meta": { "name": "set-vars-path" },
+            "environment": { "set_vars": { "PATH": "/usr/bin" } }
+        }"#;
+        let err = parse_profile_bytes(json).expect_err("PATH in set_vars must be rejected");
+        assert!(err.to_string().contains("PATH"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn set_vars_rejects_reserved_nono_prefix() {
+        let json = br#"{
+            "meta": { "name": "set-vars-nono" },
+            "environment": { "set_vars": { "NONO_FOO": "bar" } }
+        }"#;
+        let err = parse_profile_bytes(json).expect_err("NONO_* in set_vars must be rejected");
+        assert!(err.to_string().contains("NONO_"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn jsonc_comments_and_trailing_commas() {
         let jsonc = br#"{
             // Profile for my agent
@@ -6969,6 +7232,516 @@ mod tests {
         );
     }
 
+    // ============================================================================
+    // Registry pack: $PACK_DIR expansion and source_pack assignment
+    // ============================================================================
+
+    /// Run `f` inside a temporary directory that is set as `XDG_CONFIG_HOME`.
+    ///
+    /// Acquires `ENV_LOCK`, creates a canonicalized temp dir, sets the env var,
+    /// and calls `f(config_dir)`.  The lock and env guard are dropped *after*
+    /// `f` returns, so the caller can return owned values and assert outside
+    /// the locked region.
+    fn with_config_env<F, R>(f: F) -> R
+    where
+        F: FnOnce(&Path) -> R,
+    {
+        let _guard = match crate::test_env::ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let tmp = tempdir().expect("tmpdir");
+        let config_dir = tmp.path().canonicalize().expect("canonicalize");
+        let _env = crate::test_env::EnvVarGuard::set_all(&[(
+            "XDG_CONFIG_HOME",
+            config_dir.to_str().expect("utf8"),
+        )]);
+        f(&config_dir)
+    }
+
+    /// Build a minimal pack store under `config_dir` (used as XDG_CONFIG_HOME).
+    ///
+    /// Creates:
+    ///   <config_dir>/nono/packages/<ns>/<name>/package.json
+    ///   <config_dir>/nono/packages/<ns>/<name>/profiles/<install_as>.json
+    ///   <config_dir>/nono/packages/<ns>/<name>/hooks/<hook_file>  (empty, for path validity)
+    ///
+    /// Returns the install directory path.
+    fn build_fake_pack_store(
+        config_dir: &Path,
+        ns: &str,
+        pack_name: &str,
+        install_as: &str,
+        profile_json: &str,
+        hook_file: Option<&str>,
+    ) -> PathBuf {
+        let install_dir = config_dir
+            .join("nono")
+            .join("packages")
+            .join(ns)
+            .join(pack_name);
+        std::fs::create_dir_all(install_dir.join("profiles")).expect("create profiles dir");
+        if let Some(hf) = hook_file {
+            let hooks_dir = install_dir.join("hooks");
+            std::fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+            std::fs::write(hooks_dir.join(hf), "#!/bin/sh\n").expect("write hook file");
+        }
+        // Write package.json manifest
+        let manifest = format!(
+            r#"{{
+              "schema_version": 1,
+              "name": "{pack_name}",
+              "artifacts": [{{
+                "type": "profile",
+                "path": "profiles/{install_as}.json",
+                "install_as": "{install_as}"
+              }}]
+            }}"#
+        );
+        std::fs::write(install_dir.join("package.json"), &manifest).expect("write package.json");
+        // Write profile JSON
+        std::fs::write(
+            install_dir
+                .join("profiles")
+                .join(format!("{install_as}.json")),
+            profile_json,
+        )
+        .expect("write profile json");
+        install_dir
+    }
+
+    /// Test 1: A hook script starting with `$PACK_DIR` in a registry-pack profile
+    /// is expanded to the full path `<install_dir>/<rest>`.
+    #[test]
+    fn test_registry_pack_pack_dir_in_hook_script_is_expanded() {
+        let (profile, install_dir) = with_config_env(|config_dir| {
+            let install_dir = build_fake_pack_store(
+                config_dir,
+                "test-ns",
+                "mypk",
+                "mypk",
+                r#"{
+                    "meta": { "name": "mypk" },
+                    "session_hooks": {
+                        "before": { "script": "$PACK_DIR/hooks/setup.sh" },
+                        "after":  { "script": "$PACK_DIR/hooks/teardown.sh" }
+                    }
+                }"#,
+                None,
+            );
+            let profile = load_profile("test-ns/mypk").expect("load registry profile");
+            (profile, install_dir)
+        }); // lock released before assertions
+
+        let before = profile.session_hooks.before.as_ref().expect("before hook");
+        assert_eq!(
+            before.script,
+            install_dir.join("hooks").join("setup.sh"),
+            "before hook $PACK_DIR should be expanded to install_dir"
+        );
+
+        let after = profile.session_hooks.after.as_ref().expect("after hook");
+        assert_eq!(
+            after.script,
+            install_dir.join("hooks").join("teardown.sh"),
+            "after hook $PACK_DIR should be expanded to install_dir"
+        );
+    }
+
+    /// Test 2: Both before and after hooks in a registry-pack profile have
+    /// `source_pack` set to `<namespace>/<pack>`, even when the script does
+    /// not contain `$PACK_DIR`.
+    #[test]
+    fn test_registry_pack_hooks_have_source_pack_set() {
+        let profile = with_config_env(|config_dir| {
+            build_fake_pack_store(
+                config_dir,
+                "acme",
+                "widget",
+                "widget",
+                r#"{
+                    "meta": { "name": "widget" },
+                    "session_hooks": {
+                        "before": { "script": "/absolute/path/before.sh" },
+                        "after":  { "script": "/absolute/path/after.sh" }
+                    }
+                }"#,
+                None,
+            );
+            load_profile("acme/widget").expect("load registry profile")
+        }); // lock released before assertions
+
+        let before = profile.session_hooks.before.as_ref().expect("before hook");
+        assert_eq!(
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/widget"),
+            "before hook source_pack should be set to the registry pack key"
+        );
+
+        let after = profile.session_hooks.after.as_ref().expect("after hook");
+        assert_eq!(
+            after.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/widget"),
+            "after hook source_pack should be set to the registry pack key"
+        );
+    }
+
+    /// Test 3: A profile loaded from a plain file path (non-registry) does NOT
+    /// set `source_pack` on either hook — `source_pack` is `None` for both.
+    #[test]
+    fn test_non_registry_pack_hooks_have_no_source_pack() {
+        let dir = tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("local.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "local" },
+                "session_hooks": {
+                    "before": { "script": "/usr/local/bin/setup.sh" },
+                    "after":  { "script": "/usr/local/bin/cleanup.sh" }
+                }
+            }"#,
+        )
+        .expect("write profile");
+
+        let profile = load_profile_from_path(&profile_path).expect("load profile from path");
+
+        let before = profile.session_hooks.before.as_ref().expect("before hook");
+        assert!(
+            before.source_pack.is_none(),
+            "non-registry before hook must not have source_pack set"
+        );
+
+        let after = profile.session_hooks.after.as_ref().expect("after hook");
+        assert!(
+            after.source_pack.is_none(),
+            "non-registry after hook must not have source_pack set"
+        );
+    }
+
+    /// Test: a local profile that `extends: "acme/widget"` (a registry pack).
+    ///
+    /// acme/widget has only a `before` hook (uses `$PACK_DIR`).
+    /// The local profile has only an `after` hook (plain absolute path).
+    ///
+    /// After resolution the merged profile must satisfy:
+    /// 1. `before` — inherited from acme/widget, `$PACK_DIR` expanded to the
+    ///    pack install directory, `source_pack` == `"acme/widget"`.
+    /// 2. `after`  — from the local profile, script unchanged (no `$PACK_DIR`
+    ///    expansion), `source_pack` is `None`.
+    #[test]
+    fn test_extends_registry_pack_before_hook_pack_dir_and_source_pack_propagate() {
+        let (profile, install_dir) = with_config_env(|config_dir| {
+            // Install acme/widget into the fake pack store.
+            // It has a before hook using $PACK_DIR; no after hook.
+            let install_dir = build_fake_pack_store(
+                config_dir,
+                "acme",
+                "widget",
+                "widget",
+                r#"{
+                    "meta": { "name": "widget" },
+                    "session_hooks": {
+                        "before": { "script": "$PACK_DIR/hooks/setup.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            // Write the local profile that extends acme/widget and adds an after hook.
+            // The after script is a plain absolute path — no $PACK_DIR — to confirm
+            // that local profiles don't receive any $PACK_DIR expansion.
+            let local_profile_path = config_dir.join("local.json");
+            std::fs::write(
+                &local_profile_path,
+                r#"{
+                    "meta": { "name": "local" },
+                    "extends": "acme/widget",
+                    "session_hooks": {
+                        "after": { "script": "/local/hooks/teardown.sh" }
+                    }
+                }"#,
+            )
+            .expect("write local profile");
+
+            let profile = load_profile_from_path(&local_profile_path).expect("load local profile");
+            (profile, install_dir)
+        }); // lock released before assertions
+
+        // 1. before hook: inherited from acme/widget
+        //    - script: $PACK_DIR expanded to the pack install directory
+        //    - source_pack: "acme/widget"
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before hook should be inherited from acme/widget");
+        assert_eq!(
+            before.script,
+            install_dir.join("hooks").join("setup.sh"),
+            "before hook $PACK_DIR must be expanded to the pack install directory"
+        );
+        assert_eq!(
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/widget"),
+            "before hook source_pack must be set to the registry pack key"
+        );
+
+        // 2. after hook: defined locally
+        //    - script: unchanged absolute path (no $PACK_DIR substitution)
+        //    - source_pack: None (local profile, not a registry pack)
+        let after = profile
+            .session_hooks
+            .after
+            .as_ref()
+            .expect("after hook should come from the local profile");
+        assert_eq!(
+            after.script,
+            PathBuf::from("/local/hooks/teardown.sh"),
+            "after hook script must be the local path unchanged"
+        );
+        assert!(
+            after.source_pack.is_none(),
+            "after hook source_pack must be None for a local (non-registry) profile"
+        );
+    }
+
+    /// Test: a store pack (`acme/top`) that `extends: "acme/base"` (another store pack).
+    ///
+    /// `acme/base` has only a `before` hook (uses `$PACK_DIR`).
+    /// `acme/top`  has only an `after`  hook (uses `$PACK_DIR`).
+    ///
+    /// After loading `acme/top` the merged profile must satisfy:
+    /// 1. `before` — inherited from `acme/base`, `$PACK_DIR` expanded to base's
+    ///    install directory, `source_pack` == `"acme/base"`.  The `is_none()`
+    ///    guard in `resolve_pack_store_session_hooks` must prevent `acme/top`'s
+    ///    post-merge call from overwriting the already-correct provenance.
+    /// 2. `after`  — defined directly in `acme/top`, `$PACK_DIR` expanded to
+    ///    top's install directory, `source_pack` == `"acme/top"`.
+    #[test]
+    fn test_store_pack_extends_store_pack_hooks_carry_correct_source_pack() {
+        let (profile, base_install_dir, top_install_dir) = with_config_env(|config_dir| {
+            // acme/base: before hook only, uses $PACK_DIR
+            let base_install_dir = build_fake_pack_store(
+                config_dir,
+                "acme",
+                "base",
+                "base",
+                r#"{
+                    "meta": { "name": "base" },
+                    "session_hooks": {
+                        "before": { "script": "$PACK_DIR/hooks/setup.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            // acme/top: extends acme/base, after hook only, uses $PACK_DIR
+            let top_install_dir = build_fake_pack_store(
+                config_dir,
+                "acme",
+                "top",
+                "top",
+                r#"{
+                    "meta": { "name": "top" },
+                    "extends": "acme/base",
+                    "session_hooks": {
+                        "after": { "script": "$PACK_DIR/hooks/teardown.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            let profile = load_profile("acme/top").expect("load acme/top");
+            (profile, base_install_dir, top_install_dir)
+        }); // lock released before assertions
+
+        // 1. before hook: inherited from acme/base
+        //    - $PACK_DIR expanded to base's install dir (not top's)
+        //    - source_pack: "acme/base" (not overwritten by acme/top)
+        let before = profile
+            .session_hooks
+            .before
+            .as_ref()
+            .expect("before hook should be inherited from acme/base");
+        assert_eq!(
+            before.script,
+            base_install_dir.join("hooks").join("setup.sh"),
+            "before hook $PACK_DIR must expand to acme/base's install dir, not acme/top's"
+        );
+        assert_eq!(
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/base"),
+            "before hook source_pack must be acme/base, not overwritten by acme/top"
+        );
+
+        // 2. after hook: defined in acme/top
+        //    - $PACK_DIR expanded to top's install dir
+        //    - source_pack: "acme/top"
+        let after = profile
+            .session_hooks
+            .after
+            .as_ref()
+            .expect("after hook should come from acme/top");
+        assert_eq!(
+            after.script,
+            top_install_dir.join("hooks").join("teardown.sh"),
+            "after hook $PACK_DIR must expand to acme/top's install dir"
+        );
+        assert_eq!(
+            after.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/top"),
+            "after hook source_pack must be acme/top"
+        );
+    }
+
+    /// Only the exact token `$PACK_DIR` followed by `/` is expanded.  Variants
+    /// that are missing the separator, use all-lowercase, or use mixed case must
+    /// all be passed through as literal strings so authors can see and fix the
+    /// mistake at runtime rather than silently getting a wrong path.
+    #[test]
+    fn test_pack_dir_non_canonical_variants_are_not_expanded() {
+        for (label, script) in [
+            ("no slash separator", "$PACK_DIRmyscript.sh"),
+            ("lowercase", "$pack_dir/hooks/setup.sh"),
+            ("mixed case", "$Pack_Dir/hooks/setup.sh"),
+        ] {
+            let profile = with_config_env(|config_dir| {
+                build_fake_pack_store(
+                    config_dir,
+                    "acme",
+                    "widget",
+                    "default",
+                    &format!(
+                        r#"{{
+                            "meta": {{ "name": "widget" }},
+                            "session_hooks": {{
+                                "before": {{ "script": "{script}" }}
+                            }}
+                        }}"#
+                    ),
+                    None,
+                );
+                load_profile("acme/widget").expect("load acme/widget")
+            });
+
+            let before = profile
+                .session_hooks
+                .before
+                .as_ref()
+                .expect("before hook must be present");
+            assert_eq!(
+                before.script.to_str().expect("utf8"),
+                script,
+                "{label}: non-canonical $PACK_DIR variant must not be expanded"
+            );
+        }
+    }
+
+    /// Loading a pack-store profile by its `install_as` short name (e.g. "claude-code")
+    /// must both expand `$PACK_DIR` in session hook scripts and stamp `source_pack`
+    /// provenance, just as loading by the full registry ref (`namespace/pack`) does.
+    ///
+    /// The code path under test is the `find_pack_store_profile` branch inside
+    /// `load_profile_inner`, reached when:
+    ///   1. The name contains no `/`     → `is_registry_ref` is false
+    ///   2. The name contains no ext     → `is_file_path_ref` is false
+    ///   3. No user-profile file exists  → `resolve_user_profile_path` returns None
+    ///   4. A pack is installed whose manifest declares `install_as == name`
+    ///
+    /// This is exactly the user scenario for `--profile claude-code` or
+    /// `--profile widget` when those names are shipped by a registry pack.
+    ///
+    /// Two cases are verified in a loop:
+    /// - hooks using `$PACK_DIR` (expansion + provenance)
+    /// - hooks using absolute paths (provenance only — no `$PACK_DIR` expansion)
+    #[test]
+    fn test_pack_store_short_name_expands_pack_dir_and_sets_source_pack() {
+        // Case 1: $PACK_DIR hooks — expansion AND source_pack.
+        let (profile, install_dir) = with_config_env(|config_dir| {
+            // The pack registry key is "acme/my-tools" but its profile artifact
+            // is installed under the short name "claude-code".  Loading by
+            // "claude-code" (no slash) bypasses load_registry_profile entirely
+            // and hits the find_pack_store_profile slow-path scanner in
+            // load_profile_inner.
+            let install_dir = build_fake_pack_store(
+                config_dir,
+                "acme",
+                "my-tools",
+                "claude-code",
+                r#"{
+                    "meta": { "name": "claude-code" },
+                    "session_hooks": {
+                        "before": { "script": "$PACK_DIR/hooks/setup.sh" },
+                        "after":  { "script": "$PACK_DIR/hooks/teardown.sh" }
+                    }
+                }"#,
+                None,
+            );
+
+            // Load by the short install_as name, NOT the registry ref.
+            let profile = load_profile("claude-code").expect("load by short name");
+            (profile, install_dir)
+        }); // lock released before assertions
+
+        let before = profile.session_hooks.before.as_ref().expect("before hook");
+        assert_eq!(
+            before.script,
+            install_dir.join("hooks").join("setup.sh"),
+            "before hook $PACK_DIR must be expanded when loading by install_as short name"
+        );
+        assert_eq!(
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/my-tools"),
+            "before hook source_pack must be set when loading by install_as short name"
+        );
+
+        let after = profile.session_hooks.after.as_ref().expect("after hook");
+        assert_eq!(
+            after.script,
+            install_dir.join("hooks").join("teardown.sh"),
+            "after hook $PACK_DIR must be expanded when loading by install_as short name"
+        );
+        assert_eq!(
+            after.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/my-tools"),
+            "after hook source_pack must be set when loading by install_as short name"
+        );
+
+        // Case 2: absolute-path hooks — source_pack set even when strip_prefix("$PACK_DIR")
+        // returns Err (i.e. the expansion branch is not taken).
+        let profile = with_config_env(|config_dir| {
+            build_fake_pack_store(
+                config_dir,
+                "acme",
+                "widget-pack",
+                "widget",
+                r#"{
+                    "meta": { "name": "widget" },
+                    "session_hooks": {
+                        "before": { "script": "/absolute/before.sh" },
+                        "after":  { "script": "/absolute/after.sh" }
+                    }
+                }"#,
+                None,
+            );
+            load_profile("widget").expect("load by short name")
+        });
+
+        let before = profile.session_hooks.before.as_ref().expect("before hook");
+        assert_eq!(
+            before.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/widget-pack"),
+            "absolute-path before hook must still have source_pack set"
+        );
+        let after = profile.session_hooks.after.as_ref().expect("after hook");
+        assert_eq!(
+            after.source_pack.as_ref().map(PackageRef::key).as_deref(),
+            Some("acme/widget-pack"),
+            "absolute-path after hook must still have source_pack set"
+        );
+    }
+
     #[test]
     fn profile_binary_field_parses_and_inherits() {
         let base = br#"{
@@ -7005,5 +7778,413 @@ mod tests {
             Some("/usr/bin/inherited"),
             "child without binary should inherit from base"
         );
+    }
+
+    // ========================================================================
+    // aws_auth validation tests
+    // ========================================================================
+
+    fn aws_auth_cred_builder() -> CustomCredentialDef {
+        CustomCredentialDef {
+            upstream: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+            credential_key: None,
+            auth: None,
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: None,
+            }),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: None,
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+        }
+    }
+
+    #[test]
+    fn test_aws_auth_minimal_valid() {
+        let cred = aws_auth_cred_builder();
+        assert!(validate_custom_credential("bedrock", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_aws_auth_all_fields_valid() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some("my-aws-profile".to_string()),
+                region: Some("us-east-1".to_string()),
+                service: Some("bedrock".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        assert!(validate_custom_credential("bedrock", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_aws_auth_with_http_upstream_rejected() {
+        // AWS routes require HTTPS just like any other credential type.
+        let cred = CustomCredentialDef {
+            upstream: "http://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("https") || msg.contains("HTTPS"),
+            "error should mention https requirement, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_mutually_exclusive_with_credential_key() {
+        let cred = CustomCredentialDef {
+            credential_key: Some("my_aws_key".to_string()),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("aws_auth"),
+            "error should mention aws_auth, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_mutually_exclusive_with_auth_oauth2() {
+        let cred = CustomCredentialDef {
+            auth: Some(OAuth2Config {
+                token_url: "https://auth.example.com/token".to_string(),
+                client_id: "cid".to_string(),
+                client_secret: "env://SECRET".to_string(),
+                scope: String::new(),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("aws_auth"),
+            "error should mention aws_auth, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_none_of_three_rejected() {
+        let cred = CustomCredentialDef {
+            credential_key: None,
+            auth: None,
+            aws_auth: None,
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("credential_key") || msg.contains("auth") || msg.contains("aws_auth"),
+            "error should mention the missing auth fields, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_empty_profile_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some(String::new()),
+                region: None,
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("profile"),
+            "error should mention profile, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_empty_region_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some(String::new()),
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "error should mention region, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_empty_service_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some(String::new()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("service"),
+            "error should mention service, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_region_with_whitespace_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some("us east-1".to_string()),
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "error should mention region, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_service_with_whitespace_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some("bed rock".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("service"),
+            "error should mention service, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_serde_roundtrip_in_custom_cred_def() {
+        let json = r#"{
+            "upstream": "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "aws_auth": {
+                "profile": "my-aws-profile",
+                "region": "us-east-1",
+                "service": "bedrock"
+            }
+        }"#;
+        let cred: CustomCredentialDef = serde_json::from_str(json).unwrap();
+        let aws = cred.aws_auth.as_ref().unwrap();
+        assert_eq!(aws.profile.as_deref(), Some("my-aws-profile"));
+        assert_eq!(aws.region.as_deref(), Some("us-east-1"));
+        assert_eq!(aws.service.as_deref(), Some("bedrock"));
+
+        // Roundtrip
+        let serialized = serde_json::to_string(&cred).unwrap();
+        let deserialized: CustomCredentialDef = serde_json::from_str(&serialized).unwrap();
+        let aws2 = deserialized.aws_auth.unwrap();
+        assert_eq!(aws2.profile.as_deref(), Some("my-aws-profile"));
+    }
+
+    // --- profile whitespace rejection ---
+
+    #[test]
+    fn test_aws_auth_profile_with_space_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some("my profile".to_string()),
+                region: None,
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("profile"),
+            "error should mention profile, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_profile_with_tab_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some("my\tprofile".to_string()),
+                region: None,
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("profile"),
+            "error should mention profile, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_profile_mixed_case_valid() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: Some("MyCompany-Prod".to_string()),
+                region: None,
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        assert!(validate_custom_credential("bedrock", &cred).is_ok());
+    }
+
+    // --- region lowercase enforcement ---
+
+    #[test]
+    fn test_aws_auth_region_uppercase_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some("US-EAST-1".to_string()),
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "error should mention region, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_region_mixed_case_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some("Us-East-1".to_string()),
+                service: None,
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("region"),
+            "error should mention region, got: {}",
+            msg
+        );
+    }
+
+    // --- service lowercase enforcement ---
+
+    #[test]
+    fn test_aws_auth_service_uppercase_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some("Bedrock".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("service"),
+            "error should mention service, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_service_all_caps_rejected() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some("S3".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        let result = validate_custom_credential("bedrock", &cred);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("service"),
+            "error should mention service, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_aws_auth_service_with_hyphen_valid() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: None,
+                service: Some("workers-ai".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        assert!(validate_custom_credential("cf", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_aws_auth_execute_api_service_valid() {
+        let cred = CustomCredentialDef {
+            aws_auth: Some(nono_proxy::config::AwsAuthConfig {
+                profile: None,
+                region: Some("ap-southeast-2".to_string()),
+                service: Some("execute-api".to_string()),
+            }),
+            ..aws_auth_cred_builder()
+        };
+        assert!(validate_custom_credential("apigw", &cred).is_ok());
     }
 }

@@ -51,8 +51,11 @@ pub(crate) fn prepare_proxy_launch_options(
         bypass
     };
 
+    let has_custom_credentials = !prepared.custom_credentials.is_empty();
+
     let active = if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
         if !credentials.is_empty()
+            || has_custom_credentials
             || network_profile.is_some()
             || !allow_domain.is_empty()
             || upstream_proxy.is_some()
@@ -74,6 +77,7 @@ pub(crate) fn prepare_proxy_launch_options(
             prepared.caps.network_mode(),
             nono::NetworkMode::ProxyOnly { .. }
         ) || !credentials.is_empty()
+            || has_custom_credentials
             || network_profile.is_some()
             || !allow_domain.is_empty()
             || upstream_proxy.is_some()
@@ -369,20 +373,17 @@ pub(crate) fn start_proxy_runtime(
 }
 
 /// Choose the directory the proxy will write the TLS-intercept trust bundle
-/// into. Conventionally `~/.nono/sessions/<random>/`, kept owner-only.
+/// into. Conventionally `$XDG_STATE_HOME/nono/sessions/<random>/`, kept owner-only.
 ///
 /// Returns `Ok(None)` if no `HOME` is set (rare edge cases like CI). We log
 /// a warning rather than failing because TLS interception is opt-in: a
 /// missing directory just means CONNECTs to L7-bearing routes will get the
 /// usual 403, which is a coherent fallback rather than a hard error.
 fn prepare_intercept_ca_dir() -> Result<Option<PathBuf>> {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => {
-            warn!(
-                "no $HOME found; skipping TLS-intercept setup (CONNECTs to L7-bearing routes \
-                 will be denied with 403)"
-            );
+    let dir = match crate::session::ensure_sessions_dir() {
+        Ok(base) => base,
+        Err(e) => {
+            warn!("cannot resolve session registry for TLS-intercept setup: {e}; skipping");
             return Ok(None);
         }
     };
@@ -396,10 +397,7 @@ fn prepare_intercept_ca_dir() -> Result<Option<PathBuf>> {
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     let suffix = format!("{}-{:09}", pid, nanos);
-    let dir = home
-        .join(".nono")
-        .join("sessions")
-        .join(format!("intercept-{}", suffix));
+    let dir = dir.join(format!("intercept-{suffix}"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         warn!(
             "failed to create TLS-intercept dir '{}': {}; skipping interception",
@@ -560,6 +558,81 @@ mod tests {
         assert!(
             !config.strict_filter,
             "strict_filter must default off when network_block is false"
+        );
+    }
+
+    /// A profile with only `custom_credentials` set (no built-in `credentials`,
+    /// no `network_profile`, no `allow_domain`, no upstream proxy) should still
+    /// activate the proxy so that credential injection works.
+    #[test]
+    fn test_proxy_is_active_when_only_custom_credentials_are_set() {
+        use crate::profile::CustomCredentialDef;
+        use crate::sandbox_prepare::PreparedSandbox;
+        use nono::CapabilitySet;
+        use nono_proxy::config::InjectMode;
+        use std::collections::HashMap;
+
+        let mut custom_credentials: HashMap<String, CustomCredentialDef> = HashMap::new();
+        custom_credentials.insert(
+            "mockhttp".to_string(),
+            CustomCredentialDef {
+                upstream: "https://mockhttp.org".to_string(),
+                credential_key: Some("env://MOCK_API_KEY".to_string()),
+                auth: None,
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: Some("Bearer {}".to_string()),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy: None,
+                env_var: Some("MOCK_API_KEY".to_string()),
+                endpoint_rules: vec![],
+                tls_ca: None,
+                tls_client_cert: None,
+                tls_client_key: None,
+                aws_auth: None,
+            },
+        );
+
+        let prepared = PreparedSandbox {
+            caps: CapabilitySet::new(),
+            secrets: Vec::new(),
+            session_hooks: crate::profile::SessionHooks::default(),
+            rollback_exclude_patterns: Vec::new(),
+            rollback_exclude_globs: Vec::new(),
+            network_profile: None,
+            allow_domain: Vec::new(),
+            credentials: Vec::new(),
+            custom_credentials,
+            upstream_proxy: None,
+            upstream_bypass: Vec::new(),
+            listen_ports: Vec::new(),
+            capability_elevation: false,
+            #[cfg(target_os = "linux")]
+            wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
+            #[cfg(target_os = "linux")]
+            af_unix_mediation: crate::profile::LinuxAfUnixMediation::Off,
+            allow_launch_services_active: false,
+            allow_gpu_active: false,
+            open_url_origins: Vec::new(),
+            open_url_allow_localhost: false,
+            bypass_protection_paths: Vec::new(),
+            ignored_denial_paths: Vec::new(),
+            suppressed_system_service_operations: Vec::new(),
+            allowed_env_vars: None,
+            denied_env_vars: None,
+            set_vars: None,
+            network_block_requested: false,
+        };
+
+        let args = crate::cli::SandboxArgs::default();
+        let opts = prepare_proxy_launch_options(&args, &prepared, true)
+            .expect("prepare_proxy_launch_options");
+
+        assert!(
+            opts.active,
+            "proxy must be active when custom_credentials is non-empty"
         );
     }
 }

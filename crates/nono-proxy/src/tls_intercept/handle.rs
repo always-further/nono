@@ -32,6 +32,41 @@ use zeroize::Zeroizing;
 /// memory ceiling consistent.
 const MAX_HEADER_SIZE: usize = 64 * 1024;
 
+/// Resolved upstream proxy for the intercept path.
+///
+/// When `Some`, the upstream leg of the intercepted request must chain
+/// through the corporate proxy via CONNECT instead of connecting directly.
+/// The caller ([`crate::server::handle_connection`]) is responsible for
+/// deciding whether the target host should use the upstream proxy or route
+/// direct (based on the bypass list).
+pub struct InterceptUpstreamProxy<'a> {
+    /// `host:port` of the corporate proxy (e.g. `"proxy.corporate.com:80"`).
+    pub proxy_addr: &'a str,
+    /// Literal value for `Proxy-Authorization` sent to the corporate proxy,
+    /// or `None` for unauthenticated proxies.
+    pub proxy_auth_header: Option<&'a str>,
+}
+
+/// Select the upstream strategy based on whether an upstream proxy is
+/// configured for this intercepted request.
+///
+/// When `upstream_proxy` is `Some`, returns #[`UpstreamStrategy::ExternalProxy`]
+/// to chain through the corporate proxy. Otherwise returns
+/// [`UpstreamStrategy::Direct`] with the caller-provided resolved addresses.
+pub fn select_upstream_strategy<'a>(
+    upstream_proxy: &'a Option<InterceptUpstreamProxy<'a>>,
+    resolved_addrs: &'a [std::net::SocketAddr],
+) -> UpstreamStrategy<'a> {
+    if let Some(proxy) = upstream_proxy {
+        UpstreamStrategy::ExternalProxy {
+            proxy_addr: proxy.proxy_addr,
+            proxy_auth_header: proxy.proxy_auth_header,
+        }
+    } else {
+        UpstreamStrategy::Direct { resolved_addrs }
+    }
+}
+
 /// Per-connection context passed to [`handle_intercept_connect`].
 pub struct InterceptCtx<'a> {
     pub route_id: Option<&'a str>,
@@ -44,6 +79,9 @@ pub struct InterceptCtx<'a> {
     pub tls_connector: &'a tokio_rustls::TlsConnector,
     pub filter: &'a ProxyFilter,
     pub audit_log: Option<&'a audit::SharedAuditLog>,
+    /// When `Some`, the upstream leg chains through an enterprise proxy
+    /// instead of connecting directly to the target.
+    pub upstream_proxy: Option<InterceptUpstreamProxy<'a>>,
 }
 
 /// Handle a CONNECT request that matched a route requiring L7 visibility.
@@ -114,7 +152,7 @@ pub async fn handle_intercept_connect(stream: &mut TcpStream, ctx: InterceptCtx<
         "CONNECT",
     );
 
-    if let Err(e) = forward_inner_request(&mut tls_stream, &ctx).await {
+    if let Err(e) = handle_inner_request(&mut tls_stream, &ctx).await {
         debug!(
             "tls_intercept: inner-request handling failed for {}:{}: {}",
             ctx.host, ctx.port, e
@@ -123,18 +161,70 @@ pub async fn handle_intercept_connect(stream: &mut TcpStream, ctx: InterceptCtx<
     Ok(())
 }
 
-/// Read one inner HTTP/1.1 request, select the matching route, inject
-/// credentials if matched, and forward upstream.
-async fn forward_inner_request<S>(tls_stream: &mut S, ctx: &InterceptCtx<'_>) -> Result<()>
+/// The parts of an inner HTTP/1.1 request that have been read off the wire
+/// but not yet acted on. Produced by [`parse_inner_request`] and consumed by
+/// [`handle_inner_request`].
+struct ParsedRequest {
+    method: String,
+    path: String,
+    version: String,
+    /// Raw header lines (excluding the request line and the blank terminator).
+    header_bytes: Vec<u8>,
+    /// Bytes already pulled into the `BufReader` buffer beyond the headers.
+    buffered: Vec<u8>,
+}
+
+/// Calls [`ProxyFilter::check_host`] and handles the denial path.
+///
+/// On success returns the resolved addresses for use in [`select_upstream_strategy`].
+/// On denial writes the 403, emits the audit event, and returns `Ok(None)` so
+/// the caller can `return Ok(())` without duplicating the send/log boilerplate.
+async fn resolve_upstream_or_deny<S>(
+    stream: &mut S,
+    ctx: &InterceptCtx<'_>,
+    deny_event_ctx: audit::EventContext<'_>,
+) -> Result<Option<Vec<std::net::SocketAddr>>>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let check = ctx.filter.check_host(ctx.host, ctx.port).await?;
+    if !check.result.is_allowed() {
+        let reason = check.result.reason();
+        warn!("tls_intercept: upstream host denied by filter: {}", reason);
+        audit::log_denied(
+            ctx.audit_log,
+            audit::ProxyMode::ConnectIntercept,
+            &audit::EventContext {
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
+                ..deny_event_ctx
+            },
+            ctx.host,
+            ctx.port,
+            &reason,
+        );
+        reverse::send_error_generic(stream, 403, "Forbidden").await?;
+        return Ok(None);
+    }
+    Ok(Some(check.resolved_addrs))
+}
+
+/// Read and parse one inner HTTP/1.1 request from `stream`, returning the
+/// request line components and raw header bytes as a [`ParsedRequest`].
+///
+/// Returns `Ok(None)` in two terminal-but-non-error cases that the caller
+/// should treat as "nothing to do":
+/// - The connection closed before a request line arrived (clean EOF).
+/// - The headers exceeded [`MAX_HEADER_SIZE`]; a 431 has been sent and the
+///   connection should be dropped.
+async fn parse_inner_request<S>(stream: &mut S) -> Result<Option<ParsedRequest>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    // --- Parse the inner request line + headers ---
-    let mut buf_reader = BufReader::new(&mut *tls_stream);
+    let mut buf_reader = BufReader::new(&mut *stream);
     let mut first_line = String::new();
     buf_reader.read_line(&mut first_line).await?;
     if first_line.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut header_bytes = Vec::new();
@@ -148,13 +238,11 @@ where
         if header_bytes.len() > MAX_HEADER_SIZE {
             // Mirror the outer proxy's behaviour. We have to write into the
             // BufReader's inner stream — release it first.
-            let buffered = buf_reader.buffer().to_vec();
             drop(buf_reader);
-            tls_stream
+            stream
                 .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n")
                 .await?;
-            let _ = buffered;
-            return Ok(());
+            return Ok(None);
         }
     }
     let buffered = buf_reader.buffer().to_vec();
@@ -162,7 +250,26 @@ where
 
     let first_line = first_line.trim_end();
     let (method, path, version) = parse_request_line(first_line)?;
-    debug!("tls_intercept: inner request {} {}", method, path);
+    Ok(Some(ParsedRequest {
+        method,
+        path,
+        version,
+        header_bytes,
+        buffered,
+    }))
+}
+
+/// Read one inner HTTP/1.1 request, select the matching route, inject
+/// credentials if matched, and forward upstream.
+async fn handle_inner_request<S>(tls_stream: &mut S, ctx: &InterceptCtx<'_>) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let req = match parse_inner_request(tls_stream).await? {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+    debug!("tls_intercept: inner request {} {}", req.method, req.path);
 
     // Route selection: 1 match → cred, 0 → passthrough, 2+ → 403.
     let host_port = format!("{}:{}", ctx.host.to_lowercase(), ctx.port);
@@ -176,109 +283,79 @@ where
         return Ok(());
     }
 
-    let mut matches: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
-    let mut catch_all: Option<(&str, &crate::route::LoadedRoute)> = None;
-    let mut has_endpoint_only_route = false;
-    let mut endpoint_authorized = false;
-    for (prefix, route) in &candidates {
-        if route.endpoint_rules.is_empty() {
-            if catch_all.is_none() {
-                catch_all = Some((prefix, route));
-            }
-        } else if route.endpoint_rules.is_allowed(&method, &path) {
-            matches.push((prefix, route));
-            if !route.requires_managed_credential {
-                endpoint_authorized = true;
-            }
-        } else if !route.requires_managed_credential {
-            has_endpoint_only_route = true;
+    // Route selection (endpoint-authorization gate, ambiguity check, and
+    // credential-first priority) lives in `route::select_route` so it has a
+    // single source of truth shared with its unit tests.
+    let selected = match crate::route::select_route(&candidates, &req.method, &req.path) {
+        crate::route::RouteSelection::EndpointDenied => {
+            let reason = format!(
+                "endpoint rules denied {} {}: no rule matched on {}:{}",
+                req.method, req.path, ctx.host, ctx.port
+            );
+            warn!("tls_intercept: {}", reason);
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::ConnectIntercept,
+                &audit::EventContext {
+                    denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                    ..audit::EventContext::default()
+                },
+                ctx.host,
+                ctx.port,
+                &reason,
+            );
+            reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
+            return Ok(());
         }
-    }
-
-    // Endpoint-only authorization layer (from allow_domain with endpoints):
-    // if any _ep_ route exists for this upstream, the request must match at
-    // least one of their endpoint rules. This gates access BEFORE credential
-    // selection — a credential catch-all cannot bypass endpoint restrictions.
-    if has_endpoint_only_route && !endpoint_authorized {
-        let reason = format!(
-            "endpoint rules denied {} {}: no rule matched on {}:{}",
-            method, path, ctx.host, ctx.port
-        );
-        warn!("tls_intercept: {}", reason);
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::ConnectIntercept,
-            &audit::EventContext {
-                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
-                ..audit::EventContext::default()
-            },
-            ctx.host,
-            ctx.port,
-            &reason,
-        );
-        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-        return Ok(());
-    }
-
-    // Ambiguous route check only applies to credential-injection routes.
-    // Multiple endpoint-only authorization routes matching the same request
-    // is fine (they all just allow it); ambiguity is a problem only when the
-    // proxy must choose which credential to inject.
-    let credential_matches: Vec<_> = matches
-        .iter()
-        .filter(|(_, route)| route.requires_managed_credential)
-        .collect();
-    if credential_matches.len() > 1 {
-        let names: Vec<_> = credential_matches.iter().map(|(p, _)| *p).collect();
-        let reason = format!(
-            "ambiguous route: {} {} matched {} credential routes: {:?}. \
-             Narrow endpoint_rules so each request matches exactly one route.",
-            method,
-            path,
-            credential_matches.len(),
-            names
-        );
-        warn!("tls_intercept: {}", reason);
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::ConnectIntercept,
-            &audit::EventContext {
-                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
-                ..audit::EventContext::default()
-            },
-            ctx.host,
-            ctx.port,
-            &reason,
-        );
-        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-        return Ok(());
-    }
-
-    // Prefer the credential route over endpoint-only authorization routes.
-    let selected = matches
-        .iter()
-        .find(|(_, route)| route.requires_managed_credential)
-        .or(matches.first())
-        .copied()
-        .or(catch_all);
+        crate::route::RouteSelection::Ambiguous(names) => {
+            let reason = format!(
+                "ambiguous route: {} {} matched {} credential routes: {:?}. \
+                 Narrow endpoint_rules so each request matches exactly one route.",
+                req.method,
+                req.path,
+                names.len(),
+                names
+            );
+            warn!("tls_intercept: {}", reason);
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::ConnectIntercept,
+                &audit::EventContext {
+                    denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                    ..audit::EventContext::default()
+                },
+                ctx.host,
+                ctx.port,
+                &reason,
+            );
+            reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
+            return Ok(());
+        }
+        crate::route::RouteSelection::Selected(selected) => selected,
+    };
     let service: Option<&str> = selected.map(|(s, _)| s);
     let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
     match service {
         Some(svc) => debug!(
             "tls_intercept: selected route '{}' for {} {}",
-            svc, method, path
+            svc, req.method, req.path
         ),
         None => debug!(
             "tls_intercept: no endpoint_rules matched {} {}, forwarding without credentials",
-            method, path
+            req.method, req.path
         ),
     }
 
     let cred = service.and_then(|s| ctx.credential_store.get(s));
     let oauth2_route = service.and_then(|s| ctx.credential_store.get_oauth2(s));
+    let aws_route = service.and_then(|s| ctx.credential_store.get_aws(s));
 
     if let Some(rt) = route
-        && rt.missing_managed_credential(cred.is_some(), oauth2_route.is_some())
+        && rt.missing_managed_credential(
+            cred.is_some(),
+            oauth2_route.is_some(),
+            aws_route.is_some(),
+        )
     {
         let svc = service.unwrap_or("unknown");
         let reason = format!(
@@ -307,10 +384,18 @@ where
         return Ok(());
     }
 
+    // AWS SigV4 signing is not yet implemented. Return 501 so the caller
+    // knows the route exists but is not functional. This branch will be
+    // replaced with real SigV4 signing in a follow-up.
+    if aws_route.is_some() {
+        reverse::send_error_generic(tls_stream, 501, "Not Implemented").await?;
+        return Ok(());
+    }
+
     // --- Path / credential transformation ---
     let transformed_path = if let Some(cred) = cred {
         let cleaned = reverse::strip_proxy_artifacts(
-            &path,
+            &req.path,
             &cred.proxy_inject_mode,
             &cred.inject_mode,
             cred.proxy_path_pattern.as_deref(),
@@ -325,43 +410,37 @@ where
             &cred.raw_credential,
         )?
     } else {
-        path.clone()
+        req.path.clone()
     };
 
     // --- Resolve upstream IPs (DNS-rebind-safe via filter) ---
-    let check = ctx.filter.check_host(ctx.host, ctx.port).await?;
-    if !check.result.is_allowed() {
-        let reason = check.result.reason();
-        warn!("tls_intercept: upstream host denied by filter: {}", reason);
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::ConnectIntercept,
-            &audit::EventContext {
-                route_id: service,
-                managed_credential_active: Some(cred.is_some() || oauth2_route.is_some()),
-                injection_mode: cred.map(|c| match c.inject_mode {
-                    InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
-                    InjectMode::UrlPath => nono::undo::NetworkAuditInjectionMode::UrlPath,
-                    InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
-                    InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
-                }),
-                denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
-                ..audit::EventContext::default()
-            },
-            ctx.host,
-            ctx.port,
-            &reason,
-        );
-        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-        return Ok(());
-    }
+    let resolved_addrs = match resolve_upstream_or_deny(
+        tls_stream,
+        ctx,
+        audit::EventContext {
+            route_id: service,
+            managed_credential_active: Some(cred.is_some() || oauth2_route.is_some()),
+            injection_mode: cred.map(|c| match c.inject_mode {
+                InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
+                InjectMode::UrlPath => nono::undo::NetworkAuditInjectionMode::UrlPath,
+                InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
+                InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
+            }),
+            ..audit::EventContext::default()
+        },
+    )
+    .await?
+    {
+        Some(addrs) => addrs,
+        None => return Ok(()),
+    };
 
     // --- Read body (Content-Length only; chunked is rare in API requests
     // and matches the existing reverse-proxy contract). ---
     let strip_header = cred.map(|c| c.proxy_header_name.as_str()).unwrap_or("");
-    let filtered_headers = reverse::filter_headers(&header_bytes, strip_header);
-    let content_length = reverse::extract_content_length(&header_bytes);
-    let body = match reverse::read_request_body(tls_stream, content_length, &buffered).await? {
+    let filtered_headers = reverse::filter_headers(&req.header_bytes, strip_header);
+    let content_length = reverse::extract_content_length(&req.header_bytes);
+    let body = match reverse::read_request_body(tls_stream, content_length, &req.buffered).await? {
         Some(b) => b,
         None => return Ok(()),
     };
@@ -370,7 +449,7 @@ where
     let upstream_authority = reverse::format_host_header(UpstreamScheme::Https, ctx.host, ctx.port);
     let mut request = Zeroizing::new(format!(
         "{} {} {}\r\nHost: {}\r\n",
-        method, transformed_path, version, upstream_authority
+        req.method, transformed_path, req.version, upstream_authority
     ));
     if let Some(cred) = cred {
         reverse::inject_credential_for_mode(cred, &mut request);
@@ -395,40 +474,40 @@ where
     let connector = route
         .and_then(|r| r.tls_connector.as_ref())
         .unwrap_or(ctx.tls_connector);
+    let strategy = select_upstream_strategy(&ctx.upstream_proxy, &resolved_addrs);
     let upstream_spec = UpstreamSpec {
         scheme: UpstreamScheme::Https,
         host: ctx.host,
         port: ctx.port,
-        strategy: UpstreamStrategy::Direct {
-            resolved_addrs: &check.resolved_addrs,
-        },
+        strategy,
         tls_connector: connector,
+    };
+    let event_ctx = audit::EventContext {
+        route_id: service,
+        auth_mechanism: cred.map(|c| match c.proxy_inject_mode {
+            InjectMode::Header | InjectMode::BasicAuth => {
+                nono::undo::NetworkAuditAuthMechanism::PhantomHeader
+            }
+            InjectMode::UrlPath => nono::undo::NetworkAuditAuthMechanism::PhantomPath,
+            InjectMode::QueryParam => nono::undo::NetworkAuditAuthMechanism::PhantomQuery,
+        }),
+        auth_outcome: cred.map(|_| nono::undo::NetworkAuditAuthOutcome::Succeeded),
+        managed_credential_active: Some(cred.is_some() || oauth2_route.is_some()),
+        injection_mode: cred.map(|c| match c.inject_mode {
+            InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
+            InjectMode::UrlPath => nono::undo::NetworkAuditInjectionMode::UrlPath,
+            InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
+            InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
+        }),
+        denial_category: None,
     };
     let audit_ctx = AuditCtx {
         log: ctx.audit_log,
         mode: audit::ProxyMode::ConnectIntercept,
-        event_ctx: audit::EventContext {
-            route_id: service,
-            auth_mechanism: cred.map(|c| match c.proxy_inject_mode {
-                InjectMode::Header | InjectMode::BasicAuth => {
-                    nono::undo::NetworkAuditAuthMechanism::PhantomHeader
-                }
-                InjectMode::UrlPath => nono::undo::NetworkAuditAuthMechanism::PhantomPath,
-                InjectMode::QueryParam => nono::undo::NetworkAuditAuthMechanism::PhantomQuery,
-            }),
-            auth_outcome: cred.map(|_| nono::undo::NetworkAuditAuthOutcome::Succeeded),
-            managed_credential_active: Some(cred.is_some() || oauth2_route.is_some()),
-            injection_mode: cred.map(|c| match c.inject_mode {
-                InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
-                InjectMode::UrlPath => nono::undo::NetworkAuditInjectionMode::UrlPath,
-                InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
-                InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
-            }),
-            denial_category: None,
-        },
+        event_ctx: event_ctx.clone(),
         target: ctx.host,
-        method: &method,
-        path: &path,
+        method: &req.method,
+        path: &req.path,
     };
     if let Err(e) = forward::forward_request(
         tls_stream,
@@ -444,25 +523,10 @@ where
             ctx.audit_log,
             audit::ProxyMode::ConnectIntercept,
             &audit::EventContext {
-                route_id: service,
-                auth_mechanism: cred.map(|c| match c.proxy_inject_mode {
-                    InjectMode::Header | InjectMode::BasicAuth => {
-                        nono::undo::NetworkAuditAuthMechanism::PhantomHeader
-                    }
-                    InjectMode::UrlPath => nono::undo::NetworkAuditAuthMechanism::PhantomPath,
-                    InjectMode::QueryParam => nono::undo::NetworkAuditAuthMechanism::PhantomQuery,
-                }),
-                auth_outcome: cred.map(|_| nono::undo::NetworkAuditAuthOutcome::Succeeded),
-                managed_credential_active: Some(cred.is_some() || oauth2_route.is_some()),
-                injection_mode: cred.map(|c| match c.inject_mode {
-                    InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
-                    InjectMode::UrlPath => nono::undo::NetworkAuditInjectionMode::UrlPath,
-                    InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
-                    InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
-                }),
                 denial_category: Some(
                     nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
                 ),
+                ..event_ctx
             },
             ctx.host,
             ctx.port,
@@ -506,5 +570,68 @@ mod tests {
     fn parse_request_line_rejects_malformed() {
         assert!(parse_request_line("malformed").is_err());
         assert!(parse_request_line("").is_err());
+    }
+
+    #[test]
+    fn upstream_strategy_selects_external_proxy_when_configured() {
+        // When InterceptUpstreamProxy is set, the strategy must be
+        // ExternalProxy, not Direct. Regression test for #1048.
+        let proxy = InterceptUpstreamProxy {
+            proxy_addr: "proxy.corp:80",
+            proxy_auth_header: None,
+        };
+        let some_proxy = Some(proxy);
+        let strategy = select_upstream_strategy(&some_proxy, &[]);
+        match strategy {
+            UpstreamStrategy::ExternalProxy {
+                proxy_addr,
+                proxy_auth_header,
+            } => {
+                assert_eq!(proxy_addr, "proxy.corp:80");
+                assert!(proxy_auth_header.is_none());
+            }
+            UpstreamStrategy::Direct { .. } => {
+                panic!("expected ExternalProxy strategy, got Direct");
+            }
+        }
+    }
+
+    #[test]
+    fn upstream_strategy_selects_direct_when_no_proxy() {
+        // When upstream_proxy is None, the strategy must fall back to
+        // Direct (pre-existing behaviour).
+        let addrs: Vec<std::net::SocketAddr> = vec![];
+        let strategy = select_upstream_strategy(&None, &addrs);
+        match strategy {
+            UpstreamStrategy::Direct { resolved_addrs } => {
+                assert!(resolved_addrs.is_empty());
+            }
+            UpstreamStrategy::ExternalProxy { .. } => {
+                panic!("expected Direct strategy, got ExternalProxy");
+            }
+        }
+    }
+
+    #[test]
+    fn upstream_strategy_external_proxy_with_auth_header() {
+        // When auth header is provided, it must be carried through.
+        let proxy = InterceptUpstreamProxy {
+            proxy_addr: "proxy.corp:3128",
+            proxy_auth_header: Some("Basic dXNlcjpwYXNz"),
+        };
+        let some_proxy = Some(proxy);
+        let strategy = select_upstream_strategy(&some_proxy, &[]);
+        match strategy {
+            UpstreamStrategy::ExternalProxy {
+                proxy_addr,
+                proxy_auth_header,
+            } => {
+                assert_eq!(proxy_addr, "proxy.corp:3128");
+                assert_eq!(proxy_auth_header, Some("Basic dXNlcjpwYXNz"));
+            }
+            UpstreamStrategy::Direct { .. } => {
+                panic!("expected ExternalProxy strategy, got Direct");
+            }
+        }
     }
 }
