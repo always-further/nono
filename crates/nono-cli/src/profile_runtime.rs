@@ -390,7 +390,8 @@ fn validate_bundle_relative_path<'a>(
 
 fn expand_bypass_protection_path(path: &Path, workdir: &Path) -> PathBuf {
     let path_str = path.to_string_lossy();
-    let expanded = profile::expand_vars(&path_str, workdir).unwrap_or_else(|_| path.to_path_buf());
+    let expanded =
+        profile::expand_vars(&path_str, workdir, None).unwrap_or_else(|_| path.to_path_buf());
     if expanded.exists() {
         expanded.canonicalize().unwrap_or(expanded)
     } else {
@@ -410,7 +411,7 @@ fn collect_bypass_protection_paths(
                 .bypass_protection
                 .iter()
                 .filter_map(|template| {
-                    profile::expand_vars(template, workdir)
+                    profile::expand_vars(template, workdir, None)
                         .ok()
                         .map(|expanded| {
                             if expanded.exists() {
@@ -436,7 +437,8 @@ fn collect_bypass_protection_paths(
 
 fn expand_ignored_denial_path(path: &Path, workdir: &Path) -> PathBuf {
     let path_str = path.to_string_lossy();
-    let expanded = profile::expand_vars(&path_str, workdir).unwrap_or_else(|_| path.to_path_buf());
+    let expanded =
+        profile::expand_vars(&path_str, workdir, None).unwrap_or_else(|_| path.to_path_buf());
     nono::try_canonicalize(&expanded)
 }
 
@@ -465,7 +467,7 @@ fn expand_profile_set_vars(
         let Some(value) = env_config.set_vars.get(key) else {
             continue;
         };
-        let expanded_value = profile::expand_vars(value, workdir)?
+        let expanded_value = profile::expand_vars(value, workdir, None)?
             .to_string_lossy()
             .into_owned();
         expanded.push((key.clone(), expanded_value));
@@ -485,7 +487,7 @@ fn collect_ignored_denial_paths(
                 .suppress_save_prompt
                 .iter()
                 .filter_map(|template| {
-                    profile::expand_vars(template, workdir)
+                    profile::expand_vars(template, workdir, None)
                         .ok()
                         .map(|expanded| nono::try_canonicalize(&expanded))
                 })
