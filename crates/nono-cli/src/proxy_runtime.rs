@@ -105,7 +105,7 @@ pub(crate) fn prepare_proxy_launch_options(
         None
     };
 
-    let credentials_intent = if has_credentials {
+    let credentials_intent = if has_credentials || !prepared.custom_credentials.is_empty() {
         Some(CredentialProxyIntent {
             credentials,
             custom_credentials: prepared.custom_credentials.clone(),
@@ -788,6 +788,10 @@ mod tests {
         assert!(
             !opts.is_active(),
             "proxy must stay inactive when only custom credential definitions are present"
+        );
+        assert!(
+            opts.credentials.is_some(),
+            "custom credential definitions should still be carried for network profile overrides"
         );
     }
 }
