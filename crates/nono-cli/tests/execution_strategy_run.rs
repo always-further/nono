@@ -117,12 +117,25 @@ fn direct_strategy_denies_path_outside_grant() {
 }
 
 /// On macOS, Seatbelt (sandbox-exec) is used instead of Landlock.
-/// This test mirrors the Linux variant: the process must exit non-zero when
-/// `/etc/passwd` is not in the granted set.
+/// This test mirrors the Linux variant: the process must exit non-zero when it
+/// reads a path outside the granted set.
+///
+/// Note: unlike the Linux variant (which reads root-only `/etc/shadow`), this
+/// test cannot use a system path such as `/etc/passwd`. Seatbelt grants the
+/// sandboxed process a set of system/group read paths so it can exec and load
+/// dyld, and `/etc/passwd` (a world-readable system file) falls inside that
+/// allowed set, so reading it is not a sandbox violation. To exercise a genuine
+/// out-of-grant denial we read a secret file created in the temp root, a
+/// sibling of the granted workspace that is neither granted nor a system path.
 #[test]
 #[cfg(target_os = "macos")]
 fn direct_strategy_denies_path_outside_grant_macos() {
-    let (_tmp, home, workspace) = setup_isolated_home("direct-deny-macos");
+    let (tmp, home, workspace) = setup_isolated_home("direct-deny-macos");
+
+    // A secret file outside the granted workspace (sibling of it under the temp
+    // root). Not a system path, so Seatbelt must deny the read.
+    let secret = tmp.path().join("outside-secret.txt");
+    fs::write(&secret, "TOPSECRET-outside-grant\n").expect("write secret");
 
     let profile_json = format!(
         r#"{{
@@ -144,7 +157,7 @@ fn direct_strategy_denies_path_outside_grant_macos() {
             "--no-rollback",
             "--",
             "/bin/cat",
-            "/etc/passwd",
+            secret.to_str().expect("secret path"),
         ],
         &home,
         &workspace,
@@ -155,12 +168,12 @@ fn direct_strategy_denies_path_outside_grant_macos() {
 
     assert!(
         !output.status.success(),
-        "nono run (Direct/macOS) must deny /etc/passwd outside grant set; \
+        "nono run (Direct/macOS) must deny a path outside the grant set; \
          exited successfully.\nstdout: {stdout}\nstderr: {stderr}",
     );
     assert!(
-        !stdout.contains("root:"),
-        "sensitive content must not appear in stdout when sandboxed:\n{stdout}",
+        !stdout.contains("TOPSECRET"),
+        "secret content must not appear in stdout when sandboxed:\n{stdout}",
     );
 }
 
