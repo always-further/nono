@@ -40,3 +40,4 @@ pub use credential::{CredentialLoadOutcome, CredentialStore};
 pub use diagnostic::{ProxyDiagnostic, ProxyDiagnosticCode, ProxyDiagnosticSeverity};
 pub use error::{ProxyError, Result};
 pub use server::{ProxyHandle, start};
+pub use token::NonceResolver;

@@ -1,14 +1,33 @@
-//! Session token generation and validation.
+//! Session token generation, validation, and nonce resolution.
 //!
 //! Each proxy session gets a unique cryptographic token. The child process
 //! receives it via `NONO_PROXY_TOKEN` env var and must include it in all
 //! requests to the proxy. This prevents other local processes from using
 //! the proxy.
+//!
+//! The `NonceResolver` trait allows the proxy to resolve tool-sandbox broker
+//! nonces (`nono_<64hex>`) found in request headers, substituting the real
+//! credential value before forwarding upstream. The consumer ID passed to
+//! `resolve` is `"proxy.<route_id>"`, matching the `grant_to` field of the
+//! originating `capture_credential` intercept rule.
 
 use crate::error::{ProxyError, Result};
 use subtle::ConstantTimeEq;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
+
+/// Resolves tool-sandbox broker nonces for L7 header injection.
+///
+/// Implemented by the CLI's `TokenBroker` wrapper and threaded through the
+/// proxy server so that nonces appearing in request headers can be swapped for
+/// real credential values immediately before the request is forwarded upstream.
+pub trait NonceResolver: Send + Sync {
+    /// Resolve `nonce` (a `nono_<64hex>` string) for `consumer`.
+    ///
+    /// Returns the real credential bytes if the nonce is known and admitted
+    /// for `consumer` (`"proxy.<route_id>"`), or `None` otherwise (fail-closed).
+    fn resolve(&self, nonce: &str, consumer: &str) -> Option<Zeroizing<Vec<u8>>>;
+}
 
 /// Length of the random token in bytes (256 bits of entropy).
 const TOKEN_BYTES: usize = 32;

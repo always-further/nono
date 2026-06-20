@@ -2023,9 +2023,23 @@ pub(crate) fn build_proxy_config_from_flags(
     Ok(proxy_config)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct TokenBrokerNonceResolver(crate::tool_sandbox::token_broker::SharedBroker);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl nono_proxy::NonceResolver for TokenBrokerNonceResolver {
+    fn resolve(&self, nonce: &str, consumer: &str) -> Option<Zeroizing<Vec<u8>>> {
+        self.0.lock().ok()?.resolve_nonce(nonce, consumer)
+    }
+}
+
 pub(crate) fn start_proxy_runtime(
     proxy: &ProxyLaunchOptions,
     caps: &mut CapabilitySet,
+    #[cfg(any(target_os = "linux", target_os = "macos"))] shared_broker: Option<
+        crate::tool_sandbox::token_broker::SharedBroker,
+    >,
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))] _shared_broker: Option<()>,
 ) -> Result<ActiveProxyRuntime> {
     if !proxy.is_active() {
         return Ok(ActiveProxyRuntime {
@@ -2084,12 +2098,19 @@ pub(crate) fn start_proxy_runtime(
                 proxy.session_id.clone(),
             )?))
         };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let nonce_resolver: Option<Arc<dyn nono_proxy::NonceResolver>> = shared_broker
+        .map(|b| -> Arc<dyn nono_proxy::NonceResolver> { Arc::new(TokenBrokerNonceResolver(b)) });
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let nonce_resolver: Option<Arc<dyn nono_proxy::NonceResolver>> = None;
+
     let handle = rt
         .block_on(async {
-            nono_proxy::server::start_with_approval_and_capture_registry(
+            nono_proxy::server::start_with_nonce_resolver(
                 proxy_config.clone(),
                 approval_registry,
                 credential_capture_backend,
+                nonce_resolver,
             )
             .await
         })

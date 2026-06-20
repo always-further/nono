@@ -121,7 +121,7 @@ struct ToolSandboxState {
     emitted_error_response: AtomicBool,
     /// Token broker for credential isolation. Holds real credential values;
     /// nonces in the agent env are resolved to real values by filter_child_env.
-    token_broker: Mutex<crate::tool_sandbox::token_broker::TokenBroker>,
+    token_broker: crate::tool_sandbox::token_broker::SharedBroker,
     /// Approval backend registry for invocation-policy and intercept approvals.
     approval_backends: nono_proxy::approval::ApprovalBackendRegistry,
 }
@@ -193,6 +193,11 @@ impl ResolvedToolSandboxPlan {
         let path_env = std::env::var_os("PATH");
         let resolved =
             crate::command_policy::resolve_policy_command_binaries(config, path_env.clone())?;
+        for w in &resolved.warnings {
+            if w.code == "command_not_found" {
+                eprintln!("  [nono] Warning: {}", w.message);
+            }
+        }
         // Validate PATH/configured executable directories before using them
         // for deny-only resolution and the outer executable identity gate.
         // The gate allows non-controlled executables while excluding
@@ -231,6 +236,7 @@ impl PreparedToolSandboxRuntime {
             policy_root,
             proxy_credential_env_vars,
             proxy_trust_bundle_paths,
+            shared_broker,
         } = input;
 
         let start_total = std::time::Instant::now();
@@ -355,7 +361,8 @@ impl PreparedToolSandboxRuntime {
                 active_count: AtomicUsize::new(0),
                 queued_requests: AtomicUsize::new(0),
                 emitted_error_response: AtomicBool::new(false),
-                token_broker: Mutex::new(crate::tool_sandbox::token_broker::TokenBroker::new()),
+                token_broker: shared_broker
+                    .unwrap_or_else(crate::tool_sandbox::token_broker::new_shared_broker),
                 approval_backends,
             }),
             listener: Arc::new(listener),
@@ -1566,10 +1573,19 @@ fn handle_shim_stream_inner(
         }
     }
 
-    if let crate::command_policy::InterceptActionConfig::CaptureCredential { credential } =
-        intercept_action
+    if let crate::command_policy::InterceptActionConfig::CaptureCredential {
+        credential,
+        grant_to,
+    } = intercept_action
     {
-        if let Some(nonce) = issue_existing_ambient_credential_nonce(state, credential)? {
+        let grants = if grant_to.is_empty() {
+            crate::tool_sandbox::token_broker::GrantSet::All
+        } else {
+            crate::tool_sandbox::token_broker::GrantSet::Specific(grant_to.clone())
+        };
+        if let Some(nonce) =
+            issue_existing_ambient_credential_nonce(state, credential, grants.clone())?
+        {
             record_command_policy_audit(
                 audit_recorder.as_ref(),
                 &request,
@@ -1635,7 +1651,7 @@ fn handle_shim_stream_inner(
                             "tool-sandbox token broker lock poisoned".to_string(),
                         )
                     })?;
-                    broker.store_named(credential.clone(), captured)
+                    broker.store_named(credential.clone(), captured, grants.clone())
                 };
                 record_command_policy_audit(
                     audit_recorder.as_ref(),
@@ -2522,9 +2538,8 @@ fn resolve_allowed_direct_bypasses(
     let mut paths = Vec::new();
     for (command_name, command) in &config.commands {
         let Some(policy_binary) = resolved.commands.get(command_name) else {
-            return Err(NonoError::SandboxInit(format!(
-                "missing resolved binary for command '{command_name}'"
-            )));
+            // Command was skipped during resolution (not found on PATH); skip here too.
+            continue;
         };
         let policy_id = FileId {
             dev: policy_binary.dev,
@@ -3202,19 +3217,20 @@ fn add_policy_fs(
     policy: &CommandSandboxConfig,
     policy_root: &Path,
 ) -> Result<()> {
-    for entry in &policy.fs_read {
+    use super::dynamic_providers::expand_dynamic_tokens;
+    for entry in &expand_dynamic_tokens(&policy.fs_read)? {
         let path = resolve_policy_path(entry, policy_root)?;
         caps.add_fs(FsCapability::new_dir(path, AccessMode::Read)?);
     }
-    for entry in &policy.fs_write {
+    for entry in &expand_dynamic_tokens(&policy.fs_write)? {
         let path = resolve_policy_path(entry, policy_root)?;
         caps.add_fs(FsCapability::new_dir(path, AccessMode::ReadWrite)?);
     }
-    for entry in &policy.fs_read_file {
+    for entry in &expand_dynamic_tokens(&policy.fs_read_file)? {
         let path = resolve_policy_path(entry, policy_root)?;
         add_optional_read_file(caps, path)?;
     }
-    for entry in &policy.fs_write_file {
+    for entry in &expand_dynamic_tokens(&policy.fs_write_file)? {
         let path = resolve_policy_path(entry, policy_root)?;
         caps.add_fs(FsCapability::new_file(path, AccessMode::ReadWrite)?);
     }
@@ -3505,7 +3521,8 @@ fn filter_child_env(
         }
         if crate::exec_strategy::is_env_var_allowed(key_str, &allowed_patterns) {
             // Resolve broker nonces to real values immediately before execve.
-            let resolved = broker.resolve_env_entry(entry);
+            let consumer = format!("cmd.{}", request.command);
+            let resolved = broker.resolve_env_entry(entry, &consumer);
             env.push(resolved.unwrap_or_else(|| entry.clone()));
         }
     }
@@ -3832,6 +3849,7 @@ fn join_relay_thread(
 fn issue_existing_ambient_credential_nonce(
     state: &ToolSandboxState,
     credential: &str,
+    grants: crate::tool_sandbox::token_broker::GrantSet,
 ) -> Result<Option<String>> {
     {
         let mut broker = state.token_broker.lock().map_err(|_| {
@@ -3848,7 +3866,11 @@ fn issue_existing_ambient_credential_nonce(
     let mut broker = state.token_broker.lock().map_err(|_| {
         NonoError::SandboxInit("tool-sandbox token broker lock poisoned".to_string())
     })?;
-    Ok(Some(broker.store_named(credential.to_string(), value)))
+    Ok(Some(broker.store_named(
+        credential.to_string(),
+        value,
+        grants,
+    )))
 }
 
 fn load_ambient_credential_source(

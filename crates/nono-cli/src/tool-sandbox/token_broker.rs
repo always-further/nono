@@ -12,8 +12,26 @@
 /// any broker nonce or broker-held value found in the captured output.
 ///
 /// All stored values are zeroed on drop via the `zeroize` crate.
+///
+/// # Capability-bound nonces
+///
+/// Every nonce carries a `GrantSet` that declares which consumers are allowed
+/// to redeem it. `GrantSet::All` is unscoped (the previous behaviour). A
+/// specific grant set limits redemption to named consumers of the form
+/// `"cmd.<command_name>"` (env-var promotion path) or `"proxy.<route_id>"`
+/// (L7 header-injection path). A consumer not in the grant set receives `None`.
 use rand::RngExt;
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
+
+/// A shared, thread-safe token broker that can be held by both the proxy
+/// runtime and the tool-sandbox runtime.
+pub(crate) type SharedBroker = Arc<Mutex<TokenBroker>>;
+
+/// Create a new shared broker.
+pub(crate) fn new_shared_broker() -> SharedBroker {
+    Arc::new(Mutex::new(TokenBroker::new()))
+}
 
 /// The prefix for all broker-issued nonce tokens.
 /// No policy-defined env var may use this prefix; it is rejected at validation time.
@@ -25,11 +43,32 @@ const NONCE_HEX_LEN: usize = 64;
 /// Total length of a well-formed nonce: "nono_" + 64 hex chars.
 const NONCE_LEN: usize = NONCE_PREFIX.len() + NONCE_HEX_LEN;
 
+/// Declares which consumers may redeem a nonce.
+///
+/// Consumer IDs use the form `"cmd.<name>"` for command-env promotion and
+/// `"proxy.<route_id>"` for L7 proxy header injection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GrantSet {
+    /// Any consumer may redeem. Default for backward compatibility.
+    All,
+    /// Only the listed consumer IDs may redeem.
+    Specific(Vec<String>),
+}
+
+impl GrantSet {
+    fn admits(&self, consumer: &str) -> bool {
+        match self {
+            GrantSet::All => true,
+            GrantSet::Specific(ids) => ids.iter().any(|id| id == consumer),
+        }
+    }
+}
+
 /// Holds real credential values in the supervisor's memory.
 /// All stored values are zeroed when the broker is dropped.
 pub(crate) struct TokenBroker {
-    map: std::collections::HashMap<String, Zeroizing<Vec<u8>>>,
-    named: std::collections::HashMap<String, Zeroizing<Vec<u8>>>,
+    map: std::collections::HashMap<String, (Zeroizing<Vec<u8>>, GrantSet)>,
+    named: std::collections::HashMap<String, (Zeroizing<Vec<u8>>, GrantSet)>,
 }
 
 impl TokenBroker {
@@ -40,10 +79,20 @@ impl TokenBroker {
         }
     }
 
-    /// Issue a nonce for `value`. Returns the nonce string. Subsequent calls to
-    /// `resolve_env_entry` or `scan_and_reissue` with this nonce will return the
-    /// real value.
+    /// Issue a nonce for `value` with no consumer restriction.
+    ///
+    /// The nonce resolves for any consumer. Use `issue_granted` to scope
+    /// redemption to a specific set of consumers.
     pub(crate) fn issue(&mut self, value: Zeroizing<Vec<u8>>) -> String {
+        self.issue_granted(value, GrantSet::All)
+    }
+
+    /// Issue a capability-bound nonce for `value`.
+    ///
+    /// Only consumers listed in `grants` may redeem the nonce via
+    /// `resolve_env_entry` or `resolve_nonce`. `GrantSet::All` is equivalent
+    /// to the unscoped `issue`.
+    pub(crate) fn issue_granted(&mut self, value: Zeroizing<Vec<u8>>, grants: GrantSet) -> String {
         let mut raw = [0u8; 32];
         rand::rng().fill(&mut raw);
         let nonce = format!(
@@ -51,38 +100,66 @@ impl TokenBroker {
             NONCE_PREFIX,
             raw.iter().map(|b| format!("{b:02x}")).collect::<String>()
         );
-        self.map.insert(nonce.clone(), value);
+        self.map.insert(nonce.clone(), (value, grants));
         nonce
     }
 
     /// Store or replace a named supervisor credential and issue a nonce for it.
-    pub(crate) fn store_named(&mut self, name: String, value: Vec<u8>) -> String {
+    ///
+    /// `grants` scopes which consumers may redeem nonces issued for this credential.
+    pub(crate) fn store_named(&mut self, name: String, value: Vec<u8>, grants: GrantSet) -> String {
         let zeroized = Zeroizing::new(value);
-        self.named.insert(name, zeroized.clone());
-        self.issue(zeroized)
+        self.named.insert(name, (zeroized.clone(), grants.clone()));
+        self.issue_granted(zeroized, grants)
     }
 
     /// Issue a fresh nonce for a previously stored named supervisor credential.
+    ///
+    /// The new nonce inherits the grant set from the stored credential.
+    /// Returns `None` if the credential is not registered.
     pub(crate) fn issue_named(&mut self, name: &str) -> Option<String> {
-        let value = self.named.get(name)?.clone();
-        Some(self.issue(value))
+        let (value, grants) = self.named.get(name)?;
+        let value = value.clone();
+        let grants = grants.clone();
+        Some(self.issue_granted(value, grants))
     }
 
     /// If `env_entry` has the form `NAME=nono_<64hex>` and the nonce is known to
-    /// the broker, return a new env entry with the real value substituted.
-    /// Returns `None` if the entry is not a broker nonce or is not recognised.
-    pub(crate) fn resolve_env_entry(&self, env_entry: &[u8]) -> Option<Vec<u8>> {
+    /// the broker and admitted for `consumer`, return a new env entry with the
+    /// real value substituted. Returns `None` if the entry is not a broker nonce,
+    /// not recognised, or not admitted for `consumer`.
+    ///
+    /// `consumer` should be `"cmd.<command_name>"` for command-env promotion.
+    pub(crate) fn resolve_env_entry(&self, env_entry: &[u8], consumer: &str) -> Option<Vec<u8>> {
         let eq = env_entry.iter().position(|&b| b == b'=')?;
         let value = &env_entry[eq.saturating_add(1)..];
         let value_str = std::str::from_utf8(value).ok()?;
         if !is_nonce(value_str) {
             return None;
         }
-        let real = self.map.get(value_str)?;
+        let (real, grants) = self.map.get(value_str)?;
+        if !grants.admits(consumer) {
+            return None;
+        }
         let mut out = Vec::with_capacity(eq.saturating_add(1).saturating_add(real.len()));
         out.extend_from_slice(&env_entry[..=eq]);
         out.extend_from_slice(real);
         Some(out)
+    }
+
+    /// Resolve a raw nonce value for `consumer`, returning the real value if
+    /// the nonce is known and the consumer is admitted by the grant set.
+    ///
+    /// `consumer` should be `"proxy.<route_id>"` for L7 header-injection.
+    pub(crate) fn resolve_nonce(&self, nonce: &str, consumer: &str) -> Option<Zeroizing<Vec<u8>>> {
+        if !is_nonce(nonce) {
+            return None;
+        }
+        let (real, grants) = self.map.get(nonce)?;
+        if !grants.admits(consumer) {
+            return None;
+        }
+        Some(real.clone())
     }
 
     /// Scan `input` for broker nonces or broker-held values and issue fresh
@@ -91,14 +168,16 @@ impl TokenBroker {
     /// Used for `Capture` action output: a captured nonce is re-issued as a new
     /// nonce before the buffered response is sent to the agent, so the real value
     /// never appears in the agent's address space even in captured stdout.
+    ///
+    /// New nonces inherit the grant set of the original.
     pub(crate) fn scan_and_reissue(&mut self, input: &[u8]) -> Vec<u8> {
         // Fast path: if the input is too short to contain either a nonce or any
         // stored secret value, return as-is.
         let shortest_secret = self
             .map
             .values()
-            .filter(|value| !value.is_empty())
-            .map(|value| value.len())
+            .filter(|(value, _)| !value.is_empty())
+            .map(|(value, _)| value.len())
             .min();
         let shortest_match = shortest_secret.map_or(NONCE_LEN, |len| len.min(NONCE_LEN));
         if input.len() < shortest_match {
@@ -115,19 +194,19 @@ impl TokenBroker {
                 let candidate = &input[i..i + NONCE_LEN];
                 if let Ok(s) = std::str::from_utf8(candidate)
                     && is_nonce(s)
-                    && let Some(real) = self.map.get(s).cloned()
+                    && let Some((real, grants)) = self.map.get(s).cloned()
                 {
-                    // Re-issue a fresh nonce for the real value
-                    let new_nonce = self.issue(real);
+                    // Re-issue a fresh nonce for the real value, inheriting grants
+                    let new_nonce = self.issue_granted(real, grants);
                     out.extend_from_slice(new_nonce.as_bytes());
                     i += NONCE_LEN;
                     continue;
                 }
             }
 
-            if let Some(real) = self.longest_secret_value_at(&input[i..]) {
+            if let Some((real, grants)) = self.longest_secret_value_at(&input[i..]) {
                 let len = real.len();
-                let new_nonce = self.issue(real);
+                let new_nonce = self.issue_granted(real, grants);
                 out.extend_from_slice(new_nonce.as_bytes());
                 i += len;
                 continue;
@@ -139,17 +218,17 @@ impl TokenBroker {
         out
     }
 
-    fn longest_secret_value_at(&self, input: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    fn longest_secret_value_at(&self, input: &[u8]) -> Option<(Zeroizing<Vec<u8>>, GrantSet)> {
         self.map
             .values()
-            .filter(|value| !value.is_empty() && input.starts_with(value.as_slice()))
-            .max_by_key(|value| value.len())
+            .filter(|(value, _)| !value.is_empty() && input.starts_with(value.as_slice()))
+            .max_by_key(|(value, _)| value.len())
             .cloned()
     }
 }
 
 /// Returns true if `s` is a well-formed broker nonce: `nono_` + exactly 64 hex chars.
-fn is_nonce(s: &str) -> bool {
+pub(crate) fn is_nonce(s: &str) -> bool {
     s.len() == NONCE_LEN
         && s.starts_with(NONCE_PREFIX)
         && s[NONCE_PREFIX.len()..]
@@ -179,10 +258,10 @@ mod tests {
         &value[start..end]
     }
 
-    fn resolve_entry(broker: &TokenBroker, entry: &[u8]) -> Vec<u8> {
-        match broker.resolve_env_entry(entry) {
+    fn resolve_entry(broker: &TokenBroker, entry: &[u8], consumer: &str) -> Vec<u8> {
+        match broker.resolve_env_entry(entry, consumer) {
             Some(value) => value,
-            None => panic!("broker nonce must resolve"),
+            None => panic!("broker nonce must resolve for consumer '{consumer}'"),
         }
     }
 
@@ -194,22 +273,24 @@ mod tests {
         assert!(is_nonce(&nonce), "issued nonce must be well-formed");
 
         let entry = format!("MY_SECRET={nonce}").into_bytes();
-        let resolved = resolve_entry(&broker, &entry);
+        let resolved = resolve_entry(&broker, &entry, "cmd.any");
         assert_eq!(resolved, b"MY_SECRET=hunter2");
     }
 
     #[test]
     fn named_credential_issues_fresh_resolvable_nonces() {
         let mut broker = TokenBroker::new();
-        let first = broker.store_named("github".to_string(), b"ghp_real".to_vec());
+        let first = broker.store_named("github".to_string(), b"ghp_real".to_vec(), GrantSet::All);
         let second = match broker.issue_named("github") {
             Some(value) => value,
             None => panic!("named credential must issue nonce"),
         };
 
         assert_ne!(first, second, "named credential should issue fresh nonces");
-        let first_resolved = resolve_entry(&broker, format!("GH_TOKEN={first}").as_bytes());
-        let second_resolved = resolve_entry(&broker, format!("GH_TOKEN={second}").as_bytes());
+        let first_resolved =
+            resolve_entry(&broker, format!("GH_TOKEN={first}").as_bytes(), "cmd.gh");
+        let second_resolved =
+            resolve_entry(&broker, format!("GH_TOKEN={second}").as_bytes(), "cmd.gh");
         assert_eq!(first_resolved, b"GH_TOKEN=ghp_real");
         assert_eq!(second_resolved, b"GH_TOKEN=ghp_real");
     }
@@ -218,7 +299,7 @@ mod tests {
     fn resolve_non_nonce_returns_none() {
         let broker = TokenBroker::new();
         let entry = b"MY_VAR=plain_value".to_vec();
-        assert!(broker.resolve_env_entry(&entry).is_none());
+        assert!(broker.resolve_env_entry(&entry, "cmd.any").is_none());
     }
 
     #[test]
@@ -226,7 +307,11 @@ mod tests {
         let broker = TokenBroker::new();
         // Valid format but not in the broker
         let fake = format!("K={}", "nono_".to_string() + &"a".repeat(64));
-        assert!(broker.resolve_env_entry(fake.as_bytes()).is_none());
+        assert!(
+            broker
+                .resolve_env_entry(fake.as_bytes(), "cmd.any")
+                .is_none()
+        );
     }
 
     #[test]
@@ -246,7 +331,7 @@ mod tests {
         );
         // But the fresh nonce is there and resolves to the same secret
         let new_nonce = find_nonce(result_str);
-        let resolved = resolve_entry(&broker, format!("X={new_nonce}").as_bytes());
+        let resolved = resolve_entry(&broker, format!("X={new_nonce}").as_bytes(), "cmd.x");
         assert_eq!(resolved, b"X=s3cr3t");
     }
 
@@ -267,7 +352,7 @@ mod tests {
             "real secret must not appear in output"
         );
         let new_nonce = find_nonce(result_str);
-        let resolved = resolve_entry(&broker, format!("X={new_nonce}").as_bytes());
+        let resolved = resolve_entry(&broker, format!("X={new_nonce}").as_bytes(), "cmd.x");
         assert_eq!(resolved, b"X=s3cr3t");
     }
 
@@ -280,7 +365,7 @@ mod tests {
         let result = broker.scan_and_reissue(b"abcdef");
         let result_str = as_utf8(&result);
         let new_nonce = &result_str[..NONCE_LEN];
-        let resolved = resolve_entry(&broker, format!("X={new_nonce}").as_bytes());
+        let resolved = resolve_entry(&broker, format!("X={new_nonce}").as_bytes(), "cmd.x");
         assert_eq!(resolved, b"X=abcdef");
     }
 
@@ -313,5 +398,75 @@ mod tests {
     #[test]
     fn nonce_prefix_constant() {
         assert_eq!(NONCE_PREFIX, "nono_");
+    }
+
+    // --- Capability-bound nonce tests ---
+
+    #[test]
+    fn granted_consumer_resolves_nonce() {
+        let mut broker = TokenBroker::new();
+        let nonce = broker.issue_granted(
+            Zeroizing::new(b"secret".to_vec()),
+            GrantSet::Specific(vec!["cmd.gh".to_string()]),
+        );
+        let entry = format!("GH_TOKEN={nonce}").into_bytes();
+        let resolved = broker.resolve_env_entry(&entry, "cmd.gh");
+        assert_eq!(resolved, Some(b"GH_TOKEN=secret".to_vec()));
+    }
+
+    #[test]
+    fn ungrantend_consumer_cannot_resolve() {
+        let mut broker = TokenBroker::new();
+        let nonce = broker.issue_granted(
+            Zeroizing::new(b"secret".to_vec()),
+            GrantSet::Specific(vec!["cmd.gh".to_string()]),
+        );
+        let entry = format!("GH_TOKEN={nonce}").into_bytes();
+        assert!(
+            broker.resolve_env_entry(&entry, "cmd.curl").is_none(),
+            "ungranted consumer must not resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_nonce_proxy_consumer() {
+        let mut broker = TokenBroker::new();
+        let nonce = broker.issue_granted(
+            Zeroizing::new(b"sk-ant-real".to_vec()),
+            GrantSet::Specific(vec!["proxy.anthropic".to_string()]),
+        );
+        let resolved = broker.resolve_nonce(&nonce, "proxy.anthropic");
+        assert_eq!(
+            resolved.as_deref().map(|v| v.as_slice()),
+            Some(b"sk-ant-real".as_slice())
+        );
+        // cmd.curl must not get it
+        assert!(broker.resolve_nonce(&nonce, "cmd.curl").is_none());
+    }
+
+    #[test]
+    fn all_grant_admits_any_consumer() {
+        let mut broker = TokenBroker::new();
+        let nonce = broker.issue(Zeroizing::new(b"val".to_vec()));
+        assert!(broker.resolve_nonce(&nonce, "cmd.gh").is_some());
+        assert!(broker.resolve_nonce(&nonce, "proxy.foo").is_some());
+    }
+
+    #[test]
+    fn store_named_with_specific_grant() {
+        let mut broker = TokenBroker::new();
+        let n = broker.store_named(
+            "gitlab".to_string(),
+            b"glpat-real".to_vec(),
+            GrantSet::Specific(vec!["cmd.glab".to_string()]),
+        );
+        // Admitted
+        assert!(broker.resolve_nonce(&n, "cmd.glab").is_some());
+        // Not admitted
+        assert!(broker.resolve_nonce(&n, "cmd.curl").is_none());
+        // issue_named inherits grants
+        let n2 = broker.issue_named("gitlab").unwrap();
+        assert!(broker.resolve_nonce(&n2, "cmd.glab").is_some());
+        assert!(broker.resolve_nonce(&n2, "cmd.curl").is_none());
     }
 }

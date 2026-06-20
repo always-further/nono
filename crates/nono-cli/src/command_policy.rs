@@ -387,6 +387,11 @@ pub enum InterceptActionConfig {
     CaptureCredential {
         /// Command credential handle receiving the captured value.
         credential: String,
+        /// Consumer IDs that may redeem the issued nonce via env-var promotion
+        /// (`"cmd.<name>"`) or L7 header injection (`"proxy.<route_id>"`).
+        /// An empty list means any consumer may redeem (equivalent to `GrantSet::All`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        grant_to: Vec<String>,
     },
     /// Block and route through `ApprovalBackend` before forking the child.
     /// On denial the shim receives an error response; no child is forked.
@@ -986,32 +991,55 @@ pub(crate) fn resolve_policy_command_binaries(
     let search_dirs = command_search_dirs(config, path_env)?;
 
     for (command_name, command) in &config.commands {
-        let (selected, duplicate_paths) = if let Some(executable) = &command.executable {
-            (exact_command_match(command_name, executable)?, Vec::new())
+        let resolution = if let Some(executable) = &command.executable {
+            match candidate_command_match(&PathBuf::from(executable))? {
+                Some(m) => Some((m, Vec::new())),
+                None => {
+                    warnings.push(CommandPolicyFinding::new(
+                        "command_not_found",
+                        format!(
+                            "command policy '{command_name}': executable '{}' not found or not executable; skipping",
+                            executable
+                        ),
+                    ));
+                    None
+                }
+            }
         } else {
             let matches = find_command_matches(command_name, &search_dirs)?;
-            let Some(selected) = matches.first() else {
-                return Err(nono::NonoError::ProfileParse(format!(
-                    "command policy '{command_name}' could not be resolved on PATH"
-                )));
-            };
-
-            let duplicate_paths = duplicate_distinct_inode_paths(selected, &matches);
-            if !duplicate_paths.is_empty() {
-                let rendered = duplicate_paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                warnings.push(CommandPolicyFinding::new(
-                    "duplicate_path_command",
-                    format!(
-                        "command policy '{command_name}' resolved to {}, but other executable '{command_name}' entries exist on PATH: {rendered}; only the resolved binary is controlled by this policy",
-                        selected.canonical_path.display()
-                    ),
-                ));
+            match matches.first() {
+                None => {
+                    warnings.push(CommandPolicyFinding::new(
+                        "command_not_found",
+                        format!(
+                            "command policy '{command_name}' could not be resolved on PATH; skipping"
+                        ),
+                    ));
+                    None
+                }
+                Some(selected) => {
+                    let duplicate_paths = duplicate_distinct_inode_paths(selected, &matches);
+                    if !duplicate_paths.is_empty() {
+                        let rendered = duplicate_paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        warnings.push(CommandPolicyFinding::new(
+                            "duplicate_path_command",
+                            format!(
+                                "command policy '{command_name}' resolved to {}, but other executable '{command_name}' entries exist on PATH: {rendered}; only the resolved binary is controlled by this policy",
+                                selected.canonical_path.display()
+                            ),
+                        ));
+                    }
+                    Some((selected.clone(), duplicate_paths))
+                }
             }
-            (selected.clone(), duplicate_paths)
+        };
+
+        let Some((selected, duplicate_paths)) = resolution else {
+            continue;
         };
 
         if selected.shape.kind == ResolvedExecutableKind::ShebangScript {
@@ -1205,7 +1233,7 @@ fn validate_intercept_rules(
                 format!("command '{command_name}' intercept rule {i} respond stdout exceeds 1 MiB"),
             );
         }
-        if let InterceptActionConfig::CaptureCredential { credential } = &rule.action {
+        if let InterceptActionConfig::CaptureCredential { credential, .. } = &rule.action {
             validate_identifier(
                 &format!("commands.{command_name}.intercept[{i}].action.credential"),
                 credential,
@@ -2212,18 +2240,6 @@ fn find_command_matches(
     }
 
     Ok(matches)
-}
-
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
-fn exact_command_match(command_name: &str, executable: &str) -> nono::Result<CommandMatch> {
-    let path = PathBuf::from(executable);
-    match candidate_command_match(&path)? {
-        Some(command_match) => Ok(command_match),
-        None => Err(nono::NonoError::ProfileParse(format!(
-            "command policy '{command_name}' executable '{}' is not an executable file",
-            path.display()
-        ))),
-    }
 }
 
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
@@ -3266,15 +3282,24 @@ mod tests {
     }
 
     #[test]
-    fn command_resolution_fails_closed_when_command_is_missing() {
+    fn command_resolution_skips_missing_command_with_warning() {
         let dir = tempdir().expect("tempdir");
         let path_env = std::env::join_paths([dir.path()]).expect("join PATH entries");
-        let err = resolve_policy_command_binaries(&active_git_config(), Some(path_env))
-            .expect_err("missing command should fail");
+        let resolved = resolve_policy_command_binaries(&active_git_config(), Some(path_env))
+            .expect("missing command should not abort resolution");
 
         assert!(
-            err.to_string().contains("could not be resolved"),
-            "missing command error should be clear: {err}"
+            resolved.commands.is_empty(),
+            "missing command should be omitted from resolved set, got {:?}",
+            resolved.commands.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w.code == "command_not_found"),
+            "expected command_not_found warning, got {:?}",
+            resolved.warnings
         );
     }
 
@@ -3556,6 +3581,7 @@ mod tests {
     fn capture_credential_action_serde_roundtrip() {
         let action = InterceptActionConfig::CaptureCredential {
             credential: "github".to_string(),
+            grant_to: vec![],
         };
         let json = serde_json::to_string(&action).expect("serialize");
 
@@ -3582,6 +3608,7 @@ mod tests {
             args: vec!["auth".to_string(), "token".to_string()],
             action: InterceptActionConfig::CaptureCredential {
                 credential: "github".to_string(),
+                grant_to: vec![],
             },
         });
 
@@ -3609,6 +3636,7 @@ mod tests {
             args: vec!["auth".to_string(), "token".to_string()],
             action: InterceptActionConfig::CaptureCredential {
                 credential: "agent".to_string(),
+                grant_to: vec![],
             },
         });
 

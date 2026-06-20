@@ -85,6 +85,9 @@ pub struct InterceptCtx<'a> {
     pub upstream_proxy: Option<InterceptUpstreamProxy<'a>>,
     pub approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
     pub credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
+    /// Optional nonce resolver for substituting tool-sandbox broker nonces
+    /// (`nono_<hex>`) found in request header values before forwarding upstream.
+    pub nonce_resolver: Option<Arc<dyn crate::token::NonceResolver>>,
 }
 
 /// Handle a CONNECT request that matched a route requiring L7 visibility.
@@ -819,6 +822,7 @@ where
         reverse::inject_credential_for_mode(cred, &mut request);
     }
     let injected_header_names = reverse::injected_credential_header_names(cred);
+    let nonce_consumer = service.map(|s| format!("proxy.{s}"));
     for (name, value) in &filtered_headers {
         if injected_header_names
             .iter()
@@ -826,7 +830,15 @@ where
         {
             continue;
         }
-        request.push_str(&format!("{}: {}\r\n", name, value));
+        let resolved_value = nonce_consumer
+            .as_deref()
+            .and_then(|consumer| {
+                ctx.nonce_resolver
+                    .as_deref()
+                    .and_then(|resolver| resolve_nonce_in_header_value(value, consumer, resolver))
+            })
+            .unwrap_or_else(|| value.clone());
+        request.push_str(&format!("{}: {}\r\n", name, resolved_value));
     }
     request.push_str("Connection: close\r\n");
     if !body.is_empty() {
@@ -902,6 +914,40 @@ where
     Ok(())
 }
 
+/// Scan a header value for a tool-sandbox broker nonce (`nono_<64hex>`) and,
+/// if one is found and `resolver` admits `consumer`, return the header value
+/// with the nonce replaced by the real credential bytes (UTF-8).
+///
+/// Only the first nonce found is substituted. Non-UTF-8 real values are
+/// forwarded verbatim (fail-open for the substitution, not the request).
+/// If no nonce is found, or the resolver returns `None`, the original value
+/// is returned unchanged (fail-closed: the upstream sees the raw nonce and
+/// will reject the request, not a silently wrong credential).
+fn resolve_nonce_in_header_value(
+    value: &str,
+    consumer: &str,
+    resolver: &dyn crate::token::NonceResolver,
+) -> Option<String> {
+    const NONCE_PREFIX: &str = "nono_";
+    const NONCE_LEN: usize = 5 + 64; // "nono_" + 64 hex chars
+
+    let start = value.find(NONCE_PREFIX)?;
+    let end = start.checked_add(NONCE_LEN)?;
+    if end > value.len() {
+        return None;
+    }
+    let nonce = &value[start..end];
+    if !nonce[NONCE_PREFIX.len()..]
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let real = resolver.resolve(nonce, consumer)?;
+    let real_str = std::str::from_utf8(&real).ok()?;
+    Some(format!("{}{}{}", &value[..start], real_str, &value[end..]))
+}
+
 /// Parse a request line into (method, path, version).
 fn parse_request_line(line: &str) -> Result<(String, String, String)> {
     let parts: Vec<&str> = line.split_whitespace().collect();
@@ -922,6 +968,7 @@ fn parse_request_line(line: &str) -> Result<(String, String, String)> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use zeroize::Zeroizing;
 
     #[test]
     fn parse_request_line_extracts_components() {
@@ -998,5 +1045,78 @@ mod tests {
                 panic!("expected ExternalProxy strategy, got Direct");
             }
         }
+    }
+
+    // --- resolve_nonce_in_header_value tests ---
+
+    struct TestResolver {
+        nonce: String,
+        real: Vec<u8>,
+        admitted_consumer: String,
+    }
+
+    impl crate::token::NonceResolver for TestResolver {
+        fn resolve(&self, nonce: &str, consumer: &str) -> Option<Zeroizing<Vec<u8>>> {
+            if nonce == self.nonce && consumer == self.admitted_consumer {
+                Some(Zeroizing::new(self.real.clone()))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn make_nonce() -> String {
+        format!("nono_{}", "a".repeat(64))
+    }
+
+    #[test]
+    fn resolves_bearer_nonce() {
+        let nonce = make_nonce();
+        let resolver = TestResolver {
+            nonce: nonce.clone(),
+            real: b"sk-ant-real".to_vec(),
+            admitted_consumer: "proxy.anthropic".to_string(),
+        };
+        let value = format!("Bearer {nonce}");
+        let result = resolve_nonce_in_header_value(&value, "proxy.anthropic", &resolver);
+        assert_eq!(result, Some("Bearer sk-ant-real".to_string()));
+    }
+
+    #[test]
+    fn returns_none_for_unadmitted_consumer() {
+        let nonce = make_nonce();
+        let resolver = TestResolver {
+            nonce: nonce.clone(),
+            real: b"sk-ant-real".to_vec(),
+            admitted_consumer: "proxy.anthropic".to_string(),
+        };
+        let value = format!("Bearer {nonce}");
+        let result = resolve_nonce_in_header_value(&value, "proxy.other", &resolver);
+        assert!(result.is_none(), "unadmitted consumer must not resolve");
+    }
+
+    #[test]
+    fn returns_none_when_no_nonce_present() {
+        let resolver = TestResolver {
+            nonce: make_nonce(),
+            real: b"secret".to_vec(),
+            admitted_consumer: "proxy.anthropic".to_string(),
+        };
+        let result =
+            resolve_nonce_in_header_value("Bearer plain-token", "proxy.anthropic", &resolver);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn preserves_prefix_and_suffix_around_nonce() {
+        let nonce = make_nonce();
+        let resolver = TestResolver {
+            nonce: nonce.clone(),
+            real: b"REAL".to_vec(),
+            admitted_consumer: "proxy.svc".to_string(),
+        };
+        let value = format!("prefix-{nonce}-suffix");
+        let result = resolve_nonce_in_header_value(&value, "proxy.svc", &resolver);
+        assert_eq!(result, Some("prefix-REAL-suffix".to_string()));
     }
 }

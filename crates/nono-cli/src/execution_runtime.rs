@@ -262,7 +262,16 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         output::print_supervised_info(flags.silent, rollback.requested, proxy.is_active());
     }
 
-    let active_proxy = start_proxy_runtime(proxy, &mut caps)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let shared_broker = crate::tool_sandbox::token_broker::new_shared_broker();
+    let active_proxy = start_proxy_runtime(
+        proxy,
+        &mut caps,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Some(shared_broker.clone()),
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        None,
+    )?;
     let proxy_env_vars = active_proxy.env_vars;
     let tool_sandbox_proxy_credential_env_vars = active_proxy.tool_sandbox_credential_env_vars;
     let tool_sandbox_trust_bundle_paths = active_proxy.tool_sandbox_trust_bundle_paths;
@@ -300,6 +309,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 policy_root: &requested_workdir,
                 proxy_credential_env_vars: &tool_sandbox_proxy_credential_env_vars,
                 proxy_trust_bundle_paths: &tool_sandbox_trust_bundle_paths,
+                shared_broker: Some(shared_broker.clone()),
             },
         )?;
         runtime.grant_outer_caps(&mut caps)?;
@@ -326,6 +336,7 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 policy_root: &requested_workdir,
                 proxy_credential_env_vars: &tool_sandbox_proxy_credential_env_vars,
                 proxy_trust_bundle_paths: &tool_sandbox_trust_bundle_paths,
+                shared_broker: Some(shared_broker),
             },
         )?;
         runtime.grant_outer_caps(&mut caps)?;

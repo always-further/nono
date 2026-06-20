@@ -389,6 +389,10 @@ struct ProxyState {
     approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
     /// Optional supervisor-backed capture backend for command-backed credentials.
     credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
+    /// Optional resolver for tool-sandbox broker nonces found in request headers.
+    /// Resolves `nono_<hex>` values in `Authorization` and similar headers before
+    /// forwarding upstream. Consumer IDs use the form `"proxy.<route_id>"`.
+    nonce_resolver: Option<Arc<dyn crate::token::NonceResolver>>,
     /// Matcher for hosts that bypass the external proxy and route direct.
     /// Built once at startup from `ExternalProxyConfig.bypass_hosts`.
     bypass_matcher: external::BypassMatcher,
@@ -431,11 +435,21 @@ pub async fn start_with_approval_registry(
 }
 
 /// Start the proxy server with optional named approval and credential capture
-/// backend registries.
+/// backend registries, and an optional nonce resolver for L7 header injection.
 pub async fn start_with_approval_and_capture_registry(
     config: ProxyConfig,
     approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
     credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
+) -> Result<ProxyHandle> {
+    start_with_nonce_resolver(config, approval_backends, credential_capture_backend, None).await
+}
+
+/// Start the proxy server with all optional backends including a nonce resolver.
+pub async fn start_with_nonce_resolver(
+    config: ProxyConfig,
+    approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+    credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
+    nonce_resolver: Option<Arc<dyn crate::token::NonceResolver>>,
 ) -> Result<ProxyHandle> {
     // Generate session token
     let session_token = token::generate_session_token()?;
@@ -655,6 +669,7 @@ pub async fn start_with_approval_and_capture_registry(
         audit_log: Arc::clone(&audit_log),
         approval_backends,
         credential_capture_backend,
+        nonce_resolver,
         bypass_matcher,
         cert_cache,
     });
@@ -968,6 +983,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             upstream_proxy,
                             approval_backends: state.approval_backends.clone(),
                             credential_capture_backend: state.credential_capture_backend.clone(),
+                            nonce_resolver: state.nonce_resolver.clone(),
                         };
                         return tls_intercept::handle_intercept_connect(&mut stream, ctx).await;
                     }

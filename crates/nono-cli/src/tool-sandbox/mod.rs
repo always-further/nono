@@ -32,6 +32,8 @@ mod audit_context;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod dynamic_providers;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod env;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod launch;
@@ -55,6 +57,9 @@ pub(crate) struct ToolSandboxPrepare<'a> {
     pub(crate) proxy_credential_env_vars:
         &'a std::collections::BTreeMap<String, Vec<(String, String)>>,
     pub(crate) proxy_trust_bundle_paths: &'a [std::path::PathBuf],
+    /// Shared token broker for nonce-at-L7 resolution. When `None` a new
+    /// private broker is created for this session.
+    pub(crate) shared_broker: Option<crate::tool_sandbox::token_broker::SharedBroker>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
