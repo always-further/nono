@@ -1385,8 +1385,9 @@ fn interactive_denial_selector(patch: &profile::Profile) -> Result<Option<Vec<De
                                 ItemAction::Suppress
                             };
                         }
-                        // URL items are not suppressible; 'd' leaves them unchanged
-                        DenialItem::Url { .. } => {}
+                        // URL items are not suppressible; deny-all skips them
+                        // so Enter cannot accidentally grant the default Grant.
+                        DenialItem::Url { action, .. } => *action = UrlItemAction::Skip,
                     }
                 }
             }

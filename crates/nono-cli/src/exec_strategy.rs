@@ -2506,6 +2506,16 @@ fn run_supervisor_loop(
     Ok((status, denials.fs, denials.url))
 }
 
+/// Result of the Linux supervisor loop: child wait status plus the filesystem,
+/// IPC, and URL denial records collected during the run.
+#[cfg(target_os = "linux")]
+type SupervisorLoopResult = (
+    WaitStatus,
+    Vec<DenialRecord>,
+    Vec<nono::diagnostic::IpcDenialRecord>,
+    Vec<UrlDenialRecord>,
+);
+
 /// Supervisor IPC event loop for capability expansion (Linux).
 ///
 /// Multiplexes between:
@@ -2538,12 +2548,7 @@ fn run_supervisor_loop(
     mut pty: Option<&mut crate::pty_proxy::PtyProxy>,
     url_listener: Option<&SupervisorListener>,
     killed_by_timeout: &mut bool,
-) -> Result<(
-    WaitStatus,
-    Vec<DenialRecord>,
-    Vec<nono::diagnostic::IpcDenialRecord>,
-    Vec<UrlDenialRecord>,
-)> {
+) -> Result<SupervisorLoopResult> {
     struct LoopTimer {
         start: Instant,
         iterations: u64,
@@ -3499,8 +3504,11 @@ pub(super) fn record_denial(denials: &mut Vec<DenialRecord>, record: DenialRecor
 }
 
 /// Push a URL denial record to the vec, capping at MAX_DENIAL_RECORDS.
+///
+/// Deduplicates inline so a child polling the same blocked URL in a retry loop
+/// cannot exhaust the buffer and crowd out other unique denials.
 fn record_url_denial(url_denials: &mut Vec<UrlDenialRecord>, record: UrlDenialRecord) {
-    if url_denials.len() < MAX_DENIAL_RECORDS {
+    if url_denials.len() < MAX_DENIAL_RECORDS && !url_denials.contains(&record) {
         url_denials.push(record);
     }
 }
@@ -4401,6 +4409,32 @@ mod tests {
             &[],
             &[],
         ));
+    }
+
+    #[test]
+    fn test_record_url_denial_dedupes_repeated_records() {
+        let mut denials = Vec::new();
+        let record = UrlDenialRecord {
+            origin: "https://accounts.google.com".to_string(),
+            reason: UrlDenialReason::OriginNotAllowed,
+        };
+
+        // A child polling the same blocked URL must not fill the buffer with
+        // identical records.
+        for _ in 0..100 {
+            record_url_denial(&mut denials, record.clone());
+        }
+        assert_eq!(denials.len(), 1);
+
+        // Distinct records are still recorded.
+        record_url_denial(
+            &mut denials,
+            UrlDenialRecord {
+                origin: String::new(),
+                reason: UrlDenialReason::LocalhostNotAllowed,
+            },
+        );
+        assert_eq!(denials.len(), 2);
     }
 
     #[test]
