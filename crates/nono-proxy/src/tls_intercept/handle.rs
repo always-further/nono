@@ -284,43 +284,53 @@ where
     }))
 }
 
-/// Read one inner HTTP/1.1 request, select the matching route, inject
-/// credentials if matched, and forward upstream.
-async fn handle_inner_request<S>(tls_stream: &mut S, ctx: &InterceptCtx<'_>) -> Result<()>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let req = match parse_inner_request(tls_stream).await? {
-        Some(r) => r,
-        None => return Ok(()),
-    };
-    debug!("tls_intercept: inner request {} {}", req.method, req.path);
+/// Outcome of endpoint-policy evaluation + route selection on the
+/// CONNECT-intercept path. Shared by the HTTP/1.1 and HTTP/2 forwarders so the
+/// two protocols cannot diverge in L7 authorization behavior.
+pub(crate) enum RouteSelection<'a> {
+    /// The request was rejected. The denial has already been audited; the
+    /// caller must return the given HTTP status to the client and stop.
+    Rejected(u16),
+    /// Endpoint policy authorized the request. The selected route (if any) is
+    /// the one whose credential should be injected; `None` means forward
+    /// without credentials (passthrough).
+    Selected(Option<(&'a str, &'a crate::route::LoadedRoute)>),
+}
 
-    // Route selection: 1 match → cred, 0 → passthrough, 2+ → 403.
-    let host_port = format!("{}:{}", ctx.host.to_lowercase(), ctx.port);
-    let candidates = ctx.route_store.lookup_all_by_upstream(&host_port);
+/// Evaluate endpoint policy for every candidate route on an intercepted
+/// upstream and select the route whose credential (if any) applies.
+///
+/// This is the single source of truth for per-request L7 authorization on the
+/// CONNECT-intercept path, shared by both [`handle_inner_request`] (HTTP/1.1)
+/// and [`super::h2_forward`] (HTTP/2). It must not be duplicated per protocol:
+/// a divergence here is a security gap, since gRPC traffic would otherwise
+/// bypass deny/approve/default-deny policies that the HTTP/1.1 path enforces.
+///
+/// `endpoint_policy` subsumes the legacy `endpoint_rules` (they are merged at
+/// compile time in `route::LoadedRoute::load`), so it is the authoritative
+/// source for allow / deny / approve decisions. The loop runs the approval
+/// workflow when required and emits L7 audit records. Bucketing mirrors
+/// `route::select_route` so a credential catch-all is not shadowed by a
+/// passthrough endpoint route.
+pub(crate) async fn select_intercept_route<'a>(
+    route_store: &'a RouteStore,
+    host: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    audit_log: Option<&audit::SharedAuditLog>,
+    approval_backends: Option<&crate::approval::ApprovalBackendRegistry>,
+) -> RouteSelection<'a> {
+    let host_port = format!("{}:{}", host.to_lowercase(), port);
+    let candidates = route_store.lookup_all_by_upstream(&host_port);
     if candidates.is_empty() {
         warn!(
             "tls_intercept: no route for {} after intercept handshake",
             host_port
         );
-        reverse::send_error_generic(tls_stream, 502, "Bad Gateway").await?;
-        return Ok(());
+        return RouteSelection::Rejected(502);
     }
 
-    // Endpoint authorization + credential route selection.
-    //
-    // `endpoint_policy` subsumes the legacy `endpoint_rules` (they are merged at
-    // compile time in `route::LoadedRoute::load`), so it is the single source of
-    // truth for per-route L7 authorization: allow / deny / approve. The loop runs
-    // the approval workflow when required and emits L7 audit records. Bucketing
-    // mirrors `route::select_route` (commit b0b2c743) so a credential catch-all
-    // is not shadowed by a passthrough endpoint route.
-    //
-    // `req` is kept whole for the forward path below, so bind owned method/path
-    // for the policy-evaluation loop.
-    let method = req.method.clone();
-    let path = req.path.clone();
     let mut matched_cred: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
     let mut matched_passthrough: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
     let mut catchall_cred: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
@@ -336,10 +346,10 @@ where
             }
             continue;
         }
-        match route.endpoint_policy.evaluate(&method, &path) {
+        match route.endpoint_policy.evaluate(method, path) {
             EndpointPolicyOutcome::Allow { rule_label } => {
                 audit::log_l7_policy_decision(
-                    ctx.audit_log,
+                    audit_log,
                     audit::ProxyMode::ConnectIntercept,
                     &audit::EventContext {
                         route_id: Some(prefix),
@@ -348,10 +358,10 @@ where
                         upstream: Some(&route.upstream),
                         ..audit::EventContext::default()
                     },
-                    ctx.host,
-                    Some(ctx.port),
-                    &method,
-                    &path,
+                    host,
+                    Some(port),
+                    method,
+                    path,
                     nono::undo::NetworkAuditDecision::Allow,
                     "allow",
                     &rule_label,
@@ -370,14 +380,14 @@ where
                 timeout_secs,
                 rule_label,
             } => {
-                let Some(approval_backends) = ctx.approval_backends.clone() else {
+                let Some(approval_backends) = approval_backends else {
                     let deny_reason = format!(
                         "endpoint approval required by {} but no approval backend is configured",
                         rule_label
                     );
                     warn!("tls_intercept: {}", deny_reason);
                     audit::log_denied(
-                        ctx.audit_log,
+                        audit_log,
                         audit::ProxyMode::ConnectIntercept,
                         &audit::EventContext {
                             denial_category: Some(
@@ -389,12 +399,11 @@ where
                             upstream: Some(&route.upstream),
                             ..audit::EventContext::default()
                         },
-                        ctx.host,
-                        ctx.port,
+                        host,
+                        port,
                         &deny_reason,
                     );
-                    reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-                    return Ok(());
+                    return RouteSelection::Rejected(403);
                 };
                 let (backend_name, backend) = match approval_backends.resolve(backend) {
                     Ok(resolved) => resolved,
@@ -403,7 +412,7 @@ where
                             format!("endpoint approval backend resolution failed: {err}");
                         warn!("tls_intercept: {}", deny_reason);
                         audit::log_l7_policy_decision(
-                            ctx.audit_log,
+                            audit_log,
                             audit::ProxyMode::ConnectIntercept,
                             &audit::EventContext {
                                 denial_category: Some(
@@ -415,17 +424,16 @@ where
                                 upstream: Some(&route.upstream),
                                 ..audit::EventContext::default()
                             },
-                            ctx.host,
-                            Some(ctx.port),
-                            &method,
-                            &path,
+                            host,
+                            Some(port),
+                            method,
+                            path,
                             nono::undo::NetworkAuditDecision::ApproveError,
                             "approve",
                             &rule_label,
                             Some(&deny_reason),
                         );
-                        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-                        return Ok(());
+                        return RouteSelection::Rejected(403);
                     }
                 };
                 let request_reason = reason.map(str::to_string).unwrap_or_else(|| {
@@ -443,24 +451,24 @@ where
                     ..audit::EventContext::default()
                 };
                 audit::log_l7_policy_decision(
-                    ctx.audit_log,
+                    audit_log,
                     audit::ProxyMode::ConnectIntercept,
                     &approval_ctx,
-                    ctx.host,
-                    Some(ctx.port),
-                    &method,
-                    &path,
+                    host,
+                    Some(port),
+                    method,
+                    path,
                     nono::undo::NetworkAuditDecision::ApproveRequested,
                     "approve",
                     &rule_label,
                     Some(&request_reason),
                 );
                 let request = nono::supervisor::ApprovalRequest::Endpoint {
-                    request_id: format!("proxy-endpoint-approval-{}-{}", ctx.host, ctx.port),
+                    request_id: format!("proxy-endpoint-approval-{}-{}", host, port),
                     route_id: (*prefix).to_string(),
                     upstream: route.upstream.clone(),
-                    method: method.clone(),
-                    path: path.clone(),
+                    method: method.to_string(),
+                    path: path.to_string(),
                     rule_label: rule_label.clone(),
                     reason: Some(request_reason),
                     child_pid: 0,
@@ -475,13 +483,13 @@ where
                 match decision {
                     Ok(Ok(Ok(decision))) if decision.is_granted() => {
                         audit::log_l7_policy_decision(
-                            ctx.audit_log,
+                            audit_log,
                             audit::ProxyMode::ConnectIntercept,
                             &approval_ctx,
-                            ctx.host,
-                            Some(ctx.port),
-                            &method,
-                            &path,
+                            host,
+                            Some(port),
+                            method,
+                            path,
                             nono::undo::NetworkAuditDecision::ApproveGranted,
                             "approve",
                             &rule_label,
@@ -496,13 +504,13 @@ where
                     }
                     Ok(Ok(Ok(_))) => {
                         audit::log_l7_policy_decision(
-                            ctx.audit_log,
+                            audit_log,
                             audit::ProxyMode::ConnectIntercept,
                             &approval_ctx,
-                            ctx.host,
-                            Some(ctx.port),
-                            &method,
-                            &path,
+                            host,
+                            Some(port),
+                            method,
+                            path,
                             nono::undo::NetworkAuditDecision::ApproveDenied,
                             "approve",
                             &rule_label,
@@ -515,13 +523,13 @@ where
                     Ok(Ok(Err(err))) => {
                         let deny_reason = format!("endpoint approval backend error: {err}");
                         audit::log_l7_policy_decision(
-                            ctx.audit_log,
+                            audit_log,
                             audit::ProxyMode::ConnectIntercept,
                             &approval_ctx,
-                            ctx.host,
-                            Some(ctx.port),
-                            &method,
-                            &path,
+                            host,
+                            Some(port),
+                            method,
+                            path,
                             nono::undo::NetworkAuditDecision::ApproveError,
                             "approve",
                             &rule_label,
@@ -535,13 +543,13 @@ where
                     Ok(Err(err)) => {
                         let deny_reason = format!("endpoint approval task failed: {err}");
                         audit::log_l7_policy_decision(
-                            ctx.audit_log,
+                            audit_log,
                             audit::ProxyMode::ConnectIntercept,
                             &approval_ctx,
-                            ctx.host,
-                            Some(ctx.port),
-                            &method,
-                            &path,
+                            host,
+                            Some(port),
+                            method,
+                            path,
                             nono::undo::NetworkAuditDecision::ApproveError,
                             "approve",
                             &rule_label,
@@ -558,13 +566,13 @@ where
                             rule_label, method, path, prefix
                         );
                         audit::log_l7_policy_decision(
-                            ctx.audit_log,
+                            audit_log,
                             audit::ProxyMode::ConnectIntercept,
                             &approval_ctx,
-                            ctx.host,
-                            Some(ctx.port),
-                            &method,
-                            &path,
+                            host,
+                            Some(port),
+                            method,
+                            path,
                             nono::undo::NetworkAuditDecision::ApproveTimeout,
                             "approve",
                             &rule_label,
@@ -580,7 +588,7 @@ where
             EndpointPolicyOutcome::Deny { reason, rule_label } => {
                 let deny_reason = reason.unwrap_or("endpoint denied by policy");
                 audit::log_l7_policy_decision(
-                    ctx.audit_log,
+                    audit_log,
                     audit::ProxyMode::ConnectIntercept,
                     &audit::EventContext {
                         route_id: Some(prefix),
@@ -592,17 +600,16 @@ where
                         upstream: Some(&route.upstream),
                         ..audit::EventContext::default()
                     },
-                    ctx.host,
-                    Some(ctx.port),
-                    &method,
-                    &path,
+                    host,
+                    Some(port),
+                    method,
+                    path,
                     nono::undo::NetworkAuditDecision::Deny,
                     "deny",
                     &rule_label,
                     Some(deny_reason),
                 );
-                reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-                return Ok(());
+                return RouteSelection::Rejected(403);
             }
         }
     }
@@ -612,22 +619,21 @@ where
     if has_endpoint_only_route && !endpoint_authorized {
         let reason = format!(
             "endpoint rules denied {} {}: no rule matched on {}:{}",
-            req.method, req.path, ctx.host, ctx.port
+            method, path, host, port
         );
         warn!("tls_intercept: {}", reason);
         audit::log_denied(
-            ctx.audit_log,
+            audit_log,
             audit::ProxyMode::ConnectIntercept,
             &audit::EventContext {
                 denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
                 ..audit::EventContext::default()
             },
-            ctx.host,
-            ctx.port,
+            host,
+            port,
             &reason,
         );
-        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-        return Ok(());
+        return RouteSelection::Rejected(403);
     }
 
     // Ambiguity applies only to credential-injection routes within the active
@@ -642,25 +648,24 @@ where
         let reason = format!(
             "ambiguous route: {} {} matched {} credential routes: {:?}. \
              Narrow endpoint rules so each request matches exactly one route.",
-            req.method,
-            req.path,
+            method,
+            path,
             names.len(),
             names
         );
         warn!("tls_intercept: {}", reason);
         audit::log_denied(
-            ctx.audit_log,
+            audit_log,
             audit::ProxyMode::ConnectIntercept,
             &audit::EventContext {
                 denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
                 ..audit::EventContext::default()
             },
-            ctx.host,
-            ctx.port,
+            host,
+            port,
             &reason,
         );
-        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-        return Ok(());
+        return RouteSelection::Rejected(403);
     }
 
     let selected = credential_layer
@@ -668,18 +673,59 @@ where
         .copied()
         .or_else(|| matched_passthrough.first().copied())
         .or_else(|| catchall_passthrough.first().copied());
-    let service: Option<&str> = selected.map(|(s, _)| s);
-    let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
-    match service {
+    match selected.map(|(s, _)| s) {
         Some(svc) => debug!(
             "tls_intercept: selected route '{}' for {} {}",
-            svc, req.method, req.path
+            svc, method, path
         ),
         None => debug!(
             "tls_intercept: no endpoint_rules matched {} {}, forwarding without credentials",
-            req.method, req.path
+            method, path
         ),
     }
+    RouteSelection::Selected(selected)
+}
+
+/// Read one inner HTTP/1.1 request, select the matching route, inject
+/// credentials if matched, and forward upstream.
+async fn handle_inner_request<S>(tls_stream: &mut S, ctx: &InterceptCtx<'_>) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let req = match parse_inner_request(tls_stream).await? {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+    debug!("tls_intercept: inner request {} {}", req.method, req.path);
+
+    // Endpoint authorization + credential route selection. Shared with the
+    // HTTP/2 path via [`select_intercept_route`] so the two protocols cannot
+    // diverge in L7 policy enforcement.
+    let method = req.method.clone();
+    let path = req.path.clone();
+    let selected = match select_intercept_route(
+        &ctx.route_store,
+        ctx.host,
+        ctx.port,
+        &method,
+        &path,
+        ctx.audit_log,
+        ctx.approval_backends.as_ref(),
+    )
+    .await
+    {
+        RouteSelection::Rejected(status) => {
+            let msg = match status {
+                502 => "Bad Gateway",
+                _ => "Forbidden",
+            };
+            reverse::send_error_generic(tls_stream, status, msg).await?;
+            return Ok(());
+        }
+        RouteSelection::Selected(selected) => selected,
+    };
+    let service: Option<&str> = selected.map(|(s, _)| s);
+    let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
 
     let static_cred = service.and_then(|s| ctx.credential_store.get(s));
     let cmd_route = service.and_then(|s| ctx.credential_store.get_cmd(s));

@@ -16,7 +16,7 @@ use crate::error::{ProxyError, Result};
 use crate::forward::{self, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
 use crate::reverse;
 use crate::route::RouteStore;
-use crate::tls_intercept::handle::InterceptCtx;
+use crate::tls_intercept::handle::{self, InterceptCtx, RouteSelection};
 use bytes::Bytes;
 use h2::{RecvStream, SendStream};
 use http::{HeaderMap, HeaderValue, Request, Response};
@@ -38,6 +38,7 @@ struct SharedH2Ctx {
     route_store: Arc<RouteStore>,
     credential_store: Arc<CredentialStore>,
     audit_log: Option<audit::SharedAuditLog>,
+    approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
 }
 
 /// Accept an h2 connection from the client, open an h2 connection to the
@@ -100,6 +101,7 @@ where
         route_store: Arc::clone(&ctx.route_store),
         credential_store: Arc::clone(&ctx.credential_store),
         audit_log: ctx.audit_log.cloned(),
+        approval_backends: ctx.approval_backends.clone(),
     };
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -209,96 +211,29 @@ async fn handle_h2_stream(
         method, path, ctx.host, ctx.port
     );
 
-    // Route selection (same logic as handle.rs forward_inner_request).
-    let host_port = format!("{}:{}", ctx.host.to_lowercase(), ctx.port);
-    let candidates = ctx.route_store.lookup_all_by_upstream(&host_port);
-    if candidates.is_empty() {
-        warn!(
-            "h2_forward: no route for {} after intercept handshake",
-            host_port
-        );
-        send_h2_error(&mut respond, 502)?;
-        return Ok(());
-    }
-
+    // Endpoint authorization + credential route selection. Shared with the
+    // HTTP/1.1 path via [`handle::select_intercept_route`] so the two protocols
+    // enforce identical L7 policy (deny / approve / default-deny). Using the
+    // legacy `endpoint_rules` API here would silently bypass endpoint_policy on
+    // gRPC traffic.
     let method_str = method.as_str().to_string();
-    let mut matches: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
-    let mut catch_all: Option<(&str, &crate::route::LoadedRoute)> = None;
-    let mut has_endpoint_only_route = false;
-    let mut endpoint_authorized = false;
-    for (prefix, route) in &candidates {
-        if route.endpoint_rules.is_empty() {
-            if catch_all.is_none() {
-                catch_all = Some((prefix, route));
-            }
-        } else if route.endpoint_rules.is_allowed(&method_str, &path) {
-            matches.push((prefix, route));
-            if !route.requires_managed_credential {
-                endpoint_authorized = true;
-            }
-        } else if !route.requires_managed_credential {
-            has_endpoint_only_route = true;
+    let selected = match handle::select_intercept_route(
+        &ctx.route_store,
+        &ctx.host,
+        ctx.port,
+        &method_str,
+        &path,
+        ctx.audit_log.as_ref(),
+        ctx.approval_backends.as_ref(),
+    )
+    .await
+    {
+        RouteSelection::Rejected(status) => {
+            send_h2_error(&mut respond, status)?;
+            return Ok(());
         }
-    }
-
-    // Endpoint-only authorization layer: if any _ep_ route exists for this
-    // upstream, the request must match at least one of their endpoint rules.
-    // This gates access BEFORE credential selection — a credential catch-all
-    // cannot bypass endpoint restrictions.
-    if has_endpoint_only_route && !endpoint_authorized {
-        let reason = format!(
-            "endpoint rules denied {} {}: no rule matched on {}:{}",
-            method_str, path, ctx.host, ctx.port
-        );
-        warn!("h2_forward: {}", reason);
-        audit::log_denied(
-            ctx.audit_log.as_ref(),
-            audit::ProxyMode::ConnectIntercept,
-            &audit::EventContext {
-                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
-                ..audit::EventContext::default()
-            },
-            &ctx.host,
-            ctx.port,
-            &reason,
-        );
-        send_h2_error(&mut respond, 403)?;
-        return Ok(());
-    }
-
-    // Ambiguous route check only applies to credential-injection routes.
-    let credential_matches: Vec<_> = matches
-        .iter()
-        .filter(|(_, route)| route.requires_managed_credential)
-        .collect();
-    if credential_matches.len() > 1 {
-        let names: Vec<_> = credential_matches.iter().map(|(p, _)| *p).collect();
-        warn!(
-            "h2_forward: ambiguous route: {} {} matched {:?}",
-            method_str, path, names
-        );
-        audit::log_denied(
-            ctx.audit_log.as_ref(),
-            audit::ProxyMode::ConnectIntercept,
-            &audit::EventContext {
-                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
-                ..audit::EventContext::default()
-            },
-            &ctx.host,
-            ctx.port,
-            "ambiguous route",
-        );
-        send_h2_error(&mut respond, 403)?;
-        return Ok(());
-    }
-
-    // Prefer the credential route over endpoint-only authorization routes.
-    let selected = matches
-        .iter()
-        .find(|(_, route)| route.requires_managed_credential)
-        .or(matches.first())
-        .copied()
-        .or(catch_all);
+        RouteSelection::Selected(selected) => selected,
+    };
     let service: Option<&str> = selected.map(|(s, _)| s);
     let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
     let cred = service.and_then(|s| ctx.credential_store.get(s));
@@ -1311,6 +1246,127 @@ mod tests {
                         response.status(),
                         403,
                         "endpoint-only route must deny unmatched requests"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    /// Regression test for the h1/h2 endpoint-policy divergence: a route
+    /// authored with the explicit `endpoint_policy` API (default deny + an
+    /// `allow` rule) and EMPTY legacy `endpoint_rules` must be enforced on the
+    /// h2/gRPC path. The legacy `endpoint_rules`-based selection treated such a
+    /// route as an unrestricted catch-all and forwarded denied requests.
+    #[tokio::test]
+    async fn h2_forward_enforces_explicit_endpoint_policy_default_deny() {
+        use crate::config::{
+            EndpointPolicyConfig, EndpointPolicyDecision, EndpointPolicyDefault, EndpointPolicyRule,
+        };
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, _rx) = spawn_mock_h2_upstream(&ca).await;
+
+        // Explicit policy: deny everything except GET /repos/my-org/**.
+        // No legacy endpoint_rules — so the legacy path would treat this as a
+        // catch-all and forward the request.
+        let routes = vec![RouteConfig {
+            prefix: "_ep_policy".to_string(),
+            upstream: format!("https://localhost:{}", upstream_port),
+            credential_key: None,
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: None,
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: Vec::new(),
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+            aws_auth: None,
+            endpoint_policy: Some(EndpointPolicyConfig {
+                default: EndpointPolicyDefault {
+                    decision: EndpointPolicyDecision::Deny,
+                    backend: None,
+                    timeout_secs: None,
+                },
+                deny: Vec::new(),
+                approve: Vec::new(),
+                allow: vec![EndpointPolicyRule {
+                    method: "GET".to_string(),
+                    path: "/repos/my-org/**".to_string(),
+                    backend: None,
+                    reason: None,
+                    timeout_secs: None,
+                }],
+            }),
+        }];
+        let route_store = RouteStore::load(&routes).unwrap();
+        let credential_store = CredentialStore::empty();
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let ctx = InterceptCtx {
+            route_id: Some("_ep_policy"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: None,
+            nonce_resolver: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    // Denied by default-deny (not GET /repos/my-org/**).
+                    let request = http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "https://localhost:{}/repos/victim-org/repo",
+                            upstream_port
+                        ))
+                        .body(())
+                        .unwrap();
+                    let (response_fut, _send_stream) =
+                        h2_client.send_request(request, true).unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        403,
+                        "explicit endpoint_policy default-deny must be enforced on h2"
                     );
 
                     drop(h2_client);
