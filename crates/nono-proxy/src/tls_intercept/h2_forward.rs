@@ -498,6 +498,94 @@ mod tests {
     use tokio::net::TcpListener;
     use zeroize::Zeroizing;
 
+    /// Capture backend that returns a fixed secret, for exercising the
+    /// command-backed credential path without a real supervisor.
+    #[derive(Debug)]
+    struct MockCaptureBackend {
+        secret: String,
+    }
+
+    impl crate::capture::CredentialCaptureBackend for MockCaptureBackend {
+        fn capture(
+            &self,
+            _request: crate::capture::CredentialCaptureRequest,
+        ) -> std::result::Result<
+            crate::capture::CredentialCaptureResponse,
+            crate::capture::CredentialCaptureError,
+        > {
+            Ok(crate::capture::CredentialCaptureResponse {
+                material: crate::capture::CredentialCaptureMaterial::Secret(Zeroizing::new(
+                    self.secret.clone(),
+                )),
+                metadata: crate::capture::CredentialCaptureMetadata::default(),
+            })
+        }
+    }
+
+    /// Capture backend that returns fully-materialized headers (the `Json`
+    /// output format), exercising the `Headers` material variant.
+    #[derive(Debug)]
+    struct MockHeaderCaptureBackend {
+        headers: Vec<(String, String)>,
+    }
+
+    impl crate::capture::CredentialCaptureBackend for MockHeaderCaptureBackend {
+        fn capture(
+            &self,
+            _request: crate::capture::CredentialCaptureRequest,
+        ) -> std::result::Result<
+            crate::capture::CredentialCaptureResponse,
+            crate::capture::CredentialCaptureError,
+        > {
+            let headers = self
+                .headers
+                .iter()
+                .map(|(name, value)| (name.clone(), Zeroizing::new(value.clone())))
+                .collect();
+            Ok(crate::capture::CredentialCaptureResponse {
+                material: crate::capture::CredentialCaptureMaterial::Headers(headers),
+                metadata: crate::capture::CredentialCaptureMetadata::default(),
+            })
+        }
+    }
+
+    /// Build a RouteStore + CredentialStore for a `cmd://` route so the
+    /// command-backed capture path is exercised.
+    fn make_cmd_route_stores(
+        host: &str,
+        port: u16,
+        tls_connector: &tokio_rustls::TlsConnector,
+    ) -> (RouteStore, CredentialStore) {
+        let routes = vec![RouteConfig {
+            prefix: "cmd-svc".to_string(),
+            upstream: format!("https://{}:{}", host, port),
+            credential_key: Some("cmd://my-cmd-cred".to_string()),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![EndpointRule {
+                method: "*".to_string(),
+                path: "/**".to_string(),
+            }],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+            aws_auth: None,
+            endpoint_policy: None,
+        }];
+        let route_store = RouteStore::load(&routes).unwrap();
+        let credential_store = CredentialStore::load_with_diagnostics(&routes, tls_connector)
+            .unwrap()
+            .store;
+        (route_store, credential_store)
+    }
+
     /// Build a TLS connector that trusts the given CA PEM and offers h2 ALPN.
     fn h2_tls_connector_trusting(ca_pem: &str) -> tokio_rustls::TlsConnector {
         use rustls::pki_types::pem::PemObject;
@@ -799,6 +887,247 @@ mod tests {
                     );
 
                     // Close client h2 so server_conn.accept() returns None.
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    #[tokio::test]
+    async fn h2_forward_injects_command_captured_credential() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let (route_store, credential_store) =
+            make_cmd_route_stores("localhost", upstream_port, &tls_connector);
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+        let capture_backend: Arc<dyn crate::capture::CredentialCaptureBackend> =
+            Arc::new(MockCaptureBackend {
+                secret: "captured-secret".to_string(),
+            });
+
+        let ctx = InterceptCtx {
+            route_id: Some("cmd-svc"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: Some(capture_backend),
+            nonce_resolver: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    let request = http::Request::builder()
+                        .method("POST")
+                        .uri(format!("https://localhost:{}/v1/resource", upstream_port))
+                        .header("content-type", "application/json")
+                        .body(())
+                        .unwrap();
+                    let (response_fut, mut send_stream) =
+                        h2_client.send_request(request, false).unwrap();
+                    send_stream.send_data(Bytes::from("{}"), true).unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(response.status(), 200);
+
+                    let (_method_path, headers) = rx.await.unwrap();
+                    assert_eq!(
+                        headers.get("authorization").map(|v| v.to_str().unwrap()),
+                        Some("Bearer captured-secret"),
+                        "command-captured credential must be injected on the h2 path"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    #[tokio::test]
+    async fn h2_forward_injects_command_captured_headers() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let (route_store, credential_store) =
+            make_cmd_route_stores("localhost", upstream_port, &tls_connector);
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+        // Headers-format capture: materializes into extra_headers with an empty
+        // primary header_value, exercising the other injection branch on h2.
+        let capture_backend: Arc<dyn crate::capture::CredentialCaptureBackend> =
+            Arc::new(MockHeaderCaptureBackend {
+                headers: vec![
+                    ("authorization".to_string(), "Bearer hdr-token".to_string()),
+                    ("x-extra".to_string(), "extra-val".to_string()),
+                ],
+            });
+
+        let ctx = InterceptCtx {
+            route_id: Some("cmd-svc"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: Some(capture_backend),
+            nonce_resolver: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    let request = http::Request::builder()
+                        .method("GET")
+                        .uri(format!("https://localhost:{}/v1/resource", upstream_port))
+                        .body(())
+                        .unwrap();
+                    let (response_fut, _send_stream) =
+                        h2_client.send_request(request, true).unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(response.status(), 200);
+
+                    let (_method_path, headers) = rx.await.unwrap();
+                    assert_eq!(
+                        headers.get("authorization").map(|v| v.to_str().unwrap()),
+                        Some("Bearer hdr-token"),
+                        "captured header must be injected on the h2 path"
+                    );
+                    assert_eq!(
+                        headers.get("x-extra").map(|v| v.to_str().unwrap()),
+                        Some("extra-val"),
+                        "captured extra header must be injected on the h2 path"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    #[tokio::test]
+    async fn h2_forward_denies_command_credential_without_backend() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, _rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let (route_store, credential_store) =
+            make_cmd_route_stores("localhost", upstream_port, &tls_connector);
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        // No capture backend configured: a cmd:// route must be denied (503),
+        // mirroring the gate the HTTP/1.1 path applies.
+        let ctx = InterceptCtx {
+            route_id: Some("cmd-svc"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: None,
+            nonce_resolver: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    let request = http::Request::builder()
+                        .method("POST")
+                        .uri(format!("https://localhost:{}/v1/resource", upstream_port))
+                        .body(())
+                        .unwrap();
+                    let (response_fut, _send_stream) =
+                        h2_client.send_request(request, true).unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        503,
+                        "cmd:// route without a capture backend must be denied on h2"
+                    );
+
                     drop(h2_client);
                     conn_handle.abort();
                     let _ = conn_handle.await;
