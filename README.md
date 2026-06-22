@@ -48,7 +48,7 @@ From here **fork the config**, tweak it, theme it, make it your own, and share i
 brew install nono
 ```
 
-**Other platforms** — Debian/Ubuntu, Fedora, Arch, RHEL, openSUSE, WSL2, and Nix: [see install instructions](https://docs.nono.sh/docs/installation).
+**Other platforms** — Debian/Ubuntu, Fedora, Arch, RHEL, openSUSE, WSL2, and Nix: [see install instructions](https://nono.sh/docs/cli/getting_started/installation).
 
 ## Run it!
 
