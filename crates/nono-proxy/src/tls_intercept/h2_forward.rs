@@ -10,6 +10,7 @@
 //! streaming.
 
 use crate::audit;
+use crate::capture::CredentialCaptureBackend;
 use crate::config::InjectMode;
 use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
@@ -39,6 +40,7 @@ struct SharedH2Ctx {
     credential_store: Arc<CredentialStore>,
     audit_log: Option<audit::SharedAuditLog>,
     approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+    credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
 }
 
 /// Accept an h2 connection from the client, open an h2 connection to the
@@ -102,6 +104,7 @@ where
         credential_store: Arc::clone(&ctx.credential_store),
         audit_log: ctx.audit_log.cloned(),
         approval_backends: ctx.approval_backends.clone(),
+        credential_capture_backend: ctx.credential_capture_backend.clone(),
     };
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -236,46 +239,41 @@ async fn handle_h2_stream(
     };
     let service: Option<&str> = selected.map(|(s, _)| s);
     let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
-    let cred = service.and_then(|s| ctx.credential_store.get(s));
 
-    if let Some(rt) = route
-        && rt.missing_managed_credential(
-            cred.is_some(),
-            service
-                .and_then(|s| ctx.credential_store.get_oauth2(s))
-                .is_some(),
-            service
-                .and_then(|s| ctx.credential_store.get_aws(s))
-                .is_some(),
-        )
+    // Managed credential gating, AWS handling, and command-backed capture are
+    // shared with the HTTP/1.1 path via [`handle::resolve_managed_credential`]
+    // so the two protocols cannot diverge (e.g. h2 must not forward an unsigned
+    // AWS request just because it lacks a signing branch).
+    let resolved = match handle::resolve_managed_credential(
+        &ctx.credential_store,
+        ctx.credential_capture_backend.as_ref(),
+        ctx.audit_log.as_ref(),
+        &ctx.host,
+        ctx.port,
+        service,
+        route,
+        &method_str,
+        &path,
+    )
+    .await
     {
-        warn!("h2_forward: managed credential unavailable for route");
-        send_h2_error(&mut respond, 503)?;
-        return Ok(());
-    }
+        handle::CredentialResolution::Rejected(status) => {
+            send_h2_error(&mut respond, status)?;
+            return Ok(());
+        }
+        handle::CredentialResolution::Forward { credential } => credential,
+    };
+    let cred = resolved.as_ref().map(|c| c.as_ref());
 
     // Build transformed path (credential injection into path/query if needed).
-    let transformed_path = if let Some(cred) = cred {
-        let cleaned = reverse::strip_proxy_artifacts(
-            &path,
-            &cred.proxy_inject_mode,
-            &cred.inject_mode,
-            cred.proxy_path_pattern.as_deref(),
-            cred.proxy_query_param_name.as_deref(),
-        );
-        reverse::transform_path_for_mode(
-            &cred.inject_mode,
-            &cleaned,
-            cred.path_pattern.as_deref(),
-            cred.path_replacement.as_deref(),
-            cred.query_param_name.as_deref(),
-            &cred.raw_credential,
-        )?
-    } else {
-        path.clone()
-    };
+    // Shared with the HTTP/1.1 path so URL-mode injection cannot diverge.
+    let transformed_path = reverse::transform_path_for_credential(cred, &path)?;
 
-    // Build upstream request headers.
+    // Build upstream request headers. The set of credential header names that
+    // must be stripped from the inbound request (and re-injected below) is
+    // computed by the shared helper so the h2 path strips/injects exactly the
+    // same headers as HTTP/1.1 — including any `extra_headers`.
+    let injected_header_names = reverse::injected_credential_header_names(cred);
     let mut upstream_headers = HeaderMap::new();
     for (name, value) in request.headers() {
         let name_lower = name.as_str().to_lowercase();
@@ -284,23 +282,31 @@ async fn handle_h2_stream(
         {
             continue;
         }
-        // Skip the credential header if we're injecting a replacement.
-        if let Some(cred) = cred
-            && matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
-            && name_lower == cred.header_name.to_lowercase()
-        {
+        // Skip any header the credential will inject (primary + extra), so a
+        // client-supplied copy cannot survive alongside the injected value.
+        if injected_header_names.contains(&name_lower) {
             continue;
         }
         upstream_headers.insert(name.clone(), value.clone());
     }
 
-    // Inject credential header.
+    // Inject credential headers (primary + extra) for header/basic-auth modes.
     if let Some(cred) = cred
         && matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
-        && let Ok(val) = HeaderValue::from_str(cred.header_value.as_str())
-        && let Ok(name) = http::header::HeaderName::from_bytes(cred.header_name.as_bytes())
     {
-        upstream_headers.insert(name, val);
+        if !cred.header_value.is_empty()
+            && let Ok(val) = HeaderValue::from_str(cred.header_value.as_str())
+            && let Ok(name) = http::header::HeaderName::from_bytes(cred.header_name.as_bytes())
+        {
+            upstream_headers.insert(name, val);
+        }
+        for (header_name, header_value) in &cred.extra_headers {
+            if let Ok(val) = HeaderValue::from_str(header_value.as_str())
+                && let Ok(name) = http::header::HeaderName::from_bytes(header_name.as_bytes())
+            {
+                upstream_headers.insert(name, val);
+            }
+        }
     }
 
     // Build upstream h2 request.
@@ -370,21 +376,12 @@ async fn handle_h2_stream(
         audit::ProxyMode::ConnectIntercept,
         &audit::EventContext {
             route_id: service,
-            auth_mechanism: cred.map(|c| match c.proxy_inject_mode {
-                InjectMode::Header | InjectMode::BasicAuth => {
-                    nono::undo::NetworkAuditAuthMechanism::PhantomHeader
-                }
-                InjectMode::UrlPath => nono::undo::NetworkAuditAuthMechanism::PhantomPath,
-                InjectMode::QueryParam => nono::undo::NetworkAuditAuthMechanism::PhantomQuery,
-            }),
+            auth_mechanism: cred
+                .map(|c| reverse::auth_mechanism_for_inject_mode(&c.proxy_inject_mode)),
             auth_outcome: cred.map(|_| nono::undo::NetworkAuditAuthOutcome::Succeeded),
             managed_credential_active: Some(cred.is_some()),
-            injection_mode: cred.map(|c| match c.inject_mode {
-                InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
-                InjectMode::UrlPath => nono::undo::NetworkAuditInjectionMode::UrlPath,
-                InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
-                InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
-            }),
+            injection_mode: cred
+                .map(|c| reverse::audit_injection_mode_for_inject_mode(&c.inject_mode)),
             denial_category: None,
             ..audit::EventContext::default()
         },
@@ -595,6 +592,37 @@ mod tests {
         store
     }
 
+    /// Build a CredentialStore whose credential carries an extra header in
+    /// addition to the primary `Authorization` header.
+    fn make_credential_store_with_extra(
+        secret: &str,
+        extra_name: &str,
+        extra_value: &str,
+    ) -> CredentialStore {
+        let mut store = CredentialStore::empty();
+        store.insert_for_test(
+            "test-svc".to_string(),
+            LoadedCredential {
+                inject_mode: InjectMode::Header,
+                proxy_inject_mode: InjectMode::Header,
+                raw_credential: Zeroizing::new(secret.to_string()),
+                header_name: "Authorization".to_string(),
+                proxy_header_name: "Authorization".to_string(),
+                header_value: Zeroizing::new(format!("Bearer {}", secret)),
+                extra_headers: vec![(
+                    extra_name.to_string(),
+                    Zeroizing::new(extra_value.to_string()),
+                )],
+                path_pattern: None,
+                proxy_path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy_query_param_name: None,
+            },
+        );
+        store
+    }
+
     /// Spawn a mock h2 upstream server that captures received request headers
     /// and responds with 200. Returns the captured headers via the channel.
     async fn spawn_mock_h2_upstream(
@@ -779,6 +807,220 @@ mod tests {
         })
         .await;
         assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    #[tokio::test]
+    async fn h2_forward_injects_extra_headers_and_replaces_client_copy() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let route_store = make_route_store(
+            "localhost",
+            upstream_port,
+            vec![EndpointRule {
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+            }],
+        );
+        // Credential carries a second managed header beyond Authorization.
+        let credential_store =
+            make_credential_store_with_extra("sk-test-secret-key", "x-api-key", "managed-key");
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let ctx = InterceptCtx {
+            route_id: Some("test-svc"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: None,
+            nonce_resolver: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    // Client smuggles its own x-api-key — it must be replaced by
+                    // the managed value, not forwarded.
+                    let request = http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "https://localhost:{}/v1/chat/completions",
+                            upstream_port
+                        ))
+                        .header("content-type", "application/json")
+                        .header("x-api-key", "client-supplied-attacker-key")
+                        .body(())
+                        .unwrap();
+                    let (response_fut, mut send_stream) =
+                        h2_client.send_request(request, false).unwrap();
+                    send_stream
+                        .send_data(Bytes::from(r#"{"model":"gpt-4"}"#), true)
+                        .unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(response.status(), 200);
+
+                    let (_method_path, headers) = rx.await.unwrap();
+                    assert_eq!(
+                        headers.get("authorization").map(|v| v.to_str().unwrap()),
+                        Some("Bearer sk-test-secret-key")
+                    );
+                    // Extra managed header must be injected, and the client's
+                    // copy must not survive.
+                    let api_keys: Vec<&str> = headers
+                        .get_all("x-api-key")
+                        .iter()
+                        .map(|v| v.to_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        api_keys,
+                        vec!["managed-key"],
+                        "extra header must be injected and the client copy dropped"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    /// Regression test for the h1/h2 AWS divergence: an `aws_auth` route is
+    /// gated identically on both protocols. SigV4 signing is not implemented,
+    /// so the request must be rejected (501) rather than forwarded upstream
+    /// unsigned. Before the shared `resolve_managed_credential`, the h2 path had
+    /// no AWS branch and would forward the request without a signature.
+    #[tokio::test]
+    async fn h2_forward_rejects_aws_route_without_forwarding() {
+        use crate::config::AwsAuthConfig;
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+
+        // Route configured for AWS SigV4 (signing not yet implemented).
+        let routes = vec![RouteConfig {
+            prefix: "aws-svc".to_string(),
+            upstream: format!("https://localhost:{}", upstream_port),
+            credential_key: None,
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: None,
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![EndpointRule {
+                method: "*".to_string(),
+                path: "/**".to_string(),
+            }],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+            aws_auth: Some(AwsAuthConfig::default()),
+            endpoint_policy: None,
+        }];
+        let route_store = RouteStore::load(&routes).unwrap();
+        let credential_store = CredentialStore::load_with_diagnostics(&routes, &tls_connector)
+            .unwrap()
+            .store;
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let ctx = InterceptCtx {
+            route_id: Some("aws-svc"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: None,
+            nonce_resolver: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    let request = http::Request::builder()
+                        .method("GET")
+                        .uri(format!("https://localhost:{}/some/api", upstream_port))
+                        .body(())
+                        .unwrap();
+                    let (response_fut, _send_stream) =
+                        h2_client.send_request(request, true).unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        501,
+                        "AWS route must be rejected (not forwarded unsigned) on h2"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+
+        // The upstream must NOT have received the request.
+        assert!(
+            rx.await.is_err(),
+            "AWS request must not be forwarded upstream unsigned"
+        );
     }
 
     #[tokio::test]

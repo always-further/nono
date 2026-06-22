@@ -36,7 +36,9 @@ use zeroize::Zeroizing;
 /// Maximum request body size (16 MiB). Prevents DoS from malicious Content-Length.
 const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
 
-fn auth_mechanism_for_inject_mode(mode: &InjectMode) -> nono::undo::NetworkAuditAuthMechanism {
+pub(crate) fn auth_mechanism_for_inject_mode(
+    mode: &InjectMode,
+) -> nono::undo::NetworkAuditAuthMechanism {
     match mode {
         InjectMode::Header | InjectMode::BasicAuth => {
             nono::undo::NetworkAuditAuthMechanism::PhantomHeader
@@ -46,7 +48,7 @@ fn auth_mechanism_for_inject_mode(mode: &InjectMode) -> nono::undo::NetworkAudit
     }
 }
 
-fn audit_injection_mode_for_inject_mode(
+pub(crate) fn audit_injection_mode_for_inject_mode(
     mode: &InjectMode,
 ) -> nono::undo::NetworkAuditInjectionMode {
     match mode {
@@ -2041,6 +2043,37 @@ fn inject_credential_structured(
         }
         InjectMode::UrlPath | InjectMode::QueryParam => builder,
     }
+}
+
+/// Apply proxy-artifact stripping and upstream credential injection to a
+/// request path for the given credential.
+///
+/// Combines [`strip_proxy_artifacts`] and [`transform_path_for_mode`] into the
+/// single transformation both the HTTP/1.1 and HTTP/2 CONNECT-intercept paths
+/// need, so they cannot diverge. When `cred` is `None` the path is returned
+/// unchanged (passthrough).
+pub(crate) fn transform_path_for_credential(
+    cred: Option<&LoadedCredential>,
+    path: &str,
+) -> Result<String> {
+    let Some(cred) = cred else {
+        return Ok(path.to_string());
+    };
+    let cleaned = strip_proxy_artifacts(
+        path,
+        &cred.proxy_inject_mode,
+        &cred.inject_mode,
+        cred.proxy_path_pattern.as_deref(),
+        cred.proxy_query_param_name.as_deref(),
+    );
+    transform_path_for_mode(
+        &cred.inject_mode,
+        &cleaned,
+        cred.path_pattern.as_deref(),
+        cred.path_replacement.as_deref(),
+        cred.query_param_name.as_deref(),
+        &cred.raw_credential,
+    )
 }
 
 pub(crate) fn inject_credential_for_mode(cred: &LoadedCredential, request: &mut Zeroizing<String>) {

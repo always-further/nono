@@ -13,7 +13,7 @@
 
 use crate::audit;
 use crate::capture::CredentialCaptureBackend;
-use crate::config::{EndpointPolicyOutcome, InjectMode};
+use crate::config::EndpointPolicyOutcome;
 use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
@@ -686,6 +686,162 @@ pub(crate) async fn select_intercept_route<'a>(
     RouteSelection::Selected(selected)
 }
 
+/// A managed credential resolved for an intercept request. Borrowed for static
+/// credentials (the hot path; no secret copy), owned for command-backed
+/// captures which are minted per request.
+pub(crate) enum ResolvedCredential<'a> {
+    Static(&'a crate::credential::LoadedCredential),
+    Captured(Box<crate::credential::LoadedCredential>),
+}
+
+impl ResolvedCredential<'_> {
+    pub(crate) fn as_ref(&self) -> &crate::credential::LoadedCredential {
+        match self {
+            ResolvedCredential::Static(cred) => cred,
+            ResolvedCredential::Captured(cred) => cred,
+        }
+    }
+}
+
+/// Outcome of resolving the managed credential for an already-authorized
+/// intercept request. Shared by the HTTP/1.1 and HTTP/2 forwarders so the two
+/// protocols apply identical credential gating, AWS handling, and command
+/// capture — a divergence here would let one protocol forward a request the
+/// other rejects (e.g. an unsigned AWS request, or one missing a managed key).
+pub(crate) enum CredentialResolution<'a> {
+    /// The request must be rejected with this HTTP status; the denial has
+    /// already been audited.
+    Rejected(u16),
+    /// Forward the request, optionally injecting `credential`.
+    Forward {
+        credential: Option<ResolvedCredential<'a>>,
+    },
+}
+
+/// Resolve the managed credential for an authorized intercept request.
+///
+/// Runs the shared post-selection credential pipeline: the
+/// [`LoadedRoute::missing_managed_credential`] gate, the AWS SigV4 stub (not
+/// yet implemented → reject), and command-backed credential capture. Static
+/// credentials are returned cloned. OAuth2 routes are not injected on the
+/// CONNECT-intercept path (parity with the legacy behavior); their presence
+/// only satisfies the gate.
+///
+/// This is the single source of truth shared by [`handle_inner_request`]
+/// (HTTP/1.1) and [`super::h2_forward`] (HTTP/2).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_managed_credential<'a>(
+    credential_store: &'a CredentialStore,
+    credential_capture_backend: Option<&Arc<dyn CredentialCaptureBackend>>,
+    audit_log: Option<&audit::SharedAuditLog>,
+    host: &str,
+    port: u16,
+    service: Option<&str>,
+    route: Option<&crate::route::LoadedRoute>,
+    method: &str,
+    path: &str,
+) -> CredentialResolution<'a> {
+    let static_cred = service.and_then(|s| credential_store.get(s));
+    let cmd_route = service.and_then(|s| credential_store.get_cmd(s));
+    let oauth2_route = service.and_then(|s| credential_store.get_oauth2(s));
+    let aws_route = service.and_then(|s| credential_store.get_aws(s));
+
+    if let Some(rt) = route
+        && rt.missing_managed_credential(
+            static_cred.is_some() || (cmd_route.is_some() && credential_capture_backend.is_some()),
+            oauth2_route.is_some(),
+            aws_route.is_some(),
+        )
+    {
+        let svc = service.unwrap_or("unknown");
+        let reason = format!(
+            "managed credential unavailable for route '{}': intercepted request requires proxy-supplied auth",
+            svc
+        );
+        warn!("tls_intercept: {}", reason);
+        audit::log_denied(
+            audit_log,
+            audit::ProxyMode::ConnectIntercept,
+            &audit::EventContext {
+                route_id: service,
+                auth_mechanism: rt.managed_auth_mechanism.clone(),
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                managed_credential_active: Some(false),
+                injection_mode: rt.managed_injection_mode.clone(),
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                ),
+                ..audit::EventContext::default()
+            },
+            host,
+            port,
+            &reason,
+        );
+        return CredentialResolution::Rejected(503);
+    }
+
+    // AWS SigV4 signing is not yet implemented. Return 501 so the caller knows
+    // the route exists but is not functional. Crucially this rejects rather
+    // than forwarding an unsigned request — the HTTP/2 path must not silently
+    // pass AWS traffic upstream just because it lacks a signing branch.
+    if aws_route.is_some() {
+        return CredentialResolution::Rejected(501);
+    }
+
+    // Command-backed credential capture (mints a per-request credential).
+    if let (Some(svc), Some(cmd)) = (service, cmd_route)
+        && static_cred.is_none()
+    {
+        match reverse::capture_cmd_credential(
+            cmd,
+            svc,
+            route.map(|r| r.upstream.as_str()).unwrap_or(""),
+            path,
+            method,
+            host,
+            port,
+            audit::ProxyMode::ConnectIntercept,
+            audit_log,
+            credential_capture_backend.cloned(),
+        )
+        .await
+        {
+            Ok(credential) => {
+                return CredentialResolution::Forward {
+                    credential: Some(ResolvedCredential::Captured(Box::new(credential))),
+                };
+            }
+            Err(err) => {
+                let reason = err.to_string();
+                warn!("tls_intercept: {}", reason);
+                audit::log_denied(
+                    audit_log,
+                    audit::ProxyMode::ConnectIntercept,
+                    &audit::EventContext {
+                        route_id: service,
+                        auth_mechanism: route.and_then(|r| r.managed_auth_mechanism.clone()),
+                        auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                        managed_credential_active: Some(false),
+                        injection_mode: route.and_then(|r| r.managed_injection_mode.clone()),
+                        denial_category: Some(
+                            nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                        ),
+                        ..audit::EventContext::default()
+                    },
+                    host,
+                    port,
+                    &reason,
+                );
+                return CredentialResolution::Rejected(503);
+            }
+        }
+    }
+
+    CredentialResolution::Forward {
+        credential: static_cred.map(ResolvedCredential::Static),
+    }
+}
+
 /// Read one inner HTTP/1.1 request, select the matching route, inject
 /// credentials if matched, and forward upstream.
 async fn handle_inner_request<S>(tls_stream: &mut S, ctx: &InterceptCtx<'_>) -> Result<()>
@@ -727,123 +883,41 @@ where
     let service: Option<&str> = selected.map(|(s, _)| s);
     let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
 
-    let static_cred = service.and_then(|s| ctx.credential_store.get(s));
-    let cmd_route = service.and_then(|s| ctx.credential_store.get_cmd(s));
+    // OAuth2 presence only affects the audit `managed_credential_active` flag
+    // on this path; injection is not performed for intercepted requests.
     let oauth2_route = service.and_then(|s| ctx.credential_store.get_oauth2(s));
-    let aws_route = service.and_then(|s| ctx.credential_store.get_aws(s));
 
-    if let Some(rt) = route
-        && rt.missing_managed_credential(
-            static_cred.is_some()
-                || (cmd_route.is_some() && ctx.credential_capture_backend.is_some()),
-            oauth2_route.is_some(),
-            aws_route.is_some(),
-        )
+    // Managed credential gating, AWS handling, and command-backed capture are
+    // shared with the HTTP/2 path via [`resolve_managed_credential`] so the two
+    // protocols cannot diverge (e.g. forwarding an unsigned AWS request).
+    let resolved = match resolve_managed_credential(
+        &ctx.credential_store,
+        ctx.credential_capture_backend.as_ref(),
+        ctx.audit_log,
+        ctx.host,
+        ctx.port,
+        service,
+        route,
+        &method,
+        &path,
+    )
+    .await
     {
-        let svc = service.unwrap_or("unknown");
-        let reason = format!(
-            "managed credential unavailable for route '{}': intercepted request requires proxy-supplied auth",
-            svc
-        );
-        warn!("tls_intercept: {}", reason);
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::ConnectIntercept,
-            &audit::EventContext {
-                route_id: service,
-                auth_mechanism: rt.managed_auth_mechanism.clone(),
-                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
-                managed_credential_active: Some(false),
-                injection_mode: rt.managed_injection_mode.clone(),
-                denial_category: Some(
-                    nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
-                ),
-                ..audit::EventContext::default()
-            },
-            ctx.host,
-            ctx.port,
-            &reason,
-        );
-        reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
-        return Ok(());
-    }
-
-    // AWS SigV4 signing is not yet implemented. Return 501 so the caller
-    // knows the route exists but is not functional. This branch will be
-    // replaced with real SigV4 signing in a follow-up.
-    if aws_route.is_some() {
-        reverse::send_error_generic(tls_stream, 501, "Not Implemented").await?;
-        return Ok(());
-    }
-
-    let captured_credential = if let (Some(svc), Some(cmd)) = (service, cmd_route)
-        && static_cred.is_none()
-    {
-        match reverse::capture_cmd_credential(
-            cmd,
-            svc,
-            route.map(|r| r.upstream.as_str()).unwrap_or(""),
-            &path,
-            &method,
-            ctx.host,
-            ctx.port,
-            audit::ProxyMode::ConnectIntercept,
-            ctx.audit_log,
-            ctx.credential_capture_backend.clone(),
-        )
-        .await
-        {
-            Ok(credential) => Some(credential),
-            Err(err) => {
-                let reason = err.to_string();
-                warn!("tls_intercept: {}", reason);
-                audit::log_denied(
-                    ctx.audit_log,
-                    audit::ProxyMode::ConnectIntercept,
-                    &audit::EventContext {
-                        route_id: service,
-                        auth_mechanism: route.and_then(|r| r.managed_auth_mechanism.clone()),
-                        auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
-                        managed_credential_active: Some(false),
-                        injection_mode: route.and_then(|r| r.managed_injection_mode.clone()),
-                        denial_category: Some(
-                            nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
-                        ),
-                        ..audit::EventContext::default()
-                    },
-                    ctx.host,
-                    ctx.port,
-                    &reason,
-                );
-                reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
-                return Ok(());
-            }
+        CredentialResolution::Rejected(status) => {
+            let msg = match status {
+                501 => "Not Implemented",
+                _ => "Service Unavailable",
+            };
+            reverse::send_error_generic(tls_stream, status, msg).await?;
+            return Ok(());
         }
-    } else {
-        None
+        CredentialResolution::Forward { credential } => credential,
     };
-    let cred = static_cred.or(captured_credential.as_ref());
+    let cred = resolved.as_ref().map(|c| c.as_ref());
 
     // --- Path / credential transformation ---
-    let transformed_path = if let Some(cred) = cred {
-        let cleaned = reverse::strip_proxy_artifacts(
-            &req.path,
-            &cred.proxy_inject_mode,
-            &cred.inject_mode,
-            cred.proxy_path_pattern.as_deref(),
-            cred.proxy_query_param_name.as_deref(),
-        );
-        reverse::transform_path_for_mode(
-            &cred.inject_mode,
-            &cleaned,
-            cred.path_pattern.as_deref(),
-            cred.path_replacement.as_deref(),
-            cred.query_param_name.as_deref(),
-            &cred.raw_credential,
-        )?
-    } else {
-        req.path.clone()
-    };
+    // Shared with the HTTP/2 path so URL-mode injection cannot diverge.
+    let transformed_path = reverse::transform_path_for_credential(cred, &req.path)?;
 
     // --- Resolve upstream IPs (DNS-rebind-safe via filter) ---
     let resolved_addrs = match resolve_upstream_or_deny(
@@ -852,12 +926,8 @@ where
         audit::EventContext {
             route_id: service,
             managed_credential_active: Some(cred.is_some() || oauth2_route.is_some()),
-            injection_mode: cred.map(|c| match c.inject_mode {
-                InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
-                InjectMode::UrlPath => nono::undo::NetworkAuditInjectionMode::UrlPath,
-                InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
-                InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
-            }),
+            injection_mode: cred
+                .map(|c| reverse::audit_injection_mode_for_inject_mode(&c.inject_mode)),
             ..audit::EventContext::default()
         },
     )
@@ -925,21 +995,10 @@ where
     };
     let event_ctx = audit::EventContext {
         route_id: service,
-        auth_mechanism: cred.map(|c| match c.proxy_inject_mode {
-            InjectMode::Header | InjectMode::BasicAuth => {
-                nono::undo::NetworkAuditAuthMechanism::PhantomHeader
-            }
-            InjectMode::UrlPath => nono::undo::NetworkAuditAuthMechanism::PhantomPath,
-            InjectMode::QueryParam => nono::undo::NetworkAuditAuthMechanism::PhantomQuery,
-        }),
+        auth_mechanism: cred.map(|c| reverse::auth_mechanism_for_inject_mode(&c.proxy_inject_mode)),
         auth_outcome: cred.map(|_| nono::undo::NetworkAuditAuthOutcome::Succeeded),
         managed_credential_active: Some(cred.is_some() || oauth2_route.is_some()),
-        injection_mode: cred.map(|c| match c.inject_mode {
-            InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
-            InjectMode::UrlPath => nono::undo::NetworkAuditInjectionMode::UrlPath,
-            InjectMode::QueryParam => nono::undo::NetworkAuditInjectionMode::QueryParam,
-            InjectMode::BasicAuth => nono::undo::NetworkAuditInjectionMode::BasicAuth,
-        }),
+        injection_mode: cred.map(|c| reverse::audit_injection_mode_for_inject_mode(&c.inject_mode)),
         denial_category: None,
         ..audit::EventContext::default()
     };
