@@ -11,7 +11,7 @@
 <p>
   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"/></a>
   <a href="https://github.com/always-further/nono/actions/workflows/ci.yml"><img src="https://github.com/always-further/nono/actions/workflows/ci.yml/badge.svg" alt="CI Status"/></a>
-  <a href="https://www.bestpractices.dev/projects/13332"><img src="https://www.bestpractices.dev/projects/13332/badge"></a>
+  <a href="https://www.bestpractices.dev/projects/13332"><img src="https://www.bestpractices.dev/projects/13332/badge" alt="OpenSSF Best Practices"/></a>
   <a href="https://docs.nono.sh"><img src="https://img.shields.io/badge/Docs-docs.nono.sh-green.svg" alt="Documentation"/></a>
 </p>
 <p>
