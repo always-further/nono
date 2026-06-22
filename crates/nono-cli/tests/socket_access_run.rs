@@ -43,11 +43,13 @@ fn run_nono(args: &[&str], home: &Path, cwd: &Path) -> Output {
         .expect("failed to run nono")
 }
 
-// Socket paths must stay under the 104-byte SUN_LEN limit; use /tmp directly.
+// Socket paths must stay under the 104-byte SUN_LEN limit; use /tmp directly
+// rather than std::env::temp_dir() which on macOS expands to a long path
+// under /var/folders/... that can exceed the limit.
 fn short_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("nono-sock-")
-        .tempdir_in(std::env::temp_dir())
+        .tempdir_in(std::path::Path::new("/tmp"))
         .expect("tempdir in /tmp")
 }
 

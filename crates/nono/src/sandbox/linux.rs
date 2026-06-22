@@ -3767,7 +3767,7 @@ mod tests {
 
             // Install the proxy filter (no bind ports).
             // This requires PR_SET_NO_NEW_PRIVS first.
-            let result = install_seccomp_proxy_filter(false, report_pipe[1]);
+            let result = install_seccomp_proxy_filter(false);
             if result.is_err() {
                 // Seccomp not available on this system
                 let payload: [u8; 3] = [2, 2, 2]; // skip sentinel
@@ -3944,7 +3944,7 @@ mod tests {
 
             // Install filter with `has_bind_ports=false` — this is the
             // exact configuration the #685 bug manifested under.
-            let notify_fd = match install_seccomp_proxy_filter(false, report_pipe[1]) {
+            let notify_fd = match install_seccomp_proxy_filter(false) {
                 Ok(fd) => fd,
                 Err(_) => {
                     // Seccomp unavailable — skip via sentinel.
@@ -4169,7 +4169,7 @@ mod tests {
             // Install proxy filter with has_bind_ports=false. As of the
             // #685 fix, bind() now routes to USER_NOTIF — so a handler
             // IS required even for the "block all bind" policy.
-            let notify_fd = match install_seccomp_proxy_filter(false, report_pipe[1]) {
+            let notify_fd = match install_seccomp_proxy_filter(false) {
                 Ok(fd) => fd,
                 Err(_) => {
                     // Seccomp not available — skip.

@@ -1072,12 +1072,20 @@ pub fn execute_supervised(
                             // The parent reads this number and calls pidfd_getfd.
                             let fd_num = proxy_notify_fd.as_raw_fd();
                             let fd_bytes = fd_num.to_ne_bytes();
-                            let written = unsafe {
-                                libc::write(
-                                    fd,
-                                    fd_bytes.as_ptr().cast::<libc::c_void>(),
-                                    fd_bytes.len(),
-                                )
+                            let written = loop {
+                                // SAFETY: fd is a valid socket fd; fd_bytes is
+                                // a valid 4-byte buffer.
+                                let n = unsafe {
+                                    libc::write(
+                                        fd,
+                                        fd_bytes.as_ptr().cast::<libc::c_void>(),
+                                        fd_bytes.len(),
+                                    )
+                                };
+                                if n < 0 && unsafe { *libc::__errno_location() } == libc::EINTR {
+                                    continue;
+                                }
+                                break n;
                             };
                             if written < 0 {
                                 let detail = format!(
@@ -1099,10 +1107,19 @@ pub fn execute_supervised(
                             // closing the notify fd) before the parent acquires
                             // its own copy. read() is not trapped by the BPF
                             // filter (only connect/bind/send* are), so this
-                            // does not deadlock.
+                            // does not deadlock. Loop on EINTR so a signal
+                            // cannot cause the child to proceed prematurely.
                             let mut ack = [0u8; 1];
-                            unsafe {
-                                libc::read(fd, ack.as_mut_ptr().cast::<libc::c_void>(), 1);
+                            loop {
+                                // SAFETY: fd is a valid socket fd; ack is a
+                                // valid 1-byte buffer.
+                                let n = unsafe {
+                                    libc::read(fd, ack.as_mut_ptr().cast::<libc::c_void>(), 1)
+                                };
+                                if n < 0 && unsafe { *libc::__errno_location() } == libc::EINTR {
+                                    continue;
+                                }
+                                break;
                             }
                             // Keep alive past close_inherited_fds so the parent
                             // can call pidfd_getfd. O_CLOEXEC closes it at exec.
@@ -1309,13 +1326,23 @@ pub fn execute_supervised(
                             // Always ack so the child's blocking read unblocks
                             // and exec can proceed (O_CLOEXEC closes the fd at
                             // exec, which is safe only after pidfd_getfd ran).
+                            // Loop on EINTR so a signal cannot silently drop
+                            // the ack and leave the child blocked forever.
                             let ack = [1u8];
-                            unsafe {
-                                libc::write(
-                                    sup_sock.as_raw_fd(),
-                                    ack.as_ptr().cast::<libc::c_void>(),
-                                    1,
-                                );
+                            loop {
+                                // SAFETY: sup_sock fd is valid; ack is a
+                                // valid 1-byte buffer.
+                                let n = unsafe {
+                                    libc::write(
+                                        sup_sock.as_raw_fd(),
+                                        ack.as_ptr().cast::<libc::c_void>(),
+                                        1,
+                                    )
+                                };
+                                if n < 0 && unsafe { *libc::__errno_location() } == libc::EINTR {
+                                    continue;
+                                }
+                                break;
                             }
                             match result {
                                 Ok(fd) => {
