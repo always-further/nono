@@ -13,7 +13,7 @@ use crate::capture::CredentialCaptureMaterial;
 use crate::config::{InjectMode, RouteConfig};
 use crate::diagnostic::{ProxyDiagnostic, ProxyDiagnosticCode};
 use crate::error::{ProxyError, Result};
-use crate::oauth2::{OAuth2ExchangeConfig, TokenCache};
+use crate::oauth2::{OAuth2ExchangeConfig, SpiffeAssertionTokenCache, TokenCache};
 use base64::Engine;
 use std::collections::HashMap;
 use tokio_rustls::TlsConnector;
@@ -151,9 +151,14 @@ impl std::fmt::Debug for LoadedCredential {
 /// An OAuth2 route entry: token cache + upstream URL.
 #[derive(Debug)]
 pub struct OAuth2Route {
-    /// Token cache for automatic refresh
     pub cache: TokenCache,
-    /// Upstream URL (e.g., "https://api.example.com")
+    pub upstream: String,
+}
+
+/// An OAuth2 jwt-bearer route backed by a SPIFFE JWT-SVID assertion.
+#[derive(Debug)]
+pub struct SpiffeAssertionRoute {
+    pub cache: SpiffeAssertionTokenCache,
     pub upstream: String,
 }
 
@@ -180,11 +185,8 @@ pub struct CredentialStore {
     credentials: HashMap<String, LoadedCredential>,
     /// Map from route prefix to lazy command-backed credential config.
     cmd_routes: HashMap<String, CmdCredentialRoute>,
-    /// Map from route prefix to OAuth2 route (token cache + upstream)
     oauth2_routes: HashMap<String, OAuth2Route>,
-    /// Map from route prefix to AWS SigV4 route (placeholder until full
-    /// SigV4 signing is implemented; value is () because no runtime state
-    /// is needed yet).
+    spiffe_assertion_routes: HashMap<String, SpiffeAssertionRoute>,
     aws_routes: HashMap<String, ()>,
 }
 
@@ -213,6 +215,7 @@ impl CredentialStore {
         let mut credentials = HashMap::new();
         let mut cmd_routes = HashMap::new();
         let mut oauth2_routes = HashMap::new();
+        let mut spiffe_assertion_routes = HashMap::new();
         let mut aws_routes = HashMap::new();
         let mut diagnostics = Vec::new();
 
@@ -353,65 +356,147 @@ impl CredentialStore {
                 continue;
             }
 
-            // OAuth2 client_credentials path
+            // OAuth2 path
             if let Some(ref oauth2) = route.oauth2 {
-                debug!(
-                    "Loading OAuth2 credential for route prefix: {}",
-                    route.prefix
-                );
+                if let Some(ref assertion) = oauth2.client_assertion {
+                    // jwt-bearer grant via SPIFFE JWT-SVID
+                    use crate::config::ClientAssertionConfig;
+                    let ClientAssertionConfig::SpiffeJwt {
+                        workload_api_socket,
+                        audience,
+                        svid_hint,
+                    } = assertion;
+                    debug!(
+                        "Loading SPIFFE assertion OAuth2 credential for route: {}",
+                        route.prefix
+                    );
 
-                let Some(client_id) = load_oauth_keystore_ref(
-                    &mut diagnostics,
-                    &route.prefix,
-                    &oauth2.client_id,
-                    "OAuth2 client_id",
-                    ProxyDiagnosticCode::OAuthClientIdUnavailable,
-                )?
-                else {
-                    continue;
-                };
+                    let jwt_source = match tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(
+                            crate::spiffe::SpiffeJwtSource::connect(
+                                workload_api_socket,
+                                audience.clone(),
+                                "Authorization".to_string(),
+                                svid_hint.as_deref(),
+                            ),
+                        )
+                    }) {
+                        Ok(s) => std::sync::Arc::new(s),
+                        Err(e) => {
+                            let message = format!(
+                                "SPIFFE JWT source failed for route '{}': {e}. \
+                                 Requests on this route will be denied.",
+                                route.prefix
+                            );
+                            warn!("{message}");
+                            diagnostics.push(ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::OAuthTokenExchangeFailed,
+                                &route.prefix,
+                                message,
+                            ));
+                            continue;
+                        }
+                    };
 
-                let Some(client_secret) = load_oauth_keystore_ref(
-                    &mut diagnostics,
-                    &route.prefix,
-                    &oauth2.client_secret,
-                    "OAuth2 client_secret",
-                    ProxyDiagnosticCode::OAuthClientSecretUnavailable,
-                )?
-                else {
-                    continue;
-                };
+                    let extra_params: Vec<(String, String)> = oauth2
+                        .extra_params
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
 
-                let config = OAuth2ExchangeConfig {
-                    token_url: oauth2.token_url.clone(),
-                    client_id,
-                    client_secret,
-                    scope: oauth2.scope.clone(),
-                };
-
-                match TokenCache::new(config, tls_connector.clone()) {
-                    Ok(cache) => {
-                        oauth2_routes.insert(
-                            route.prefix.clone(),
-                            OAuth2Route {
-                                cache,
-                                upstream: route.upstream.clone(),
-                            },
-                        );
+                    match tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(SpiffeAssertionTokenCache::new(
+                            oauth2.token_url.clone(),
+                            jwt_source,
+                            audience.clone(),
+                            extra_params,
+                            tls_connector.clone(),
+                        ))
+                    }) {
+                        Ok(cache) => {
+                            spiffe_assertion_routes.insert(
+                                route.prefix.clone(),
+                                SpiffeAssertionRoute {
+                                    cache,
+                                    upstream: route.upstream.clone(),
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            let message = format!(
+                                "SPIFFE assertion token exchange failed for route '{}': {e}. \
+                                 Requests on this route will be denied.",
+                                route.prefix
+                            );
+                            warn!("{message}");
+                            diagnostics.push(ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::OAuthTokenExchangeFailed,
+                                &route.prefix,
+                                message,
+                            ));
+                            continue;
+                        }
                     }
-                    Err(e) => {
-                        let message = format!(
-                            "OAuth2 token exchange failed for route '{}': {e}. \
-                             Managed-credential requests on this route will be denied.",
-                            route.prefix
-                        );
-                        warn!("{message}");
-                        diagnostics.push(ProxyDiagnostic::warning(
-                            ProxyDiagnosticCode::OAuthTokenExchangeFailed,
-                            &route.prefix,
-                            message,
-                        ));
+                } else {
+                    // client_credentials grant
+                    debug!(
+                        "Loading OAuth2 credential for route prefix: {}",
+                        route.prefix
+                    );
+
+                    let Some(client_id) = load_oauth_keystore_ref(
+                        &mut diagnostics,
+                        &route.prefix,
+                        &oauth2.client_id,
+                        "OAuth2 client_id",
+                        ProxyDiagnosticCode::OAuthClientIdUnavailable,
+                    )?
+                    else {
                         continue;
+                    };
+
+                    let Some(client_secret) = load_oauth_keystore_ref(
+                        &mut diagnostics,
+                        &route.prefix,
+                        &oauth2.client_secret,
+                        "OAuth2 client_secret",
+                        ProxyDiagnosticCode::OAuthClientSecretUnavailable,
+                    )?
+                    else {
+                        continue;
+                    };
+
+                    let config = OAuth2ExchangeConfig {
+                        token_url: oauth2.token_url.clone(),
+                        client_id,
+                        client_secret,
+                        scope: oauth2.scope.clone(),
+                    };
+
+                    match TokenCache::new(config, tls_connector.clone()) {
+                        Ok(cache) => {
+                            oauth2_routes.insert(
+                                route.prefix.clone(),
+                                OAuth2Route {
+                                    cache,
+                                    upstream: route.upstream.clone(),
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            let message = format!(
+                                "OAuth2 token exchange failed for route '{}': {e}. \
+                                 Managed-credential requests on this route will be denied.",
+                                route.prefix
+                            );
+                            warn!("{message}");
+                            diagnostics.push(ProxyDiagnostic::warning(
+                                ProxyDiagnosticCode::OAuthTokenExchangeFailed,
+                                &route.prefix,
+                                message,
+                            ));
+                            continue;
+                        }
                     }
                 }
             } else if route.aws_auth.is_some() {
@@ -429,6 +514,7 @@ impl CredentialStore {
                 credentials,
                 cmd_routes,
                 oauth2_routes,
+                spiffe_assertion_routes,
                 aws_routes,
             },
             diagnostics,
@@ -451,6 +537,7 @@ impl CredentialStore {
             credentials: HashMap::new(),
             cmd_routes: HashMap::new(),
             oauth2_routes: HashMap::new(),
+            spiffe_assertion_routes: HashMap::new(),
             aws_routes: HashMap::new(),
         }
     }
@@ -467,47 +554,46 @@ impl CredentialStore {
         self.cmd_routes.get(prefix)
     }
 
-    /// Get an OAuth2 route (token cache + upstream) for a route prefix, if configured.
     #[must_use]
     pub fn get_oauth2(&self, prefix: &str) -> Option<&OAuth2Route> {
         self.oauth2_routes.get(prefix)
     }
 
-    /// Returns `Some(())` if an AWS SigV4 route is configured for the given
-    /// prefix, `None` otherwise. The `Option<&()>` return mirrors `get_oauth2`
-    /// so call sites can use `.is_some()` uniformly. The value will become
-    /// `Option<&AwsRoute>` when SigV4 signing is implemented.
+    #[must_use]
+    pub fn get_spiffe_assertion(&self, prefix: &str) -> Option<&SpiffeAssertionRoute> {
+        self.spiffe_assertion_routes.get(prefix)
+    }
+
     #[must_use]
     pub fn get_aws(&self, prefix: &str) -> Option<&()> {
         self.aws_routes.get(prefix)
     }
 
-    /// Check if any credentials (static, command-backed, OAuth2, or AWS) are loaded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.credentials.is_empty()
             && self.cmd_routes.is_empty()
             && self.oauth2_routes.is_empty()
+            && self.spiffe_assertion_routes.is_empty()
             && self.aws_routes.is_empty()
     }
 
-    /// Number of loaded credentials (static + OAuth2 + AWS).
     #[must_use]
     pub fn len(&self) -> usize {
         self.credentials.len()
             + self.cmd_routes.len()
             + self.oauth2_routes.len()
+            + self.spiffe_assertion_routes.len()
             + self.aws_routes.len()
     }
 
-    /// Returns the set of route prefixes that have loaded credentials
-    /// (static keystore, OAuth2, and AWS routes).
     #[must_use]
     pub fn loaded_prefixes(&self) -> std::collections::HashSet<String> {
         self.credentials
             .keys()
             .chain(self.cmd_routes.keys())
             .chain(self.oauth2_routes.keys())
+            .chain(self.spiffe_assertion_routes.keys())
             .chain(self.aws_routes.keys())
             .cloned()
             .collect()
@@ -864,8 +950,11 @@ mod tests {
                 client_id: client_id.to_string(),
                 client_secret: client_secret.to_string(),
                 scope: String::new(),
+                client_assertion: None,
+                extra_params: Default::default(),
             }),
             aws_auth: None,
+            spiffe: None,
         }
     }
 
@@ -891,6 +980,7 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
             aws_auth: None,
+            spiffe: None,
         }];
         let outcome = CredentialStore::load_with_diagnostics(&routes, &tls).expect("load");
         assert!(outcome.store.is_empty());
@@ -1002,6 +1092,7 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
             aws_auth: None,
+            spiffe: None,
         }];
         let outcome = CredentialStore::load_with_diagnostics(&routes, &tls);
         assert!(outcome.is_ok());
@@ -1043,6 +1134,7 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
             aws_auth: None,
+            spiffe: None,
         }];
         let store = CredentialStore::load_with_diagnostics(&routes, &tls)
             .expect("credential store loads")
@@ -1078,6 +1170,7 @@ mod tests {
             credentials: HashMap::new(),
             cmd_routes: HashMap::new(),
             oauth2_routes,
+            spiffe_assertion_routes: HashMap::new(),
             aws_routes: HashMap::new(),
         };
 
@@ -1108,6 +1201,7 @@ mod tests {
             credentials: HashMap::new(),
             cmd_routes: HashMap::new(),
             oauth2_routes,
+            spiffe_assertion_routes: HashMap::new(),
             aws_routes: HashMap::new(),
         };
 
@@ -1139,6 +1233,7 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
             aws_auth: None,
+            spiffe: None,
         }];
         let store = CredentialStore::load_with_diagnostics(&routes, &tls)
             .expect("credential load")
@@ -1172,6 +1267,7 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
             aws_auth: None,
+            spiffe: None,
         }];
         let store = CredentialStore::load_with_diagnostics(&routes, &tls)
             .expect("credential load")
@@ -1214,8 +1310,11 @@ mod tests {
                 client_id: "env://TEST_OAUTH2_CLIENT_ID".to_string(),
                 client_secret: "env://TEST_OAUTH2_CLIENT_SECRET".to_string(),
                 scope: String::new(),
+                client_assertion: None,
+                extra_params: Default::default(),
             }),
             aws_auth: None,
+            spiffe: None,
         }];
 
         let outcome = CredentialStore::load_with_diagnostics(&routes, &tls);
