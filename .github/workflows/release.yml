@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    if: github.repository == 'always-further/nono'
+    if: github.repository == 'nolabs-ai/nono'
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -288,7 +288,7 @@ jobs:
         with:
           formula-name: nono
           tag-name: ${{ env.RELEASE_TAG }}
-          download-url: "https://github.com/always-further/nono/archive/refs/tags/${{ env.RELEASE_TAG }}.tar.gz"
+          download-url: "https://github.com/nolabs-ai/nono/archive/refs/tags/${{ env.RELEASE_TAG }}.tar.gz"
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_CORE_TOKEN }}
 
@@ -301,10 +301,10 @@ jobs:
       fail-fast: false
       matrix:
         repo:
-          - always-further/nono-py
-          - always-further/nono-ts
-          - always-further/nono-go
-          - always-further/nono-docs
+          - nolabs-ai/nono-py
+          - nolabs-ai/nono-ts
+          - nolabs-ai/nono-go
+          - nolabs-ai/nono-docs
     steps:
       - name: Dispatch to ${{ matrix.repo }}
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1

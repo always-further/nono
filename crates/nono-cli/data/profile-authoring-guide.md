@@ -198,9 +198,9 @@ If a command uses a proxy credential, both layers must allow the operation. For 
                   "endpoint_policy": {
                     "default": "deny",
                     "allow": [
-                      { "method": "GET", "path": "/repos/always-further/nono/issues" },
-                      { "method": "GET", "path": "/repos/always-further/nono/issues/*" },
-                      { "method": "POST", "path": "/repos/always-further/nono/issues/*/comments" }
+                      { "method": "GET", "path": "/repos/nolabs-ai/nono/issues" },
+                      { "method": "GET", "path": "/repos/nolabs-ai/nono/issues/*" },
+                      { "method": "POST", "path": "/repos/nolabs-ai/nono/issues/*/comments" }
                     ],
                     "deny": [
                       {
@@ -233,7 +233,7 @@ If a command uses a proxy credential, both layers must allow the operation. For 
 }
 ```
 
-Endpoint policy uses the same decision order as invocation policy: `deny`, then `approve`, then `allow`, then `default`. A broad `deny` such as `{"method": "POST", "path": "/repos/always-further/nono/issues/**"}` will still win over a later `allow` for issue comments. Remove or narrow the deny when the mutation is intentionally allowed.
+Endpoint policy uses the same decision order as invocation policy: `deny`, then `approve`, then `allow`, then `default`. A broad `deny` such as `{"method": "POST", "path": "/repos/nolabs-ai/nono/issues/**"}` will still win over a later `allow` for issue comments. Remove or narrow the deny when the mutation is intentionally allowed.
 
 ### security
 
@@ -419,7 +419,7 @@ Capture commands run with `NONO_SESSION_ID`, `NONO_REQUEST_HOST`, `NONO_REQUEST_
   "credential_name": "github",
   "route_id": "github",
   "request_host": "api.github.com",
-  "request_path": "/repos/always-further/nono/issues/787",
+  "request_path": "/repos/nolabs-ai/nono/issues/787",
   "request_method": "GET",
   "cache_scope": "always-further"
 }
@@ -894,7 +894,7 @@ Supported predicate forms include `linux`, `macos`, `linux:fedora`, `linux:rhel-
 
 ## 9. Migration from previous schema
 
-Issue [#594](https://github.com/always-further/nono/issues/594) restructured the profile JSON schema. The old `policy.*` namespace has been dissolved into `filesystem`, `groups`, and `commands`; `security.groups` and `security.allowed_commands` have moved to top-level `groups.include` and `commands.allow`.
+Issue [#594](https://github.com/nolabs-ai/nono/issues/594) restructured the profile JSON schema. The old `policy.*` namespace has been dissolved into `filesystem`, `groups`, and `commands`; `security.groups` and `security.allowed_commands` have moved to top-level `groups.include` and `commands.allow`.
 
 Legacy keys still deserialize — profiles using the old names continue to load and emit a single deprecation warning — but they are scheduled for removal in **v1.0.0**. New profiles and edits should use the canonical keys below.
 

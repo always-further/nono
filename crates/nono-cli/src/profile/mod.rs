@@ -7332,7 +7332,7 @@ mod tests {
                                                 "allow": [
                                                     {
                                                         "method": "GET",
-                                                        "path": "/repos/always-further/nono/issues"
+                                                        "path": "/repos/nolabs-ai/nono/issues"
                                                     }
                                                 ]
                                             }

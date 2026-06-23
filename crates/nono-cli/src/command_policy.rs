@@ -3811,7 +3811,7 @@ mod tests {
                                 endpoint_policy: Some(EndpointPolicyConfig {
                                     allow: vec![EndpointRuleConfig {
                                         method: "GET".to_string(),
-                                        path: "/repos/always-further/nono/issues".to_string(),
+                                        path: "/repos/nolabs-ai/nono/issues".to_string(),
                                         backend: None,
                                         reason: None,
                                         timeout_secs: Some(0),

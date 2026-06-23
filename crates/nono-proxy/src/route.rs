@@ -1275,18 +1275,14 @@ mod tests {
             select(&candidates, "GET", "/org-b/repo.git/info/refs"),
             Selection::Route("github_https_org_b")
         );
-        // Public repo (e.g. always-further/nono) → passthrough, no cred
+        // Public repo (e.g. nolabs-ai/nono) → passthrough, no cred
         assert_eq!(
-            select(&candidates, "GET", "/always-further/nono.git/info/refs"),
+            select(&candidates, "GET", "/nolabs-ai/nono.git/info/refs"),
             Selection::Passthrough
         );
         // POST to public repo → also passthrough
         assert_eq!(
-            select(
-                &candidates,
-                "POST",
-                "/always-further/nono.git/git-upload-pack"
-            ),
+            select(&candidates, "POST", "/nolabs-ai/nono.git/git-upload-pack"),
             Selection::Passthrough
         );
 
@@ -1307,7 +1303,7 @@ mod tests {
         );
         // Public repo matches only the /** catch-all → 1 match, ok
         assert_eq!(
-            select(&candidates2, "GET", "/always-further/nono.git/info/refs"),
+            select(&candidates2, "GET", "/nolabs-ai/nono.git/info/refs"),
             Selection::Route("github_https_all")
         );
     }

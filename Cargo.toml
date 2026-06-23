@@ -12,8 +12,8 @@ edition = "2024"
 rust-version = "1.95"
 authors = ["Luke Hinds"]
 license = "Apache-2.0"
-repository = "https://github.com/always-further/nono"
-homepage = "https://github.com/always-further/nono"
+repository = "https://github.com/nolabs-ai/nono"
+homepage = "https://github.com/nolabs-ai/nono"
 
 [workspace.dependencies]
 # Error handling
