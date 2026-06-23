@@ -52,6 +52,11 @@ pub struct LoadedRoute {
     /// clients without needing to extract the config from the connector.
     pub tls_client_config: Option<std::sync::Arc<rustls::ClientConfig>>,
 
+    /// Stable identity for route TLS settings. Two routes with the same key can
+    /// share one HTTP/2 upstream connection without changing trust roots or
+    /// client certificate behavior between streams.
+    pub tls_config_key: Option<String>,
+
     /// `true` if this route requires L7 visibility — i.e. it declares
     /// `credential_key`, `oauth2`, or non-empty `endpoint_rules` and would
     /// not function as a transparent CONNECT tunnel. Computed once at load
@@ -180,6 +185,7 @@ impl RouteStore {
             )
             .map_err(|e| ProxyError::Config(format!("route '{}': {}", normalized_prefix, e)))?;
 
+            let tls_config_key = route_tls_config_key(route);
             let (tls_connector, tls_client_config) = if route.tls_ca.is_some()
                 || route.tls_client_cert.is_some()
                 || route.tls_client_key.is_some()
@@ -226,6 +232,7 @@ impl RouteStore {
                     endpoint_policy,
                     tls_connector,
                     tls_client_config,
+                    tls_config_key,
                     requires_intercept,
                     requires_managed_credential,
                     managed_auth_mechanism,
@@ -466,6 +473,19 @@ fn extract_host_port(url: &str) -> Option<String> {
     };
     let port = parsed.port().unwrap_or(default_port);
     Some(format!("{}:{}", host.to_lowercase(), port))
+}
+
+fn route_tls_config_key(route: &RouteConfig) -> Option<String> {
+    if route.tls_ca.is_none() && route.tls_client_cert.is_none() && route.tls_client_key.is_none() {
+        return None;
+    }
+
+    Some(format!(
+        "ca={};cert={};key={}",
+        route.tls_ca.as_deref().unwrap_or(""),
+        route.tls_client_cert.as_deref().unwrap_or(""),
+        route.tls_client_key.as_deref().unwrap_or("")
+    ))
 }
 
 /// Read a PEM file, producing a clear `ProxyError::Config` for common failure modes.
@@ -866,6 +886,7 @@ mod tests {
             endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
             tls_client_config: None,
+            tls_config_key: None,
             requires_intercept: false,
             requires_managed_credential: false,
             managed_auth_mechanism: None,
@@ -990,6 +1011,7 @@ mod tests {
             endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
             tls_client_config: None,
+            tls_config_key: None,
             requires_intercept: true,
             requires_managed_credential: true,
             managed_auth_mechanism: Some(NetworkAuditAuthMechanism::PhantomHeader),
@@ -1007,6 +1029,7 @@ mod tests {
             endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
             tls_client_config: None,
+            tls_config_key: None,
             requires_intercept: true,
             requires_managed_credential: false,
             managed_auth_mechanism: None,

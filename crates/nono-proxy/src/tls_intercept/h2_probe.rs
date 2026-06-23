@@ -7,22 +7,23 @@
 //! committed to h2, leaving no graceful fallback.
 //!
 //! The fix: open a short-lived TLS probe to the upstream before the inbound
-//! handshake, cache the result keyed on `"host:port"`, and only advertise
-//! `h2` to the client when the upstream is known to support it.
+//! handshake, cache the result by target, upstream strategy, and TLS connector,
+//! and only advertise `h2` to the client when the upstream is known to support
+//! it.
 
 use crate::filter::ProxyFilter;
 use crate::forward::{UpstreamScheme, UpstreamSpec, UpstreamStrategy, open_tcp_upstream};
+use crate::tls_intercept::handle::{InterceptUpstreamProxy, select_upstream_strategy};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::debug;
 
 /// Per-host HTTP/2 capability cache.
 ///
-/// Keyed on `"host:port"` strings (lower-case, same normalisation used
-/// elsewhere in the proxy). Cache entries are permanent for the lifetime of
-/// the proxy session — upstream H2 capability is stable.
+/// Keyed on target, upstream strategy, and TLS connector identity. Cache
+/// entries are permanent for the lifetime of the proxy session — upstream H2
+/// capability is stable for a fixed connection policy.
 pub(crate) struct UpstreamH2Cache {
     inner: RwLock<HashMap<String, bool>>,
 }
@@ -41,8 +42,19 @@ impl UpstreamH2Cache {
         port: u16,
         filter: &ProxyFilter,
         tls_connector_h2: &tokio_rustls::TlsConnector,
+        upstream_proxy: Option<&InterceptUpstreamProxy<'_>>,
+        connector_cache_key: &str,
     ) -> bool {
-        let key = format!("{}:{}", host.to_lowercase(), port);
+        let proxy_cache_key = upstream_proxy
+            .map(|proxy| format!("proxy:{}", proxy.proxy_addr))
+            .unwrap_or_else(|| "direct".to_string());
+        let key = format!(
+            "{}:{}:{}:{}",
+            host.to_lowercase(),
+            port,
+            proxy_cache_key,
+            connector_cache_key
+        );
 
         // Fast path: read lock.
         {
@@ -59,7 +71,7 @@ impl UpstreamH2Cache {
             return cached;
         }
 
-        let result = probe_upstream_h2(host, port, filter, tls_connector_h2).await;
+        let result = probe_upstream_h2(host, port, filter, tls_connector_h2, upstream_proxy).await;
         debug!("h2_probe: {}:{} → h2={}", host, port, result);
         guard.insert(key, result);
         result
@@ -77,29 +89,48 @@ async fn probe_upstream_h2(
     port: u16,
     filter: &ProxyFilter,
     tls_connector_h2: &tokio_rustls::TlsConnector,
+    upstream_proxy: Option<&InterceptUpstreamProxy<'_>>,
 ) -> bool {
     let check = match filter.check_host(host, port).await {
         Ok(c) if c.result.is_allowed() => c,
         _ => return false,
     };
 
-    probe_with_addrs(host, port, &check.resolved_addrs, tls_connector_h2).await
+    let upstream_proxy = upstream_proxy.cloned();
+    let strategy = select_upstream_strategy(&upstream_proxy, &check.resolved_addrs);
+    probe_with_strategy(host, port, strategy, tls_connector_h2).await
 }
 
 /// Inner probe: TCP connect + TLS handshake against pre-resolved addresses.
 ///
 /// Split out so tests can call it directly without a `ProxyFilter`.
+#[cfg(test)]
 pub(crate) async fn probe_with_addrs(
     host: &str,
     port: u16,
-    resolved_addrs: &[SocketAddr],
+    resolved_addrs: &[std::net::SocketAddr],
+    tls_connector_h2: &tokio_rustls::TlsConnector,
+) -> bool {
+    probe_with_strategy(
+        host,
+        port,
+        UpstreamStrategy::Direct { resolved_addrs },
+        tls_connector_h2,
+    )
+    .await
+}
+
+pub(crate) async fn probe_with_strategy(
+    host: &str,
+    port: u16,
+    strategy: UpstreamStrategy<'_>,
     tls_connector_h2: &tokio_rustls::TlsConnector,
 ) -> bool {
     let upstream = UpstreamSpec {
         scheme: UpstreamScheme::Https,
         host,
         port,
-        strategy: UpstreamStrategy::Direct { resolved_addrs },
+        strategy,
         tls_connector: tls_connector_h2,
     };
 
@@ -128,6 +159,7 @@ mod tests {
     use crate::tls_intercept::ca::EphemeralCa;
     use rcgen::{CertificateParams, KeyPair};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject};
+    use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use time::OffsetDateTime;
     use tokio::net::TcpListener;
@@ -231,7 +263,7 @@ mod tests {
         // We test the cache logic by calling get_or_probe twice against a
         // real server and checking connect_count reaches exactly 1.
         let r1 = cache
-            .get_or_probe("localhost", port, &filter, &connector)
+            .get_or_probe("localhost", port, &filter, &connector, None, "test")
             .await;
         // get_or_probe with allow_all calls probe_upstream_h2 which calls
         // filter.check_host — for allow_all this returns empty resolved_addrs,
@@ -240,7 +272,7 @@ mod tests {
         let count_after_first = connect_count.load(Ordering::SeqCst);
 
         let r2 = cache
-            .get_or_probe("localhost", port, &filter, &connector)
+            .get_or_probe("localhost", port, &filter, &connector, None, "test")
             .await;
         let count_after_second = connect_count.load(Ordering::SeqCst);
 
@@ -249,5 +281,72 @@ mod tests {
             count_after_first, count_after_second,
             "second call must not open a new connection (cache hit)"
         );
+    }
+
+    #[tokio::test]
+    async fn probe_supports_external_proxy_strategy() {
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, _) = spawn_alpn_server(&ca, vec![b"h2".to_vec()]).await;
+        let proxy_port = spawn_connect_proxy().await;
+
+        let connector = h2_connector_trusting(ca.cert_pem());
+        let proxy_addr = format!("127.0.0.1:{}", proxy_port);
+        let result = probe_with_strategy(
+            "localhost",
+            upstream_port,
+            UpstreamStrategy::ExternalProxy {
+                proxy_addr: &proxy_addr,
+                proxy_auth_header: None,
+            },
+            &connector,
+        )
+        .await;
+
+        assert!(result, "h2 probe should work through an upstream proxy");
+    }
+
+    async fn spawn_connect_proxy() -> u16 {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let Ok((mut inbound, _)) = listener.accept().await else {
+                return;
+            };
+            let mut reader = BufReader::new(&mut inbound);
+            let mut first_line = String::new();
+            if reader.read_line(&mut first_line).await.is_err() {
+                return;
+            }
+            let target = first_line
+                .split_whitespace()
+                .nth(1)
+                .map(str::to_string)
+                .unwrap_or_default();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.is_err() || line.trim().is_empty() {
+                    break;
+                }
+            }
+            drop(reader);
+
+            let Ok(mut upstream) = TcpStream::connect(target).await else {
+                return;
+            };
+            if inbound
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
+        });
+
+        port
     }
 }

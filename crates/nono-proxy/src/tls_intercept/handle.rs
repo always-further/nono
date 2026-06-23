@@ -40,6 +40,7 @@ const MAX_HEADER_SIZE: usize = 64 * 1024;
 /// The caller ([`crate::server::handle_connection`]) is responsible for
 /// deciding whether the target host should use the upstream proxy or route
 /// direct (based on the bypass list).
+#[derive(Clone, Copy)]
 pub struct InterceptUpstreamProxy<'a> {
     /// `host:port` of the corporate proxy (e.g. `"proxy.corporate.com:80"`).
     pub proxy_addr: &'a str,
@@ -51,7 +52,7 @@ pub struct InterceptUpstreamProxy<'a> {
 /// Select the upstream strategy based on whether an upstream proxy is
 /// configured for this intercepted request.
 ///
-/// When `upstream_proxy` is `Some`, returns #[`UpstreamStrategy::ExternalProxy`]
+/// When `upstream_proxy` is `Some`, returns [`UpstreamStrategy::ExternalProxy`]
 /// to chain through the corporate proxy. Otherwise returns
 /// [`UpstreamStrategy::Direct`] with the caller-provided resolved addresses.
 pub fn select_upstream_strategy<'a>(
@@ -66,6 +67,59 @@ pub fn select_upstream_strategy<'a>(
     } else {
         UpstreamStrategy::Direct { resolved_addrs }
     }
+}
+
+/// Select the h2 upstream TLS connector for an intercepted target.
+///
+/// HTTP/2 opens one upstream connection before individual request streams are
+/// selected. To keep per-route TLS behavior aligned with the HTTP/1.1 path
+/// without leaking an mTLS/client-cert config across unrelated routes, all
+/// intercepted routes for the same upstream must agree on the TLS config.
+pub(crate) fn select_h2_tls_connector_for_target(
+    route_store: &RouteStore,
+    host: &str,
+    port: u16,
+    default_connector: &tokio_rustls::TlsConnector,
+) -> Result<(tokio_rustls::TlsConnector, String)> {
+    let host_port = format!("{}:{}", host.to_lowercase(), port);
+    let candidates = route_store.lookup_all_by_upstream(&host_port);
+    let mut selected: Option<(Option<String>, Option<std::sync::Arc<rustls::ClientConfig>>)> = None;
+
+    for (_, route) in candidates
+        .iter()
+        .copied()
+        .filter(|(_, route)| route.requires_intercept)
+    {
+        let key = route.tls_config_key.clone();
+        let config = route.tls_client_config.clone();
+        match &selected {
+            None => selected = Some((key, config)),
+            Some((existing_key, _)) if existing_key == &key => {}
+            Some(_) => {
+                return Err(ProxyError::Config(format!(
+                    "intercepted h2 routes for {} require different TLS configs; \
+                     split the upstreams or disable h2 for this session",
+                    host_port
+                )));
+            }
+        }
+    }
+
+    match selected.and_then(|(key, config)| key.zip(config)) {
+        Some((key, config)) => {
+            let cache_key = format!("route:{}", key);
+            Ok((h2_connector_from_config(&config), cache_key))
+        }
+        None => Ok((default_connector.clone(), "default".to_string())),
+    }
+}
+
+fn h2_connector_from_config(
+    config: &std::sync::Arc<rustls::ClientConfig>,
+) -> tokio_rustls::TlsConnector {
+    let mut config = (**config).clone();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
 }
 
 /// Per-connection context passed to [`handle_intercept_connect`].
@@ -1169,6 +1223,131 @@ mod tests {
                 panic!("expected ExternalProxy strategy, got Direct");
             }
         }
+    }
+
+    #[test]
+    fn h2_tls_connector_for_target_uses_custom_route_config() {
+        let ca = crate::tls_intercept::ca::EphemeralCa::generate().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("upstream-ca.pem");
+        std::fs::write(&ca_path, ca.cert_pem()).unwrap();
+
+        let routes = vec![route_config(
+            "custom",
+            "localhost",
+            9443,
+            Some(ca_path.to_string_lossy().as_ref()),
+        )];
+        let route_store = RouteStore::load(&routes).unwrap();
+        let default_connector = test_default_h2_connector();
+
+        let (_connector, key) =
+            select_h2_tls_connector_for_target(&route_store, "localhost", 9443, &default_connector)
+                .unwrap();
+
+        assert!(
+            key.starts_with("route:"),
+            "custom route TLS config should be selected for h2"
+        );
+    }
+
+    #[test]
+    fn h2_tls_connector_for_target_accepts_matching_custom_route_configs() {
+        let ca = crate::tls_intercept::ca::EphemeralCa::generate().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("upstream-ca.pem");
+        std::fs::write(&ca_path, ca.cert_pem()).unwrap();
+        let ca_path = ca_path.to_string_lossy();
+
+        let routes = vec![
+            route_config("custom-a", "localhost", 9443, Some(ca_path.as_ref())),
+            route_config("custom-b", "localhost", 9443, Some(ca_path.as_ref())),
+        ];
+        let route_store = RouteStore::load(&routes).unwrap();
+        let default_connector = test_default_h2_connector();
+
+        let (_connector, key) =
+            select_h2_tls_connector_for_target(&route_store, "localhost", 9443, &default_connector)
+                .unwrap();
+
+        assert!(
+            key.starts_with("route:"),
+            "matching custom route TLS configs can share an h2 upstream"
+        );
+    }
+
+    #[test]
+    fn h2_tls_connector_for_target_rejects_mixed_route_configs() {
+        let ca = crate::tls_intercept::ca::EphemeralCa::generate().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("upstream-ca.pem");
+        std::fs::write(&ca_path, ca.cert_pem()).unwrap();
+
+        let routes = vec![
+            route_config("default", "localhost", 9443, None),
+            route_config(
+                "custom",
+                "localhost",
+                9443,
+                Some(ca_path.to_string_lossy().as_ref()),
+            ),
+        ];
+        let route_store = RouteStore::load(&routes).unwrap();
+        let default_connector = test_default_h2_connector();
+
+        assert!(
+            select_h2_tls_connector_for_target(
+                &route_store,
+                "localhost",
+                9443,
+                &default_connector,
+            )
+            .is_err(),
+            "h2 should not guess between incompatible route TLS configs"
+        );
+    }
+
+    fn route_config(
+        prefix: &str,
+        host: &str,
+        port: u16,
+        tls_ca: Option<&str>,
+    ) -> crate::config::RouteConfig {
+        crate::config::RouteConfig {
+            prefix: prefix.to_string(),
+            upstream: format!("https://{}:{}", host, port),
+            credential_key: Some(format!("env://{}_TOKEN", prefix.to_uppercase())),
+            inject_mode: crate::config::InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: None,
+            endpoint_rules: vec![crate::config::EndpointRule {
+                method: "*".to_string(),
+                path: "/**".to_string(),
+            }],
+            tls_ca: tls_ca.map(str::to_string),
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+            aws_auth: None,
+            endpoint_policy: None,
+        }
+    }
+
+    fn test_default_h2_connector() -> tokio_rustls::TlsConnector {
+        let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
     }
 
     // --- resolve_nonce_in_header_value tests ---

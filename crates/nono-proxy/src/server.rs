@@ -997,13 +997,45 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                                 None
                             };
 
+                        let mut h2_enabled_for_target = state.enable_h2;
+                        let (tls_connector_h2, h2_connector_cache_key) = if state.enable_h2 {
+                            match tls_intercept::handle::select_h2_tls_connector_for_target(
+                                &state.route_store,
+                                &host,
+                                port,
+                                &state.tls_connector_h2,
+                            ) {
+                                Ok(selected) => selected,
+                                Err(err) => {
+                                    warn!(
+                                        "tls_intercept: disabling h2 for {}:{}: {}",
+                                        host, port, err
+                                    );
+                                    h2_enabled_for_target = false;
+                                    (
+                                        state.tls_connector_h2.clone(),
+                                        "disabled-route-tls".to_string(),
+                                    )
+                                }
+                            }
+                        } else {
+                            (state.tls_connector_h2.clone(), "disabled".to_string())
+                        };
+
                         // Pre-flight h2 probe: only advertise h2 to the agent
                         // when the upstream actually negotiates it, avoiding
                         // NoApplicationProtocol against h1-only upstreams.
-                        let upstream_h2 = if state.enable_h2 {
+                        let upstream_h2 = if h2_enabled_for_target {
                             state
                                 .h2_cache
-                                .get_or_probe(&host, port, &state.filter, &state.tls_connector_h2)
+                                .get_or_probe(
+                                    &host,
+                                    port,
+                                    &state.filter,
+                                    &tls_connector_h2,
+                                    upstream_proxy.as_ref(),
+                                    &h2_connector_cache_key,
+                                )
                                 .await
                         } else {
                             false
@@ -1017,7 +1049,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             session_token: &state.session_token,
                             cert_cache: Arc::clone(cache),
                             tls_connector: &state.tls_connector,
-                            tls_connector_h2: &state.tls_connector_h2,
+                            tls_connector_h2: &tls_connector_h2,
                             filter: &state.filter,
                             audit_log: Some(&state.audit_log),
                             upstream_proxy,

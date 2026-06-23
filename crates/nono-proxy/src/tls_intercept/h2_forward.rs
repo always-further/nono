@@ -14,7 +14,7 @@ use crate::capture::CredentialCaptureBackend;
 use crate::config::InjectMode;
 use crate::credential::CredentialStore;
 use crate::error::{ProxyError, Result};
-use crate::forward::{self, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
+use crate::forward::{self, UpstreamScheme, UpstreamSpec};
 use crate::reverse;
 use crate::route::RouteStore;
 use crate::tls_intercept::handle::{self, InterceptCtx, RouteSelection};
@@ -174,7 +174,7 @@ async fn open_upstream_h2(
         scheme: UpstreamScheme::Https,
         host: ctx.host,
         port: ctx.port,
-        strategy: UpstreamStrategy::Direct { resolved_addrs },
+        strategy: handle::select_upstream_strategy(&ctx.upstream_proxy, resolved_addrs),
         tls_connector: ctx.tls_connector_h2,
     };
     let tcp = forward::open_tcp_upstream(&upstream_spec).await?;
