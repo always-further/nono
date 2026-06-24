@@ -184,10 +184,10 @@ pub fn resolve_credentials(
     service_names: &[String],
     custom_credentials: &HashMap<String, CustomCredentialDef>,
 ) -> Result<Vec<RouteConfig>> {
-    // Build the full set of names to resolve: explicitly requested names
-    // (from `credentials`) plus all custom_credentials keys. custom_credentials
-    // entries are always activated — they don't need to be listed in `credentials`.
-    let mut all_names: Vec<String> = custom_credentials.keys().cloned().collect();
+    // Build the full set of names to resolve from explicitly requested
+    // credentials. `custom_credentials` defines route templates, but does not
+    // enable them on its own.
+    let mut all_names: Vec<String> = Vec::new();
     for name in service_names {
         if !all_names.contains(name) {
             all_names.push(name.clone());
@@ -246,6 +246,7 @@ pub fn resolve_credentials(
                 proxy: cred.proxy.clone(),
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
+                endpoint_policy: cred.endpoint_policy.clone(),
                 tls_ca: cred
                     .tls_ca
                     .as_deref()
@@ -296,6 +297,7 @@ pub fn resolve_credentials(
                 proxy: None,
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
+                endpoint_policy: None,
                 tls_ca: None, // Built-in credentials don't support custom CAs
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -423,6 +425,7 @@ pub fn partition_allow_domain(
                         proxy: None,
                         env_var: None,
                         endpoint_rules: endpoints.clone(),
+                        endpoint_policy: None,
                         tls_ca: None,
                         tls_client_cert: None,
                         tls_client_key: None,
@@ -578,6 +581,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -619,6 +623,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -656,6 +661,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -703,6 +709,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -790,6 +797,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -824,6 +832,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -858,6 +867,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -897,6 +907,7 @@ mod tests {
                 proxy: None,
                 env_var: Some("OPENAI_API_KEY".to_string()),
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1030,6 +1041,7 @@ mod tests {
                 proxy: None,
                 env_var: Some("LD_PRELOAD".to_string()),
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1119,6 +1131,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1168,6 +1181,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1298,10 +1312,10 @@ mod tests {
     }
 
     /// A profile with `custom_credentials` but no `credentials` list passes an
-    /// empty `service_names` slice.  `resolve_credentials` should still return
-    /// a route for each entry in `custom_credentials`.
+    /// empty `service_names` slice. `resolve_credentials` should not activate
+    /// route definitions unless they are explicitly named.
     #[test]
-    fn test_resolve_credentials_custom_credentials_without_service_names() {
+    fn test_resolve_credentials_custom_credentials_without_service_names_returns_no_routes() {
         use crate::profile::CustomCredentialDef;
 
         let json = embedded_network_policy_json();
@@ -1323,6 +1337,7 @@ mod tests {
                 proxy: None,
                 env_var: Some("MOCK_API_KEY".to_string()),
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1331,25 +1346,17 @@ mod tests {
         );
 
         let routes = resolve_credentials(&policy, &[], &custom).unwrap();
-        assert_eq!(
-            routes.len(),
-            1,
-            "expected one route for the custom credential, got {}",
+        assert!(
+            routes.is_empty(),
+            "custom credential definitions should remain disabled until explicitly requested, got {} route(s)",
             routes.len()
-        );
-        assert_eq!(routes[0].prefix, "mockhttp");
-        assert_eq!(routes[0].upstream, "https://mockhttp.org");
-        assert_eq!(
-            routes[0].env_var,
-            Some("MOCK_API_KEY".to_string()),
-            "env_var must be propagated from CustomCredentialDef"
         );
     }
 
     /// When `service_names` is empty but multiple `custom_credentials` are
-    /// defined, `resolve_credentials` should return a route for every entry.
+    /// defined, `resolve_credentials` should leave them all disabled.
     #[test]
-    fn test_resolve_credentials_all_custom_credentials_without_service_names() {
+    fn test_resolve_credentials_all_custom_credentials_without_service_names_returns_no_routes() {
         use crate::profile::CustomCredentialDef;
 
         let json = embedded_network_policy_json();
@@ -1371,6 +1378,7 @@ mod tests {
                 proxy: None,
                 env_var: Some("SVC_A_KEY".to_string()),
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1392,6 +1400,7 @@ mod tests {
                 proxy: None,
                 env_var: Some("SVC_B_KEY".to_string()),
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1401,23 +1410,10 @@ mod tests {
 
         let routes = resolve_credentials(&policy, &[], &custom).unwrap();
 
-        assert_eq!(
-            routes.len(),
-            2,
-            "expected one route per custom credential, got {}",
+        assert!(
+            routes.is_empty(),
+            "custom credential definitions should remain disabled until explicitly requested, got {} route(s)",
             routes.len()
-        );
-
-        let prefixes: Vec<&str> = routes.iter().map(|r| r.prefix.as_str()).collect();
-        assert!(
-            prefixes.contains(&"svc_a"),
-            "route for svc_a must be present; got: {:?}",
-            prefixes
-        );
-        assert!(
-            prefixes.contains(&"svc_b"),
-            "route for svc_b must be present; got: {:?}",
-            prefixes
         );
     }
 }

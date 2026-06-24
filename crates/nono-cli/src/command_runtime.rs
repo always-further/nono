@@ -185,10 +185,15 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         eprintln!();
     }
 
-    let proxy = prepare_proxy_launch_options(&args.sandbox, &prepared, silent)?;
+    let session_id = std::env::var(crate::DETACHED_SESSION_ID_ENV)
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(crate::session::generate_session_id);
+    let network =
+        prepare_proxy_launch_options(&args.sandbox, &prepared, silent, session_id.clone())?;
     let strategy = select_exec_strategy(
         false,
-        proxy.is_active(),
+        network.is_proxy_active(),
         prepared.capability_elevation,
         false,
         false,
@@ -215,9 +220,12 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             denied_env_vars: prepared.denied_env_vars,
             set_vars: prepared.set_vars,
             startup_timeout_secs: args.startup_timeout_secs,
-            proxy,
+            command_policies: prepared.command_policies,
+            session_hooks: prepared.session_hooks,
+            network,
             redaction_policy: load_configured_redaction_policy()?,
             session: SessionLaunchOptions {
+                session_id: Some(session_id),
                 session_name: args.name,
                 detach_sequence: load_configured_detach_sequence()?,
                 ..SessionLaunchOptions::default()
@@ -299,6 +307,8 @@ pub(crate) fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
             allowed_env_vars: prepared.allowed_env_vars,
             denied_env_vars: prepared.denied_env_vars,
             set_vars: prepared.set_vars,
+            command_policies: prepared.command_policies,
+            session_hooks: prepared.session_hooks,
             ..ExecutionFlags::defaults(silent)?
         },
     })

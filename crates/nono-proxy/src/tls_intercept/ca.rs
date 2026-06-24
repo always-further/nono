@@ -96,12 +96,12 @@ impl EphemeralCa {
         // key, causing TLS handshake failures.
         validate_key_cert_binding(&key_pair, &cert_der)?;
 
-        let not_after = extract_not_after_from_der(&cert_der)?;
         let issuer = Issuer::from_ca_cert_pem(cert_pem, key_pair).map_err(|e| {
             ProxyError::Config(format!(
                 "failed to reconstruct issuer from persisted material: {e}"
             ))
         })?;
+        let not_after = extract_not_after_from_der(&cert_der)?;
 
         Ok(Self {
             key_pkcs8_der,

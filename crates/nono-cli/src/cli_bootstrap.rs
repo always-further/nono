@@ -21,44 +21,60 @@ pub(crate) fn collect_legacy_network_warnings() -> Vec<String> {
     let mut warnings = Vec::new();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    for (legacy, replacement) in [
-        ("--allow-net", Some("network is unrestricted by default")),
-        ("--net-allow", Some("network is unrestricted by default")),
-        ("--allow-proxy", Some("--allow-domain")),
-        ("--proxy-allow", Some("--allow-domain")),
-        ("--proxy-credential", Some("--credential")),
-        ("--allow-bind", Some("--listen-port")),
-        ("--allow-port", Some("--open-port")),
-        ("--external-proxy", Some("--upstream-proxy")),
-        ("--external-proxy-bypass", Some("--upstream-bypass")),
-        ("--net-block", Some("--block-net")),
+    // (legacy, replacement, remove_by)
+    for (legacy, replacement, remove_by) in [
+        (
+            "--allow-net",
+            Some("network is unrestricted by default"),
+            None,
+        ),
+        (
+            "--net-allow",
+            Some("network is unrestricted by default"),
+            None,
+        ),
+        ("--allow-proxy", Some("--allow-domain"), None),
+        ("--proxy-allow", Some("--allow-domain"), None),
+        ("--proxy-credential", Some("--credential"), Some("v1.0.0")),
+        ("--allow-bind", Some("--listen-port"), None),
+        ("--allow-port", Some("--open-port"), None),
+        ("--external-proxy", Some("--upstream-proxy"), None),
+        ("--external-proxy-bypass", Some("--upstream-bypass"), None),
+        ("--net-block", Some("--block-net"), None),
     ] {
         if args
             .iter()
             .any(|arg| arg == legacy || arg.starts_with(&format!("{legacy}=")))
         {
-            let message = if let Some(replacement) = replacement {
+            let mut message = if let Some(replacement) = replacement {
                 format!("Warning: `{legacy}` is deprecated; use `{replacement}` instead.")
             } else {
                 format!("Warning: `{legacy}` is deprecated.")
             };
+            if let Some(v) = remove_by {
+                message.push_str(&format!(" Will be removed in {v}."));
+            }
             warnings.push(message);
         }
     }
 
-    for (legacy, replacement) in [
-        ("NONO_NET_BLOCK", "NONO_BLOCK_NET"),
-        ("NONO_NET_ALLOW", "NONO_ALLOW_NET"),
-        ("NONO_ALLOW_PROXY", "NONO_ALLOW_DOMAIN"),
-        ("NONO_PROXY_ALLOW", "NONO_ALLOW_DOMAIN"),
-        ("NONO_PROXY_CREDENTIAL", "NONO_CREDENTIAL"),
-        ("NONO_EXTERNAL_PROXY", "NONO_UPSTREAM_PROXY"),
-        ("NONO_EXTERNAL_PROXY_BYPASS", "NONO_UPSTREAM_BYPASS"),
+    // (legacy, replacement, remove_by)
+    for (legacy, replacement, remove_by) in [
+        ("NONO_NET_BLOCK", "NONO_BLOCK_NET", None),
+        ("NONO_NET_ALLOW", "NONO_ALLOW_NET", None),
+        ("NONO_ALLOW_PROXY", "NONO_ALLOW_DOMAIN", None),
+        ("NONO_PROXY_ALLOW", "NONO_ALLOW_DOMAIN", None),
+        ("NONO_PROXY_CREDENTIAL", "NONO_CREDENTIAL", Some("v1.0.0")),
+        ("NONO_EXTERNAL_PROXY", "NONO_UPSTREAM_PROXY", None),
+        ("NONO_EXTERNAL_PROXY_BYPASS", "NONO_UPSTREAM_BYPASS", None),
     ] {
         if std::env::var_os(legacy).is_some() {
-            warnings.push(format!(
-                "Warning: `{legacy}` is deprecated; use `{replacement}` instead."
-            ));
+            let mut message =
+                format!("Warning: `{legacy}` is deprecated; use `{replacement}` instead.");
+            if let Some(v) = remove_by {
+                message.push_str(&format!(" Will be removed in {v}."));
+            }
+            warnings.push(message);
         }
     }
 
@@ -84,7 +100,48 @@ pub(crate) fn init_theme(cli: &Cli) {
     theme::init(cli.theme.as_deref(), config_theme.as_deref());
 }
 
+/// Initialize tracing for an internal re-exec entrypoint (e.g. the tool-sandbox
+/// child launcher), which returns from `main()` before [`init_tracing`] runs and
+/// therefore has no subscriber of its own.
+///
+/// Honors `RUST_LOG` only (forwarded from the parent by `prepare_launcher_command`)
+/// and writes to stderr. This is what surfaces the library's
+/// `debug!("Generated Seatbelt profile…")` for a brokered child under
+/// `RUST_LOG=debug`. It is a no-op when `RUST_LOG` is unset or empty, so normal
+/// runs stay silent. Errors from a double-init are swallowed: the launcher only
+/// ever calls this once, but `try_init` keeps it defensive.
+pub(crate) fn init_internal_entrypoint_tracing() {
+    let Some(filter) = std::env::var_os("RUST_LOG") else {
+        return;
+    };
+    if filter.is_empty() {
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
+        .with_target(false)
+        .with_writer(io::stderr)
+        .try_init();
+}
+
 pub(crate) fn init_tracing(cli: &Cli) {
+    // Export the resolved CLI verbosity into RUST_LOG (unless already set) so it
+    // propagates to internal re-exec subprocesses — notably the tool-sandbox
+    // child launcher, which forwards RUST_LOG and inits its own subscriber. This
+    // makes `-vv` surface the brokered child's generated Seatbelt profile too,
+    // not just the parent's logs.
+    if let Some(level) = cli_log_override(cli)
+        && std::env::var_os("RUST_LOG").is_none()
+    {
+        // SAFETY: called during single-threaded CLI bootstrap, before any
+        // threads are spawned (same contract as copy_legacy_env_var).
+        #[allow(clippy::disallowed_methods)]
+        unsafe {
+            std::env::set_var("RUST_LOG", level)
+        };
+    }
     match cli.log_file.as_deref() {
         Some(path) => match SharedFileMakeWriter::new(path) {
             Ok(writer) => {

@@ -147,6 +147,10 @@ const ENV_URI_PREFIX: &str = "env://";
 /// Read once at startup before sandbox activation; contents zeroed on drop.
 const FILE_URI_PREFIX: &str = "file://";
 
+/// The `cmd://` URI scheme prefix, indicating a supervisor command-backed
+/// credential source. This is intentionally not loaded by the keystore.
+const CMD_URI_PREFIX: &str = "cmd://";
+
 /// Environment variable names that must never be loaded via `env://`.
 ///
 /// These control linker, interpreter, or shell behavior. Allowing them as
@@ -264,7 +268,12 @@ pub fn load_secrets(
 /// internal buffers.
 #[must_use = "loaded secret should be used or explicitly dropped"]
 pub fn load_secret_by_ref(service: &str, credential_ref: &str) -> Result<Zeroizing<String>> {
-    if credential_ref.starts_with(FILE_URI_PREFIX) {
+    if credential_ref.starts_with(CMD_URI_PREFIX) {
+        Err(NonoError::KeystoreAccess(
+            "cmd:// credentials can only be resolved by the supervisor credential capture path"
+                .to_string(),
+        ))
+    } else if credential_ref.starts_with(FILE_URI_PREFIX) {
         load_from_file(credential_ref)
     } else if credential_ref.starts_with(ENV_URI_PREFIX) {
         load_from_env(credential_ref)
@@ -733,6 +742,31 @@ pub fn is_env_uri(credential_ref: &str) -> bool {
 #[must_use]
 pub fn is_file_uri(credential_ref: &str) -> bool {
     credential_ref.starts_with(FILE_URI_PREFIX)
+}
+
+/// Check if a credential reference uses the `cmd://` scheme.
+#[must_use]
+pub fn is_cmd_uri(credential_ref: &str) -> bool {
+    credential_ref.starts_with(CMD_URI_PREFIX)
+}
+
+/// Validate a `cmd://<name>` URI.
+///
+/// The name portion must be non-empty and contain only ASCII alphanumeric
+/// characters and underscores (`[A-Za-z0-9_]+`).
+pub fn validate_cmd_uri(uri: &str) -> Result<()> {
+    let name = uri.strip_prefix(CMD_URI_PREFIX).unwrap_or("");
+    if name.is_empty() {
+        return Err(NonoError::ConfigParse(
+            "cmd:// URI must include a credential name (for example cmd://github)".to_string(),
+        ));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(NonoError::ConfigParse(format!(
+            "cmd:// credential name '{name}' must contain only alphanumeric characters and underscores"
+        )));
+    }
+    Ok(())
 }
 
 /// Validate an `env://VAR_NAME` URI.

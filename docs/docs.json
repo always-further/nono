@@ -43,6 +43,8 @@
         "pages": [
           "cli/features/profiles-groups",
           "cli/features/profile-authoring",
+          "cli/features/tool-sandbox",
+          "cli/features/dangerous-command-blocking",
           "cli/features/profile-introspection",
           "cli/features/environment"
         ]
@@ -119,7 +121,10 @@
       },
       {
         "group": "Development",
-        "pages": ["cli/development/index", "cli/development/testing"]
+        "pages": [
+          "cli/development/index",
+          "cli/development/testing"
+        ]
       }
     ]
   },

@@ -447,7 +447,7 @@ pub(super) fn handle_seccomp_notification(
     };
 
     // 8. Delegate to approval backend (for both instruction and non-instruction files)
-    let request = nono::supervisor::CapabilityRequest {
+    let request = nono::supervisor::ApprovalRequest::Capability {
         request_id: format!("seccomp-{}", unique_request_id()),
         path: path.clone(),
         access,
@@ -456,7 +456,7 @@ pub(super) fn handle_seccomp_notification(
         session_id: config.session_id.to_string(),
     };
 
-    let decision = match config.approval_backend.request_capability(&request) {
+    let decision = match config.approval_backend.request_approval(&request) {
         Ok(d) => {
             if d.is_denied() {
                 record_denial(
@@ -825,13 +825,6 @@ pub(super) fn handle_network_notification(
 
     let notif = recv_notif(notify_fd)?;
 
-    // Rate limit to prevent flooding
-    if !rate_limiter.try_acquire() {
-        debug!("Rate limited network seccomp notification, denying");
-        let _ = deny_notif(notify_fd, notif.id);
-        return Ok(());
-    }
-
     // Read sockaddr from child's memory. The location depends on the syscall:
     //   connect(fd, sockaddr*, addrlen):   args[1] = sockaddr*, args[2] = addrlen
     //   bind(fd, sockaddr*, addrlen):       args[1] = sockaddr*, args[2] = addrlen
@@ -965,6 +958,34 @@ pub(super) fn handle_network_notification(
             return Ok(());
         }
     };
+
+    // In AfUnixOnly mode the BPF filter traps by syscall number and cannot
+    // distinguish address families, so TCP/UDP calls arrive here too. They
+    // carry no policy decision — pass them through without consuming a
+    // rate-limiter token, which would otherwise starve legitimate network
+    // traffic once the burst is exhausted.
+    if matches!(
+        config.linux_network_notify_mode,
+        LinuxNetworkNotifyMode::AfUnixOnly
+    ) && sockaddrs.iter().all(|s| s.family != libc::AF_UNIX as u16)
+    {
+        if let Err(e) = continue_notif(notify_fd, notif.id) {
+            debug!(
+                "continue_notif failed for non-AF_UNIX pass-through (AfUnixOnly): {}",
+                e
+            );
+            return deny_notif(notify_fd, notif.id);
+        }
+        return Ok(());
+    }
+
+    // Rate limit: guard AF_UNIX mediation decisions and proxy-mode decisions
+    // against notification flooding from a compromised child.
+    if !rate_limiter.try_acquire() {
+        debug!("Rate limited network seccomp notification, denying");
+        let _ = deny_notif(notify_fd, notif.id);
+        return Ok(());
+    }
 
     // TOCTOU check
     if !notif_id_valid(notify_fd, notif.id)? {
@@ -1121,7 +1142,24 @@ fn record_network_audit_denial(
         managed_credential_active: None,
         injection_mode: None,
         denial_category: Some(nono::undo::NetworkAuditDenialCategory::HostDenied),
+        endpoint_policy_action: None,
+        endpoint_policy_rule: None,
+        approval_backend: None,
+        credential_capture_action: None,
+        credential_capture_name: None,
+        credential_capture_command: None,
+        credential_capture_argv: None,
+        credential_capture_exit_status: None,
+        credential_capture_duration_ms: None,
+        credential_capture_stdout_bytes: None,
+        credential_capture_stderr: None,
+        credential_capture_cache_scope: None,
+        credential_capture_output_format: None,
+        credential_capture_header_names: None,
+        credential_capture_stdin_mode: None,
+        credential_capture_interactive: None,
         target,
+        upstream: None,
         port: if sockaddr.port == 0 {
             None
         } else {
@@ -1140,7 +1178,7 @@ fn record_network_audit_denial(
         events.push(event.clone());
     }
 
-    if let Some(recorder_mutex) = config.audit_recorder {
+    if let Some(recorder_mutex) = config.audit_recorder.as_ref() {
         let mut recorder = recorder_mutex
             .lock()
             .map_err(|_| NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
@@ -1458,17 +1496,14 @@ mod tests {
             SYS_BIND, SYS_CONNECT, SYS_SENDMMSG, SYS_SENDMSG, SYS_SENDTO, SockaddrInfo,
             UnixSocketKind,
         };
-        use nono::supervisor::{ApprovalDecision, CapabilityRequest};
+        use nono::supervisor::{ApprovalDecision, ApprovalRequest};
         use nono::{ApprovalBackend, UnixSocketCapability, UnixSocketMode};
         use std::os::unix::net::UnixListener;
         use std::path::{Path, PathBuf};
 
         struct DenyAllBackend;
         impl ApprovalBackend for DenyAllBackend {
-            fn request_capability(
-                &self,
-                _req: &CapabilityRequest,
-            ) -> nono::Result<ApprovalDecision> {
+            fn request_approval(&self, _req: &ApprovalRequest) -> nono::Result<ApprovalDecision> {
                 Ok(ApprovalDecision::Denied {
                     reason: "test".to_string(),
                 })
@@ -1502,6 +1537,7 @@ mod tests {
                 proxy_bind_ports,
                 unix_socket_allowlist,
                 linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
+                tool_sandbox_runtime: None,
             }
         }
 

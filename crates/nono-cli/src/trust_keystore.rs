@@ -200,10 +200,10 @@ impl TrustKeyStore {
                 #[cfg(not(feature = "system-keyring"))]
                 {
                     let _ = (service, account);
-                    return Err(NonoError::KeystoreAccess(
+                    Err(NonoError::KeystoreAccess(
                         "system keyring is not available (built without system-keyring feature)"
                             .to_string(),
-                    ));
+                    ))
                 }
                 #[cfg(feature = "system-keyring")]
                 {
@@ -231,10 +231,10 @@ impl TrustKeyStore {
                 #[cfg(not(feature = "system-keyring"))]
                 {
                     let _ = (service, account);
-                    return Err(NonoError::KeystoreAccess(
+                    Err(NonoError::KeystoreAccess(
                         "system keyring is not available (built without system-keyring feature)"
                             .to_string(),
-                    ));
+                    ))
                 }
                 #[cfg(feature = "system-keyring")]
                 {
@@ -286,10 +286,10 @@ impl TrustKeyStore {
                 #[cfg(not(feature = "system-keyring"))]
                 {
                     let _ = (service, account, secret);
-                    return Err(NonoError::KeystoreAccess(
+                    Err(NonoError::KeystoreAccess(
                         "system keyring is not available (built without system-keyring feature)"
                             .to_string(),
-                    ));
+                    ))
                 }
                 #[cfg(feature = "system-keyring")]
                 {

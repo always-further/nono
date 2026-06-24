@@ -15,7 +15,7 @@ use colored::Colorize;
 use nono::undo::ExecutableIdentity;
 use nono::{CapabilitySet, Result};
 use std::io::IsTerminal;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 struct SessionRuntimeState {
     started: String,
@@ -31,7 +31,7 @@ pub(crate) struct SupervisedRuntimeContext<'a> {
     pub(crate) session: &'a SessionLaunchOptions,
     pub(crate) rollback: &'a RollbackLaunchOptions,
     pub(crate) trust: &'a TrustLaunchOptions,
-    pub(crate) proxy: &'a ProxyLaunchOptions,
+    pub(crate) proxy: Option<&'a ProxyLaunchOptions>,
     pub(crate) proxy_handle: Option<&'a nono_proxy::server::ProxyHandle>,
     pub(crate) executable_identity: Option<&'a ExecutableIdentity>,
     pub(crate) audit_signer: Option<&'a AuditSigner>,
@@ -88,9 +88,14 @@ fn create_session_runtime_state(
     redaction_policy: &nono::ScrubPolicy,
 ) -> Result<SessionRuntimeState> {
     let started = chrono::Local::now().to_rfc3339();
-    let short_session_id = std::env::var(DETACHED_SESSION_ID_ENV)
-        .ok()
-        .filter(|id| !id.is_empty())
+    let short_session_id = session
+        .session_id
+        .clone()
+        .or_else(|| {
+            std::env::var(DETACHED_SESSION_ID_ENV)
+                .ok()
+                .filter(|id| !id.is_empty())
+        })
         .unwrap_or_else(session::generate_session_id);
     let session_record = session::SessionRecord {
         session_id: short_session_id.clone(),
@@ -168,7 +173,11 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
 
     output::print_applying_sandbox(silent);
 
-    let audit_state = create_audit_state(rollback.audit_disabled, rollback.destination.as_ref())?;
+    let audit_state = create_audit_state(
+        rollback.audit_disabled,
+        rollback.destination.as_ref(),
+        session.session_id.as_deref(),
+    )?;
     warn_if_rollback_flags_ignored(rollback, silent);
 
     // Create the session guard (writes session file) and PTY pair BEFORE
@@ -202,12 +211,12 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
     } else {
         None
     };
-    let audit_recorder = if audit_state.is_some() && !rollback.no_audit_integrity {
+    let audit_recorder = if audit_state.is_some() {
         audit_state
             .as_ref()
             .map(|state| {
                 AuditRecorder::new_with_policy(state.session_dir.clone(), redaction_policy.clone())
-                    .map(Mutex::new)
+                    .map(|recorder| Arc::new(Mutex::new(recorder)))
             })
             .transpose()?
     } else {
@@ -221,6 +230,18 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
             .lock()
             .map_err(|_| nono::NonoError::Snapshot("Audit recorder lock poisoned".to_string()))?;
         recorder.record_session_started(started.clone(), command.to_vec())?;
+        #[cfg(target_os = "linux")]
+        if let Some(tool_sandbox_runtime) = config.tool_sandbox_runtime {
+            recorder.record_sandbox_runtime_event(
+                crate::audit_integrity::SandboxRuntimeAuditEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    platform: "linux".to_string(),
+                    landlock_abi: Some(tool_sandbox_runtime.landlock_abi_version().to_string()),
+                    landlock_execute_enforced: Some(true),
+                    tool_sandbox_active: true,
+                },
+            )?;
+        }
     }
 
     let protected_roots = protected_paths::ProtectedRoots::from_defaults()?;
@@ -233,21 +254,18 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         attach_initial_client: !session.detached_start,
         detach_sequence: session.detach_sequence.as_deref(),
         open_url_origins: proxy
-            .open_url
-            .as_ref()
+            .and_then(|p| p.open_url.as_ref())
             .map(|o| o.origins.as_slice())
             .unwrap_or(&[]),
         open_url_allow_localhost: proxy
-            .open_url
-            .as_ref()
+            .and_then(|p| p.open_url.as_ref())
             .map(|o| o.allow_localhost)
             .unwrap_or(false),
-        audit_recorder: audit_recorder.as_ref(),
+        audit_recorder: audit_recorder.clone(),
         network_audit_events: supervisor_network_audit_events.as_ref(),
         redaction_policy,
         allow_launch_services_active: proxy
-            .open_url
-            .as_ref()
+            .and_then(|p| p.open_url.as_ref())
             .map(|o| o.allow_launch_services)
             .unwrap_or(false),
         #[cfg(target_os = "linux")]
@@ -268,6 +286,8 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         } else {
             exec_strategy::LinuxNetworkNotifyMode::AfUnixOnly
         },
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        tool_sandbox_runtime: config.tool_sandbox_runtime,
     };
 
     let exit_code = {
@@ -294,7 +314,7 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         rollback_state,
         audit_snapshot_state,
         audit_tracked_paths,
-        audit_recorder: audit_recorder.as_ref(),
+        audit_recorder: audit_recorder.as_deref(),
         supervisor_network_audit_events: supervisor_network_audit_events.as_ref(),
         audit_integrity_enabled: !rollback.no_audit_integrity,
         proxy_handle,
