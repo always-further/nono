@@ -1887,7 +1887,18 @@ fn inject_credential_structured(
 ) -> http::request::Builder {
     match cred.inject_mode {
         InjectMode::Header | InjectMode::BasicAuth => {
-            builder.header(cred.header_name.as_str(), cred.header_value.as_str())
+            // Mirror `inject_credential_for_mode` (the HTTP/1.1 raw-string path):
+            // inject the primary header plus every materialized extra header.
+            // `injected_credential_header_names` strips client-supplied copies of
+            // all these names, so they must be re-added here or be lost entirely.
+            let mut builder = builder;
+            if !cred.header_value.is_empty() {
+                builder = builder.header(cred.header_name.as_str(), cred.header_value.as_str());
+            }
+            for (name, value) in &cred.extra_headers {
+                builder = builder.header(name.as_str(), value.as_str());
+            }
+            builder
         }
         InjectMode::UrlPath | InjectMode::QueryParam => builder,
     }
@@ -2079,6 +2090,89 @@ mod tests {
         assert_eq!(
             names,
             vec!["authorization".to_string(), "x-gateway-key".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_inject_credential_structured_includes_extra_headers() {
+        // Regression: `inject_credential_structured` must re-add `extra_headers`
+        // on the reverse-proxy path. `injected_credential_header_names` strips
+        // client-supplied copies of these names, so if they are not re-injected
+        // here the managed extra header is lost entirely.
+        let cred = LoadedCredential {
+            inject_mode: InjectMode::Header,
+            proxy_inject_mode: InjectMode::Header,
+            raw_credential: Zeroizing::new(String::new()),
+            header_name: "Authorization".to_string(),
+            proxy_header_name: "Authorization".to_string(),
+            header_value: Zeroizing::new("Bearer real".to_string()),
+            extra_headers: vec![(
+                "X-Gateway-Key".to_string(),
+                Zeroizing::new("gateway-real".to_string()),
+            )],
+            path_pattern: None,
+            proxy_path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy_query_param_name: None,
+        };
+
+        let builder = http::Request::builder().method("POST").uri("https://x/y");
+        let req = inject_credential_structured(&cred, builder)
+            .body(())
+            .unwrap();
+
+        assert_eq!(
+            req.headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer real")
+        );
+        assert_eq!(
+            req.headers()
+                .get("x-gateway-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("gateway-real"),
+            "extra managed header must be injected on the reverse-proxy path"
+        );
+    }
+
+    #[test]
+    fn test_inject_credential_structured_skips_empty_primary_value() {
+        // A credential with only extra headers (empty primary value) must not
+        // emit an empty `Authorization` header, matching `inject_credential_for_mode`.
+        let cred = LoadedCredential {
+            inject_mode: InjectMode::Header,
+            proxy_inject_mode: InjectMode::Header,
+            raw_credential: Zeroizing::new(String::new()),
+            header_name: "Authorization".to_string(),
+            proxy_header_name: "Authorization".to_string(),
+            header_value: Zeroizing::new(String::new()),
+            extra_headers: vec![(
+                "X-Gateway-Key".to_string(),
+                Zeroizing::new("gateway-real".to_string()),
+            )],
+            path_pattern: None,
+            proxy_path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy_query_param_name: None,
+        };
+
+        let builder = http::Request::builder().method("POST").uri("https://x/y");
+        let req = inject_credential_structured(&cred, builder)
+            .body(())
+            .unwrap();
+
+        assert!(
+            req.headers().get("authorization").is_none(),
+            "empty primary credential value must not be injected"
+        );
+        assert_eq!(
+            req.headers()
+                .get("x-gateway-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("gateway-real")
         );
     }
 

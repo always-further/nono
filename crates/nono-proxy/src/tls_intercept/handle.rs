@@ -1101,7 +1101,7 @@ where
 /// If no nonce is found, or the resolver returns `None`, the original value
 /// is returned unchanged (fail-closed: the upstream sees the raw nonce and
 /// will reject the request, not a silently wrong credential).
-fn resolve_nonce_in_header_value(
+pub(crate) fn resolve_nonce_in_header_value(
     value: &str,
     consumer: &str,
     resolver: &dyn crate::token::NonceResolver,

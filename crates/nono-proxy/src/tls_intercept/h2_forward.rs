@@ -41,6 +41,7 @@ struct SharedH2Ctx {
     audit_log: Option<audit::SharedAuditLog>,
     approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
     credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
+    nonce_resolver: Option<Arc<dyn crate::token::NonceResolver>>,
 }
 
 /// Accept an h2 connection from the client, open an h2 connection to the
@@ -105,6 +106,7 @@ where
         audit_log: ctx.audit_log.cloned(),
         approval_backends: ctx.approval_backends.clone(),
         credential_capture_backend: ctx.credential_capture_backend.clone(),
+        nonce_resolver: ctx.nonce_resolver.clone(),
     };
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -274,6 +276,11 @@ async fn handle_h2_stream(
     // computed by the shared helper so the h2 path strips/injects exactly the
     // same headers as HTTP/1.1 — including any `extra_headers`.
     let injected_header_names = reverse::injected_credential_header_names(cred);
+    // Resolve tool-sandbox broker nonces (`nono_<64hex>`) in forwarded header
+    // values, mirroring the HTTP/1.1 path. Without this, an h2/gRPC request that
+    // carries a broker nonce in a header would forward the raw nonce upstream
+    // instead of the resolved credential.
+    let nonce_consumer = service.map(|s| format!("proxy.{s}"));
     let mut upstream_headers = HeaderMap::new();
     for (name, value) in request.headers() {
         let name_lower = name.as_str().to_lowercase();
@@ -287,7 +294,28 @@ async fn handle_h2_stream(
         if injected_header_names.contains(&name_lower) {
             continue;
         }
-        upstream_headers.insert(name.clone(), value.clone());
+        // Substitute a broker nonce for the real credential when present and
+        // admitted; otherwise forward the value unchanged (fail-closed: the
+        // upstream rejects a raw nonce, never sees a silently-wrong credential).
+        let resolved = value
+            .to_str()
+            .ok()
+            .and_then(|v| {
+                nonce_consumer.as_deref().and_then(|consumer| {
+                    ctx.nonce_resolver.as_deref().and_then(|resolver| {
+                        handle::resolve_nonce_in_header_value(v, consumer, resolver)
+                    })
+                })
+            })
+            .and_then(|resolved| HeaderValue::from_str(&resolved).ok());
+        match resolved {
+            Some(val) => {
+                upstream_headers.insert(name.clone(), val);
+            }
+            None => {
+                upstream_headers.insert(name.clone(), value.clone());
+            }
+        }
     }
 
     // Inject credential headers (primary + extra) for header/basic-auth modes.
@@ -334,41 +362,59 @@ async fn handle_h2_stream(
             reason: format!("h2 send_request failed: {}", e),
         })?;
 
-    // Stream request body to upstream (frame-by-frame).
-    if !is_end_stream {
-        stream_body_to_upstream(recv_body, &mut send_stream).await?;
-    }
+    // Run both directions concurrently. Bidirectional gRPC clients keep the
+    // request stream open while consuming the response, so we must not block on
+    // fully draining the request body before polling the upstream response —
+    // doing so would deadlock streaming RPCs. `try_join!` polls both halves on
+    // this task and drops the other (cancelling its pump, which sends a RST via
+    // the `Drop` of the open `SendStream`) as soon as either side errors.
+    let host = ctx.host.as_str();
 
-    // Await upstream response.
-    let response = response_fut
-        .await
-        .map_err(|e| ProxyError::UpstreamConnect {
-            host: ctx.host.to_string(),
-            reason: format!("h2 response error: {}", e),
-        })?;
+    // Half A: pump client request body → upstream (no-op if already ended).
+    let request_pump = async {
+        if !is_end_stream {
+            stream_body_to_upstream(recv_body, &mut send_stream).await?;
+        }
+        Ok::<(), ProxyError>(())
+    };
 
-    let status = response.status();
-    let resp_headers = response.headers().clone();
-    let recv_resp_body = response.into_body();
-    let resp_end_stream = recv_resp_body.is_end_stream();
+    // Half B: await upstream response headers, relay them, then pump the
+    // response body → client. Returns the upstream status for auditing.
+    let response_pump = async {
+        let response = response_fut
+            .await
+            .map_err(|e| ProxyError::UpstreamConnect {
+                host: host.to_string(),
+                reason: format!("h2 response error: {}", e),
+            })?;
 
-    // Send response headers back to client.
-    let mut client_response = Response::builder().status(status);
-    if let Some(headers) = client_response.headers_mut() {
-        *headers = resp_headers;
-    }
-    let client_response = client_response
-        .body(())
-        .map_err(|e| ProxyError::HttpParse(format!("h2 response build error: {}", e)))?;
+        let status = response.status();
+        let resp_headers = response.headers().clone();
+        let recv_resp_body = response.into_body();
+        let resp_end_stream = recv_resp_body.is_end_stream();
 
-    let mut send_resp = respond
-        .send_response(client_response, resp_end_stream)
-        .map_err(|e| ProxyError::HttpParse(format!("h2 send_response failed: {}", e)))?;
+        // Send response headers back to client.
+        let mut client_response = Response::builder().status(status);
+        if let Some(headers) = client_response.headers_mut() {
+            *headers = resp_headers;
+        }
+        let client_response = client_response
+            .body(())
+            .map_err(|e| ProxyError::HttpParse(format!("h2 response build error: {}", e)))?;
 
-    // Stream response body back to client (frame-by-frame).
-    if !resp_end_stream {
-        stream_body_to_client(recv_resp_body, &mut send_resp).await?;
-    }
+        let mut send_resp = respond
+            .send_response(client_response, resp_end_stream)
+            .map_err(|e| ProxyError::HttpParse(format!("h2 send_response failed: {}", e)))?;
+
+        // Stream response body back to client (frame-by-frame).
+        if !resp_end_stream {
+            stream_body_to_client(recv_resp_body, &mut send_resp).await?;
+        }
+
+        Ok::<http::StatusCode, ProxyError>(status)
+    };
+
+    let ((), status) = tokio::try_join!(request_pump, response_pump)?;
 
     // Audit event.
     audit::log_l7_request(
@@ -750,6 +796,85 @@ mod tests {
 
                     let _ = tx.send((method_path, headers));
                 }
+            }
+        });
+
+        (port, rx)
+    }
+
+    /// Nonce resolver stub that swaps one fixed nonce for one fixed secret,
+    /// but only for the expected consumer (`proxy.<route_id>`).
+    #[derive(Debug)]
+    struct StubNonceResolver {
+        nonce: String,
+        consumer: String,
+        secret: String,
+    }
+
+    impl crate::token::NonceResolver for StubNonceResolver {
+        fn resolve(&self, nonce: &str, consumer: &str) -> Option<Zeroizing<Vec<u8>>> {
+            if nonce == self.nonce && consumer == self.consumer {
+                Some(Zeroizing::new(self.secret.clone().into_bytes()))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Spawn a mock h2 upstream that sends response headers and a DATA frame
+    /// *before* reading the request body, then drains the body. Used to prove
+    /// the proxy relays the response concurrently with the request body (no
+    /// head-of-line deadlock for bidirectional streaming).
+    async fn spawn_mock_h2_upstream_early_response(
+        ca: &EphemeralCa,
+    ) -> (u16, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+        let server_config = upstream_server_config(ca);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let (tcp_stream, _) = listener.accept().await.unwrap();
+            let tls_acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+            let tls_stream = tls_acceptor.accept(tcp_stream).await.unwrap();
+
+            let mut h2_conn = h2::server::handshake(tls_stream).await.unwrap();
+            if let Some(Ok((request, mut respond))) = h2_conn.accept().await {
+                // Respond immediately, before consuming the request body.
+                let response = http::Response::builder().status(200).body(()).unwrap();
+                let mut send_stream = respond.send_response(response, false).unwrap();
+                send_stream
+                    .send_data(Bytes::from_static(b"early"), false)
+                    .unwrap();
+
+                let mut body_recv = request.into_body();
+
+                // Drain the request body while concurrently driving the h2
+                // connection — polling `accept()` flushes the queued early
+                // response to the proxy so the client can react and send its
+                // (late) request body. Without this drive the early frame never
+                // leaves the mock's send buffer and the test deadlocks.
+                let drain = async {
+                    let mut collected = Vec::new();
+                    while let Some(Ok(data)) = body_recv.data().await {
+                        let len = data.len();
+                        collected.extend_from_slice(&data);
+                        body_recv.flow_control().release_capacity(len).unwrap();
+                    }
+                    collected
+                };
+                let drive = async { while h2_conn.accept().await.is_some() {} };
+                let collected = tokio::select! {
+                    c = drain => c,
+                    _ = drive => Vec::new(),
+                };
+
+                send_stream.send_data(Bytes::new(), true).unwrap();
+                let _ = tx.send(collected);
+
+                // Keep driving the connection so the trailing frames flush and
+                // the client sees a clean end-of-stream.
+                while h2_conn.accept().await.is_some() {}
             }
         });
 
@@ -2165,5 +2290,318 @@ mod tests {
         })
         .await;
         assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    /// A broker nonce (`nono_<64hex>`) carried in a forwarded header must be
+    /// resolved to the real credential before being sent upstream, mirroring
+    /// the HTTP/1.1 path. Without `nonce_resolver` wired into `SharedH2Ctx` the
+    /// raw nonce would leak upstream.
+    #[tokio::test]
+    async fn h2_forward_resolves_broker_nonce_in_header() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let route_store = make_route_store(
+            "localhost",
+            upstream_port,
+            vec![EndpointRule {
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+            }],
+        );
+        // No managed credential — the secret arrives purely via nonce resolution.
+        let credential_store = CredentialStore::empty();
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let nonce = format!("nono_{}", "a".repeat(64));
+        let resolver: Arc<dyn crate::token::NonceResolver> = Arc::new(StubNonceResolver {
+            nonce: nonce.clone(),
+            consumer: "proxy.test-svc".to_string(),
+            secret: "Bearer resolved-secret".to_string(),
+        });
+
+        let ctx = InterceptCtx {
+            route_id: Some("test-svc"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: None,
+            nonce_resolver: Some(resolver),
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    let request = http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "https://localhost:{}/v1/chat/completions",
+                            upstream_port
+                        ))
+                        .header("authorization", &nonce)
+                        .body(())
+                        .unwrap();
+                    let (response_fut, mut send_stream) =
+                        h2_client.send_request(request, false).unwrap();
+                    send_stream
+                        .send_data(Bytes::from_static(b"{}"), true)
+                        .unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(response.status(), 200);
+
+                    let (_method_path, headers) = rx.await.unwrap();
+                    assert_eq!(
+                        headers.get("authorization").map(|v| v.to_str().unwrap()),
+                        Some("Bearer resolved-secret"),
+                        "broker nonce must be resolved to the real credential upstream"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    /// When no resolver admits the nonce (returns `None`), the raw header value
+    /// is forwarded unchanged (fail-closed: upstream rejects the raw nonce,
+    /// never a silently-wrong credential).
+    #[tokio::test]
+    async fn h2_forward_passes_through_unresolved_nonce() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, rx) = spawn_mock_h2_upstream(&ca).await;
+
+        let route_store = make_route_store(
+            "localhost",
+            upstream_port,
+            vec![EndpointRule {
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+            }],
+        );
+        let credential_store = CredentialStore::empty();
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let nonce = format!("nono_{}", "b".repeat(64));
+        // Resolver only admits a *different* nonce, so this one is unresolved.
+        let resolver: Arc<dyn crate::token::NonceResolver> = Arc::new(StubNonceResolver {
+            nonce: format!("nono_{}", "c".repeat(64)),
+            consumer: "proxy.test-svc".to_string(),
+            secret: "Bearer unused".to_string(),
+        });
+
+        let ctx = InterceptCtx {
+            route_id: Some("test-svc"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: None,
+            nonce_resolver: Some(resolver),
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    let request = http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "https://localhost:{}/v1/chat/completions",
+                            upstream_port
+                        ))
+                        .header("authorization", &nonce)
+                        .body(())
+                        .unwrap();
+                    let (response_fut, mut send_stream) =
+                        h2_client.send_request(request, false).unwrap();
+                    send_stream
+                        .send_data(Bytes::from_static(b"{}"), true)
+                        .unwrap();
+
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(response.status(), 200);
+
+                    let (_method_path, headers) = rx.await.unwrap();
+                    assert_eq!(
+                        headers.get("authorization").map(|v| v.to_str().unwrap()),
+                        Some(nonce.as_str()),
+                        "unresolved nonce must be forwarded unchanged (fail-closed)"
+                    );
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "test timed out — h2 forwarding hung");
+    }
+
+    /// Bidirectional gRPC: the upstream sends response headers and a DATA frame
+    /// before the client finishes its request body. The proxy must relay that
+    /// response concurrently with pumping the request body — if the two halves
+    /// ran sequentially (await full request body, then poll response) this would
+    /// deadlock and time out.
+    #[tokio::test]
+    async fn h2_forward_bidi_streaming_no_deadlock() {
+        use std::time::Duration;
+
+        let ca = Arc::new(EphemeralCa::generate().unwrap());
+        let (upstream_port, body_rx) = spawn_mock_h2_upstream_early_response(&ca).await;
+
+        let route_store = make_route_store(
+            "localhost",
+            upstream_port,
+            vec![EndpointRule {
+                method: "POST".to_string(),
+                path: "/pkg.Svc/BidiStream".to_string(),
+            }],
+        );
+        let credential_store = make_credential_store("sk-test-secret-key");
+        let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
+        let tls_connector = h2_tls_connector_trusting(ca.cert_pem());
+        let filter = ProxyFilter::allow_all();
+        let session_token = Zeroizing::new("session-tok".to_string());
+
+        let ctx = InterceptCtx {
+            route_id: Some("test-svc"),
+            host: "localhost",
+            port: upstream_port,
+            route_store: Arc::new(route_store),
+            credential_store: Arc::new(credential_store),
+            session_token: &session_token,
+            cert_cache,
+            tls_connector: &tls_connector,
+            tls_connector_h2: &tls_connector,
+            filter: &filter,
+            audit_log: None,
+            upstream_proxy: None,
+            approval_backends: None,
+            credential_capture_backend: None,
+            nonce_resolver: None,
+            enable_h2: true,
+        };
+
+        let (client_io, server_io) = tokio::io::duplex(65536);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    let _ = forward_h2_connection(server_io, &ctx).await;
+                },
+                async {
+                    let (mut h2_client, h2_conn) = h2::client::handshake(client_io).await.unwrap();
+                    let conn_handle = tokio::spawn(async move {
+                        let _ = h2_conn.await;
+                    });
+
+                    let request = http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "https://localhost:{}/pkg.Svc/BidiStream",
+                            upstream_port
+                        ))
+                        .header("content-type", "application/grpc")
+                        .body(())
+                        .unwrap();
+                    // Keep the request stream OPEN (end_stream = false) and do not
+                    // send the body yet — emulating a client waiting for the first
+                    // server response before continuing to stream.
+                    let (response_fut, mut send_stream) =
+                        h2_client.send_request(request, false).unwrap();
+
+                    // We must receive the early response while our request body
+                    // is still open. A sequential proxy would never get here.
+                    let response = response_fut.await.unwrap();
+                    assert_eq!(response.status(), 200);
+                    let mut resp_body = response.into_body();
+                    let first = resp_body.data().await.unwrap().unwrap();
+                    assert_eq!(&first[..], b"early");
+                    resp_body
+                        .flow_control()
+                        .release_capacity(first.len())
+                        .unwrap();
+
+                    // Now that we've seen the response, finish the request body.
+                    send_stream
+                        .send_data(Bytes::from_static(b"late-request-data"), true)
+                        .unwrap();
+
+                    // Upstream received the late body only after responding early.
+                    let received = body_rx.await.unwrap();
+                    assert_eq!(&received[..], b"late-request-data");
+
+                    // Drain the rest of the response.
+                    while let Some(chunk) = resp_body.data().await {
+                        let chunk = chunk.unwrap();
+                        let len = chunk.len();
+                        resp_body.flow_control().release_capacity(len).unwrap();
+                    }
+
+                    drop(h2_client);
+                    conn_handle.abort();
+                    let _ = conn_handle.await;
+                }
+            );
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "test timed out — bidirectional h2 streaming deadlocked"
+        );
     }
 }
