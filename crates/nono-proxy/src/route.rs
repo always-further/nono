@@ -10,7 +10,7 @@
 //! (inject mode, header name/value, raw secret). Both stores are keyed by the
 //! normalised route prefix and are consulted independently by the proxy handlers.
 
-use crate::config::{CompiledEndpointRules, RouteConfig};
+use crate::config::{CompiledEndpointPolicy, CompiledEndpointRules, RouteConfig};
 use crate::error::{ProxyError, Result};
 use nono::undo::{NetworkAuditAuthMechanism, NetworkAuditInjectionMode};
 use rustls::pki_types::pem::PemObject;
@@ -37,6 +37,10 @@ pub struct LoadedRoute {
     /// When non-empty, only matching requests are allowed (default-deny).
     /// When empty, all method+path combinations are permitted.
     pub endpoint_rules: CompiledEndpointRules,
+
+    /// Pre-compiled explicit endpoint policy. When no explicit policy is
+    /// configured this preserves legacy `endpoint_rules` semantics.
+    pub endpoint_policy: CompiledEndpointPolicy,
 
     /// Per-route TLS connector with custom CA trust, if configured.
     /// Built once at startup from the route's `tls_ca` certificate file.
@@ -71,6 +75,7 @@ impl std::fmt::Debug for LoadedRoute {
             .field("upstream", &self.upstream)
             .field("upstream_host_port", &self.upstream_host_port)
             .field("endpoint_rules", &self.endpoint_rules)
+            .field("endpoint_policy", &self.endpoint_policy)
             .field("has_custom_tls_ca", &self.tls_connector.is_some())
             .field("requires_intercept", &self.requires_intercept)
             .field(
@@ -164,6 +169,11 @@ impl RouteStore {
 
             let endpoint_rules = CompiledEndpointRules::compile(&route.endpoint_rules)
                 .map_err(|e| ProxyError::Config(format!("route '{}': {}", normalized_prefix, e)))?;
+            let endpoint_policy = CompiledEndpointPolicy::compile(
+                route.endpoint_policy.as_ref(),
+                &route.endpoint_rules,
+            )
+            .map_err(|e| ProxyError::Config(format!("route '{}': {}", normalized_prefix, e)))?;
 
             let tls_connector = if route.tls_ca.is_some()
                 || route.tls_client_cert.is_some()
@@ -197,7 +207,7 @@ impl RouteStore {
                 || route.oauth2.is_some()
                 || route.aws_auth.is_some();
             let requires_intercept =
-                requires_managed_credential || !route.endpoint_rules.is_empty();
+                requires_managed_credential || !endpoint_policy.allows_all_without_l7();
             let managed_auth_mechanism = auth_mechanism_for_route(route);
             let managed_injection_mode = injection_mode_for_route(route);
 
@@ -207,6 +217,7 @@ impl RouteStore {
                     upstream: route.upstream.clone(),
                     upstream_host_port,
                     endpoint_rules,
+                    endpoint_policy,
                     tls_connector,
                     requires_intercept,
                     requires_managed_credential,
@@ -255,7 +266,7 @@ impl RouteStore {
             route
                 .upstream_host_port
                 .as_ref()
-                .is_some_and(|hp| *hp == normalised)
+                .is_some_and(|hp| host_port_matches(hp, &normalised))
         })
     }
 
@@ -270,7 +281,7 @@ impl RouteStore {
             route
                 .upstream_host_port
                 .as_ref()
-                .filter(|hp| **hp == normalised)
+                .filter(|hp| host_port_matches(hp, &normalised))
                 .map(|_| (prefix.as_str(), route))
         })
     }
@@ -287,7 +298,7 @@ impl RouteStore {
                 route
                     .upstream_host_port
                     .as_ref()
-                    .is_some_and(|hp| *hp == normalised)
+                    .is_some_and(|hp| host_port_matches(hp, &normalised))
             })
             .map(|(prefix, route)| (prefix.as_str(), route))
             .collect();
@@ -303,7 +314,7 @@ impl RouteStore {
             route
                 .upstream_host_port
                 .as_ref()
-                .is_some_and(|hp| *hp == normalised)
+                .is_some_and(|hp| host_port_matches(hp, &normalised))
                 && route.requires_intercept
         })
     }
@@ -318,9 +329,15 @@ impl RouteStore {
     }
 }
 
-/// Outcome of route selection for an intercepted request, shared by
-/// `tls_intercept::handle` and tests so the decision has a single source of
-/// truth (the caller maps each variant to its HTTP/audit response).
+/// Outcome of route selection for an intercepted request.
+///
+/// The shipping selection logic lives inline in `tls_intercept::handle`
+/// (`handle_inner_request`) because it is interleaved with the asynchronous
+/// `endpoint_policy` approval workflow, which cannot run inside this synchronous
+/// helper. `select_route` is retained as the unit-tested reference for the
+/// endpoint-authorization gate, ambiguity check, and credential-first priority
+/// (commit b0b2c743); keep it in sync with the loop in `handle_inner_request`.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) enum RouteSelection<'a> {
     /// An `_ep_` endpoint-authorization route exists for the upstream but no
@@ -353,6 +370,7 @@ pub(crate) enum RouteSelection<'a> {
 ///    injected rather than silently dropped,
 /// 2. a matched credential-less route (bare endpoint authorization),
 /// 3. a credential-less catch-all (un-credentialed passthrough).
+#[cfg(test)]
 #[must_use]
 pub(crate) fn select_route<'a>(
     candidates: &'a [(&'a str, &'a LoadedRoute)],
@@ -441,6 +459,32 @@ fn extract_host_port(url: &str) -> Option<String> {
     };
     let port = parsed.port().unwrap_or(default_port);
     Some(format!("{}:{}", host.to_lowercase(), port))
+}
+
+fn host_port_matches(pattern: &str, target: &str) -> bool {
+    if pattern == target {
+        return true;
+    }
+    if !pattern.starts_with("*.") {
+        return false;
+    }
+
+    let Some((pattern_host, pattern_port)) = pattern.rsplit_once(':') else {
+        return false;
+    };
+    let Some((target_host, target_port)) = target.rsplit_once(':') else {
+        return false;
+    };
+    if pattern_port != target_port {
+        return false;
+    }
+
+    let Some(suffix) = pattern_host.strip_prefix("*.") else {
+        return false;
+    };
+    target_host
+        .strip_suffix(suffix)
+        .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
 }
 
 /// Read a PEM file, producing a clear `ProxyError::Config` for common failure modes.
@@ -661,6 +705,7 @@ mod tests {
                     path: "/v1/models".to_string(),
                 },
             ],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -701,6 +746,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -728,6 +774,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -756,6 +803,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -775,6 +823,7 @@ mod tests {
                 proxy: None,
                 env_var: None,
                 endpoint_rules: vec![],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -823,11 +872,44 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_host_port_preserves_wildcard_host() {
+        assert_eq!(
+            extract_host_port("https://*.dev.example.net"),
+            Some("*.dev.example.net:443".to_string())
+        );
+    }
+
+    #[test]
+    fn test_host_port_matches_wildcard_subdomain_only() {
+        assert!(host_port_matches(
+            "*.dev.example.net:443",
+            "api.admin.dev.example.net:443"
+        ));
+        assert!(host_port_matches(
+            "*.dev.example.net:443",
+            "admin.dev.example.net:443"
+        ));
+        assert!(!host_port_matches(
+            "*.dev.example.net:443",
+            "dev.example.net:443"
+        ));
+        assert!(!host_port_matches(
+            "*.dev.example.net:443",
+            "api.admin.dev.example.net:8443"
+        ));
+        assert!(!host_port_matches(
+            "*.dev.example.net:443",
+            "api.admin.other.net:443"
+        ));
+    }
+
+    #[test]
     fn test_loaded_route_debug() {
         let route = LoadedRoute {
             upstream: "https://api.openai.com".to_string(),
             upstream_host_port: Some("api.openai.com:443".to_string()),
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
+            endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
             requires_intercept: false,
             requires_managed_credential: false,
@@ -858,6 +940,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -880,6 +963,46 @@ mod tests {
     }
 
     #[test]
+    fn test_requires_intercept_wildcard_credential_upstream() {
+        let routes = vec![RouteConfig {
+            prefix: "internal_api".to_string(),
+            upstream: "https://*.dev.example.net".to_string(),
+            credential_key: Some("cmd://internal_api".to_string()),
+            inject_mode: Default::default(),
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("Bearer {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: Some("INTERNAL_API_TOKEN".to_string()),
+            endpoint_rules: vec![],
+            endpoint_policy: None,
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+            aws_auth: None,
+        }];
+        let store = RouteStore::load(&routes).unwrap();
+
+        assert!(store.is_route_upstream("api.admin.dev.example.net:443"));
+        assert!(store.has_intercept_route("api.admin.dev.example.net:443"));
+        let hit = store
+            .lookup_by_upstream("api.admin.dev.example.net:443")
+            .unwrap();
+        assert_eq!(hit.0, "internal_api");
+        assert!(hit.1.requires_managed_credential);
+
+        let all = store.lookup_all_by_upstream("api.admin.dev.example.net:443");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "internal_api");
+
+        assert!(!store.is_route_upstream("dev.example.net:443"));
+        assert!(!store.has_intercept_route("api.admin.dev.example.net:8443"));
+    }
+
+    #[test]
     fn test_requires_intercept_endpoint_rules_only() {
         // L7-only route (no credential): rules alone are enough to require
         // interception.
@@ -899,6 +1022,7 @@ mod tests {
                 method: "GET".to_string(),
                 path: "/v1/items".to_string(),
             }],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -930,6 +1054,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -947,6 +1072,7 @@ mod tests {
             upstream: "https://api.openai.com".to_string(),
             upstream_host_port: Some("api.openai.com:443".to_string()),
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
+            endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
             requires_intercept: true,
             requires_managed_credential: true,
@@ -962,6 +1088,7 @@ mod tests {
             upstream: "https://internal.example.com".to_string(),
             upstream_host_port: Some("internal.example.com:443".to_string()),
             endpoint_rules: CompiledEndpointRules::compile(&[]).unwrap(),
+            endpoint_policy: CompiledEndpointPolicy::compile(None, &[]).unwrap(),
             tls_connector: None,
             requires_intercept: true,
             requires_managed_credential: false,
@@ -986,6 +1113,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -1019,6 +1147,7 @@ mod tests {
                     method: "*".to_string(),
                     path: "/org-a/**".to_string(),
                 }],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1041,6 +1170,7 @@ mod tests {
                     method: "*".to_string(),
                     path: "/org-b/**".to_string(),
                 }],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1117,6 +1247,7 @@ mod tests {
                     method: "*".to_string(),
                     path: path.to_string(),
                 }],
+                endpoint_policy: None,
                 tls_ca: None,
                 tls_client_cert: None,
                 tls_client_key: None,
@@ -1530,6 +1661,7 @@ h56ZLEEqHfVWFhJWIKRSabtxYPV/VJyMv+lo3L0QwSKsouHs3dtF1zVQ
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: Some(cert_path.to_str().unwrap().to_string()),
             tls_client_key: Some(key_path.to_str().unwrap().to_string()),

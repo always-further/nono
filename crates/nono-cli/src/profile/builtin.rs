@@ -118,9 +118,11 @@ mod tests {
         //   claude-code → always-further/claude   (removed v0.43.0)
         //   codex       → always-further/codex    (removed v0.43.0)
         //   opencode    → always-further/opencode (removed)
+        // Tool Sandbox examples should also live outside embedded built-ins.
         assert!(!profiles.contains(&"claude-code".to_string()));
         assert!(!profiles.contains(&"claude-no-kc".to_string()));
         assert!(!profiles.contains(&"codex".to_string()));
+        assert!(!profiles.contains(&"linux-tool-sandbox-git-ssh".to_string()));
         assert!(!profiles.contains(&"opencode".to_string()));
     }
 

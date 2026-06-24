@@ -1,0 +1,588 @@
+---
+title: Sandboxed Tool Execution
+description: Run selected commands in zero-trust ephemeral per-tool sandboxes with brokered chaining
+---
+
+Sandboxed Tool Execution lets a profile turn specific commands into fine-grained brokered tool executions. The supervisor acts as the Capability Broker and launches the tool into a fresh child sandbox built only from the selected command policy and its lifecycle.
+
+This means a single tool, such as git, kubectl, or curl, can be scoped with specific filesystem, network, and credential grants. The tool can be chained to a second selected tool with a separate policy. The second tool can be chained to a third, and so on.
+
+For commands that should not run at all, see [Dangerous Command Blocking](/cli/features/dangerous-command-blocking). That page covers deny-only Tool Sandbox command-control entries and inherited `dangerous_commands` behavior.
+
+## Mental Model
+
+A Tool Sandbox profile answers three questions:
+
+| Question | Field |
+|---|---|
+| What may the outer session run directly? | `command_policies.commands.<name>.sandbox` or `command_policies.commands.<name>.from.session` |
+| What may one Tool Sandbox command run next? | `command_policies.commands.<caller>.can_use` plus `command_policies.commands.<callee>.from.<caller>` |
+| What does the selected child command receive? | `sandbox` or caller-specific `from.<caller>` grants |
+
+`command_policies.entrypoint` is still parsed for older profiles, but current profiles should express direct session access with `commands.<name>.sandbox` or `commands.<name>.from.session`.
+
+Each child command starts from a minimal runtime baseline. It does not inherit outer `--allow`, CWD access, broad profile groups, raw credential paths, or outer network access.
+
+When Tool Sandbox is active, the outer process can execute the initial program and the Tool Sandbox shims. Further tool launches should be modeled as command-policy hops. This keeps direct executable-path bypasses blocked without building a host-wide allow-list of every executable on `PATH`.
+
+## Available Fields
+
+Tool Sandbox configuration lives under `command_policies`. A minimal shape looks like this:
+
+```json
+{
+  "command_policies": {
+    "commands": {
+      "tool": {
+        "sandbox": {}
+      }
+    }
+  }
+}
+```
+
+The top-level `command_policies` object accepts these fields:
+
+| Field | Value | Use |
+|---|---|---|
+| `commands` | object | Policy-controlled commands. A non-empty object activates Tool Sandbox. |
+| `credentials` | object | Named credentials that selected child policies may request. |
+| `executable_dirs` | string array | Extra directories used while resolving command names before shim `PATH` is prepended. |
+| `allow_writable_executables` | boolean | Profile-wide trust downgrade for command targets writable by the sandbox capability set. |
+| `deny_direct_exec_bypass` | absolute path array | Canonical executable paths that must not bypass shim control. |
+| `approval_backends` | object | Named backends for `approve` decisions. |
+| `approval_defaults` | object | Default approval backend and timeout. |
+| `entrypoint` | command name | Legacy session hint. Prefer `commands.<name>.sandbox` or `commands.<name>.from.session`. |
+
+Each entry under `commands` uses the command name as the key:
+
+| Field | Value | Use |
+|---|---|---|
+| `sandbox` | object | Direct-session policy shorthand. This lets the outer session run the command. |
+| `from` | object | Caller-specific policies. Use `session` for direct session invocation or another command name for chaining. |
+| `can_use` | command-name array | Commands this command may invoke through Tool Sandbox. |
+| `executable` | absolute path | Pin the command name to one executable file instead of the first `PATH` match. |
+| `allow_writable_executable` | boolean | Per-command trust downgrade for a pinned executable writable by the sandbox capability set. Requires absolute `executable`. |
+| `intercept` | array | Ordered argument-prefix mediation rules evaluated after invocation policy. |
+| `allow_direct_exec_bypass` | absolute path array | Compatibility escape hatch for direct canonical-path invocation. |
+| `allow_direct_exec_bypass_with_credentials` | boolean | Required when a credential-using command also allows direct exec bypass. |
+
+`from` entries accept three value shapes:
+
+| Value | Meaning |
+|---|---|
+| `"deny"` | Explicitly deny this caller. |
+| `{ "fs_read": ["."], ... }` | Bare sandbox shorthand for this caller. |
+| `{ "sandbox": { ... }, "invocation_policy": { ... } }` | Full edge policy with optional argv/env mediation before launch. |
+
+The selected `sandbox` object describes what the child receives:
+
+| Field | Value | Use |
+|---|---|---|
+| `fs_read` / `fs_write` | directory path arrays | Directory grants. |
+| `fs_read_file` / `fs_write_file` | file path arrays | Exact file grants. |
+| `network` | object | Child network grants. |
+| `environment` | object | Environment allow-list and injected static variables. |
+| `argv_prepend` | string array | Mandatory arguments inserted before caller-provided arguments. |
+| `use_credentials` | credential-name array | Named credentials injected into this selected policy. |
+| `credentials` | array | Credential grants with optional endpoint policy constraints. |
+| `stdio` | object | Brokered stdout/stderr byte limits. |
+| `resources` | object | Optional child resource limits. |
+| `open_urls` | object | Runtime-delegated URL opening for this command. |
+| `allow_launch_services` | boolean | macOS-only direct LaunchServices URL opening. |
+| `allow_raw_file_credentials_in_chained_policy` | boolean | Required before non-session callers can receive raw-file credentials. |
+
+### Dynamic Filesystem Grants
+
+`fs_read`, `fs_write`, `fs_read_file`, and `fs_write_file` can contain dynamic provider tokens as well as literal paths. Tokens are expanded at launch before the child sandbox is built. They are opt-in: no dynamic paths are added unless a selected command policy includes one of these tokens.
+
+Supported tokens:
+
+| Token | Use in | Expands to |
+|---|---|---|
+| `@git:config-files` | `fs_read_file` | Trusted global/system Git config files and configured Git file paths, such as attributes, excludes, and commit template files. |
+| `@git:hooks-path` | `fs_read` | Trusted global/system `core.hooksPath` directories. |
+
+Example:
+
+```json
+{
+  "command_policies": {
+    "commands": {
+      "git": {
+        "sandbox": {
+          "fs_read_file": ["@git:config-files"],
+          "fs_read": ["@git:hooks-path"]
+        }
+      }
+    }
+  }
+}
+```
+
+The Git provider reads `git config --list --show-origin --show-scope` and keeps only `global` and `system` scoped paths. It ignores `local` and `worktree` scopes so a repository cannot grant itself additional host filesystem access through `.git/config`. If `git` is unavailable or returns no matching paths, the token expands to no paths.
+
+`network` accepts these values:
+
+| Field | Value | Notes |
+|---|---|---|
+| `allow_all` | boolean | Allows unrestricted child network access. |
+| `allow_domain` | string array | Hostname allow-list. Valid only with an enforceable nono proxy/helper mode. |
+| `tcp_connect_ports` | port array | Raw TCP connect ports on Linux Landlock. Not hostname-filtered. |
+| `tcp_bind_ports` | port array | Raw TCP bind ports on Linux Landlock. |
+
+`environment.allow_vars` accepts exact names such as `PATH`, trailing-prefix wildcards such as `AWS_*`, and the bare wildcard `*`. `environment.set_vars` injects static values after filtering; `PATH` and `NONO_*` are reserved.
+
+`invocation_policy` and endpoint policies use the same decision values: `deny`, `approve`, and `allow`. A decision may also route approval with an object such as `{ "decision": "approve", "backend": "terminal", "timeout_secs": 30 }`.
+
+## Command Resolution
+
+By default, Tool Sandbox resolves a command to the first executable found on the original `PATH`, before the shim directory is prepended. Pin a command to an exact executable when PATH order should not decide the security boundary:
+
+```json
+{
+  "commands": {
+    "aws": {
+      "executable": "/usr/sbin/aws",
+      "sandbox": {
+        "fs_read_file": ["$HOME/.aws/credentials"]
+      }
+    }
+  }
+}
+```
+
+`executable` is canonicalized at startup and bound by path, inode, and digest. The command name still uses the shim, so `nono run --profile my-profile -- aws ...` reaches the pinned executable.
+
+Tool Sandbox rejects executables and executable parent directories that are writable through the outer sandbox capability set. This prevents a profile from both trusting a command target and granting the agent write or replace access to that same target. Homebrew-style or otherwise user-writable host toolchains are allowed when the sandbox does not grant write access to the executable or its parent.
+
+If a low-assurance profile intentionally grants write access overlapping a command target, pin the command to a full absolute executable path and set `allow_writable_executable: true`:
+
+```json
+{
+  "commands": {
+    "demonator": {
+      "executable": "/opt/homebrew/bin/demonator",
+      "sandbox": {
+        "fs_write": ["/opt/homebrew/bin"]
+      },
+      "allow_writable_executable": true
+    }
+  }
+}
+```
+
+This is a per-command trust downgrade. It is rejected unless `executable` is set to an absolute file path; a relative path or a bare command name fails validation. It does not cover other binaries in that directory and does not change invocation: the agent still calls `demonator ...` through the Tool Sandbox shim.
+
+For local demos or other low-assurance profiles that intentionally grant write access overlapping tool locations, a profile can disable the writable-executable trust check across Tool Sandbox:
+
+```json
+{
+  "command_policies": {
+    "allow_writable_executables": true,
+    "commands": {
+      "npm": {
+        "executable": "/Users/alice/.nvm/versions/node/v24.13.0/bin/npm",
+        "sandbox": {
+          "fs_write": ["/Users/alice/.nvm/versions/node/v24.13.0/bin"]
+        }
+      }
+    }
+  }
+}
+```
+
+This is broader than `commands.<name>.allow_writable_executable`: it also covers deny-only commands and the outer executable allow-list used by Tool Sandbox.
+
+Linux launches the verified executable object by file descriptor. macOS verifies the pinned file before sandboxing but must still call `execve()` by path, so a sandbox-writable executable or parent directory remains replaceable before launch. Avoid `allow_writable_executable` for high-assurance macOS policies.
+
+Interpreter-packaged tools, such as a Python `aws` entrypoint, are classified as shebang scripts. Tool Sandbox grants the selected script, its interpreter, and the interpreter's ELF loader closure. Language package directories, virtualenvs, SDK homes, and tool-specific data are not guessed by Tool Sandbox; grant those explicitly with `fs_read`, `fs_read_file`, `fs_write`, or `fs_write_file`.
+
+## Examples
+
+### Minimal Direct Tool
+
+This profile lets the session invoke `jq` directly. The `jq` child can read the project directory and has no network access.
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-jq-readonly",
+    "description": "Run jq with read-only access to this project"
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "command_policies": {
+    "commands": {
+      "jq": {
+        "sandbox": {
+          "fs_read": ["."],
+          "environment": {
+            "allow_vars": ["PATH", "LANG", "LC_*"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Run:
+
+```bash
+nono profile validate ~/.config/nono/profiles/eti-jq-readonly.json
+nono run --profile eti-jq-readonly -- jq '.name' package.json
+```
+
+### Direct Network Tool
+
+On Linux, this profile lets the session invoke `curl` and allows raw TCP connect on port 443. Hostname filtering is not implied by port rules. macOS Tool Sandbox rejects raw TCP port rules because Seatbelt cannot enforce per-port filters for these child sandboxes.
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-curl-https",
+    "description": "Run curl with raw TCP/443 egress"
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "command_policies": {
+    "commands": {
+      "curl": {
+        "sandbox": {
+          "fs_write": ["."],
+          "fs_read_file": [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt"
+          ],
+          "network": {
+            "tcp_connect_ports": [443]
+          },
+          "environment": {
+            "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "SSL_CERT_FILE", "SSL_CERT_DIR"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Run:
+
+```bash
+nono run --profile eti-curl-https -- curl -I https://example.com
+```
+
+If you need hostname enforcement, use an enforceable nono proxy/helper policy. `network.allow_domain` without such a helper is rejected.
+
+For tools that must use raw network directly on macOS, make the broader grant
+explicit with `network.allow_all: true`. This allows unrestricted child network
+for that selected command and cannot be combined with narrower host or port
+rules.
+
+### Chained Tools
+
+This profile lets the session run `git`, and lets the `git` child invoke `ssh`.
+Direct session `ssh` remains denied. A shell wrapper is not part of the authority
+chain; `sh -c 'git ls-remote ...'` still reaches the same `git` policy through
+the shim-prefixed `PATH`.
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-git-ssh",
+    "description": "Allow git to call ssh without direct session ssh"
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "command_policies": {
+    "commands": {
+      "git": {
+        "can_use": ["ssh"],
+        "sandbox": {
+          "fs_read": ["."],
+          "fs_write": ["."],
+          "environment": {
+            "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*"]
+          }
+        }
+      },
+      "ssh": {
+        "from": {
+          "git": {
+            "fs_read": ["."],
+            "environment": {
+              "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_*"]
+            }
+          },
+          "session": "deny"
+        }
+      }
+    }
+  }
+}
+```
+
+Run:
+
+```bash
+nono run --profile eti-git-ssh -- git ls-remote git@github.com:owner/repo.git
+nono run --profile eti-git-ssh -- ssh -T git@github.com
+```
+
+Expected:
+
+- `git` calling `ssh` succeeds;
+- direct session `ssh` is denied.
+
+### Build Tool Chains
+
+Build tools often execute helper programs. Model each helper explicitly.
+
+```json
+{
+  "extends": "default",
+  "meta": {
+    "name": "eti-make-cc",
+    "description": "Allow make to call cc and pkg-config"
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "command_policies": {
+    "commands": {
+      "make": {
+        "can_use": ["cc", "pkg-config"],
+        "sandbox": {
+          "fs_read": ["."],
+          "fs_write": ["."],
+          "environment": {
+            "allow_vars": ["PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "LC_*", "MAKEFLAGS", "CC", "CFLAGS", "LDFLAGS", "PKG_CONFIG_*"]
+          }
+        }
+      },
+      "cc": {
+        "from": {
+          "make": {
+            "fs_read": ["."],
+            "fs_write": ["."],
+            "environment": {
+              "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "TMPDIR", "CFLAGS", "LDFLAGS"]
+            }
+          },
+          "session": "deny"
+        }
+      },
+      "pkg-config": {
+        "from": {
+          "make": {
+            "fs_read": ["."],
+            "environment": {
+              "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "PKG_CONFIG_*"]
+            }
+          },
+          "session": "deny"
+        }
+      }
+    }
+  }
+}
+```
+
+Compilers may invoke additional helpers such as assemblers, linkers, or language-specific drivers. When a build fails with a Tool Sandbox denial for a helper command, add that helper as another policy-controlled command and caller edge.
+
+## Environment Controls
+
+By default, Tool Sandbox preserves a small safe environment set. Override it with `environment.allow_vars`:
+
+```json
+{
+  "environment": {
+    "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "AWS_*"]
+  }
+}
+```
+
+Pattern syntax is intentionally small:
+
+- exact names: `PATH`;
+- trailing prefix wildcards: `AWS_*`;
+- bare wildcard: `*`.
+
+`environment.set_vars` injects static values after filtering and after `PATH` has been shim-prefixed:
+
+```json
+{
+  "environment": {
+    "allow_vars": ["PATH", "LANG", "LC_*"],
+    "set_vars": {
+      "PAGER": "",
+      "GIT_PAGER": ""
+    }
+  }
+}
+```
+
+`PATH` and `NONO_*` are reserved and cannot be set with `set_vars`.
+
+## Mandatory Arguments
+
+Use `argv_prepend` when a selected child policy needs mandatory mode flags. The arguments are inserted after the synthesized `argv[0]` and before caller-provided arguments.
+
+```json
+{
+  "ssh": {
+    "from": {
+      "git": {
+        "argv_prepend": ["-o", "IdentityFile=none"],
+        "use_credentials": ["ssh-agent"]
+      }
+    }
+  }
+}
+```
+
+This is useful for mode selection. It is not a substitute for sandbox grants; filesystem, network, and credential access are still controlled by the selected policy.
+
+## Credentials
+
+Tool Sandbox supports two credential types:
+
+| Type | Typical use |
+|---|---|
+| `local-socket` | Grant one selected child access to a local IPC socket and optionally map it into an env var |
+| `raw-file` | Grant direct-session tools exact read access to a file credential |
+
+A Git profile can model SSH agent as a local socket credential. A raw TCP/22
+rule currently requires Linux Landlock; use a proxy-backed policy for
+hostname/network enforcement on macOS:
+
+```json
+{
+  "credentials": {
+    "ssh-agent": {
+      "type": "local-socket",
+      "path": "$SSH_AUTH_SOCK",
+      "mode": "connect",
+      "env_var": "SSH_AUTH_SOCK"
+    }
+  }
+}
+```
+
+If `SSH_AUTH_SOCK` is unset, a command that selects this credential fails before launch with a Tool Sandbox error. Prefer the agent socket over raw private-key file grants.
+
+## Stdio Output Mediation
+
+Tool Sandbox treats stdout and stderr as output capabilities. A tool that can print
+unbounded data can exfiltrate files or credentials, or destabilize the broker
+with excessive output.
+
+When `sandbox.stdio` is present, the Capability Broker does not pass the
+caller's stdout/stderr file descriptors directly to the tool. It creates
+broker-owned pipes, reads output in bounded chunks, applies the byte policy, and
+relays only permitted bytes back to the caller.
+
+```json
+{
+  "sandbox": {
+    "stdio": {
+      "stdout": {
+        "max_bytes": 1048576,
+        "on_limit": "truncate"
+      },
+      "stderr": {
+        "max_bytes": 262144,
+        "on_limit": "terminate"
+      }
+    }
+  }
+}
+```
+
+`truncate` forwards up to `max_bytes`, then drains the child pipe without
+forwarding more bytes. `terminate` and `deny` stop the delegated tool and return
+a denied command result.
+
+Command-policy audit events include structured stdio counts when brokered stdio
+is active:
+
+```json
+{
+  "stdio": {
+    "stdout": {
+      "total_bytes": 1200000,
+      "forwarded_bytes": 1048576,
+      "max_bytes": 1048576,
+      "limit_exceeded": true,
+      "on_limit": "truncate"
+    }
+  }
+}
+```
+
+## Direct Exec Bypass
+
+Policy-controlled commands are meant to be reached through shims. A direct path like `/usr/bin/ssh` is denied unless explicitly configured:
+
+```json
+{
+  "commands": {
+    "tool": {
+      "allow_direct_exec_bypass": ["/usr/bin/tool"]
+    }
+  }
+}
+```
+
+Direct bypass is a compatibility escape hatch:
+
+- `tool` through `PATH` still uses Tool Sandbox;
+- `/usr/bin/tool` runs with outer session capabilities, not the child Tool Sandbox sandbox;
+- deny-only blocked commands are never eligible;
+- credential-using commands require `allow_direct_exec_bypass_with_credentials: true`.
+
+## Validation Checklist
+
+Use these commands while developing a profile:
+
+```bash
+nono profile validate ~/.config/nono/profiles/my-eti-profile.json
+nono profile show my-eti-profile --json
+nono run --profile my-eti-profile --dry-run -- my-command --version
+```
+
+For command-control behavior:
+
+```bash
+# Direct command should be allowed
+nono run --profile my-eti-profile -- allowed-command --version
+
+# A denied direct command should hit the shim and exit 126
+nono run --profile my-eti-profile -- denied-command --version
+
+# Direct canonical path should be denied unless explicitly bypassed
+REAL="$(command -p -v denied-command)"
+nono run --profile my-eti-profile -- "$REAL" --version
+```
+
+## Troubleshooting
+
+| Symptom | Meaning |
+|---|---|
+| `nono: Tool Sandbox denied <cmd>: missing session sandbox` | The outer session invoked a policy command without `commands.<name>.sandbox` or `commands.<name>.from.session`. |
+| `nono: Tool Sandbox denied <cmd>: missing from.<caller>` | A caller was allowed to invoke a callee name, but the callee has no `from.<caller>` policy. |
+| `Tool Sandbox credential '<name>' is unavailable: SSH_AUTH_SOCK is unset` | The selected policy references a local-socket credential backed by `SSH_AUTH_SOCK`, but no agent socket was available at session startup. |
+| `Permission denied (publickey)` | SSH reached the remote server; authentication failed outside nono. |
+| `Host key verification failed` | SSH could not verify the host from the known-hosts files the policy grants. |
+| `Tool Sandbox exec failed for script ... using interpreter ...` | The command resolved to a shebang script. Grant the required interpreter, package, and runtime data paths explicitly. |
+| `Tool Sandbox direct exec bypass denied` | A policy-controlled command was invoked by absolute path instead of through its shim. |
+| `Seatbelt cannot enforce raw per-port TCP rules for Tool Sandbox children` | The selected Tool Sandbox policy uses raw TCP port filters on macOS. Use a Linux host or a proxy-backed policy instead. |
+| `legacy_blocked_command` | A deprecated blocked-command entry was folded into Tool Sandbox as deny-only command control. |

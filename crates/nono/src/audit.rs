@@ -81,8 +81,127 @@ pub enum AuditEventPayload {
     /// Network audit event.
     Network {
         /// Network audit event emitted by the proxy or sandbox supervisor.
-        event: NetworkAuditEvent,
+        event: Box<NetworkAuditEvent>,
     },
+    /// Sandbox runtime metadata.
+    SandboxRuntime {
+        /// Sandbox runtime event emitted when execution starts.
+        event: SandboxRuntimeAuditEvent,
+    },
+    /// Tool sandbox command policy decision.
+    CommandPolicy {
+        /// Command policy decision event.
+        event: Box<CommandPolicyAuditEvent>,
+    },
+}
+
+/// Sandbox runtime metadata captured in the audit log.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SandboxRuntimeAuditEvent {
+    /// RFC3339 timestamp.
+    pub timestamp: String,
+    /// Runtime platform name.
+    pub platform: String,
+    /// Landlock ABI version when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landlock_abi: Option<String>,
+    /// Whether Landlock execute restrictions were enforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landlock_execute_enforced: Option<bool>,
+    /// Whether tool sandbox command mediation was active.
+    pub tool_sandbox_active: bool,
+}
+
+/// Tool sandbox command policy decision captured in the audit log.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CommandPolicyAuditEvent {
+    /// RFC3339 timestamp.
+    pub timestamp: String,
+    /// Session identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Command name being mediated.
+    pub command: String,
+    /// Caller label.
+    pub caller: String,
+    /// Caller kind, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_kind: Option<String>,
+    /// Caller command, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_command: Option<String>,
+    /// Caller process id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_pid: Option<u32>,
+    /// Shim process id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shim_pid: Option<u32>,
+    /// Session root process id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_root_pid: Option<u32>,
+    /// Policy decision.
+    pub decision: String,
+    /// Decision reason.
+    pub reason: Option<String>,
+    /// Stdio mode used for the launched command.
+    pub stdio_mode: String,
+    /// Hash of argv bytes.
+    pub argv_hash: String,
+    /// Hash of environment variable names.
+    pub env_name_hash: String,
+    /// Hash of current working directory bytes.
+    pub cwd_hash: String,
+    /// Redacted argv display.
+    pub argv_display: Vec<String>,
+    /// Redacted environment variable names.
+    pub env_names_display: Vec<String>,
+    /// Redacted environment entries selected for display.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_display: Vec<CommandPolicyEnvAuditEntry>,
+    /// Redacted current working directory display.
+    pub cwd_display: String,
+    /// Command exit code, when a command was launched.
+    pub exit_code: Option<i32>,
+    /// Captured stdio accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdio: Option<CommandPolicyStdioAudit>,
+}
+
+/// Redacted command policy environment entry.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CommandPolicyEnvAuditEntry {
+    /// Environment variable name.
+    pub name: String,
+    /// Redacted display value.
+    pub value_display: String,
+}
+
+/// Command policy stdio audit metadata.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CommandPolicyStdioAudit {
+    /// Stdout accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<CommandPolicyStdioStreamAudit>,
+    /// Stderr accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<CommandPolicyStdioStreamAudit>,
+}
+
+/// Command policy stdio stream accounting.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CommandPolicyStdioStreamAudit {
+    /// Total observed bytes.
+    pub total_bytes: u64,
+    /// Bytes forwarded to the caller.
+    pub forwarded_bytes: u64,
+    /// Configured byte limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    /// Whether the configured limit was exceeded.
+    pub limit_exceeded: bool,
+    /// Action taken when the limit was exceeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_limit: Option<String>,
 }
 
 /// One line of `audit-events.ndjson`.
@@ -357,7 +476,23 @@ impl AuditRecorder {
 
     /// Record a network event.
     pub fn record_network_event(&mut self, event: NetworkAuditEvent) -> Result<()> {
-        self.append_event(AuditEventPayload::Network { event })
+        self.append_event(AuditEventPayload::Network {
+            event: Box::new(event),
+        })
+    }
+
+    /// Record sandbox runtime metadata.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn record_sandbox_runtime_event(&mut self, event: SandboxRuntimeAuditEvent) -> Result<()> {
+        self.append_event(AuditEventPayload::SandboxRuntime { event })
+    }
+
+    /// Record a tool sandbox command policy decision.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn record_command_policy_event(&mut self, event: CommandPolicyAuditEvent) -> Result<()> {
+        self.append_event(AuditEventPayload::CommandPolicy {
+            event: Box::new(event),
+        })
     }
 
     /// Number of events appended by this recorder.
@@ -1330,7 +1465,7 @@ pub fn verify_audit_log(
 mod tests {
     use super::*;
     use crate::AccessMode;
-    use crate::supervisor::{ApprovalDecision, CapabilityRequest};
+    use crate::supervisor::{ApprovalDecision, ApprovalRequest};
     use crate::undo::{ExecutableIdentity, NetworkAuditDecision, NetworkAuditMode};
     use std::io::BufReader;
     use std::time::{Duration, UNIX_EPOCH};
@@ -1390,7 +1525,7 @@ mod tests {
         recorder
             .record_capability_decision(AuditEntry {
                 timestamp: UNIX_EPOCH + Duration::from_secs(5),
-                request: CapabilityRequest {
+                request: ApprovalRequest::Capability {
                     request_id: "req-1".to_string(),
                     path: PathBuf::from("/tmp/example"),
                     access: AccessMode::ReadWrite,
@@ -1428,7 +1563,24 @@ mod tests {
                 managed_credential_active: None,
                 injection_mode: None,
                 denial_category: None,
+                endpoint_policy_action: None,
+                endpoint_policy_rule: None,
+                approval_backend: None,
+                credential_capture_action: None,
+                credential_capture_name: None,
+                credential_capture_command: None,
+                credential_capture_argv: None,
+                credential_capture_exit_status: None,
+                credential_capture_duration_ms: None,
+                credential_capture_stdout_bytes: None,
+                credential_capture_stderr: None,
+                credential_capture_cache_scope: None,
+                credential_capture_output_format: None,
+                credential_capture_header_names: None,
+                credential_capture_stdin_mode: None,
+                credential_capture_interactive: None,
                 target: "api.example.com".to_string(),
+                upstream: None,
                 port: Some(443),
                 method: Some("POST".to_string()),
                 path: Some("/v1/chat".to_string()),
@@ -1602,7 +1754,24 @@ mod tests {
                 managed_credential_active: None,
                 injection_mode: None,
                 denial_category: None,
+                endpoint_policy_action: None,
+                endpoint_policy_rule: None,
+                approval_backend: None,
+                credential_capture_action: None,
+                credential_capture_name: None,
+                credential_capture_command: None,
+                credential_capture_argv: None,
+                credential_capture_exit_status: None,
+                credential_capture_duration_ms: None,
+                credential_capture_stdout_bytes: None,
+                credential_capture_stderr: None,
+                credential_capture_cache_scope: None,
+                credential_capture_output_format: None,
+                credential_capture_header_names: None,
+                credential_capture_stdin_mode: None,
+                credential_capture_interactive: None,
                 target: "example.com".to_string(),
+                upstream: None,
                 port: Some(443),
                 method: Some("GET".to_string()),
                 path: Some("/".to_string()),

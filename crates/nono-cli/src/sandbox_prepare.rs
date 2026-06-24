@@ -417,6 +417,8 @@ struct PendingCwdAccessRequest {
 pub(crate) struct PreparedSandbox {
     pub(crate) caps: CapabilitySet,
     pub(crate) secrets: Vec<nono::LoadedSecret>,
+    pub(crate) profile_display_name: Option<String>,
+    pub(crate) command_policies: Option<crate::command_policy::CommandPoliciesConfig>,
     pub(crate) session_hooks: profile::SessionHooks,
     pub(crate) rollback_exclude_patterns: Vec<String>,
     pub(crate) rollback_exclude_globs: Vec<String>,
@@ -424,6 +426,8 @@ pub(crate) struct PreparedSandbox {
     pub(crate) allow_domain: Vec<profile::AllowDomainEntry>,
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
+    pub(crate) credential_capture: HashMap<String, profile::CredentialCaptureEntry>,
+    pub(crate) tls_intercept: Option<profile::TlsInterceptConfig>,
     pub(crate) upstream_proxy: Option<String>,
     pub(crate) upstream_bypass: Vec<String>,
     pub(crate) listen_ports: Vec<u16>,
@@ -443,10 +447,10 @@ pub(crate) struct PreparedSandbox {
     pub(crate) denied_env_vars: Option<Vec<String>>,
     /// Expanded `environment.set_vars` (key, expanded-value), `None` if absent.
     pub(crate) set_vars: Option<Vec<(String, String)>>,
-    /// True when the profile or CLI requested `network.block`. Carried
-    /// through because a CLI proxy flag (e.g. `--credential`) may later
-    /// override `caps` to `ProxyOnly`, losing the original intent.
-    pub(crate) network_block_requested: bool,
+    /// True when the profile's `network.block` is set. The CLI `--block-net`
+    /// flag is read directly from `SandboxArgs` at proxy-launch time, so only
+    /// the profile's contribution needs to be carried through.
+    pub(crate) profile_network_block: bool,
 }
 
 fn resolved_workdir(args: &SandboxArgs) -> PathBuf {
@@ -576,7 +580,20 @@ fn finalize_prepared_sandbox(
     silent: bool,
 ) -> Result<PreparedSandbox> {
     output::print_skipped_requested_paths(&collect_missing_cli_requested_paths(args), silent);
-    output::print_capabilities(&prepared.caps, blocked_grants, args.verbose, silent);
+    let has_proxy_intent = args.has_proxy_flags()
+        || prepared.network_profile.is_some()
+        || !prepared.allow_domain.is_empty()
+        || !prepared.credentials.is_empty()
+        || prepared.upstream_proxy.is_some();
+    let block_wins = args.block_net || (prepared.profile_network_block && !has_proxy_intent);
+    let proxy_pending = !block_wins && !args.allow_net && has_proxy_intent;
+    output::print_capabilities(
+        &prepared.caps,
+        blocked_grants,
+        args.verbose,
+        silent,
+        proxy_pending,
+    );
 
     if let Some(ref profile_name) = args.profile {
         crate::pack_update_hint::show_pack_update_hints(profile_name, silent);
@@ -1053,6 +1070,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             PreparedSandbox {
                 caps,
                 secrets: Vec::new(),
+                profile_display_name: None,
+                command_policies: None,
                 session_hooks: profile::SessionHooks::default(),
                 rollback_exclude_patterns,
                 rollback_exclude_globs,
@@ -1060,6 +1079,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 allow_domain,
                 credentials,
                 custom_credentials: HashMap::new(),
+                credential_capture: HashMap::new(),
+                tls_intercept: None,
                 upstream_proxy: None,
                 upstream_bypass: Vec::new(),
                 listen_ports: Vec::new(),
@@ -1078,7 +1099,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
                 allowed_env_vars: None,
                 denied_env_vars: None,
                 set_vars: None,
-                network_block_requested: args.block_net,
+                profile_network_block: false,
             },
             &[],
             args,
@@ -1089,6 +1110,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
     let prepared_profile = prepare_profile(args, silent, &workdir)?;
     let crate::profile_runtime::PreparedProfile {
         loaded_profile,
+        command_policies,
         capability_elevation,
         #[cfg(target_os = "linux")]
         wsl2_proxy_policy,
@@ -1101,6 +1123,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         allow_domain: profile_allow_domain,
         credentials: profile_credentials,
         custom_credentials: profile_custom_credentials,
+        tls_intercept: profile_tls_intercept,
         upstream_proxy: profile_upstream_proxy,
         upstream_bypass: profile_upstream_bypass,
         listen_ports: profile_listen_ports,
@@ -1359,10 +1382,18 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         .as_ref()
         .map(|p| p.network.block)
         .unwrap_or(false);
-    let network_block_requested = args.block_net || profile_network_block;
 
     let profile_secrets = loaded_profile
-        .map(|profile| profile.env_credentials.mappings)
+        .as_ref()
+        .map(|profile| profile.env_credentials.mappings.clone())
+        .unwrap_or_default();
+    let profile_display_name = loaded_profile
+        .as_ref()
+        .map(|profile| profile.meta.name.clone())
+        .filter(|name| !name.is_empty());
+    let profile_credential_capture = loaded_profile
+        .as_ref()
+        .map(|profile| profile.credential_capture.clone())
         .unwrap_or_default();
     let loaded_secrets = load_env_credentials(args, &profile_secrets, silent)?;
 
@@ -1370,6 +1401,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         PreparedSandbox {
             caps,
             secrets: loaded_secrets,
+            profile_display_name,
+            command_policies,
             session_hooks,
             rollback_exclude_patterns: profile_rollback_patterns,
             rollback_exclude_globs: profile_rollback_globs,
@@ -1377,6 +1410,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             allow_domain: profile_allow_domain,
             credentials: profile_credentials,
             custom_credentials: profile_custom_credentials,
+            credential_capture: profile_credential_capture,
+            tls_intercept: profile_tls_intercept,
             upstream_proxy: profile_upstream_proxy,
             upstream_bypass: profile_upstream_bypass,
             listen_ports: profile_listen_ports,
@@ -1395,7 +1430,7 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
             allowed_env_vars: profile_allowed_env_vars,
             denied_env_vars: profile_denied_env_vars,
             set_vars: profile_set_vars,
-            network_block_requested,
+            profile_network_block,
         },
         &blocked_grants,
         args,
