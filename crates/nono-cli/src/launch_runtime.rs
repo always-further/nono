@@ -3,6 +3,7 @@ use crate::config;
 use crate::proxy_runtime::prepare_proxy_launch_options;
 use crate::sandbox_prepare::{
     PreparedSandbox, prepare_sandbox, print_allow_gpu_warning, print_allow_launch_services_warning,
+    validate_block_net_conflicts,
 };
 use crate::{exec_strategy, instruction_deny, profile, trust_scan};
 use colored::Colorize;
@@ -307,6 +308,7 @@ pub(crate) fn prepare_run_launch_plan(
     }
 
     let mut prepared = prepare_sandbox(&args, silent)?;
+    validate_block_net_conflicts(&args, &prepared)?;
     validate_rollback_destination(run_args.rollback_dest.as_ref(), &prepared)?;
 
     if prepared.allow_launch_services_active {
