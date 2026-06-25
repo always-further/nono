@@ -57,6 +57,12 @@ impl DetectedAbi {
         AccessFs::from_all(self.abi).contains(AccessFs::Truncate)
     }
 
+    /// Whether execute access control is supported strongly enough for Tool Sandbox Execution.
+    #[must_use]
+    pub fn has_execute(&self) -> bool {
+        matches!(self.abi, ABI::V3 | ABI::V4 | ABI::V5 | ABI::V6)
+    }
+
     /// Whether TCP network filtering is supported (V4+).
     #[must_use]
     pub fn has_network(&self) -> bool {
@@ -838,6 +844,82 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
     // installs it post-fork via install_seccomp_proxy_filter().
 
     Ok(seccomp_net_fallback)
+}
+
+/// Apply a second Landlock layer that restricts execute access to the given paths.
+///
+/// Landlock rulesets stack: each `restrict_self()` call adds an immutable layer.
+/// The effective permission for any access right is the intersection of what
+/// every layer grants. This function handles ONLY `AccessFs::Execute`, so paths
+/// not listed here lose execute permission even if the main sandbox granted it
+/// via `AccessMode::Read`. Read/write grants from the main ruleset are unaffected.
+///
+/// Call this after `apply()` / `apply_with_abi()` to lock down which binaries
+/// an already-sandboxed process can exec.
+pub fn restrict_execute(paths: &[impl AsRef<Path>]) -> Result<()> {
+    let abi = detect_abi()?;
+    if !abi.has_execute() {
+        return Err(NonoError::SandboxInit(format!(
+            "Tool Sandbox  execute restriction requires Landlock ABI V3+; detected {}",
+            abi.version_string()
+        )));
+    }
+
+    let mut ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(AccessFs::Execute)
+        .map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Tool Sandbox  execute restriction: kernel does not support Landlock Execute: {e}"
+            ))
+        })?
+        .set_compatibility(CompatLevel::BestEffort)
+        .create()
+        .map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Tool Sandbox  execute restriction: ruleset create failed: {e}"
+            ))
+        })?;
+
+    for path in paths {
+        let p = path.as_ref();
+        let fd = PathFd::new(p).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Tool Sandbox  execute restriction: cannot open {}: {e}",
+                p.display()
+            ))
+        })?;
+        ruleset = ruleset
+            .add_rule(PathBeneath::new(fd, AccessFs::Execute))
+            .map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Tool Sandbox  execute restriction: add_rule for {}: {e}",
+                    p.display()
+                ))
+            })?;
+    }
+
+    let status = ruleset.restrict_self().map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Tool Sandbox  execute restriction: restrict_self failed: {e}"
+        ))
+    })?;
+
+    ensure_execute_restriction_fully_enforced(status.ruleset)?;
+
+    Ok(())
+}
+
+fn ensure_execute_restriction_fully_enforced(status: landlock::RulesetStatus) -> Result<()> {
+    match status {
+        landlock::RulesetStatus::FullyEnforced => Ok(()),
+        landlock::RulesetStatus::PartiallyEnforced => Err(NonoError::SandboxInit(
+            "Tool Sandbox  execute restriction: Landlock was only partially enforced".to_string(),
+        )),
+        landlock::RulesetStatus::NotEnforced => Err(NonoError::SandboxInit(
+            "Tool Sandbox  execute restriction: Landlock was not enforced".to_string(),
+        )),
+    }
 }
 
 // ==========================================================================
@@ -1840,6 +1922,8 @@ fn build_seccomp_proxy_filter(_has_bind_ports: bool) -> Vec<SockFilterInsn> {
     let bind_action = SECCOMP_RET_USER_NOTIF;
 
     // sendto(), sendmsg(), and sendmmsg() route unconditionally to USER_NOTIF.
+    // The IPC handshake completes before this filter is installed, so no
+    // fd-based exemption is needed.
     // The supervisor does the full-width NULL destination checks and inspects
     // each sendmmsg vector entry.
     //
@@ -2033,25 +2117,29 @@ fn build_seccomp_proxy_filter(_has_bind_ports: bool) -> Vec<SockFilterInsn> {
     ]
 }
 
-/// Build a BPF filter for opt-in pathname AF_UNIX mediation.
+/// Build a BPF filter for opt-in pathname AF_UNIX mediation (Linux-only).
 ///
-/// The filter routes `connect()`, `bind()`, `sendto()`, `sendmsg()`, and `sendmmsg()`
-/// to the supervisor so it can inspect `sockaddr_un` paths. Everything
-/// else is allowed by this filter: TCP policy remains Landlock's job on
-/// V4+ kernels.
+/// Routes `connect()`, `bind()`, `sendto()`, `sendmsg()`, and `sendmmsg()`
+/// to `USER_NOTIF` so the supervisor can inspect `sockaddr_un` paths.
+/// Everything else is allowed: TCP policy is Landlock's responsibility on
+/// V4+ kernels; this filter only handles AF_UNIX.
 ///
-/// The send syscalls route unconditionally. BPF cannot dereference
-/// `msghdr`/`mmsghdr`, and checking only half of a 64-bit `sendto` pointer
-/// is not a reliable NULL test.
+/// The IPC handshake (child→parent SCM_RIGHTS transfer of the notify fd)
+/// must complete *before* this filter is installed. That ordering removes
+/// the need for any fd-based exemption, so the filter is a pure allowlist
+/// with no internal plumbing holes.
+///
+/// BPF cannot dereference `msghdr`/`mmsghdr`; the supervisor performs those
+/// checks instead.
 ///
 /// Instruction layout:
 /// ```text
 ///  0: ld  [nr]
-///  1: jeq SYS_CONNECT  jt=+5 (-> 7: notify)
-///  2: jeq SYS_BIND     jt=+4 (-> 7: notify)
-///  3: jeq SYS_SENDTO   jt=+3 (-> 7: notify)
-///  4: jeq SYS_SENDMSG  jt=+2 (-> 7: notify)
-///  5: jeq SYS_SENDMMSG jt=+1 (-> 7: notify)
+///  1: jeq SYS_CONNECT  jt=+5 (->  7: notify)
+///  2: jeq SYS_BIND     jt=+4 (->  7: notify)
+///  3: jeq SYS_SENDTO   jt=+3 (->  7: notify)
+///  4: jeq SYS_SENDMSG  jt=+2 (->  7: notify)
+///  5: jeq SYS_SENDMMSG jt=+1 (->  7: notify)
 ///  6: ret ALLOW
 ///  7: ret USER_NOTIF
 /// ```
@@ -2116,13 +2204,19 @@ fn build_seccomp_af_unix_filter() -> Vec<SockFilterInsn> {
     ]
 }
 
-/// Install a seccomp-notify BPF filter for proxy-only network mode.
+/// Install a seccomp-notify BPF filter for proxy-only network mode (Linux-only).
 ///
-/// Returns the notify fd that the supervisor must poll for connect/bind
-/// notifications. Uses `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
+/// Used on kernels without Landlock V4 TCP support as a fallback: traps
+/// `connect()`, `bind()`, `sendto()`, `sendmmsg()`, and `sendmsg()` for
+/// supervisor mediation. Returns the notify fd the supervisor must poll.
+/// Uses `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
 ///
-/// Must be called AFTER `PR_SET_NO_NEW_PRIVS` is already set (either by
-/// a prior seccomp install or by Landlock's `restrict_self()`).
+/// The IPC handshake (SCM_RIGHTS transfer of the notify fd to the parent)
+/// must complete before this filter is installed so no fd-based exemption
+/// is needed.
+///
+/// Must be called after `PR_SET_NO_NEW_PRIVS` is set (either by a prior
+/// seccomp install or by Landlock's `restrict_self()`).
 ///
 /// # Errors
 ///
@@ -2131,7 +2225,19 @@ pub fn install_seccomp_proxy_filter(has_bind_ports: bool) -> Result<std::os::fd:
     install_seccomp_notify_filter(&build_seccomp_proxy_filter(has_bind_ports), "proxy filter")
 }
 
-/// Install a seccomp-notify BPF filter for pathname AF_UNIX mediation.
+/// Install a seccomp-notify BPF filter for pathname AF_UNIX mediation (Linux-only).
+///
+/// Enables `linux.af_unix_mediation: pathname` enforcement: traps AF_UNIX
+/// `connect()`, `bind()`, `sendto()`, `sendmmsg()`, and `sendmsg()` and
+/// routes them to the supervisor, which checks `sockaddr_un.sun_path`
+/// against the `unix_sockets` allowlist. Connections to unlisted paths
+/// are denied with `EACCES`. Returns the notify fd the supervisor must poll.
+///
+/// The IPC handshake (SCM_RIGHTS transfer of the notify fd to the parent)
+/// must complete before this filter is installed so no fd-based exemption
+/// is needed.
+///
+/// Must be called after `PR_SET_NO_NEW_PRIVS` is set.
 ///
 /// # Errors
 ///
@@ -2589,6 +2695,7 @@ mod tests {
     fn test_detected_abi_feature_methods() {
         let v1 = DetectedAbi::new(ABI::V1);
         assert!(!v1.has_refer());
+        assert!(!v1.has_execute());
         assert!(!v1.has_truncate());
         assert!(!v1.has_network());
         assert!(!v1.has_ioctl_dev());
@@ -2596,9 +2703,11 @@ mod tests {
 
         let v2 = DetectedAbi::new(ABI::V2);
         assert!(v2.has_refer());
+        assert!(!v2.has_execute());
         assert!(!v2.has_truncate());
 
         let v3 = DetectedAbi::new(ABI::V3);
+        assert!(v3.has_execute());
         assert!(v3.has_refer());
         assert!(v3.has_truncate());
         assert!(!v3.has_network());
@@ -3166,6 +3275,25 @@ mod tests {
     }
 
     #[test]
+    fn restrict_execute_rejects_partial_enforcement() {
+        let result =
+            ensure_execute_restriction_fully_enforced(landlock::RulesetStatus::PartiallyEnforced);
+        assert!(matches!(result, Err(err) if err.to_string().contains("partially enforced")));
+    }
+
+    #[test]
+    fn restrict_execute_accepts_only_full_enforcement() {
+        assert!(
+            ensure_execute_restriction_fully_enforced(landlock::RulesetStatus::FullyEnforced)
+                .is_ok()
+        );
+        assert!(
+            ensure_execute_restriction_fully_enforced(landlock::RulesetStatus::NotEnforced)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn test_detect_abi_returns_ok_on_supported_system() {
         // On a system with Landlock, this should succeed
         // On a system without it, it should return Err (not panic)
@@ -3508,39 +3636,42 @@ mod tests {
     #[test]
     fn test_build_seccomp_proxy_filter_with_bind() {
         let filter = build_seccomp_proxy_filter(true);
-        // 23 instructions
+        // 23 instructions: no check_fd block
         assert_eq!(filter.len(), 23);
 
-        // Instruction 0 should be ld [nr]
         assert_eq!(filter[0].code, BPF_LD | BPF_W | BPF_ABS);
         assert_eq!(filter[0].k, SECCOMP_DATA_NR_OFFSET);
 
-        // Instruction 19 should be USER_NOTIF (connect)
+        // insn 6: jeq SENDMSG -> 21 (jt = 21-6-1 = 14)
+        assert_eq!(filter[6].k, SYS_SENDMSG as u32);
+        assert_eq!(filter[6].jt, 14);
+
+        // insn 19: USER_NOTIF (connect)
         assert_eq!(filter[19].code, BPF_RET | BPF_K);
         assert_eq!(filter[19].k, SECCOMP_RET_USER_NOTIF);
 
-        // Instruction 20 should be USER_NOTIF (bind; supervisor decides).
+        // insn 20: USER_NOTIF (bind)
         assert_eq!(filter[20].code, BPF_RET | BPF_K);
         assert_eq!(filter[20].k, SECCOMP_RET_USER_NOTIF);
 
-        // Instruction 21 should be USER_NOTIF (sendto/sendmsg/sendmmsg)
+        // insn 21: USER_NOTIF (sendto/sendmsg/sendmmsg)
         assert_eq!(filter[21].code, BPF_RET | BPF_K);
         assert_eq!(filter[21].k, SECCOMP_RET_USER_NOTIF);
+
+        // insn 22: ALLOW (good socket/socketpair family)
+        assert_eq!(filter[22].code, BPF_RET | BPF_K);
+        assert_eq!(filter[22].k, SECCOMP_RET_ALLOW);
     }
 
     /// Regression test for the Landlock V2 + `has_bind_ports=false`
     /// scenario (issue #685): even with no TCP bind ports configured,
     /// bind() must route to USER_NOTIF so the supervisor can allow
-    /// pathname AF_UNIX bind. Previously the filter short-circuited to
-    /// ERRNO in this branch, unconditionally failing AF_UNIX bind.
+    /// pathname AF_UNIX bind.
     #[test]
     fn test_build_seccomp_proxy_filter_without_bind() {
         let filter = build_seccomp_proxy_filter(false);
         assert_eq!(filter.len(), 23);
 
-        // Instruction 20 (bind) must ALSO route to USER_NOTIF -- the
-        // supervisor is the sole gate. This is the fix: previously this
-        // emitted ERRNO, which skipped the supervisor entirely.
         assert_eq!(filter[20].code, BPF_RET | BPF_K);
         assert_eq!(
             filter[20].k, SECCOMP_RET_USER_NOTIF,
@@ -3550,16 +3681,26 @@ mod tests {
     }
 
     #[test]
-    fn test_build_seccomp_af_unix_filter_notifies_connect_bind_sendto_sendmsg_sendmmsg() {
+    fn test_build_seccomp_af_unix_filter_notifies_all_syscalls() {
         let filter = build_seccomp_af_unix_filter();
+        // 8 instructions: 0 ld-nr, 1-5 jeq dispatch, 6 ALLOW, 7 USER_NOTIF
+        // No check_fd block — the IPC handshake completes before the filter
+        // is installed, so no fd-based exemption is needed.
         assert_eq!(filter.len(), 8);
         assert_eq!(filter[0].code, BPF_LD | BPF_W | BPF_ABS);
         assert_eq!(filter[0].k, SECCOMP_DATA_NR_OFFSET);
+
         assert_eq!(filter[1].k, SYS_CONNECT as u32);
+        assert_eq!(filter[1].jt, 5); // -> insn 7 (USER_NOTIF)
         assert_eq!(filter[2].k, SYS_BIND as u32);
+        assert_eq!(filter[2].jt, 4); // -> insn 7
         assert_eq!(filter[3].k, SYS_SENDTO as u32);
+        assert_eq!(filter[3].jt, 3); // -> insn 7
         assert_eq!(filter[4].k, SYS_SENDMSG as u32);
+        assert_eq!(filter[4].jt, 2); // -> insn 7 (no special exemption)
         assert_eq!(filter[5].k, SYS_SENDMMSG as u32);
+        assert_eq!(filter[5].jt, 1); // -> insn 7
+
         assert_eq!(filter[6].k, SECCOMP_RET_ALLOW);
         assert_eq!(filter[7].k, SECCOMP_RET_USER_NOTIF);
     }

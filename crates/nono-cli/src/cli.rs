@@ -33,7 +33,7 @@ const STYLES: Styles = Styles::plain().header(Style::new().bold());
 
 \x1b[1mEXPLORATION & DEBUGGING\x1b[0m
   learn      [deprecated] Use `nono run` to learn from sandbox denials
-  why        Check why a path or network operation would be allowed or denied
+  why        Check why filesystem, network, scope, or command access would be allowed or denied
 
 \x1b[1mSESSION MANAGEMENT\x1b[0m
   ps         List running or detached sandbox sessions
@@ -206,7 +206,7 @@ pub enum Commands {
 ")]
     Learn(Box<LearnArgs>),
 
-    /// Check why a path or network operation would be allowed or denied
+    /// Check why filesystem, network, scope, or command access would be allowed or denied
     #[command(help_template = "\
 {about}
 
@@ -221,6 +221,19 @@ pub enum Commands {
   nono why --json --path ~/.aws --op read      # JSON output for agents
   nono why --host api.openai.com --port 443    # Query network access
   nono why --self --path /tmp --op write       # Inside sandbox, query own capabilities
+  nono why --profile gh --command gh -- issue comment 1052
+                                                # Query ETI command argv policy
+
+\x1b[1mETI TOOL DENIALS\x1b[0m
+  `nono why --command <cmd> -- <args...>` diagnoses tool-sandbox argv policy.
+  A message like:
+
+    nono: tool-sandbox denied gh: Command 'gh' is blocked: agents may read issues but not comment on them
+
+  is an ephemeral tool invocation command-policy denial from
+  command_policies.commands.<name>.from.<caller>.invocation_policy. If the
+  command uses proxy credentials, also check endpoint_policy for HTTP method
+  and path rules.
 ")]
     Why(Box<WhyArgs>),
 
@@ -1273,7 +1286,7 @@ pub struct SandboxArgs {
 
     // ── Credentials ──────────────────────────────────────────────────────
     /// Inject credentials via reverse proxy for a service (repeatable)
-    /// ALIAS(canonical="--credential", introduced="v0.0.0", remove_by="indefinite", issue="#143")
+    /// ALIAS(canonical="--credential", introduced="v0.0.0", remove_by="v1.0.0", issue="#143")
     #[arg(
         long = "credential",
         alias = "proxy-credential",
@@ -1341,6 +1354,21 @@ pub struct SandboxArgs {
     #[arg(long, help_heading = "OPTIONS")]
     pub allow_gpu: bool,
 
+    /// Allow HTTP/2 multiplexing for upstream proxy connections.
+    ///
+    /// When enabled, the proxy negotiates HTTP/2 via ALPN with upstream
+    /// servers that support it, allowing multiple requests to be multiplexed
+    /// over a single TCP connection. This can significantly improve throughput
+    /// for workloads that make many concurrent requests to the same host
+    /// (e.g., Maven/Gradle artifact downloads).
+    ///
+    /// Without this flag, the proxy uses HTTP/1.1 with keep-alive connection
+    /// pooling (connections are reused but requests are serialized per
+    /// connection). This is the conservative default since some upstream
+    /// servers may not handle HTTP/2 correctly.
+    #[arg(long, help_heading = "OPTIONS")]
+    pub allow_http2: bool,
+
     /// Capability manifest file (JSON). A fully-resolved sandbox specification —
     /// mutually exclusive with all other sandbox configuration flags.
     #[arg(
@@ -1356,7 +1384,7 @@ pub struct SandboxArgs {
             "block_net", "allow_net", "network_profile", "allow_proxy",
             "allow_bind", "allow_port", "allow_connect_port", "external_proxy", "proxy_port",
             "proxy_credential", "allow_endpoint", "env_credential", "env_credential_map",
-            "allow_command", "block_command", "allow_launch_services", "allow_gpu",
+            "allow_command", "block_command", "allow_launch_services", "allow_gpu", "allow_http2",
         ],
         help_heading = "OPTIONS"
     )]
@@ -1638,6 +1666,7 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             profile: args.profile,
             allow_launch_services: args.allow_launch_services,
             allow_gpu: args.allow_gpu,
+            allow_http2: false,
             config: args.config,
             verbose: args.verbose,
             dry_run: args.dry_run,
@@ -1807,8 +1836,7 @@ pub struct ShellArgs {
     #[arg(long, value_name = "NAME", help_heading = "OPTIONS")]
     pub name: Option<String>,
 
-    /// Kill the process if it has not entered alt-screen mode after this many seconds.
-    /// Startup banners and log lines do not count; only a full-screen TUI transition satisfies the check.
+    /// Kill the process if it has not become interactive after this many seconds.
     /// Set to 0 to disable. Env: NONO_STARTUP_TIMEOUT.
     #[arg(
         long = "startup-timeout",
@@ -1869,6 +1897,18 @@ pub struct SetupArgs {
 #[derive(Parser, Debug)]
 #[command(disable_help_flag = true)]
 pub struct WhyArgs {
+    /// Tool-sandbox command name to check (ETI command policy)
+    #[arg(long, help_heading = "QUERY")]
+    pub command: Option<String>,
+
+    /// Caller edge for command policy checks (default: session)
+    #[arg(long, default_value = "session", help_heading = "QUERY")]
+    pub caller: String,
+
+    /// Arguments for --command after `--`
+    #[arg(last = true, value_name = "ARGS", help_heading = "QUERY")]
+    pub command_args: Vec<String>,
+
     /// Path to check
     #[arg(long, help_heading = "QUERY")]
     pub path: Option<PathBuf>,
@@ -3343,6 +3383,49 @@ mod tests {
             }
             _ => panic!("Expected Why command"),
         }
+
+        let cli = Cli::parse_from([
+            "nono",
+            "why",
+            "--profile",
+            "gh",
+            "--command",
+            "gh",
+            "--",
+            "issue",
+            "comment",
+            "1052",
+        ]);
+        match cli.command {
+            Commands::Why(args) => {
+                assert_eq!(args.profile.as_deref(), Some("gh"));
+                assert_eq!(args.command.as_deref(), Some("gh"));
+                assert_eq!(args.caller, "session");
+                assert_eq!(args.command_args, vec!["issue", "comment", "1052"]);
+            }
+            _ => panic!("Expected Why command"),
+        }
+    }
+
+    #[test]
+    fn test_why_help_mentions_eti_command_policy_denials() {
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("why")
+            .expect("why subcommand exists")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("ETI TOOL DENIALS"), "{help}");
+        assert!(
+            help.contains("command_policies.commands.<name>.from.<caller>.invocation_policy"),
+            "{help}"
+        );
+        assert!(help.contains("--command <COMMAND>"), "{help}");
+        assert!(
+            help.contains("nono why --command <cmd> -- <args...>"),
+            "{help}"
+        );
     }
 
     #[test]

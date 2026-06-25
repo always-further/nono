@@ -9,6 +9,7 @@
 //! is handled by [`crate::route::RouteStore`], which loads independently of
 //! credentials. This module handles only credential-specific concerns.
 
+use crate::capture::CredentialCaptureMaterial;
 use crate::config::{InjectMode, RouteConfig};
 use crate::diagnostic::{ProxyDiagnostic, ProxyDiagnosticCode};
 use crate::error::{ProxyError, Result};
@@ -39,6 +40,9 @@ pub struct LoadedCredential {
     pub proxy_header_name: String,
     /// Formatted header value (e.g., "Bearer sk-...")
     pub header_value: Zeroizing<String>,
+    /// Additional fully materialized headers returned by a command-backed
+    /// capture. Values are redacted by the type and never audited.
+    pub extra_headers: Vec<(String, Zeroizing<String>)>,
 
     // --- URL path mode ---
     /// Pattern to match in incoming path (with {} placeholder)
@@ -55,6 +59,67 @@ pub struct LoadedCredential {
     pub proxy_query_param_name: Option<String>,
 }
 
+/// Metadata for a command-backed credential route. The actual secret is
+/// captured lazily by the supervisor and then materialized into a
+/// [`LoadedCredential`] for a single request.
+#[derive(Debug, Clone)]
+pub struct CmdCredentialRoute {
+    pub credential_name: String,
+    pub inject_mode: InjectMode,
+    pub proxy_inject_mode: InjectMode,
+    pub header_name: String,
+    pub proxy_header_name: String,
+    pub credential_format: Option<String>,
+    pub path_pattern: Option<String>,
+    pub proxy_path_pattern: Option<String>,
+    pub path_replacement: Option<String>,
+    pub query_param_name: Option<String>,
+    pub proxy_query_param_name: Option<String>,
+}
+
+impl CmdCredentialRoute {
+    pub fn materialize(&self, material: CredentialCaptureMaterial) -> LoadedCredential {
+        let effective_format = crate::config::resolved_credential_format(
+            self.header_name.as_str(),
+            self.credential_format.as_deref(),
+        );
+        let (raw_credential, header_value, extra_headers) = match material {
+            CredentialCaptureMaterial::Secret(secret) => {
+                let header_value = match self.inject_mode {
+                    InjectMode::Header => Zeroizing::new(effective_format.replace("{}", &secret)),
+                    InjectMode::BasicAuth => {
+                        let encoded =
+                            base64::engine::general_purpose::STANDARD.encode(secret.as_bytes());
+                        Zeroizing::new(format!("Basic {}", encoded))
+                    }
+                    InjectMode::UrlPath | InjectMode::QueryParam => Zeroizing::new(String::new()),
+                };
+                (secret, header_value, Vec::new())
+            }
+            CredentialCaptureMaterial::Headers(headers) => (
+                Zeroizing::new(String::new()),
+                Zeroizing::new(String::new()),
+                headers,
+            ),
+        };
+
+        LoadedCredential {
+            inject_mode: self.inject_mode.clone(),
+            proxy_inject_mode: self.proxy_inject_mode.clone(),
+            raw_credential,
+            header_name: self.header_name.clone(),
+            proxy_header_name: self.proxy_header_name.clone(),
+            header_value,
+            extra_headers,
+            path_pattern: self.path_pattern.clone(),
+            proxy_path_pattern: self.proxy_path_pattern.clone(),
+            path_replacement: self.path_replacement.clone(),
+            query_param_name: self.query_param_name.clone(),
+            proxy_query_param_name: self.proxy_query_param_name.clone(),
+        }
+    }
+}
+
 /// Custom Debug impl that redacts secret values to prevent accidental leakage
 /// in logs, panic messages, or debug output.
 impl std::fmt::Debug for LoadedCredential {
@@ -66,6 +131,14 @@ impl std::fmt::Debug for LoadedCredential {
             .field("header_name", &self.header_name)
             .field("proxy_header_name", &self.proxy_header_name)
             .field("header_value", &"[REDACTED]")
+            .field(
+                "extra_headers",
+                &self
+                    .extra_headers
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
             .field("path_pattern", &self.path_pattern)
             .field("proxy_path_pattern", &self.proxy_path_pattern)
             .field("path_replacement", &self.path_replacement)
@@ -105,6 +178,8 @@ impl CredentialLoadOutcome {
 pub struct CredentialStore {
     /// Map from route prefix to loaded credential
     credentials: HashMap<String, LoadedCredential>,
+    /// Map from route prefix to lazy command-backed credential config.
+    cmd_routes: HashMap<String, CmdCredentialRoute>,
     /// Map from route prefix to OAuth2 route (token cache + upstream)
     oauth2_routes: HashMap<String, OAuth2Route>,
     /// Map from route prefix to AWS SigV4 route (placeholder until full
@@ -136,6 +211,7 @@ impl CredentialStore {
         tls_connector: &TlsConnector,
     ) -> Result<CredentialLoadOutcome> {
         let mut credentials = HashMap::new();
+        let mut cmd_routes = HashMap::new();
         let mut oauth2_routes = HashMap::new();
         let mut aws_routes = HashMap::new();
         let mut diagnostics = Vec::new();
@@ -146,6 +222,42 @@ impl CredentialStore {
             // the reverse proxy path (e.g., "/anthropic" -> "anthropic").
             let normalized_prefix = route.prefix.trim_matches('/').to_string();
             if let Some(ref key) = route.credential_key {
+                if nono::keystore::is_cmd_uri(key) {
+                    let credential_name = key.trim_start_matches("cmd://").to_string();
+                    cmd_routes.insert(
+                        normalized_prefix.clone(),
+                        CmdCredentialRoute {
+                            credential_name,
+                            inject_mode: route.inject_mode.clone(),
+                            proxy_inject_mode: route
+                                .proxy
+                                .as_ref()
+                                .and_then(|p| p.inject_mode.clone())
+                                .unwrap_or_else(|| route.inject_mode.clone()),
+                            header_name: route.inject_header.clone(),
+                            proxy_header_name: route
+                                .proxy
+                                .as_ref()
+                                .and_then(|p| p.inject_header.clone())
+                                .unwrap_or_else(|| route.inject_header.clone()),
+                            credential_format: route.credential_format.clone(),
+                            path_pattern: route.path_pattern.clone(),
+                            proxy_path_pattern: route
+                                .proxy
+                                .as_ref()
+                                .and_then(|p| p.path_pattern.clone())
+                                .or_else(|| route.path_pattern.clone()),
+                            path_replacement: route.path_replacement.clone(),
+                            query_param_name: route.query_param_name.clone(),
+                            proxy_query_param_name: route
+                                .proxy
+                                .as_ref()
+                                .and_then(|p| p.query_param_name.clone())
+                                .or_else(|| route.query_param_name.clone()),
+                        },
+                    );
+                    continue;
+                }
                 debug!(
                     "Loading credential for route prefix: {} (mode: {:?})",
                     normalized_prefix, route.inject_mode
@@ -222,6 +334,7 @@ impl CredentialStore {
                             .and_then(|p| p.inject_header.clone())
                             .unwrap_or_else(|| route.inject_header.clone()),
                         header_value,
+                        extra_headers: Vec::new(),
                         path_pattern: route.path_pattern.clone(),
                         proxy_path_pattern: route
                             .proxy
@@ -314,6 +427,7 @@ impl CredentialStore {
         Ok(CredentialLoadOutcome {
             store: Self {
                 credentials,
+                cmd_routes,
                 oauth2_routes,
                 aws_routes,
             },
@@ -335,6 +449,7 @@ impl CredentialStore {
     pub fn empty() -> Self {
         Self {
             credentials: HashMap::new(),
+            cmd_routes: HashMap::new(),
             oauth2_routes: HashMap::new(),
             aws_routes: HashMap::new(),
         }
@@ -344,6 +459,12 @@ impl CredentialStore {
     #[must_use]
     pub fn get(&self, prefix: &str) -> Option<&LoadedCredential> {
         self.credentials.get(prefix)
+    }
+
+    /// Get a command-backed credential route, if configured.
+    #[must_use]
+    pub fn get_cmd(&self, prefix: &str) -> Option<&CmdCredentialRoute> {
+        self.cmd_routes.get(prefix)
     }
 
     /// Get an OAuth2 route (token cache + upstream) for a route prefix, if configured.
@@ -361,16 +482,22 @@ impl CredentialStore {
         self.aws_routes.get(prefix)
     }
 
-    /// Check if any credentials (static, OAuth2, or AWS) are loaded.
+    /// Check if any credentials (static, command-backed, OAuth2, or AWS) are loaded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.credentials.is_empty() && self.oauth2_routes.is_empty() && self.aws_routes.is_empty()
+        self.credentials.is_empty()
+            && self.cmd_routes.is_empty()
+            && self.oauth2_routes.is_empty()
+            && self.aws_routes.is_empty()
     }
 
     /// Number of loaded credentials (static + OAuth2 + AWS).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.credentials.len() + self.oauth2_routes.len() + self.aws_routes.len()
+        self.credentials.len()
+            + self.cmd_routes.len()
+            + self.oauth2_routes.len()
+            + self.aws_routes.len()
     }
 
     /// Returns the set of route prefixes that have loaded credentials
@@ -379,10 +506,17 @@ impl CredentialStore {
     pub fn loaded_prefixes(&self) -> std::collections::HashSet<String> {
         self.credentials
             .keys()
+            .chain(self.cmd_routes.keys())
             .chain(self.oauth2_routes.keys())
             .chain(self.aws_routes.keys())
             .cloned()
             .collect()
+    }
+
+    /// Insert a pre-built credential for testing. Not available in production.
+    #[cfg(test)]
+    pub fn insert_for_test(&mut self, prefix: String, cred: LoadedCredential) {
+        self.credentials.insert(prefix, cred);
     }
 }
 
@@ -671,6 +805,7 @@ mod tests {
             header_name: "Authorization".to_string(),
             proxy_header_name: "Authorization".to_string(),
             header_value: Zeroizing::new("Bearer sk-secret-12345".to_string()),
+            extra_headers: Vec::new(),
             path_pattern: None,
             proxy_path_pattern: None,
             path_replacement: None,
@@ -720,6 +855,7 @@ mod tests {
             proxy: None,
             env_var: Some("MY_API_KEY".to_string()),
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -749,6 +885,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -859,6 +996,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -884,6 +1022,42 @@ mod tests {
     }
 
     #[test]
+    fn test_load_cmd_uri_registers_lazy_route() {
+        let tls = test_tls_connector();
+        let routes = vec![RouteConfig {
+            prefix: "/github".to_string(),
+            upstream: "https://api.github.com".to_string(),
+            credential_key: Some("cmd://github".to_string()),
+            inject_mode: InjectMode::Header,
+            inject_header: "Authorization".to_string(),
+            credential_format: Some("token {}".to_string()),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            env_var: Some("GH_TOKEN".to_string()),
+            endpoint_rules: vec![],
+            endpoint_policy: None,
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+            aws_auth: None,
+        }];
+        let store = CredentialStore::load_with_diagnostics(&routes, &tls)
+            .expect("credential store loads")
+            .store;
+        assert!(store.get("github").is_none());
+        let cmd = store.get_cmd("github").expect("cmd route registered");
+        assert_eq!(cmd.credential_name, "github");
+        let materialized = cmd.materialize(CredentialCaptureMaterial::Secret(Zeroizing::new(
+            "ghp_secret".to_string(),
+        )));
+        assert_eq!(materialized.header_value.as_str(), "token ghp_secret");
+        assert!(store.loaded_prefixes().contains("github"));
+    }
+
+    #[test]
     fn test_is_empty_false_with_only_oauth2_routes() {
         // Simulate a store with only OAuth2 routes by constructing directly.
         // We can't call load() with a real OAuth2 config (no token server),
@@ -902,6 +1076,7 @@ mod tests {
 
         let store = CredentialStore {
             credentials: HashMap::new(),
+            cmd_routes: HashMap::new(),
             oauth2_routes,
             aws_routes: HashMap::new(),
         };
@@ -931,6 +1106,7 @@ mod tests {
 
         let store = CredentialStore {
             credentials: HashMap::new(),
+            cmd_routes: HashMap::new(),
             oauth2_routes,
             aws_routes: HashMap::new(),
         };
@@ -957,6 +1133,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -989,6 +1166,7 @@ mod tests {
             proxy: None,
             env_var: None,
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,
@@ -1025,6 +1203,7 @@ mod tests {
             proxy: None,
             env_var: Some("MY_API_KEY".to_string()),
             endpoint_rules: vec![],
+            endpoint_policy: None,
             tls_ca: None,
             tls_client_cert: None,
             tls_client_key: None,

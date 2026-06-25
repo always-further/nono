@@ -17,7 +17,7 @@
   },
   "navbar": {
     "links": [
-      { "label": "GitHub", "href": "https://github.com/always-further/nono" }
+      { "label": "GitHub", "href": "https://github.com/nolabs-ai/nono" }
     ],
     "primary": {
       "type": "button",
@@ -43,6 +43,8 @@
         "pages": [
           "cli/features/profiles-groups",
           "cli/features/profile-authoring",
+          "cli/features/tool-sandbox",
+          "cli/features/dangerous-command-blocking",
           "cli/features/profile-introspection",
           "cli/features/environment"
         ]
@@ -119,13 +121,16 @@
       },
       {
         "group": "Development",
-        "pages": ["cli/development/index", "cli/development/testing"]
+        "pages": [
+          "cli/development/index",
+          "cli/development/testing"
+        ]
       }
     ]
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/always-further/nono",
+      "github": "https://github.com/nolabs-ai/nono",
       "discord": "https://discord.gg/pPcjYzGvbS"
     }
   }

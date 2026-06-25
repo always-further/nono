@@ -1,6 +1,6 @@
 [package]
 name = "nono-cli"
-version = "0.64.0"
+version = "0.65.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -41,8 +41,8 @@ system-keyring = ["dep:keyring", "nono/system-keyring", "nono-proxy/system-keyri
 test-trust-overrides = []
 
 [dependencies]
-nono = { version = "0.64.0", path = "../nono", default-features = false }
-nono-proxy = { version = "0.64.0", path = "../nono-proxy", default-features = false }
+nono = { version = "0.65.1", path = "../nono", default-features = false }
+nono-proxy = { version = "0.65.1", path = "../nono-proxy", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 colored = "3"
@@ -82,6 +82,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url.workspace = true
 globset = "0.4"
+regex = "1"
 urlencoding = "2"
 tempfile.workspace = true
 vt100 = "0.16.2"
@@ -110,6 +111,7 @@ serde.workspace = true
 [dev-dependencies]
 jsonschema = "0.46"
 proptest = "1"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [lints]
 workspace = true

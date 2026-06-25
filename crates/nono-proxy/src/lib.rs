@@ -17,7 +17,9 @@
 //! The proxy runs **unsandboxed** in the supervisor process. The sandboxed
 //! child can only reach `localhost:<port>` via `NetworkMode::ProxyOnly`.
 
+pub mod approval;
 pub mod audit;
+pub mod capture;
 pub mod config;
 pub mod connect;
 pub mod credential;
@@ -27,6 +29,7 @@ pub mod external;
 pub mod filter;
 pub mod forward;
 pub mod oauth2;
+pub mod pool;
 pub mod reverse;
 pub mod route;
 pub mod server;
@@ -38,3 +41,4 @@ pub use credential::{CredentialLoadOutcome, CredentialStore};
 pub use diagnostic::{ProxyDiagnostic, ProxyDiagnosticCode, ProxyDiagnosticSeverity};
 pub use error::{ProxyError, Result};
 pub use server::{ProxyHandle, start};
+pub use token::NonceResolver;

@@ -68,6 +68,10 @@
       ],
       "description": "Controls which environment variables are passed to the sandboxed process. By default all variables are inherited."
     },
+    "command_policies": {
+      "$ref": "#/$defs/CommandPoliciesConfig",
+      "description": "tool-sandbox command-control policy. tool-sandbox activates only when commands is non-empty; broker-mediated enforcement is available on Linux and macOS, with platform-specific capability limits."
+    },
     "workdir": {
       "$ref": "#/$defs/WorkdirConfig",
       "description": "Working directory access configuration controlling whether and how the current working directory is shared with the sandboxed process."
@@ -124,6 +128,13 @@
       "items": { "type": "string" },
       "description": "Extra arguments appended to the child command at launch. Supports variable expansion (e.g. $NONO_CONFIG, $NONO_PACKAGES)."
     },
+    "credential_capture": {
+      "type": "object",
+      "description": "Maps logical credential names to supervisor-side commands used by custom_credentials entries with credential_key: \"cmd://<name>\". Commands are run lazily when the proxy first needs the credential; stdout is injected by the proxy and never exposed to the sandboxed child.",
+      "additionalProperties": {
+        "$ref": "#/$defs/CredentialCaptureEntry"
+      }
+    },
     "unsafe_macos_seatbelt_rules": {
       "type": "array",
       "items": { "type": "string" },
@@ -157,6 +168,113 @@
             { "type": "null" }
           ],
           "description": "Optional author or maintainer of this profile."
+        }
+      }
+    },
+    "CredentialCaptureEntry": {
+      "type": "object",
+      "description": "Configuration for a supervisor-side credential capture command.",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Command and arguments to execute without a shell, for example [\"gh\", \"auth\", \"token\"]. The executable is resolved before proxy startup."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300,
+          "default": 5,
+          "description": "Maximum seconds to wait for the command."
+        },
+        "ttl_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "default": 900,
+          "description": "How long to cache the captured credential in memory. Set to 0 to disable caching."
+        },
+        "cache_ttl_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "Preferred alias for ttl_secs. How long to cache captured material in memory. Set to 0 to disable caching. Do not set both ttl_secs and cache_ttl_secs."
+        },
+        "cache_path_regex": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional regular expression evaluated against the upstream request path. If it matches, capture group 1 is used as the cache scope; otherwise the full match is used. When absent or unmatched, the request host is used."
+        },
+        "stdin": {
+          "type": "string",
+          "enum": ["null", "request_json"],
+          "default": "null",
+          "description": "Controls stdin for the capture command. null closes stdin unless interaction.stdio is true. request_json writes request metadata JSON to stdin."
+        },
+        "output": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": ["text"],
+              "description": "Capture stdout as a single credential string."
+            },
+            {
+              "$ref": "#/$defs/CredentialCaptureOutputConfig"
+            }
+          ],
+          "default": "text",
+          "description": "Controls how capture stdout is interpreted. JSON output requires an object form with allow_headers."
+        },
+        "interaction": {
+          "$ref": "#/$defs/CredentialCaptureInteraction",
+          "description": "Explicit opt-in policy for interactive capture commands."
+        }
+      }
+    },
+    "CredentialCaptureOutputConfig": {
+      "type": "object",
+      "description": "Structured output configuration for a credential capture command.",
+      "additionalProperties": false,
+      "required": ["format"],
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["json"],
+          "description": "Interpret stdout as JSON. The supported shape is {\"headers\": {\"Header-Name\": \"value\"}}."
+        },
+        "allow_headers": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Header names that JSON output may inject. Required for json output."
+        }
+      }
+    },
+    "CredentialCaptureInteraction": {
+      "type": "object",
+      "description": "Explicit policy for capture commands that need terminal or browser interaction.",
+      "additionalProperties": false,
+      "properties": {
+        "stdio": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the capture command to use inherited stderr and, when stdin is null, inherited stdin."
+        },
+        "open_urls": {
+          "oneOf": [
+            { "$ref": "#/$defs/OpenUrlConfig" },
+            { "type": "null" }
+          ],
+          "description": "Origins this capture command may open through nono's browser helper."
+        },
+        "allow_launch_services": {
+          "type": "boolean",
+          "default": false,
+          "description": "Mark this capture command as allowed to use host browser/app launch mechanisms during auth setup."
         }
       }
     },
@@ -396,6 +514,10 @@
           "type": "boolean",
           "description": "Block network access. Network is allowed by default; set to true to deny all outbound traffic."
         },
+        "allow_http2": {
+          "type": "boolean",
+          "description": "Allow HTTP/2 to upstream servers via ALPN negotiation. Defaults to false (HTTP/1.1 with keep-alive). Equivalent to the --allow-http2 CLI flag."
+        },
         "network_profile": {
           "oneOf": [
             { "type": "string" },
@@ -460,6 +582,10 @@
           },
           "description": "Custom credential definitions for services not in network-policy.json. Keys are service names used with --credential."
         },
+        "tls_intercept": {
+          "$ref": "#/$defs/TlsInterceptConfig",
+          "description": "TLS interception certificate lifecycle controls for L7 proxy routes."
+        },
         "upstream_proxy": {
           "oneOf": [
             { "type": "string" },
@@ -486,31 +612,53 @@
         }
       }
     },
-     "CustomCredentialDef": {
-       "type": "object",
-       "description": "Custom credential route definition for the reverse proxy. Defines how to route requests and inject credentials for a service. Must have exactly one of: credential_key, auth, or aws_auth (mutually exclusive).",
-       "additionalProperties": false,
-       "required": ["upstream"],
-       "properties": {
-         "upstream": {
-           "type": "string",
-           "description": "Upstream URL to proxy requests to (e.g., \"https://api.telegram.org\"). Must use HTTPS, or HTTP only for loopback addresses."
-         },
-         "credential_key": {
-           "type": "string",
-           "description": "Keystore account name for the credential (e.g., \"telegram_bot_token\"), or a 1Password op:// URI, Bitwarden bw:// URI, apple-password:// URI, file:// URI, or env:// URI (e.g., \"env://MY_TOKEN\"). Mutually exclusive with auth and aws_auth."
-         },
-         "auth": {
-           "$ref": "#/$defs/OAuth2Config",
-           "description": "OAuth2 client_credentials configuration. When present, the proxy handles token exchange automatically. Mutually exclusive with credential_key and aws_auth."
-         },
-         "aws_auth": {
-           "oneOf": [
-             { "$ref": "#/$defs/AwsAuthConfig" },
-             { "type": "null" }
-           ],
-           "description": "AWS SigV4 signing configuration. When present, the proxy signs outbound requests with AWS credentials. Mutually exclusive with credential_key and auth."
-         },
+    "TlsInterceptConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ca_lifecycle": {
+          "type": "string",
+          "enum": ["session", "trusted"],
+          "default": "session",
+          "description": "CA lifecycle. session uses a per-run CA exposed through trust-bundle env vars. trusted reuses a CA trusted in the macOS user trust store."
+        },
+        "ca_validity": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(s|m|h|d)?$",
+          "description": "CA validity duration, such as 24h or 1d. Bare numbers are seconds."
+        },
+        "leaf_validity": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(s|m|h|d)?$",
+          "description": "Per-host leaf certificate validity duration, such as 15m. Leaf expiry is capped by CA expiry."
+        }
+      }
+    },
+    "CustomCredentialDef": {
+      "type": "object",
+      "description": "Custom credential route definition for the reverse proxy. Defines how to route requests and inject credentials for a service. Must have exactly one of: credential_key, auth, or aws_auth (mutually exclusive).",
+      "additionalProperties": false,
+      "required": ["upstream"],
+      "properties": {
+        "upstream": {
+          "type": "string",
+          "description": "Upstream URL to proxy requests to (e.g., \"https://api.telegram.org\"). Must use HTTPS, or HTTP only for loopback addresses."
+        },
+        "credential_key": {
+          "type": "string",
+          "description": "Keystore account name for the credential (e.g., \"telegram_bot_token\"), or a 1Password op:// URI, Bitwarden bw:// URI, apple-password:// URI, file:// URI, env:// URI (e.g., \"env://MY_TOKEN\"), or cmd:// URI backed by credential_capture. Mutually exclusive with auth and aws_auth."
+        },
+        "auth": {
+          "$ref": "#/$defs/OAuth2Config",
+          "description": "OAuth2 client_credentials configuration. When present, the proxy handles token exchange automatically. Mutually exclusive with credential_key and aws_auth."
+        },
+        "aws_auth": {
+          "oneOf": [
+            { "$ref": "#/$defs/AwsAuthConfig" },
+            { "type": "null" }
+          ],
+          "description": "AWS SigV4 signing configuration. When present, the proxy signs outbound requests with AWS credentials. Mutually exclusive with credential_key and auth."
+        },
         "inject_mode": {
           "$ref": "#/$defs/InjectMode",
           "description": "Credential injection mode. Determines how the credential is inserted into outbound requests.",
@@ -780,6 +928,611 @@
           "description": "Static environment variables injected after environment filtering and before credential injection. PATH and NONO_* are reserved. Values support variable expansion ($HOME, $WORKDIR, $TMPDIR, $XDG_*, $NONO_CONFIG, $NONO_PACKAGES)."
         }
       }
+    },
+    "CommandPoliciesConfig": {
+      "type": "object",
+      "description": "tool-sandbox command-control policy.",
+      "additionalProperties": false,
+      "properties": {
+        "executable_dirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional directories searched during command target resolution before shim PATH is prepended."
+        },
+        "allow_writable_executables": {
+          "type": "boolean",
+          "description": "Explicit profile-wide trust downgrade that disables tool-sandbox checks for policy, deny-only, and outer executable allow-list paths writable through the sandbox capability set."
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/CommandPolicyIdentifier",
+          "description": "Legacy session entrypoint hint. Current profiles should express direct session access with commands.<name>.sandbox or commands.<name>.from.session."
+        },
+        "approval_backends": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ApprovalBackendConfig" },
+          "description": "Named approval backends used by approve decisions in invocation and endpoint policies."
+        },
+        "approval_defaults": {
+          "$ref": "#/$defs/ApprovalDefaultsConfig",
+          "description": "Default approval backend and timeout used when an approve decision does not route explicitly."
+        },
+        "credentials": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/CommandCredentialConfig" },
+          "description": "Named command credentials that may be injected only into selected child-tool-sandbox policies."
+        },
+        "commands": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/CommandPolicyConfig" },
+          "description": "Policy-controlled command definitions. A non-empty object activates tool-sandbox."
+        },
+        "deny_direct_exec_bypass": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Governance list of canonical executable files that child profiles may not re-grant through allow_direct_exec_bypass."
+        }
+      }
+    },
+    "CommandCredentialConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["local-socket", "raw-file", "proxy", "ambient"],
+          "description": "Credential kind."
+        },
+        "path": {
+          "type": "string",
+          "description": "Path for raw-file credentials or local-socket credentials, commonly $SSH_AUTH_SOCK for SSH agent."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["connect"],
+          "description": "Local socket access mode. Currently only connect is supported."
+        },
+        "env_var": {
+          "type": "string",
+          "description": "Environment variable mapped into the child. For local-socket this receives the resolved socket path; for proxy this receives the phantom token."
+        },
+        "upstream": {
+          "type": "string",
+          "description": "Proxy credential upstream URL."
+        },
+        "credential_key": {
+          "type": "string",
+          "description": "Supervisor/proxy-side real credential reference. Supported forms include bare keyring account names and URI-backed sources such as env://, file://, keyring://, op://, bw://, and apple-password://."
+        },
+        "base_url_env_var": {
+          "type": "string",
+          "description": "Environment variable that points the child SDK/tool at the local proxy route."
+        },
+        "inject_header": {
+          "type": "string",
+          "description": "Upstream header used for proxy credential injection."
+        },
+        "credential_format": {
+          "type": "string",
+          "description": "Format string used when injecting the real proxy credential upstream."
+        },
+        "source": {
+          "$ref": "#/$defs/AmbientCredentialSourceConfig",
+          "description": "Optional supervisor-side credential source for ambient credentials or proxy credentials. For proxy credentials, use either source or credential_key, not both."
+        },
+        "tls_ca": {
+          "type": "string",
+          "description": "Optional PEM CA bundle used by proxy credentials for upstream TLS verification."
+        },
+        "tls_client_cert": {
+          "type": "string",
+          "description": "Optional PEM client certificate for proxy credential mutual TLS. Must be paired with tls_client_key."
+        },
+        "tls_client_key": {
+          "type": "string",
+          "description": "Optional PEM client private key for proxy credential mutual TLS. Must be paired with tls_client_cert."
+        }
+      }
+    },
+    "ApprovalDefaultsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/CommandPolicyIdentifier",
+          "description": "Default approval backend name."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Default approval timeout in seconds."
+        }
+      }
+    },
+    "ApprovalBackendConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["terminal", "webhook", "chain"],
+          "description": "Approval backend kind."
+        },
+        "url": {
+          "type": "string",
+          "description": "Webhook URL for webhook approval backends."
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Backend-specific approval timeout in seconds."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["all", "any"],
+          "description": "Decision mode for chain approval backends."
+        },
+        "backends": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+          "description": "Child backend names for chain approval backends."
+        }
+      }
+    },
+    "AmbientCredentialSourceConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "key"],
+          "properties": {
+            "type": { "type": "string", "const": "keystore" },
+            "key": {
+              "type": "string",
+              "description": "Credential reference resolved by the supervisor keystore backend."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "command"],
+          "properties": {
+            "type": { "type": "string", "const": "command" },
+            "command": {
+              "type": "string",
+              "description": "Supervisor-side command used to print the credential on stdout."
+            },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": [],
+              "description": "Arguments passed to the supervisor-side credential command."
+            },
+            "timeout_secs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Maximum time to wait for the credential command."
+            }
+          }
+        }
+      ]
+    },
+    "InterceptRuleConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["args"],
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Argument prefix matched against argv[1..]. An empty list is a catch-all and must be last."
+        },
+        "action": { "$ref": "#/$defs/InterceptActionConfig" }
+      }
+    },
+    "InterceptActionConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "const": "passthrough" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "stdout"],
+          "properties": {
+            "type": { "type": "string", "const": "respond" },
+            "stdout": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "const": "capture" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "credential"],
+          "properties": {
+            "type": { "type": "string", "const": "capture_credential" },
+            "credential": { "$ref": "#/$defs/CommandPolicyIdentifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "const": "approve" },
+            "timeout_secs": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "CommandPolicyConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "type": "string",
+          "description": "Optional exact executable file for this command. When set, tool-sandbox binds the command name to this canonical file instead of resolving the first PATH match."
+        },
+        "allow_writable_executable": {
+          "type": "boolean",
+          "description": "Explicit per-command trust downgrade for a pinned executable or parent directory writable through the sandbox capability set. Valid only when executable is set to an absolute file path. On macOS this remains path-racy and is not suitable for high-assurance policies."
+        },
+        "can_use": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+          "description": "Commands this command may invoke through tool-sandbox chaining."
+        },
+        "sandbox": {
+          "$ref": "#/$defs/CommandSandboxConfig",
+          "description": "Direct from.session sandbox shorthand. Must not be combined with from.session."
+        },
+        "from": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string", "enum": ["deny"] },
+              { "$ref": "#/$defs/CommandEdgeConfig" },
+              { "$ref": "#/$defs/CommandSandboxConfig" }
+            ]
+          },
+          "description": "Caller-specific policies. Use the reserved caller session for direct session invocation. Values may be \"deny\", a bare sandbox shorthand, or an edge object with sandbox and invocation_policy."
+        },
+        "intercept": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InterceptRuleConfig" },
+          "description": "Ordered command argument-prefix intercept rules evaluated after invocation policy."
+        },
+        "allow_direct_exec_bypass": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Canonical executable paths allowed to bypass child-tool-sandbox when invoked directly, while PATH invocation remains shim-controlled."
+        },
+        "allow_direct_exec_bypass_with_credentials": {
+          "type": "boolean",
+          "description": "Second opt-in required before a credential-using command may have direct exec bypass."
+        }
+      }
+    },
+    "CommandEdgeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox"],
+      "properties": {
+        "sandbox": {
+          "$ref": "#/$defs/CommandSandboxConfig",
+          "description": "Child sandbox selected for this caller edge."
+        },
+        "invocation_policy": {
+          "$ref": "#/$defs/InvocationPolicyConfig",
+          "description": "Optional argv and environment policy evaluated before launching the child command."
+        }
+      }
+    },
+    "CommandSandboxConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fs_read": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Directory read grants for the selected child-tool-sandbox policy."
+        },
+        "fs_read_file": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Exact file read grants for the selected child-tool-sandbox policy."
+        },
+        "fs_write": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Directory write grants for the selected child-tool-sandbox policy."
+        },
+        "fs_write_file": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Exact file write grants for the selected child-tool-sandbox policy."
+        },
+        "use_credentials": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+          "description": "Credential handles injected into this selected child-tool-sandbox policy."
+        },
+        "credentials": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CommandCredentialGrantConfig" },
+          "description": "Credential handles injected into this selected child-tool-sandbox policy, optionally with endpoint policy constraints."
+        },
+        "argv_prepend": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments inserted after the synthesized argv[0] and before shim-captured argv[1..] for this selected child-tool-sandbox policy."
+        },
+        "network": {
+          "$ref": "#/$defs/CommandNetworkConfig",
+          "description": "Network grants for this selected child-tool-sandbox policy."
+        },
+        "environment": {
+          "$ref": "#/$defs/CommandEnvironmentConfig",
+          "description": "Environment carry-over rules for this selected child-tool-sandbox policy."
+        },
+        "allow_raw_file_credentials_in_chained_policy": {
+          "type": "boolean",
+          "description": "Explicit opt-in allowing raw-file credentials in a non-session caller policy."
+        },
+        "resources": {
+          "$ref": "#/$defs/CommandResourceConfig",
+          "description": "Optional child resource limits. Current runtimes fail closed if requested resources cannot be enforced."
+        },
+        "stdio": {
+          "$ref": "#/$defs/CommandStdioConfig",
+          "description": "Optional stdout/stderr byte limits enforced by brokered stdio."
+        },
+        "open_urls": {
+          "$ref": "#/$defs/OpenUrlConfig",
+          "description": "Runtime-delegated URL opening for this command (e.g. OAuth2 login). The unsandboxed tool-sandbox runtime validates each requested URL against allow_origins before opening it in the user's browser. When omitted, inherits from the base profile; when present, replaces it entirely."
+        },
+        "allow_launch_services": {
+          "type": "boolean",
+          "description": "macOS-only: allow this command to open URLs directly via LaunchServices instead of the origin-validated browser shim. Ignored on Linux. Defaults to false."
+        }
+      }
+    },
+    "CommandCredentialGrantConfig": {
+      "oneOf": [
+        { "$ref": "#/$defs/CommandPolicyIdentifier" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/CommandPolicyIdentifier",
+              "description": "Credential handle name."
+            },
+            "endpoint_policy": {
+              "$ref": "#/$defs/EndpointPolicyConfig",
+              "description": "Optional method/path policy for proxy credentials."
+            }
+          }
+        }
+      ]
+    },
+    "EndpointPolicyConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "$ref": "#/$defs/PolicyDecisionConfig" },
+        "deny": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRuleConfig" }
+        },
+        "approve": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRuleConfig" }
+        },
+        "allow": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/EndpointRuleConfig" }
+        }
+      }
+    },
+    "EndpointRuleConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": { "type": "string" },
+        "path": { "type": "string" },
+        "backend": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+        "reason": { "type": "string" },
+        "timeout_secs": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "InvocationPolicyConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "$ref": "#/$defs/PolicyDecisionConfig" },
+        "deny": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InvocationRuleConfig" }
+        },
+        "approve": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InvocationRuleConfig" }
+        },
+        "allow": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InvocationRuleConfig" }
+        }
+      }
+    },
+    "InvocationRuleConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": { "$ref": "#/$defs/ArgvMatcherConfig" },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/EnvMatcherConfig" }
+        },
+        "backend": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+        "reason": { "type": "string" },
+        "timeout_secs": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "ArgvMatcherConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exact": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "prefix": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "contains": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "EnvMatcherConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "one_of": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "equals": { "type": "string" }
+      }
+    },
+    "PolicyDecisionConfig": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["deny", "approve", "allow"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["decision"],
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": ["deny", "approve", "allow"]
+            },
+            "backend": { "$ref": "#/$defs/CommandPolicyIdentifier" },
+            "timeout_secs": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "CommandResourceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["auto", "cgroup", "portable"]
+        },
+        "fallback": {
+          "type": "string",
+          "enum": ["warn_if_weaker", "fail_if_weaker"]
+        },
+        "memory_bytes": { "type": "integer", "minimum": 0 },
+        "cpu_seconds": { "type": "integer", "minimum": 0 },
+        "wall_time_seconds": { "type": "integer", "minimum": 0 },
+        "max_processes": { "type": "integer", "minimum": 0 },
+        "max_file_size_bytes": { "type": "integer", "minimum": 0 },
+        "max_output_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "CommandStdioConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stdout": { "$ref": "#/$defs/CommandStdioStreamConfig" },
+        "stderr": { "$ref": "#/$defs/CommandStdioStreamConfig" }
+      }
+    },
+    "CommandStdioStreamConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_bytes"],
+      "properties": {
+        "max_bytes": { "type": "integer", "minimum": 1 },
+        "on_limit": {
+          "type": "string",
+          "enum": ["truncate", "terminate", "deny"]
+        }
+      }
+    },
+    "CommandNetworkConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_all": {
+          "type": "boolean",
+          "description": "Allow unrestricted child network access."
+        },
+        "allow_domain": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hostname egress allow-list. Valid only with an enforceable nono proxy/helper mode."
+        },
+        "tcp_connect_ports": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 65535 },
+          "description": "Raw TCP connect ports. Requires Landlock ABI v4+ TCP support and is not hostname-filtered."
+        },
+        "tcp_bind_ports": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 65535 },
+          "description": "Raw TCP bind ports. Requires Landlock ABI v4+ TCP support."
+        }
+      }
+    },
+    "CommandEnvironmentConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_vars": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Authoritative environment variable allow-list for tool-sandbox. Supports exact names, trailing-prefix wildcards such as AWS_*, and a bare *."
+        },
+        "set_vars": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Static environment variables injected after tool-sandbox environment filtering and before credential injection. PATH and NONO_* are reserved."
+        }
+      }
+    },
+    "CommandPolicyIdentifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._+-]+$",
+      "not": {
+        "enum": [".", "..", "session"]
+      },
+      "description": "tool-sandbox command or credential identifier."
     },
     "WorkdirConfig": {
       "type": "object",

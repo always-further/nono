@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   attest:
-    if: github.repository == 'always-further/nono'
+    if: github.repository == 'nolabs-ai/nono'
     name: Attest Release Artifacts
     runs-on: ubuntu-latest
     permissions:

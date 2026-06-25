@@ -23,6 +23,6 @@ jobs:
         with:
           formula-name: nono
           tag-name: ${{ github.event.inputs.tag }}
-          download-url: "https://github.com/always-further/nono/archive/refs/tags/${{ github.event.inputs.tag }}.tar.gz"
+          download-url: "https://github.com/nolabs-ai/nono/archive/refs/tags/${{ github.event.inputs.tag }}.tar.gz"
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_CORE_TOKEN }}

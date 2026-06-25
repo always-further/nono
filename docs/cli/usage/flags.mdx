@@ -102,9 +102,10 @@ nono wrap [OPTIONS] -- <COMMAND> [ARGS...]
 
 ### `nono why`
 
-Check why a path or network operation would be allowed or denied. Designed for both human debugging and programmatic use by AI agents.
+Check why filesystem, network, scope, or command access would be allowed or denied. Designed for both human debugging and programmatic use by AI agents.
 
 ```bash
+nono why --profile <PROFILE> --command <COMMAND> -- <ARGS...>
 nono why --path <PATH> --op <OP> [OPTIONS]
 nono why --host <HOST> [--port <PORT>] [OPTIONS]
 nono why --scope <SCOPE> [OPTIONS]
@@ -853,6 +854,18 @@ nono run --allow-gpu -- llama-cli -m ./model.gguf -p "hello"
   When used with a profile, the profile must opt into `allow_gpu`; otherwise nono fails closed with an error. Without a profile, the CLI flag alone is sufficient.
 </Note>
 
+#### `--allow-http2`
+
+Enable HTTP/2 multiplexing for upstream proxy connections. When set, the proxy negotiates h2 via ALPN with upstreams that support it, and the CONNECT intercept advertises both `h2` and `http/1.1`.
+
+```bash
+nono run --profile claude-code --allow-http2 -- claude
+```
+
+Without this flag, the proxy uses HTTP/1.1 with keep-alive connection pooling. This is the conservative default since some upstream servers may not handle HTTP/2 correctly.
+
+See [Networking — HTTP/2 Support](/cli/features/networking#http2-support---allow-http2) for details on connection pooling and profile configuration.
+
 ### Execution Mode Flags
 
 #### `--detached`
@@ -1089,7 +1102,7 @@ nono run --skip-dir vendor-cache --skip-dir generated --allow-cwd -- my-agent
 
 #### `--startup-timeout`
 
-Set a startup timeout in seconds for the sandboxed process. If the process does not enter alt-screen mode within the given time, nono prints a warning and terminates it. Startup banners or log lines printed before the TUI initialises do not count as interactive — only entering alt-screen (the escape sequence used by full-screen TUIs) satisfies the check. Set to `0` to disable entirely.
+Set a startup timeout in seconds for the sandboxed process. If the process does not appear interactive within the given time, nono prints a warning and terminates it. Entering alt-screen or writing visible non-whitespace output both count as interactive. Set to `0` to disable entirely.
 
 Applies to `nono run` and `nono shell`. Not available on `nono wrap` (which uses direct exec with no supervisor).
 
@@ -1214,7 +1227,19 @@ nono run --help
 
 ## `nono why` Options
 
-The `why` command checks why a path or network operation would be allowed or denied. It's designed for both human debugging and programmatic use by AI agents.
+The `why` command checks why filesystem, network, scope, or command access would be allowed or denied. It's designed for both human debugging and programmatic use by AI agents.
+
+### `--command`
+
+Tool-sandbox command name to check against Tool Sandbox  command policy. Pass the command arguments after `--`.
+
+```bash
+nono why --profile gh --command gh -- issue comment 1052
+```
+
+### `--caller`
+
+Command-policy caller edge to evaluate. Defaults to `session`, which is the usual caller for a tool invoked directly from the sandboxed agent session.
 
 ### `--path`
 

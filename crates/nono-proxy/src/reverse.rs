@@ -15,14 +15,17 @@
 //! forwarded without buffering.
 
 use crate::audit;
-use crate::config::InjectMode;
-use crate::credential::{CredentialStore, LoadedCredential};
+use crate::capture::{CredentialCaptureBackend, CredentialCaptureRequest};
+use crate::config::{EndpointPolicyOutcome, InjectMode};
+use crate::credential::{CmdCredentialRoute, CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
-use crate::forward::{self, AuditCtx, UpstreamScheme, UpstreamSpec, UpstreamStrategy};
+use crate::forward::UpstreamScheme;
 use crate::route::RouteStore;
 use crate::token;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -33,7 +36,9 @@ use zeroize::Zeroizing;
 /// Maximum request body size (16 MiB). Prevents DoS from malicious Content-Length.
 const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
 
-fn auth_mechanism_for_inject_mode(mode: &InjectMode) -> nono::undo::NetworkAuditAuthMechanism {
+pub(crate) fn auth_mechanism_for_inject_mode(
+    mode: &InjectMode,
+) -> nono::undo::NetworkAuditAuthMechanism {
     match mode {
         InjectMode::Header | InjectMode::BasicAuth => {
             nono::undo::NetworkAuditAuthMechanism::PhantomHeader
@@ -43,7 +48,7 @@ fn auth_mechanism_for_inject_mode(mode: &InjectMode) -> nono::undo::NetworkAudit
     }
 }
 
-fn audit_injection_mode_for_inject_mode(
+pub(crate) fn audit_injection_mode_for_inject_mode(
     mode: &InjectMode,
 ) -> nono::undo::NetworkAuditInjectionMode {
     match mode {
@@ -92,8 +97,16 @@ pub struct ReverseProxyCtx<'a> {
     pub filter: &'a ProxyFilter,
     /// Shared TLS connector
     pub tls_connector: &'a TlsConnector,
+    /// Default TLS client config (for routes without custom CA)
+    pub default_tls_config: &'a std::sync::Arc<rustls::ClientConfig>,
+    /// Upstream connection pool (HTTP/1.1 keep-alive + HTTP/2 multiplexing)
+    pub upstream_pool: &'a crate::pool::UpstreamPool,
     /// Shared network audit sink for session metadata capture
     pub audit_log: Option<&'a audit::SharedAuditLog>,
+    /// Optional approval backend registry for endpoint-policy approve decisions.
+    pub approval_backends: Option<crate::approval::ApprovalBackendRegistry>,
+    /// Optional supervisor capture backend for command-backed credentials.
+    pub credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
 }
 
 /// Handle a non-CONNECT HTTP request (reverse proxy mode).
@@ -129,15 +142,26 @@ pub async fn handle_reverse_proxy(
             prefix: service.clone(),
         })?;
     let static_cred = ctx.credential_store.get(&service);
+    let cmd_route = ctx.credential_store.get_cmd(&service);
     let oauth2_route = ctx.credential_store.get_oauth2(&service);
     let aws_route = ctx.credential_store.get_aws(&service);
-    let managed_ctx = static_cred.map(|cred| {
-        managed_credential_event_ctx(
-            &service,
-            &cred.proxy_inject_mode,
-            audit_injection_mode_for_inject_mode(&cred.inject_mode),
-        )
-    });
+    let managed_ctx = static_cred
+        .map(|cred| {
+            managed_credential_event_ctx(
+                &service,
+                &cred.proxy_inject_mode,
+                audit_injection_mode_for_inject_mode(&cred.inject_mode),
+            )
+        })
+        .or_else(|| {
+            cmd_route.map(|cmd| {
+                managed_credential_event_ctx(
+                    &service,
+                    &cmd.proxy_inject_mode,
+                    audit_injection_mode_for_inject_mode(&cmd.inject_mode),
+                )
+            })
+        });
     let oauth2_ctx = oauth2_route.map(|_| audit::EventContext {
         route_id: Some(&service),
         auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
@@ -154,8 +178,9 @@ pub async fn handle_reverse_proxy(
             ..audit::EventContext::default()
         });
 
+    let cmd_available = cmd_route.is_some() && ctx.credential_capture_backend.is_some();
     if route.missing_managed_credential(
-        static_cred.is_some(),
+        static_cred.is_some() || cmd_available,
         oauth2_route.is_some(),
         aws_route.is_some(),
     ) {
@@ -173,6 +198,7 @@ pub async fn handle_reverse_proxy(
             denial_category: Some(
                 nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
             ),
+            ..audit::EventContext::default()
         };
         audit::log_denied(
             ctx.audit_log,
@@ -186,27 +212,17 @@ pub async fn handle_reverse_proxy(
         return Ok(());
     }
 
-    // L7 endpoint filtering runs for all reverse-proxy routes, whether or not
-    // they inject a credential.
-    if !route.endpoint_rules.is_allowed(&method, &upstream_path) {
-        let reason = format!(
-            "endpoint denied: {} {} on service '{}'",
-            method, upstream_path, service
-        );
-        warn!("{}", reason);
-        let deny_ctx = audit::EventContext {
-            denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
-            ..route_ctx.clone()
-        };
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &deny_ctx,
-            &service,
-            0,
-            &reason,
-        );
-        send_error(stream, 403, "Forbidden").await?;
+    if !enforce_endpoint_policy(
+        route,
+        &service,
+        &method,
+        &upstream_path,
+        &route_ctx,
+        ctx,
+        stream,
+    )
+    .await?
+    {
         return Ok(());
     }
 
@@ -265,6 +281,32 @@ pub async fn handle_reverse_proxy(
             send_error(stream, 401, "Unauthorized").await?;
             return Ok(());
         }
+    } else if let Some(cmd) = cmd_route {
+        if let Err(e) = validate_phantom_token_for_mode(
+            &cmd.proxy_inject_mode,
+            remaining_header,
+            &upstream_path,
+            &cmd.proxy_header_name,
+            cmd.proxy_path_pattern.as_deref(),
+            cmd.proxy_query_param_name.as_deref(),
+            ctx.session_token,
+        ) {
+            let deny_ctx = audit::EventContext {
+                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
+                ..managed_ctx.clone().unwrap_or_else(|| route_ctx.clone())
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                &service,
+                0,
+                &e.to_string(),
+            );
+            send_error(stream, 401, "Unauthorized").await?;
+            return Ok(());
+        }
     } else if let Err(e) = token::validate_proxy_auth(remaining_header, ctx.session_token) {
         let deny_ctx = audit::EventContext {
             auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
@@ -282,6 +324,54 @@ pub async fn handle_reverse_proxy(
         send_error(stream, 407, "Proxy Authentication Required").await?;
         return Ok(());
     }
+
+    let captured_credential = if let Some(cmd) = cmd_route
+        && cred.is_none()
+    {
+        match capture_cmd_credential(
+            cmd,
+            &service,
+            &route.upstream,
+            &upstream_path,
+            &method,
+            &service,
+            0,
+            audit::ProxyMode::Reverse,
+            ctx.audit_log,
+            ctx.credential_capture_backend.clone(),
+        )
+        .await
+        {
+            Ok(credential) => Some(credential),
+            Err(err) => {
+                warn!("{}", err);
+                let deny_ctx = audit::EventContext {
+                    route_id: Some(&service),
+                    auth_mechanism: route.managed_auth_mechanism.clone(),
+                    auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                    managed_credential_active: Some(false),
+                    injection_mode: route.managed_injection_mode.clone(),
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                    ),
+                    ..audit::EventContext::default()
+                };
+                audit::log_denied(
+                    ctx.audit_log,
+                    audit::ProxyMode::Reverse,
+                    &deny_ctx,
+                    &service,
+                    0,
+                    &err.to_string(),
+                );
+                send_error(stream, 503, "Service Unavailable").await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let cred = cred.or(captured_credential.as_ref());
 
     let transformed_path = if let Some(cred) = cred {
         let cleaned_path = strip_proxy_artifacts(
@@ -378,69 +468,488 @@ pub async fn handle_reverse_proxy(
     };
 
     let upstream_authority = format_host_header(upstream_scheme, &upstream_host, upstream_port);
-    let mut request = Zeroizing::new(format!(
-        "{} {} {}\r\nHost: {}\r\n",
-        method, upstream_path_full, version, upstream_authority
-    ));
+    let scheme_str = match upstream_scheme {
+        UpstreamScheme::Https => "https",
+        UpstreamScheme::Http => "http",
+    };
+    let uri = format!(
+        "{}://{}{}",
+        scheme_str, upstream_authority, upstream_path_full
+    );
 
+    let mut req_builder = http::Request::builder()
+        .method(method.as_str())
+        .uri(&uri)
+        .header("Host", &upstream_authority);
+
+    // Inject credential header
     if let Some(cred) = cred {
-        inject_credential_for_mode(cred, &mut request);
+        req_builder = inject_credential_structured(cred, req_builder);
     }
 
-    let auth_header_lower = cred.map(|c| c.header_name.to_lowercase());
+    let injected_header_names = injected_credential_header_names(cred);
     for (name, value) in &filtered_headers {
-        if let (Some(cred), Some(header_lower)) = (cred, auth_header_lower.as_ref())
-            && matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
-            && name.to_lowercase() == *header_lower
+        if injected_header_names
+            .iter()
+            .any(|header| name.eq_ignore_ascii_case(header))
         {
             continue;
         }
-        request.push_str(&format!("{}: {}\r\n", name, value));
+        req_builder = req_builder.header(name.as_str(), value.as_str());
     }
 
-    request.push_str("Connection: close\r\n");
-    if !body.is_empty() {
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    request.push_str("\r\n");
+    let req = req_builder
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| ProxyError::HttpParse(format!("request build error: {}", e)))?;
 
-    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
-    let upstream_spec = UpstreamSpec {
-        scheme: upstream_scheme,
-        host: &upstream_host,
-        port: upstream_port,
-        strategy: UpstreamStrategy::Direct {
-            resolved_addrs: &check.resolved_addrs,
-        },
-        tls_connector: connector,
-    };
-    let audit_ctx = AuditCtx {
-        log: ctx.audit_log,
-        mode: audit::ProxyMode::Reverse,
-        event_ctx: success_ctx.clone(),
-        target: &service,
-        method: &method,
-        path: &upstream_path,
-    };
-    if let Err(e) =
-        forward::forward_request(stream, request.as_bytes(), &body, upstream_spec, audit_ctx).await
-    {
-        warn!("Upstream connection failed: {}", e);
-        send_error(stream, 502, "Bad Gateway").await?;
-        let deny_ctx = audit::EventContext {
-            denial_category: Some(nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed),
-            ..success_ctx.clone()
-        };
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &deny_ctx,
-            &service,
-            0,
-            &e.to_string(),
-        );
+    let tls_config = route
+        .tls_client_config
+        .as_ref()
+        .unwrap_or(ctx.default_tls_config);
+
+    ctx.upstream_pool
+        .pin_host(&upstream_host, &check.resolved_addrs);
+
+    match pool_forward(ctx.upstream_pool, tls_config, req, stream).await {
+        Ok(status) => {
+            audit::log_l7_request(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &success_ctx,
+                &service,
+                &method,
+                &upstream_path,
+                status,
+            );
+        }
+        Err(e) => {
+            warn!("Upstream connection failed: {}", e);
+            send_error(stream, 502, "Bad Gateway").await?;
+            let deny_ctx = audit::EventContext {
+                denial_category: Some(
+                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
+                ),
+                ..success_ctx.clone()
+            };
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                &service,
+                0,
+                &e.to_string(),
+            );
+        }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn capture_cmd_credential(
+    cmd: &CmdCredentialRoute,
+    route_id: &str,
+    upstream: &str,
+    request_path: &str,
+    request_method: &str,
+    request_host: &str,
+    request_port: u16,
+    proxy_mode: audit::ProxyMode,
+    audit_log: Option<&audit::SharedAuditLog>,
+    backend: Option<Arc<dyn CredentialCaptureBackend>>,
+) -> Result<LoadedCredential> {
+    let Some(backend) = backend else {
+        let reason = format!(
+            "credential '{}' requires supervisor capture but no capture backend is configured",
+            cmd.credential_name
+        );
+        audit::log_credential_capture(
+            audit_log,
+            proxy_mode,
+            audit::CredentialCaptureAudit {
+                route_id,
+                credential_name: &cmd.credential_name,
+                action: "denied",
+                decision: nono::undo::NetworkAuditDecision::Deny,
+                command: None,
+                argv: None,
+                exit_status: None,
+                duration_ms: Some(0),
+                stdout_bytes: None,
+                stderr_redacted: None,
+                cache_scope: None,
+                output_format: None,
+                header_names: None,
+                stdin_mode: None,
+                interactive: None,
+                upstream: Some(upstream),
+                request_host,
+                request_port: Some(request_port),
+                request_method,
+                request_path,
+                reason: Some(&reason),
+            },
+        );
+        return Err(ProxyError::Credential(reason));
+    };
+
+    let request = CredentialCaptureRequest {
+        credential_name: cmd.credential_name.clone(),
+        route_id: route_id.to_string(),
+        request_host: request_host.to_string(),
+        request_path: request_path.to_string(),
+        request_method: request_method.to_string(),
+        session_id: String::new(),
+        cache_scope: String::new(),
+    };
+    let result = tokio::task::spawn_blocking(move || backend.capture(request))
+        .await
+        .map_err(|err| ProxyError::Credential(format!("credential capture task failed: {err}")))?;
+
+    match result {
+        Ok(response) => {
+            audit::log_credential_capture(
+                audit_log,
+                proxy_mode,
+                audit::CredentialCaptureAudit {
+                    route_id,
+                    credential_name: &cmd.credential_name,
+                    action: &response.metadata.cache_action,
+                    decision: nono::undo::NetworkAuditDecision::Allow,
+                    command: response.metadata.command.as_deref(),
+                    argv: Some(&response.metadata.argv),
+                    exit_status: response.metadata.exit_status,
+                    duration_ms: Some(response.metadata.duration_ms),
+                    stdout_bytes: response.metadata.stdout_bytes,
+                    stderr_redacted: response.metadata.stderr_redacted.as_deref(),
+                    cache_scope: response.metadata.cache_scope.as_deref(),
+                    output_format: response.metadata.output_format.as_deref(),
+                    header_names: Some(&response.metadata.header_names),
+                    stdin_mode: response.metadata.stdin_mode.as_deref(),
+                    interactive: response.metadata.interactive,
+                    upstream: Some(upstream),
+                    request_host,
+                    request_port: Some(request_port),
+                    request_method,
+                    request_path,
+                    reason: None,
+                },
+            );
+            Ok(cmd.materialize(response.material))
+        }
+        Err(err) => {
+            audit::log_credential_capture(
+                audit_log,
+                proxy_mode,
+                audit::CredentialCaptureAudit {
+                    route_id,
+                    credential_name: &cmd.credential_name,
+                    action: &err.metadata.cache_action,
+                    decision: nono::undo::NetworkAuditDecision::Deny,
+                    command: err.metadata.command.as_deref(),
+                    argv: Some(&err.metadata.argv),
+                    exit_status: err.metadata.exit_status,
+                    duration_ms: Some(err.metadata.duration_ms),
+                    stdout_bytes: err.metadata.stdout_bytes,
+                    stderr_redacted: err.metadata.stderr_redacted.as_deref(),
+                    cache_scope: err.metadata.cache_scope.as_deref(),
+                    output_format: err.metadata.output_format.as_deref(),
+                    header_names: Some(&err.metadata.header_names),
+                    stdin_mode: err.metadata.stdin_mode.as_deref(),
+                    interactive: err.metadata.interactive,
+                    upstream: Some(upstream),
+                    request_host,
+                    request_port: Some(request_port),
+                    request_method,
+                    request_path,
+                    reason: Some(&err.reason),
+                },
+            );
+            Err(ProxyError::Credential(err.reason))
+        }
+    }
+}
+
+async fn enforce_endpoint_policy(
+    route: &crate::route::LoadedRoute,
+    service: &str,
+    method: &str,
+    upstream_path: &str,
+    route_ctx: &audit::EventContext<'_>,
+    ctx: &ReverseProxyCtx<'_>,
+    stream: &mut TcpStream,
+) -> Result<bool> {
+    match route.endpoint_policy.evaluate(method, upstream_path) {
+        EndpointPolicyOutcome::Allow { rule_label } => {
+            let policy_ctx = audit::EventContext {
+                endpoint_policy_action: Some("allow"),
+                endpoint_policy_rule: Some(&rule_label),
+                upstream: Some(&route.upstream),
+                ..route_ctx.clone()
+            };
+            audit::log_l7_policy_decision(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &policy_ctx,
+                service,
+                None,
+                method,
+                upstream_path,
+                nono::undo::NetworkAuditDecision::Allow,
+                "allow",
+                &rule_label,
+                None,
+            );
+            Ok(true)
+        }
+        EndpointPolicyOutcome::Deny { reason, rule_label } => {
+            let reason = reason.map(str::to_string).unwrap_or_else(|| {
+                format!(
+                    "endpoint denied by {}: {} {} on service '{}'",
+                    rule_label, method, upstream_path, service
+                )
+            });
+            warn!("{}", reason);
+            let deny_ctx = audit::EventContext {
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                endpoint_policy_action: Some("deny"),
+                endpoint_policy_rule: Some(&rule_label),
+                upstream: Some(&route.upstream),
+                ..route_ctx.clone()
+            };
+            audit::log_l7_policy_decision(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &deny_ctx,
+                service,
+                None,
+                method,
+                upstream_path,
+                nono::undo::NetworkAuditDecision::Deny,
+                "deny",
+                &rule_label,
+                Some(&reason),
+            );
+            send_error(stream, 403, "Forbidden").await?;
+            Ok(false)
+        }
+        EndpointPolicyOutcome::Approve {
+            backend,
+            reason,
+            timeout_secs,
+            rule_label,
+        } => {
+            let Some(approval_backends) = ctx.approval_backends.clone() else {
+                let deny_reason = format!(
+                    "endpoint approval required by {} but no approval backend is configured",
+                    rule_label
+                );
+                warn!("{}", deny_reason);
+                let deny_ctx = audit::EventContext {
+                    denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                    endpoint_policy_action: Some("approve"),
+                    endpoint_policy_rule: Some(&rule_label),
+                    upstream: Some(&route.upstream),
+                    ..route_ctx.clone()
+                };
+                audit::log_l7_policy_decision(
+                    ctx.audit_log,
+                    audit::ProxyMode::Reverse,
+                    &deny_ctx,
+                    service,
+                    None,
+                    method,
+                    upstream_path,
+                    nono::undo::NetworkAuditDecision::ApproveError,
+                    "approve",
+                    &rule_label,
+                    Some(&deny_reason),
+                );
+                send_error(stream, 403, "Forbidden").await?;
+                return Ok(false);
+            };
+            let (backend_name, backend) = match approval_backends.resolve(backend) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    let deny_reason = format!("endpoint approval backend resolution failed: {err}");
+                    warn!("{}", deny_reason);
+                    let deny_ctx = audit::EventContext {
+                        denial_category: Some(
+                            nono::undo::NetworkAuditDenialCategory::EndpointPolicy,
+                        ),
+                        endpoint_policy_action: Some("approve"),
+                        endpoint_policy_rule: Some(&rule_label),
+                        upstream: Some(&route.upstream),
+                        ..route_ctx.clone()
+                    };
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &deny_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveError,
+                        "approve",
+                        &rule_label,
+                        Some(&deny_reason),
+                    );
+                    send_error(stream, 403, "Forbidden").await?;
+                    return Ok(false);
+                }
+            };
+            let request_reason = reason.map(str::to_string).unwrap_or_else(|| {
+                format!(
+                    "endpoint approval required by {} for {} {}",
+                    rule_label, method, upstream_path
+                )
+            });
+            let approval_ctx = audit::EventContext {
+                endpoint_policy_action: Some("approve"),
+                endpoint_policy_rule: Some(&rule_label),
+                approval_backend: Some(&backend_name),
+                upstream: Some(&route.upstream),
+                ..route_ctx.clone()
+            };
+            audit::log_l7_policy_decision(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &approval_ctx,
+                service,
+                None,
+                method,
+                upstream_path,
+                nono::undo::NetworkAuditDecision::ApproveRequested,
+                "approve",
+                &rule_label,
+                Some(&request_reason),
+            );
+            let request = nono::supervisor::ApprovalRequest::Endpoint {
+                request_id: endpoint_approval_request_id(service),
+                route_id: service.to_string(),
+                upstream: route.upstream.clone(),
+                method: method.to_string(),
+                path: upstream_path.to_string(),
+                rule_label: rule_label.clone(),
+                reason: Some(request_reason),
+                child_pid: 0,
+                session_id: "proxy".to_string(),
+            };
+            let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(60));
+            let decision = tokio::time::timeout(
+                timeout,
+                tokio::task::spawn_blocking(move || backend.request_approval(&request)),
+            )
+            .await;
+            match decision {
+                Ok(Ok(Ok(decision))) if decision.is_granted() => {
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &approval_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveGranted,
+                        "approve",
+                        &rule_label,
+                        None,
+                    );
+                    return Ok(true);
+                }
+                Ok(Ok(Ok(_))) => {}
+                Ok(Ok(Err(err))) => {
+                    let deny_reason = format!("endpoint approval backend error: {err}");
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &approval_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveError,
+                        "approve",
+                        &rule_label,
+                        Some(&deny_reason),
+                    );
+                    warn!("{}", deny_reason);
+                    send_error(stream, 403, "Forbidden").await?;
+                    return Ok(false);
+                }
+                Ok(Err(err)) => {
+                    let deny_reason = format!("endpoint approval task failed: {err}");
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &approval_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveError,
+                        "approve",
+                        &rule_label,
+                        Some(&deny_reason),
+                    );
+                    warn!("{}", deny_reason);
+                    send_error(stream, 403, "Forbidden").await?;
+                    return Ok(false);
+                }
+                Err(_) => {
+                    let deny_reason = format!(
+                        "endpoint approval timed out by {}: {} {} on service '{}'",
+                        rule_label, method, upstream_path, service
+                    );
+                    audit::log_l7_policy_decision(
+                        ctx.audit_log,
+                        audit::ProxyMode::Reverse,
+                        &approval_ctx,
+                        service,
+                        None,
+                        method,
+                        upstream_path,
+                        nono::undo::NetworkAuditDecision::ApproveTimeout,
+                        "approve",
+                        &rule_label,
+                        Some(&deny_reason),
+                    );
+                    warn!("{}", deny_reason);
+                    send_error(stream, 403, "Forbidden").await?;
+                    return Ok(false);
+                }
+            }
+            let deny_reason = format!(
+                "endpoint approval denied by {}: {} {} on service '{}'",
+                rule_label, method, upstream_path, service
+            );
+            warn!("{}", deny_reason);
+            audit::log_l7_policy_decision(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &approval_ctx,
+                service,
+                None,
+                method,
+                upstream_path,
+                nono::undo::NetworkAuditDecision::ApproveDenied,
+                "approve",
+                &rule_label,
+                Some(&deny_reason),
+            );
+            send_error(stream, 403, "Forbidden").await?;
+            Ok(false)
+        }
+    }
+}
+
+fn endpoint_approval_request_id(service: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("proxy-endpoint-approval-{service}-{nanos}")
 }
 
 /// Handle a reverse proxy request using an OAuth2 token cache.
@@ -456,7 +965,7 @@ async fn handle_oauth2_credential(
     service: &str,
     upstream_path: &str,
     method: &str,
-    version: &str,
+    _version: &str,
     stream: &mut TcpStream,
     remaining_header: &[u8],
     buffered_body: &[u8],
@@ -476,6 +985,7 @@ async fn handle_oauth2_credential(
             managed_credential_active: Some(true),
             injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
             denial_category: Some(nono::undo::NetworkAuditDenialCategory::AuthenticationFailed),
+            ..audit::EventContext::default()
         };
         audit::log_denied(
             ctx.audit_log,
@@ -557,74 +1067,77 @@ async fn handle_oauth2_credential(
 
     // Build upstream request with Bearer token injection
     let upstream_authority = format_host_header(upstream_scheme, &upstream_host, upstream_port);
-    let mut request = Zeroizing::new(format!(
-        "{} {} {}\r\nHost: {}\r\n",
-        method, upstream_path_full, version, upstream_authority
-    ));
+    let scheme_str = match upstream_scheme {
+        UpstreamScheme::Https => "https",
+        UpstreamScheme::Http => "http",
+    };
+    let uri = format!(
+        "{}://{}{}",
+        scheme_str, upstream_authority, upstream_path_full
+    );
 
-    // Inject OAuth2 access token as Authorization: Bearer
-    request.push_str(&format!(
-        "Authorization: Bearer {}\r\n",
-        access_token.as_str()
-    ));
+    let bearer_value = Zeroizing::new(format!("Bearer {}", access_token.as_str()));
+    let mut req_builder = http::Request::builder()
+        .method(method)
+        .uri(&uri)
+        .header("Host", &upstream_authority)
+        .header("Authorization", bearer_value.as_str());
 
-    // Forward filtered headers (auth headers already stripped by filter_headers)
     for (name, value) in &filtered_headers {
-        request.push_str(&format!("{}: {}\r\n", name, value));
+        req_builder = req_builder.header(name.as_str(), value.as_str());
     }
 
-    if !body.is_empty() {
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    request.push_str("\r\n");
+    let req = req_builder
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| ProxyError::HttpParse(format!("request build error: {}", e)))?;
 
-    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
-    let upstream_spec = UpstreamSpec {
-        scheme: upstream_scheme,
-        host: &upstream_host,
-        port: upstream_port,
-        strategy: UpstreamStrategy::Direct {
-            resolved_addrs: &check.resolved_addrs,
-        },
-        tls_connector: connector,
+    let tls_config = route
+        .tls_client_config
+        .as_ref()
+        .unwrap_or(ctx.default_tls_config);
+
+    ctx.upstream_pool
+        .pin_host(&upstream_host, &check.resolved_addrs);
+
+    let success_event = audit::EventContext {
+        route_id: Some(service),
+        auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
+        auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
+        managed_credential_active: Some(true),
+        injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
+        denial_category: None,
+        ..audit::EventContext::default()
     };
-    let audit_ctx = AuditCtx {
-        log: ctx.audit_log,
-        mode: audit::ProxyMode::Reverse,
-        event_ctx: audit::EventContext {
-            route_id: Some(service),
-            auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
-            auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
-            managed_credential_active: Some(true),
-            injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
-            denial_category: None,
-        },
-        target: service,
-        method,
-        path: upstream_path,
-    };
-    if let Err(e) =
-        forward::forward_request(stream, request.as_bytes(), &body, upstream_spec, audit_ctx).await
-    {
-        warn!("Upstream connection failed: {}", e);
-        send_error(stream, 502, "Bad Gateway").await?;
-        audit::log_denied(
-            ctx.audit_log,
-            audit::ProxyMode::Reverse,
-            &audit::EventContext {
-                route_id: Some(service),
-                auth_mechanism: Some(nono::undo::NetworkAuditAuthMechanism::PhantomHeader),
-                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Succeeded),
-                managed_credential_active: Some(true),
-                injection_mode: Some(nono::undo::NetworkAuditInjectionMode::OAuth2),
-                denial_category: Some(
-                    nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
-                ),
-            },
-            service,
-            0,
-            &e.to_string(),
-        );
+
+    match pool_forward(ctx.upstream_pool, tls_config, req, stream).await {
+        Ok(status) => {
+            audit::log_l7_request(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &success_event,
+                service,
+                method,
+                upstream_path,
+                status,
+            );
+        }
+        Err(e) => {
+            warn!("Upstream connection failed: {}", e);
+            send_error(stream, 502, "Bad Gateway").await?;
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::Reverse,
+                &audit::EventContext {
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::UpstreamConnectFailed,
+                    ),
+                    ..success_event
+                },
+                service,
+                0,
+                &e.to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -678,6 +1191,66 @@ where
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+/// Forward a request through the upstream pool and stream the response back
+/// to the inbound client as HTTP/1.1.
+///
+/// Handles both the pool send and writing the full HTTP/1.1 response (status
+/// line, headers, body) back to the raw TCP stream. Returns the response
+/// status code on success.
+async fn pool_forward(
+    pool: &crate::pool::UpstreamPool,
+    tls_config: &std::sync::Arc<rustls::ClientConfig>,
+    req: http::Request<http_body_util::Full<bytes::Bytes>>,
+    inbound: &mut TcpStream,
+) -> Result<u16> {
+    use http_body_util::BodyExt;
+
+    let response = pool.send(tls_config, req).await?;
+
+    let status = response.status().as_u16();
+    let version = response.version();
+
+    debug!("pool: upstream responded {} via {:?}", status, version);
+
+    // Write HTTP/1.1 status line
+    let reason = response.status().canonical_reason().unwrap_or("OK");
+    let status_line = format!("HTTP/1.1 {} {}\r\n", status, reason);
+    inbound.write_all(status_line.as_bytes()).await?;
+
+    // Write response headers
+    for (name, value) in response.headers() {
+        // Skip h2-specific pseudo-headers and connection-level headers
+        let name_str = name.as_str();
+        if name_str == "transfer-encoding" || name_str == "connection" {
+            continue;
+        }
+        inbound
+            .write_all(format!("{}: {}\r\n", name, value.to_str().unwrap_or("")).as_bytes())
+            .await?;
+    }
+    inbound.write_all(b"\r\n").await?;
+
+    // Stream body frames without buffering
+    let mut body = response.into_body();
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Some(data) = frame.data_ref() {
+                    inbound.write_all(data).await?;
+                }
+            }
+            Some(Err(e)) => {
+                debug!("pool: response body read error: {}", e);
+                break;
+            }
+            None => break,
+        }
+    }
+    inbound.flush().await?;
+
+    Ok(status)
 }
 
 /// Parse an HTTP request line into (method, path, version).
@@ -1307,21 +1880,91 @@ fn strip_proxy_query_param(path: &str, param_name: &str) -> String {
 ///
 /// For header/basic_auth modes, adds the credential header.
 /// For url_path/query_param modes, the credential is already in the path.
+/// Inject credential into a structured `http::Request` builder.
+fn inject_credential_structured(
+    cred: &LoadedCredential,
+    builder: http::request::Builder,
+) -> http::request::Builder {
+    match cred.inject_mode {
+        InjectMode::Header | InjectMode::BasicAuth => {
+            // Mirror `inject_credential_for_mode` (the HTTP/1.1 raw-string path):
+            // inject the primary header plus every materialized extra header.
+            // `injected_credential_header_names` strips client-supplied copies of
+            // all these names, so they must be re-added here or be lost entirely.
+            let mut builder = builder;
+            if !cred.header_value.is_empty() {
+                builder = builder.header(cred.header_name.as_str(), cred.header_value.as_str());
+            }
+            for (name, value) in &cred.extra_headers {
+                builder = builder.header(name.as_str(), value.as_str());
+            }
+            builder
+        }
+        InjectMode::UrlPath | InjectMode::QueryParam => builder,
+    }
+}
+
+/// Apply proxy-artifact stripping and upstream credential injection to a
+/// request path for the given credential.
+///
+/// Combines [`strip_proxy_artifacts`] and [`transform_path_for_mode`] into the
+/// single transformation both the HTTP/1.1 and HTTP/2 CONNECT-intercept paths
+/// need, so they cannot diverge. When `cred` is `None` the path is returned
+/// unchanged (passthrough).
+pub(crate) fn transform_path_for_credential(
+    cred: Option<&LoadedCredential>,
+    path: &str,
+) -> Result<String> {
+    let Some(cred) = cred else {
+        return Ok(path.to_string());
+    };
+    let cleaned = strip_proxy_artifacts(
+        path,
+        &cred.proxy_inject_mode,
+        &cred.inject_mode,
+        cred.proxy_path_pattern.as_deref(),
+        cred.proxy_query_param_name.as_deref(),
+    );
+    transform_path_for_mode(
+        &cred.inject_mode,
+        &cleaned,
+        cred.path_pattern.as_deref(),
+        cred.path_replacement.as_deref(),
+        cred.query_param_name.as_deref(),
+        &cred.raw_credential,
+    )
+}
+
 pub(crate) fn inject_credential_for_mode(cred: &LoadedCredential, request: &mut Zeroizing<String>) {
     match cred.inject_mode {
         InjectMode::Header | InjectMode::BasicAuth => {
             // Inject credential header
-            request.push_str(&format!(
-                "{}: {}\r\n",
-                cred.header_name,
-                cred.header_value.as_str()
-            ));
+            if !cred.header_value.is_empty() {
+                request.push_str(&format!(
+                    "{}: {}\r\n",
+                    cred.header_name,
+                    cred.header_value.as_str()
+                ));
+            }
+            for (name, value) in &cred.extra_headers {
+                request.push_str(&format!("{}: {}\r\n", name, value.as_str()));
+            }
         }
         InjectMode::UrlPath | InjectMode::QueryParam => {
             // Credential is already injected into the URL path/query
             // No header injection needed
         }
     }
+}
+
+pub(crate) fn injected_credential_header_names(cred: Option<&LoadedCredential>) -> Vec<String> {
+    cred.filter(|c| matches!(c.inject_mode, InjectMode::Header | InjectMode::BasicAuth))
+        .map(|c| {
+            let mut names = vec![c.header_name.to_lowercase()];
+            names.extend(c.extra_headers.iter().map(|(name, _)| name.to_lowercase()));
+            names
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1421,6 +2064,116 @@ mod tests {
         let filtered = filter_headers(header, "PRIVATE-TOKEN");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "Content-Type");
+    }
+
+    #[test]
+    fn test_injected_credential_header_names_include_extra_headers() {
+        let cred = LoadedCredential {
+            inject_mode: InjectMode::Header,
+            proxy_inject_mode: InjectMode::Header,
+            raw_credential: Zeroizing::new(String::new()),
+            header_name: "Authorization".to_string(),
+            proxy_header_name: "Authorization".to_string(),
+            header_value: Zeroizing::new("Bearer real".to_string()),
+            extra_headers: vec![(
+                "X-Gateway-Key".to_string(),
+                Zeroizing::new("gateway-real".to_string()),
+            )],
+            path_pattern: None,
+            proxy_path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy_query_param_name: None,
+        };
+
+        let names = injected_credential_header_names(Some(&cred));
+        assert_eq!(
+            names,
+            vec!["authorization".to_string(), "x-gateway-key".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_inject_credential_structured_includes_extra_headers() {
+        // Regression: `inject_credential_structured` must re-add `extra_headers`
+        // on the reverse-proxy path. `injected_credential_header_names` strips
+        // client-supplied copies of these names, so if they are not re-injected
+        // here the managed extra header is lost entirely.
+        let cred = LoadedCredential {
+            inject_mode: InjectMode::Header,
+            proxy_inject_mode: InjectMode::Header,
+            raw_credential: Zeroizing::new(String::new()),
+            header_name: "Authorization".to_string(),
+            proxy_header_name: "Authorization".to_string(),
+            header_value: Zeroizing::new("Bearer real".to_string()),
+            extra_headers: vec![(
+                "X-Gateway-Key".to_string(),
+                Zeroizing::new("gateway-real".to_string()),
+            )],
+            path_pattern: None,
+            proxy_path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy_query_param_name: None,
+        };
+
+        let builder = http::Request::builder().method("POST").uri("https://x/y");
+        let req = inject_credential_structured(&cred, builder)
+            .body(())
+            .unwrap();
+
+        assert_eq!(
+            req.headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer real")
+        );
+        assert_eq!(
+            req.headers()
+                .get("x-gateway-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("gateway-real"),
+            "extra managed header must be injected on the reverse-proxy path"
+        );
+    }
+
+    #[test]
+    fn test_inject_credential_structured_skips_empty_primary_value() {
+        // A credential with only extra headers (empty primary value) must not
+        // emit an empty `Authorization` header, matching `inject_credential_for_mode`.
+        let cred = LoadedCredential {
+            inject_mode: InjectMode::Header,
+            proxy_inject_mode: InjectMode::Header,
+            raw_credential: Zeroizing::new(String::new()),
+            header_name: "Authorization".to_string(),
+            proxy_header_name: "Authorization".to_string(),
+            header_value: Zeroizing::new(String::new()),
+            extra_headers: vec![(
+                "X-Gateway-Key".to_string(),
+                Zeroizing::new("gateway-real".to_string()),
+            )],
+            path_pattern: None,
+            proxy_path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy_query_param_name: None,
+        };
+
+        let builder = http::Request::builder().method("POST").uri("https://x/y");
+        let req = inject_credential_structured(&cred, builder)
+            .body(())
+            .unwrap();
+
+        assert!(
+            req.headers().get("authorization").is_none(),
+            "empty primary credential value must not be injected"
+        );
+        assert_eq!(
+            req.headers()
+                .get("x-gateway-key")
+                .and_then(|v| v.to_str().ok()),
+            Some("gateway-real")
+        );
     }
 
     #[test]
