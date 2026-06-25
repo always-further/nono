@@ -1501,6 +1501,7 @@ pub struct ProxyArgs {
     /// Add a domain to the proxy allowlist (repeatable).
     /// Plain hostname for unrestricted access, or a URL with a path glob
     /// to restrict to specific endpoints (e.g., https://github.com/org/**)
+    /// ALIAS(canonical="--allow-domain", introduced="v0.0.0", remove_by="indefinite", issue="#415")
     #[arg(
         long = "allow-domain",
         alias = "allow-proxy",
@@ -1512,6 +1513,7 @@ pub struct ProxyArgs {
     pub allow_proxy: Vec<String>,
 
     /// Chain outbound traffic through an upstream proxy (host:port)
+    /// ALIAS(canonical="--upstream-proxy", introduced="v0.0.0", remove_by="indefinite", issue="#415")
     #[arg(
         long = "upstream-proxy",
         alias = "external-proxy",
@@ -1522,6 +1524,7 @@ pub struct ProxyArgs {
     pub external_proxy: Option<String>,
 
     /// Route these domains direct instead of through the upstream proxy
+    /// ALIAS(canonical="--upstream-bypass", introduced="v0.0.0", remove_by="indefinite", issue="#415")
     #[arg(
         long = "upstream-bypass",
         alias = "external-proxy-bypass",
@@ -1549,6 +1552,7 @@ pub struct ProxyArgs {
 
     // ── Credentials ──────────────────────────────────────────────────────
     /// Inject credentials via reverse proxy for a service (repeatable)
+    /// ALIAS(canonical="--credential", introduced="v0.0.0", remove_by="v1.0.0", issue="#143")
     #[arg(
         long = "credential",
         alias = "proxy-credential",
