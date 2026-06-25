@@ -418,6 +418,13 @@ impl PtyProxy {
 
         let in_alt_screen = self.screen.alternate_screen_active();
         leave_attach_screen(in_alt_screen);
+        // Swallow a late cursor-position reply (`ESC[<row>;<col>R`) that an
+        // exiting TUI's `ESC[6n` query leaves in the input queue; otherwise it
+        // is handed to the shell and pasted into the next prompt (e.g. `3;1R`).
+        // Done here, still in raw mode, on the final teardown path only —
+        // `restore_terminal()` stays non-draining so the suspend/resume and
+        // temporary-prompt paths preserve type-ahead.
+        discard_late_terminal_input(libc::STDIN_FILENO, timeouts::TERMINAL_QUERY_REPLY_TIMEOUT);
         self.restore_terminal();
         // If the child's last output had no trailing newline, `\r\x1b[K` inside
         // `prepare_parent_output_area` would erase it.  Emit a newline first so
@@ -1802,6 +1809,42 @@ fn drain_terminal_output(fd: RawFd) {
     }
 }
 
+/// Wait briefly for, then discard, a late terminal query reply on `fd`.
+///
+/// On final teardown an exiting TUI child may have just sent the terminal a
+/// cursor-position query (`ESC[6n`); the terminal's reply (`ESC[<row>;<col>R`)
+/// lands only after the child is gone, so nothing consumes it and it gets
+/// pasted into the next shell prompt (e.g. `3;1R`). A bare flush races the
+/// reply and loses, so wait up to `max_wait` for it to arrive, then flush the
+/// input queue in one shot.
+///
+/// MUST run while the terminal is still in raw mode. Any genuine type-ahead
+/// queued at exit is discarded along with the reply; on a final teardown that
+/// is safer than leaking control bytes to the shell. No-op when `fd` is not a
+/// terminal, so non-interactive runs pay no cost.
+fn discard_late_terminal_input(fd: RawFd, max_wait: Duration) {
+    // SAFETY: `isatty` only inspects the borrowed fd and does not take ownership.
+    if unsafe { libc::isatty(fd) } != 1 {
+        return;
+    }
+    // Make sure the forwarded query has actually been transmitted so the
+    // terminal has a chance to reply before we wait for it.
+    drain_terminal_output(fd);
+
+    let timeout_ms = max_wait.as_millis().min(i32::MAX as u128) as i32;
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: single-fd poll over the borrowed terminal fd.
+    if unsafe { libc::poll(&mut pfd, 1, timeout_ms) } > 0 {
+        // SAFETY: `fd` is the live terminal fd for the duration of the call.
+        let tty = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let _ = nix::sys::termios::tcflush(tty, nix::sys::termios::FlushArg::TCIFLUSH);
+    }
+}
+
 fn write_all_fd(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
     while !bytes.is_empty() {
         let written =
@@ -2472,10 +2515,11 @@ mod tests {
         ATTACH_HANDSHAKE_MAGIC, ATTACH_REQUEST_ATTACH, ATTACH_SCREEN_ENTER_ESCAPE,
         AltScreenTracker, AttachedClient, DEFAULT_DETACH_SEQUENCE, ERASE_NATIVE_SCROLLBACK,
         PtyProxy, ReadFdOutcome, ScreenState, TERMINAL_RESTORE_NORMAL, decode_attach_handshake,
-        encode_attach_request_frame, read_fd_once, select_attach_replay_bytes,
-        terminal_restore_escape, write_all_fd,
+        discard_late_terminal_input, encode_attach_request_frame, read_fd_once,
+        select_attach_replay_bytes, terminal_restore_escape, write_all_fd,
     };
     use nix::libc;
+    use nix::pty::{OpenptyResult, Winsize, openpty};
     use std::collections::VecDeque;
     use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
@@ -2483,6 +2527,37 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn discard_late_terminal_input_drains_pending_query_reply() {
+        use nix::sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr};
+
+        let ws: Option<Winsize> = None;
+        let OpenptyResult { master, slave } = openpty(ws.as_ref(), None).expect("openpty");
+
+        // Put the slave (the "terminal" side a child/shell reads) into raw mode
+        // so a reply without a trailing newline is pollable — this mirrors the
+        // terminal state at teardown, which is where the fix must run.
+        let mut attrs = tcgetattr(&slave).expect("tcgetattr");
+        cfmakeraw(&mut attrs);
+        tcsetattr(&slave, SetArg::TCSANOW, &attrs).expect("tcsetattr");
+
+        // Simulate the terminal answering a child's `ESC[6n` cursor-position
+        // query after the child has gone: the reply lands in the input queue.
+        nix::unistd::write(&master, b"\x1b[3;1R").expect("write reply");
+
+        discard_late_terminal_input(slave.as_raw_fd(), Duration::from_millis(500));
+
+        // Nothing should remain queued for the next reader (the shell).
+        let mut pfd = libc::pollfd {
+            fd: slave.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: single-fd poll over the borrowed slave fd.
+        let pending = unsafe { libc::poll(&mut pfd, 1, 50) };
+        assert_eq!(pending, 0, "terminal input queue should have been drained");
+    }
 
     fn build_test_proxy_with_master(master: OwnedFd, sequence: &[u8]) -> PtyProxy {
         let temp_dir = tempfile::tempdir().expect("tempdir");
