@@ -700,14 +700,12 @@ pub(crate) fn validate_block_net_conflicts(
 
     // --proxy-port without any proxy-triggering flag is almost certainly a
     // mistake: the port would be set but the proxy would never start.
-    if args.proxy_port.is_some() {
-        if !has_proxy_intent(args, prepared) {
-            return Err(NonoError::ConfigParse(
-                "--proxy-port has no effect without a proxy-mode flag \
-                 (e.g. --credential, --network-profile, --allow-domain)"
-                    .to_string(),
-            ));
-        }
+    if args.proxy_port.is_some() && !has_proxy_intent(args, prepared) {
+        return Err(NonoError::ConfigParse(
+            "--proxy-port has no effect without a proxy-mode flag \
+             (e.g. --credential, --network-profile, --allow-domain)"
+                .to_string(),
+        ));
     }
 
     Ok(())
@@ -2006,11 +2004,14 @@ mod tests {
 
     #[test]
     fn block_net_with_credential_errors() {
-        let mut args = SandboxArgs::default();
-        args.block_net = true;
-        args.proxy_credential = vec!["openai".to_string()];
+        let args = SandboxArgs {
+            block_net: true,
+            proxy_credential: vec!["openai".to_string()],
+            ..Default::default()
+        };
         let prepared = empty_prepared();
-        let err = validate_block_net_conflicts(&args, &prepared).unwrap_err();
+        let err = validate_block_net_conflicts(&args, &prepared)
+            .expect_err("expected error for --block-net + --credential");
         assert!(
             err.to_string().contains("--block-net") && err.to_string().contains("--credential"),
             "unexpected error: {err}"
@@ -2019,11 +2020,14 @@ mod tests {
 
     #[test]
     fn block_net_with_network_profile_errors() {
-        let mut args = SandboxArgs::default();
-        args.block_net = true;
-        args.network_profile = Some("strict".to_string());
+        let args = SandboxArgs {
+            block_net: true,
+            network_profile: Some("strict".to_string()),
+            ..Default::default()
+        };
         let prepared = empty_prepared();
-        let err = validate_block_net_conflicts(&args, &prepared).unwrap_err();
+        let err = validate_block_net_conflicts(&args, &prepared)
+            .expect_err("expected error for --block-net + --network-profile");
         assert!(
             err.to_string().contains("--block-net")
                 && err.to_string().contains("--network-profile"),
@@ -2033,11 +2037,14 @@ mod tests {
 
     #[test]
     fn block_net_with_allow_domain_errors() {
-        let mut args = SandboxArgs::default();
-        args.block_net = true;
-        args.allow_proxy = vec!["example.com".to_string()];
+        let args = SandboxArgs {
+            block_net: true,
+            allow_proxy: vec!["example.com".to_string()],
+            ..Default::default()
+        };
         let prepared = empty_prepared();
-        let err = validate_block_net_conflicts(&args, &prepared).unwrap_err();
+        let err = validate_block_net_conflicts(&args, &prepared)
+            .expect_err("expected error for --block-net + --allow-domain");
         assert!(
             err.to_string().contains("--block-net") && err.to_string().contains("--allow-domain"),
             "unexpected error: {err}"
@@ -2046,8 +2053,10 @@ mod tests {
 
     #[test]
     fn block_net_alone_is_valid() {
-        let mut args = SandboxArgs::default();
-        args.block_net = true;
+        let args = SandboxArgs {
+            block_net: true,
+            ..Default::default()
+        };
         let prepared = empty_prepared();
         assert!(validate_block_net_conflicts(&args, &prepared).is_ok());
     }
@@ -2058,7 +2067,8 @@ mod tests {
         let mut prepared = empty_prepared();
         prepared.profile_network_block = true;
         prepared.credentials = vec!["github".to_string()];
-        let err = validate_block_net_conflicts(&args, &prepared).unwrap_err();
+        let err = validate_block_net_conflicts(&args, &prepared)
+            .expect_err("expected error for profile network block + profile credential");
         assert!(
             err.to_string().contains("--block-net") && err.to_string().contains("--credential"),
             "unexpected error: {err}"
@@ -2067,10 +2077,13 @@ mod tests {
 
     #[test]
     fn allow_endpoint_without_credential_errors() {
-        let mut args = SandboxArgs::default();
-        args.allow_endpoint = vec!["openai:GET:/v1/chat/completions".to_string()];
+        let args = SandboxArgs {
+            allow_endpoint: vec!["openai:GET:/v1/chat/completions".to_string()],
+            ..Default::default()
+        };
         let prepared = empty_prepared();
-        let err = validate_block_net_conflicts(&args, &prepared).unwrap_err();
+        let err = validate_block_net_conflicts(&args, &prepared)
+            .expect_err("expected error for --allow-endpoint without --credential");
         assert!(
             err.to_string().contains("--allow-endpoint")
                 && err.to_string().contains("--credential"),
@@ -2080,19 +2093,24 @@ mod tests {
 
     #[test]
     fn allow_endpoint_with_credential_is_valid() {
-        let mut args = SandboxArgs::default();
-        args.allow_endpoint = vec!["openai:GET:/v1/chat/completions".to_string()];
-        args.proxy_credential = vec!["openai".to_string()];
+        let args = SandboxArgs {
+            allow_endpoint: vec!["openai:GET:/v1/chat/completions".to_string()],
+            proxy_credential: vec!["openai".to_string()],
+            ..Default::default()
+        };
         let prepared = empty_prepared();
         assert!(validate_block_net_conflicts(&args, &prepared).is_ok());
     }
 
     #[test]
     fn proxy_port_without_proxy_intent_errors() {
-        let mut args = SandboxArgs::default();
-        args.proxy_port = Some(8080);
+        let args = SandboxArgs {
+            proxy_port: Some(8080),
+            ..Default::default()
+        };
         let prepared = empty_prepared();
-        let err = validate_block_net_conflicts(&args, &prepared).unwrap_err();
+        let err = validate_block_net_conflicts(&args, &prepared)
+            .expect_err("expected error for --proxy-port without proxy mode");
         assert!(
             err.to_string().contains("--proxy-port"),
             "unexpected error: {err}"
@@ -2101,9 +2119,11 @@ mod tests {
 
     #[test]
     fn proxy_port_with_credential_is_valid() {
-        let mut args = SandboxArgs::default();
-        args.proxy_port = Some(8080);
-        args.proxy_credential = vec!["openai".to_string()];
+        let args = SandboxArgs {
+            proxy_port: Some(8080),
+            proxy_credential: vec!["openai".to_string()],
+            ..Default::default()
+        };
         let prepared = empty_prepared();
         assert!(validate_block_net_conflicts(&args, &prepared).is_ok());
     }
