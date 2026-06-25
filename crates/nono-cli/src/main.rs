@@ -307,6 +307,7 @@ mod tests {
             denied_env_vars: None,
             set_vars: None,
             profile_network_block: false,
+            allow_http2_requested: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
@@ -364,6 +365,7 @@ mod tests {
             denied_env_vars: None,
             set_vars: None,
             profile_network_block: false,
+            allow_http2_requested: false,
         };
 
         let effective = resolve_effective_proxy_settings(&args, &prepared);
