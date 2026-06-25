@@ -93,6 +93,9 @@ pub(crate) struct EndpointFilterIntent {
 pub(crate) struct CredentialProxyIntent {
     pub(crate) credentials: Vec<String>,
     pub(crate) custom_credentials: HashMap<String, profile::CustomCredentialDef>,
+    /// Per-credential endpoint restrictions from `--allow-endpoint SERVICE:METHOD:PATH`,
+    /// pre-parsed into `(service_name, rule)` pairs.
+    pub(crate) endpoint_restrictions: Vec<(String, nono_proxy::config::EndpointRule)>,
 }
 
 #[derive(Clone, Debug)]
