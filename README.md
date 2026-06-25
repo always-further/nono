@@ -63,7 +63,7 @@ Search for an agent in the registry, then run it:
 
 ```bash
 $ nono search opencode
-always-further/opencode	-	Official Always Further Opencode Plugin
+always-further/opencode	-	Official Opencode Plugin
 
 $ nono run --profile always-further/opencode -- opencode
 ```
