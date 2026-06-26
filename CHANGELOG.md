@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Features
+
+- *(tool-sandbox)* Add `@git:common-dir` dynamic token: expands to the git common directory (`.git` in a regular repo; the main repo's `.git` when running inside a worktree). Use in `fs_write` to cover the object store when the agent session starts from a worktree and `--workdir` points to the worktree itself ([#1270](https://github.com/nolabs-ai/nono/issues/1270))
+
 ### Bug Fixes
 
 - *(tool-sandbox)* Pass TLS trust bundle env vars (`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO`) to tool-sandbox children so HTTPS certificate verification works when TLS interception is active (#1248)
