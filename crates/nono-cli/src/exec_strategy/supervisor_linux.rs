@@ -78,6 +78,24 @@ impl RateLimiter {
     }
 }
 
+/// Returns true if `path` is exactly `/proc/<N>/task/<M>/comm` where `<N>` equals
+/// `tgid`. Used by the GPU fast-path to allow CUDA thread naming without a broad
+/// Landlock write grant (Landlock resolves `/proc/self` to the startup PID, so
+/// grandchild processes would still be blocked even with a write rule on /proc/self/task).
+fn is_owned_proc_task_comm(path: &std::path::Path, tgid: u32) -> bool {
+    // Expected: ["", "proc", "<tgid>", "task", "<tid>", "comm"]
+    let mut it = path.components();
+    use std::path::Component::*;
+    let ok = matches!(it.next(), Some(RootDir))
+        && matches!(it.next(), Some(Normal(c)) if c == "proc")
+        && matches!(it.next(), Some(Normal(c)) if c.to_str().and_then(|s| s.parse::<u32>().ok()) == Some(tgid))
+        && matches!(it.next(), Some(Normal(c)) if c == "task")
+        && matches!(it.next(), Some(Normal(c)) if c.to_str().map_or(false, |s| s.parse::<u32>().is_ok()))
+        && matches!(it.next(), Some(Normal(c)) if c == "comm")
+        && it.next().is_none();
+    ok
+}
+
 /// Read the TGID (thread group ID / process ID) of a thread from /proc/<tid>/status.
 ///
 /// `seccomp_data.pid` is the TID of the requesting thread, not the TGID. `/proc/self`
@@ -283,6 +301,35 @@ pub(super) fn handle_seccomp_notification(
             },
         );
         let _ = deny_notif(notify_fd, notif.id);
+        return Ok(());
+    }
+
+    // 4.5. GPU fast-path: auto-approve opens of /proc/<tgid>/task/<tid>/comm
+    // when --allow-gpu is active. Landlock cannot cover grandchild PIDs because
+    // it resolves /proc/self to the startup PID at rule-setup time. The TGID
+    // check ensures a process can only name its own threads.
+    if config.allow_gpu_active && is_owned_proc_task_comm(&canonicalized, notifying_tgid) {
+        // If the notification is already stale there is no
+        // point opening the file and no notification to respond to.
+        if !notif_id_valid(notify_fd, notif.id)? {
+            return Ok(());
+        }
+        let open_result = std::fs::OpenOptions::new()
+            .read(matches!(access, AccessMode::Read | AccessMode::ReadWrite))
+            .write(matches!(access, AccessMode::Write | AccessMode::ReadWrite))
+            .open(&canonicalized);
+        match open_result {
+            Ok(file) => {
+                if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
+                    debug!("inject_fd failed for comm fast-path {}: {}", canonicalized.display(), e);
+                    let _ = deny_notif(notify_fd, notif.id);
+                }
+            }
+            Err(e) => {
+                let errno = e.raw_os_error().unwrap_or(libc::EACCES);
+                let _ = respond_notif_errno(notify_fd, notif.id, errno);
+            }
+        }
         return Ok(());
     }
 

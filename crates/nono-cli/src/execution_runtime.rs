@@ -578,6 +578,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         set_vars: flags.set_vars.unwrap_or_default(),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         tool_sandbox_runtime: tool_sandbox_runtime.as_ref(),
+        #[cfg(target_os = "linux")]
+        allow_gpu_active: flags.allow_gpu_active,
     };
 
     match strategy {

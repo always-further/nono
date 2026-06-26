@@ -831,22 +831,6 @@ fn missing_cwd_prompt_must_fail(
 }
 
 /// Grant the procfs paths that the NVIDIA driver needs for CUDA initialisation.
-///
-/// Scoped narrowly to the NVIDIA stack — not called on pure DRM render-node,
-/// AMD ROCm, or WSL `/dev/dxg` setups.
-///
-/// - `/proc/driver/nvidia`, `/proc/driver/nvidia-uvm` (read, when present):
-///   CUDA's UVM subsystem reads these during init. We grant each individually
-///   rather than the parent `/proc/driver` to avoid exposing metadata about
-///   unrelated kernel drivers.
-/// - `/proc/self` (read): CUDA init reads `/proc/self/maps`, `/proc/self/status`
-///   and other per-process files.
-/// - `/proc/self/task` (read+write): NVIDIA driver 570+ writes to
-///   `/proc/self/task/<tid>/comm` during thread startup to set thread names.
-///   Without write access this returns EACCES and the driver treats it as a
-///   fatal OS error, surfacing as CUDA Error 304 (`cudaErrorOperatingSystem`).
-///   Narrowing write access to the `task` subtree keeps other per-process
-///   procfs entries read-only.
 #[cfg(target_os = "linux")]
 fn grant_nvidia_gpu_procfs(caps: &mut CapabilitySet) -> Result<()> {
     for name in ["nvidia", "nvidia-uvm"] {
@@ -857,17 +841,13 @@ fn grant_nvidia_gpu_procfs(caps: &mut CapabilitySet) -> Result<()> {
         }
     }
 
-    // /proc/self and /proc/self/task are guaranteed on Linux; propagate any
-    // error rather than silently skipping (fail-secure: if the kernel ever
-    // fails to present these, the sandbox should fail rather than grant
-    // less-than-intended access).
     caps.add_fs(FsCapability::new_dir(
         std::path::Path::new("/proc/self"),
         AccessMode::Read,
     )?);
     caps.add_fs(FsCapability::new_dir(
         std::path::Path::new("/proc/self/task"),
-        AccessMode::ReadWrite,
+        AccessMode::Read,
     )?);
 
     Ok(())
@@ -1557,8 +1537,11 @@ mod tests {
     #[test]
     fn grant_nvidia_gpu_procfs_scopes_proc_self_reads_with_task_writes() {
         // Regression test for the NVIDIA-scoped procfs grants:
-        //   /proc/self       Read        (CUDA init reads maps/status/etc.)
-        //   /proc/self/task  ReadWrite   (driver writes task/<tid>/comm)
+        //   /proc/self       Read  (CUDA init reads maps/status/etc.)
+        //   /proc/self/task  Read  (driver enumerates task entries)
+        // Writes to /proc/<tgid>/task/<tid>/comm are handled by the supervisor
+        // fast-path, not via a Landlock grant, because Landlock resolves
+        // /proc/self to the startup PID — grandchildren would still be blocked.
         // Plus any of /proc/driver/{nvidia,nvidia-uvm} that exist.
         //
         // /proc/self and /proc/self/task always exist on Linux, so those
@@ -1583,18 +1566,16 @@ mod tests {
         assert_eq!(
             proc_self.access,
             AccessMode::Read,
-            "/proc/self must be read-only (writes are scoped to /proc/self/task)"
+            "/proc/self must be read-only"
         );
         assert!(!proc_self.is_file);
 
-        let proc_self_task = find("/proc/self/task").expect(
-            "/proc/self/task must be granted read+write so the NVIDIA driver \
-             can write task/<tid>/comm (CUDA Error 304 root cause)",
-        );
+        let proc_self_task = find("/proc/self/task")
+            .expect("/proc/self/task must be granted read for task enumeration");
         assert_eq!(
             proc_self_task.access,
-            AccessMode::ReadWrite,
-            "/proc/self/task must be granted read+write"
+            AccessMode::Read,
+            "/proc/self/task must be read-only (comm writes go via supervisor fast-path)"
         );
         assert!(!proc_self_task.is_file);
 

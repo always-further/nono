@@ -288,6 +288,8 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         },
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         tool_sandbox_runtime: config.tool_sandbox_runtime,
+        #[cfg(target_os = "linux")]
+        allow_gpu_active: config.allow_gpu_active,
     };
 
     let exit_code = {

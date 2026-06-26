@@ -262,6 +262,11 @@ pub struct ExecConfig<'a> {
     /// and an additional Linux execute-only Landlock gate.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub tool_sandbox_runtime: Option<&'a crate::tool_sandbox::PreparedToolSandboxRuntime>,
+    /// Whether `--allow-gpu` is active for this session.
+    /// Used by the Linux supervisor to auto-approve writes to
+    /// `/proc/<tgid>/task/<tid>/comm` (CUDA thread naming).
+    #[cfg(target_os = "linux")]
+    pub allow_gpu_active: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -321,6 +326,10 @@ pub struct SupervisorConfig<'a> {
     /// Prepared tool-sandbox runtime listener for command-policy shim requests.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub tool_sandbox_runtime: Option<&'a crate::tool_sandbox::PreparedToolSandboxRuntime>,
+    /// Whether `--allow-gpu` is active. Enables the supervisor fast-path that
+    /// auto-approves writes to `/proc/<tgid>/task/<tid>/comm` for CUDA thread naming.
+    #[cfg(target_os = "linux")]
+    pub allow_gpu_active: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -4590,6 +4599,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         // Fork a child that closes its socket end and exits immediately.
@@ -4710,6 +4721,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         match unsafe { fork() } {
@@ -4796,6 +4809,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         // Allowed origin: validation passes
@@ -4839,6 +4854,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         let result = validate_url("file:///etc/passwd", &config);
@@ -4880,6 +4897,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
         let config_deny = SupervisorConfig {
             protected_roots: &[],
@@ -4903,6 +4922,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         // Localhost denied when not allowed
@@ -4949,6 +4970,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         let long_url = format!("https://example.com/{}", "a".repeat(MAX_URL_LENGTH));
@@ -5100,6 +5123,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         assert!(
@@ -5151,6 +5176,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         // The redirect_uri in query params should not affect origin validation.
@@ -5191,6 +5218,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         // The url crate's host_str() returns "::1" without brackets for IPv6.
@@ -5250,6 +5279,8 @@ mod tests {
             linux_network_notify_mode: LinuxNetworkNotifyMode::ProxyOnly,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             tool_sandbox_runtime: None,
+            #[cfg(target_os = "linux")]
+            allow_gpu_active: false,
         };
 
         let result = validate_url("data:text/html,<script>alert(1)</script>", &config);
