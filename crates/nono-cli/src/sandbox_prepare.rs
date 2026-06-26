@@ -1049,8 +1049,9 @@ pub(crate) fn print_allow_gpu_warning(silent: bool) {
         eprintln!(
             "  This grants read/write access to /dev/dri/renderD* and NVIDIA compute devices.\n  \
              On NVIDIA systems, additionally: read access to /proc/driver/nvidia,\n  \
-             /proc/driver/nvidia-uvm, and /proc/self; read/write access to\n  \
-             /proc/self/task (for CUDA thread-name initialisation)."
+             /proc/driver/nvidia-uvm, /proc/self, and /proc/self/task; writes to\n  \
+             /proc/<pid>/task/<tid>/comm (CUDA thread naming) are mediated by the\n  \
+             seccomp supervisor and restricted to the process's own threads."
         );
     }
 }
@@ -1465,6 +1466,13 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         .map(|profile| profile.credential_capture.clone())
         .unwrap_or_default();
     let loaded_secrets = load_env_credentials(args, &profile_secrets, silent)?;
+
+    // The GPU comm fast-path in the supervisor depends on seccomp-notify being
+    // active. Force capability_elevation on when --allow-gpu is in use so that
+    // the supervisor intercepts openat and can inject the fd for grandchild
+    // processes, regardless of whether the profile explicitly set the flag.
+    #[cfg(target_os = "linux")]
+    let capability_elevation = capability_elevation || allow_gpu_active;
 
     finalize_prepared_sandbox(
         PreparedSandbox {
