@@ -208,6 +208,7 @@ pub(crate) struct ExecutionFlags {
     pub(crate) diagnostics_json: bool,
     pub(crate) diagnostic_verbosity: u8,
     pub(crate) silent: bool,
+    #[cfg(target_os = "linux")]
     pub(crate) capability_elevation: bool,
     #[cfg(target_os = "linux")]
     pub(crate) wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy,
@@ -241,6 +242,7 @@ impl ExecutionFlags {
             diagnostics_json: false,
             diagnostic_verbosity: 0,
             silent,
+            #[cfg(target_os = "linux")]
             capability_elevation: false,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: crate::profile::Wsl2ProxyPolicy::Error,
@@ -387,6 +389,7 @@ pub(crate) fn prepare_run_launch_plan(
             diagnostics_json,
             diagnostic_verbosity: args.verbose,
             silent,
+            #[cfg(target_os = "linux")]
             capability_elevation: prepared.capability_elevation,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: prepared.wsl2_proxy_policy,

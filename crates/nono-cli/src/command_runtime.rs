@@ -210,6 +210,7 @@ pub(crate) fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             strategy,
             workdir: resolve_requested_workdir(args.sandbox.workdir.as_ref()),
             no_diagnostics: true,
+            #[cfg(target_os = "linux")]
             capability_elevation: prepared.capability_elevation,
             #[cfg(target_os = "linux")]
             wsl2_proxy_policy: prepared.wsl2_proxy_policy,

@@ -568,11 +568,12 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 program: recommended_program_name,
                 recommended_profile: known_builtin_profile,
             }),
-        capability_elevation: flags.capability_elevation,
         #[cfg(target_os = "linux")]
-        seccomp_proxy_fallback,
-        #[cfg(target_os = "linux")]
-        af_unix_mediation: flags.af_unix_mediation,
+        seccomp_policy: exec_strategy::SeccompPolicy {
+            capability_elevation: flags.capability_elevation,
+            proxy_fallback: seccomp_proxy_fallback,
+            af_unix_mediation: flags.af_unix_mediation.is_pathname(),
+        },
         allowed_env_vars: flags.allowed_env_vars,
         denied_env_vars: flags.denied_env_vars,
         set_vars: flags.set_vars.unwrap_or_default(),
