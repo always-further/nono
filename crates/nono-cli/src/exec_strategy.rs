@@ -155,14 +155,14 @@ pub enum ThreadingContext {
     /// Keyring threads are idle XPC dispatch workers (macOS) or D-Bus workers
     /// (Linux) after the synchronous keyring call completes — parked, not
     /// holding allocator locks. Safe for Supervised mode's post-fork
-    /// Sandbox::apply() allocation.
+    /// Sandbox::apply_auto() allocation.
     KeyringExpected,
 
     /// Allow elevated thread count for crypto library thread pools.
     /// Spawned by trust scan's ECDSA verification (aws-lc-rs) and keystore
     /// public key lookup. These are idle pool workers parked on condvars,
     /// NOT holding allocator locks — safe for supervised mode's post-fork
-    /// Sandbox::apply() allocation.
+    /// Sandbox::apply_auto() allocation.
     CryptoExpected,
 }
 
@@ -433,7 +433,7 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<()> {
 ///
 /// # Sandbox Application in Child
 ///
-/// The child calls `Sandbox::apply()` after fork, which allocates memory (generating
+/// The child calls `Sandbox::apply_auto()` after fork, which allocates memory (generating
 /// Seatbelt profile strings on macOS, opening Landlock PathFds on Linux). This is safe
 /// because we validate threading context before fork — known-safe thread contexts
 /// (keyring workers, crypto pool) are idle and not holding allocator locks.
@@ -811,7 +811,7 @@ pub fn execute_supervised(
     clear_signal_forwarding_target();
 
     // SAFETY: fork() is safe here because we validated threading context.
-    // Child will call Sandbox::apply() which allocates, but this is safe
+    // Child will call Sandbox::apply_auto() which allocates, but this is safe
     // because the child is single-threaded (validated above).
     let fork_result = unsafe { fork() };
 
@@ -853,7 +853,7 @@ pub fn execute_supervised(
             // CHILD: Set up PTY, apply sandbox, then exec.
             //
             // The child applies the sandbox itself before exec.
-            // Sandbox::apply() allocates (Seatbelt profile generation, Landlock
+            // Sandbox::apply_auto() allocates (Seatbelt profile generation, Landlock
             // PathFd opens) but this is safe because we validated single-threaded
             // execution before fork, giving us a clean heap.
 
@@ -939,7 +939,7 @@ pub fn execute_supervised(
                     }
                 }
 
-                match Sandbox::apply(effective_caps) {
+                match Sandbox::apply_auto(effective_caps) {
                     Ok(_fallback) => {}
                     Err(e) => {
                         let detail =
@@ -959,7 +959,7 @@ pub fn execute_supervised(
 
             #[cfg(not(target_os = "linux"))]
             {
-                if let Err(e) = Sandbox::apply(effective_caps) {
+                if let Err(e) = Sandbox::apply_auto(effective_caps) {
                     let detail =
                         format!("nono: failed to apply sandbox in supervised child: {}\n", e);
                     let msg = detail.as_bytes();
@@ -2032,7 +2032,7 @@ fn wait_for_child(child: Pid) -> Result<WaitStatus> {
 /// This is acceptable because:
 /// 1. `execute_supervised` is CLI code, not library code (per DESIGN-supervisor.md)
 /// 2. The fork+wait model inherently requires single-threaded execution
-/// 3. Library consumers would use `Sandbox::apply()` directly, not the fork machinery
+/// 3. Library consumers would use `Sandbox::apply_auto()` directly, not the fork machinery
 fn setup_signal_forwarding(child: Pid, pty_master_fd: Option<i32>) {
     // ==================== SAFETY INVARIANT ====================
     // This static variable is ONLY safe because execute_supervised()
