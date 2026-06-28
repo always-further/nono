@@ -742,45 +742,8 @@ fn build_credential_miss_hint(key: &str) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvVarGuard {
-        original: Vec<(&'static str, Option<String>)>,
-    }
-
-    #[allow(clippy::disallowed_methods)]
-    impl EnvVarGuard {
-        fn set_all(vars: &[(&'static str, &str)]) -> Self {
-            let original = vars
-                .iter()
-                .map(|(key, _)| (*key, std::env::var(key).ok()))
-                .collect::<Vec<_>>();
-
-            for (key, value) in vars {
-                // SAFETY: test-only helper; tests using EnvVarGuard are
-                // serialised via #[serial] so no concurrent env mutation.
-                unsafe { std::env::set_var(key, value) };
-            }
-
-            Self { original }
-        }
-    }
-
-    #[allow(clippy::disallowed_methods)]
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.original.iter().rev() {
-                // SAFETY: test-only restore; same serialisation guarantee as set_all.
-                match value {
-                    Some(value) => unsafe { std::env::set_var(key, value) },
-                    None => unsafe { std::env::remove_var(key) },
-                }
-            }
-        }
-    }
-
+    use crate::test_env::{ENV_LOCK, EnvVarGuard};
+    use std::sync::Arc;
     /// Build a TLS connector for tests (never used for real connections).
     fn test_tls_connector() -> TlsConnector {
         let mut root_store = rustls::RootCertStore::empty();

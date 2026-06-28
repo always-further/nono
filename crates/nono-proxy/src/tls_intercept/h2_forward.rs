@@ -1415,35 +1415,27 @@ mod tests {
             endpoint_policy: None,
         }];
         let route_store = RouteStore::load(&routes).unwrap();
-
         // Set fake AWS credential env vars so the default chain succeeds and
-        // load_with_diagnostics inserts the AwsRoute. Saved and restored so
-        // parallel tests are not affected (per AGENTS.md env-var policy).
-        let prev_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
-        let prev_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
-        // SAFETY: test-only; the multi_thread flavor serialises env mutation
-        // within this process. No other thread reads these vars during this window.
-        unsafe {
-            std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE");
-            std::env::set_var(
-                "AWS_SECRET_ACCESS_KEY",
-                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-            );
-        }
+        // load_with_diagnostics inserts the AwsRoute. The mutex lock is dropped
+        // before the await point (holding a MutexGuard across an await is a
+        // compile error); the EnvVarGuard outlives the await so it restores the
+        // vars after load completes.
+        let _env = {
+            let _lock = crate::test_env::ENV_LOCK
+                .lock()
+                .expect("env mutex poisoned");
+            crate::test_env::EnvVarGuard::set_all(&[
+                ("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+                (
+                    "AWS_SECRET_ACCESS_KEY",
+                    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                ),
+            ])
+        };
         let credential_store = CredentialStore::load_with_diagnostics(&routes, &tls_connector)
             .await
             .unwrap()
             .store;
-        unsafe {
-            match prev_key {
-                Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
-                None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
-            }
-            match prev_secret {
-                Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
-                None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
-            }
-        }
         let cert_cache = Arc::new(CertCache::new(Arc::clone(&ca)));
         let filter = ProxyFilter::allow_all();
         let session_token = Zeroizing::new("session-tok".to_string());
@@ -1509,7 +1501,6 @@ mod tests {
             rx.await.is_err(),
             "AWS request must not be forwarded upstream unsigned"
         );
-
     }
 
     #[tokio::test]

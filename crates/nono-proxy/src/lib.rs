@@ -37,6 +37,9 @@ pub mod server;
 pub mod tls_intercept;
 pub mod token;
 
+#[cfg(test)]
+pub mod test_env;
+
 pub use config::ProxyConfig;
 pub use credential::{CredentialLoadOutcome, CredentialStore};
 pub use diagnostic::{ProxyDiagnostic, ProxyDiagnosticCode, ProxyDiagnosticSeverity};
