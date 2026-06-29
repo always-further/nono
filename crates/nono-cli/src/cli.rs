@@ -1488,6 +1488,18 @@ pub struct ProxyArgs {
     )]
     pub profile: Option<String>,
 
+    /// Maximum concurrent client connections (0 = unlimited). Raise this when
+    /// driving highly parallel clients such as `docker pull`, which opens many
+    /// simultaneous tunnels and can exhaust the default limit.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 256,
+        env = "NONO_PROXY_MAX_CONNECTIONS",
+        help_heading = "PROXY"
+    )]
+    pub max_connections: usize,
+
     // ── Network ──────────────────────────────────────────────────────────
     /// Enable proxy filtering with a named network profile
     #[arg(

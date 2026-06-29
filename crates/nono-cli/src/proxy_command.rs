@@ -42,6 +42,11 @@ pub(crate) fn run_proxy(args: ProxyArgs, silent: bool) -> Result<()> {
     proxy_config.bind_port = args.port;
     proxy_config.require_auth = !args.no_auth;
 
+    // Connection ceiling is configurable only on the standalone proxy, where
+    // the caller points their own (possibly highly parallel) tooling at it.
+    // The sandboxed paths keep the built-in default.
+    proxy_config.max_connections = args.max_connections;
+
     // An explicit `--pass` pins the proxy credential to a caller-chosen value
     // instead of a random per-session token. Reject a blank password so it
     // can't collapse to an effectively-absent secret. `--no-auth` and `--pass`
@@ -395,6 +400,7 @@ mod tests {
         "NONO_PROXY_CA_KEY",
         "NONO_TRUST_PROXY_CA",
         "NONO_CREDENTIAL",
+        "NONO_PROXY_MAX_CONNECTIONS",
     ];
 
     fn cleared_env() -> EnvVarGuard {
@@ -410,6 +416,22 @@ mod tests {
         let mut argv = vec!["proxy"];
         argv.extend_from_slice(extra);
         ProxyArgs::try_parse_from(argv).expect("parse proxy args")
+    }
+
+    #[test]
+    fn max_connections_defaults_to_256() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env = cleared_env();
+        let args = parse_args(&[]);
+        assert_eq!(args.max_connections, 256);
+    }
+
+    #[test]
+    fn max_connections_override_parses() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env = cleared_env();
+        let args = parse_args(&["--max-connections", "4096"]);
+        assert_eq!(args.max_connections, 4096);
     }
 
     #[test]
