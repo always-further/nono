@@ -1285,8 +1285,7 @@ fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
         // Validate destination env var name against dangerous blocklist
         nono::validate_destination_env_var(value).map_err(|e| {
             NonoError::ProfileParse(format!(
-                "invalid destination env var '{}' in env_credentials: {}",
-                value, e
+                "invalid destination env var '{value}' in env_credentials: {e}"
             ))
         })?;
     }
@@ -4069,12 +4068,20 @@ mod tests {
         let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert_eq!(profile.env_credentials.mappings.len(), 2);
         assert_eq!(
-            profile.env_credentials.mappings.get("openai_api_key"),
-            Some(&"OPENAI_API_KEY".to_string())
+            profile
+                .env_credentials
+                .mappings
+                .get("openai_api_key")
+                .map(|s| s.as_str()),
+            Some("OPENAI_API_KEY")
         );
         assert_eq!(
-            profile.env_credentials.mappings.get("anthropic_api_key"),
-            Some(&"ANTHROPIC_API_KEY".to_string())
+            profile
+                .env_credentials
+                .mappings
+                .get("anthropic_api_key")
+                .map(|s| s.as_str()),
+            Some("ANTHROPIC_API_KEY")
         );
     }
 
@@ -4338,8 +4345,12 @@ mod tests {
         let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert_eq!(profile.env_credentials.mappings.len(), 1);
         assert_eq!(
-            profile.env_credentials.mappings.get("openai_api_key"),
-            Some(&"OPENAI_API_KEY".to_string())
+            profile
+                .env_credentials
+                .mappings
+                .get("openai_api_key")
+                .map(|s| s.as_str()),
+            Some("OPENAI_API_KEY")
         );
     }
 
@@ -6180,8 +6191,12 @@ mod tests {
 
         let merged = merge_profiles(base, child);
         assert_eq!(
-            merged.env_credentials.mappings.get("shared_key"),
-            Some(&"CHILD_VALUE".to_string()),
+            merged
+                .env_credentials
+                .mappings
+                .get("shared_key")
+                .map(|s| s.as_str()),
+            Some("CHILD_VALUE"),
             "child should win for same key"
         );
         assert!(merged.env_credentials.mappings.contains_key("base_key"));
@@ -7866,12 +7881,20 @@ mod tests {
         );
         assert_eq!(profile.filesystem.deny, vec!["/denied".to_string()]);
         assert_eq!(
-            profile.env_credentials.mappings.get("plain"),
-            Some(&"PLAIN_TOKEN".to_string())
+            profile
+                .env_credentials
+                .mappings
+                .get("plain")
+                .map(|s| s.as_str()),
+            Some("PLAIN_TOKEN")
         );
         assert_eq!(
-            profile.env_credentials.mappings.get("matching"),
-            Some(&"MATCH_TOKEN".to_string())
+            profile
+                .env_credentials
+                .mappings
+                .get("matching")
+                .map(|s| s.as_str()),
+            Some("MATCH_TOKEN")
         );
         assert!(!profile.env_credentials.mappings.contains_key("skipped"));
         let origins = profile.open_urls.expect("open urls").allow_origins;

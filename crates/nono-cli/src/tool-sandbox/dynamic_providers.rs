@@ -29,7 +29,7 @@ fn parse_token(s: &str) -> Option<(&str, &str)> {
 }
 
 pub(super) mod git {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use nono::{NonoError, Result};
@@ -47,6 +47,23 @@ pub(super) mod git {
         pub dirs: Vec<String>,
     }
 
+    /// Run `git rev-parse --show-toplevel` and return the repo root, or `None`
+    /// when the process is not inside a git repository (or git is absent).
+    fn git_toplevel() -> Option<PathBuf> {
+        let output = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let s = std::str::from_utf8(&output.stdout).ok()?.trim();
+        if s.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(s))
+    }
+
     /// Invoke `git config --list --show-origin --show-scope` and return
     /// the file-typed paths the git binary needs to read at startup.
     ///
@@ -54,7 +71,8 @@ pub(super) mod git {
     ///
     /// Returns an empty list if `git` is absent or exits non-zero.
     pub(crate) fn read_files() -> Result<Vec<String>> {
-        Ok(run(None, None)?.files)
+        let cwd = git_toplevel();
+        Ok(run(cwd.as_deref(), None)?.files)
     }
 
     /// Invoke `git config --list --show-origin --show-scope` and return
@@ -63,7 +81,8 @@ pub(super) mod git {
     ///
     /// Returned paths are intended for `fs_read` lists.
     pub(crate) fn read_hooks_path() -> Result<Vec<String>> {
-        Ok(run(None, None)?.dirs)
+        let cwd = git_toplevel();
+        Ok(run(cwd.as_deref(), None)?.dirs)
     }
 
     /// Return the path to the git common directory (`.git` or the main repo's
@@ -77,7 +96,7 @@ pub(super) mod git {
     /// Returns an empty list when git is absent, the command fails, or the
     /// process is not inside a git repository.
     pub(crate) fn read_common_dir() -> Result<Vec<String>> {
-        run_common_dir(None)
+        run_common_dir(git_toplevel().as_deref())
     }
 
     fn run_common_dir(cwd: Option<&Path>) -> Result<Vec<String>> {
@@ -468,6 +487,58 @@ global\tfile:/home/u/.gitconfig\tcore.attributesFile=/home/u/.gitattributes
         assert!(
             paths.files.iter().any(|p| p == work_str),
             "included gitconfig-work missing, got {:?}",
+            paths.files
+        );
+    }
+
+    #[test]
+    fn git_read_paths_includeif_hasconfig_matches_remote() {
+        use std::io::Write;
+        use std::process::Command;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // A file included only when a ddoghq remote is present.
+        let included = tmp.path().join("gitconfig-ddoghq");
+        {
+            let mut f = std::fs::File::create(&included).expect("create included");
+            writeln!(f, "[user]\n\temail = work@ddoghq.example.com").expect("write included");
+        }
+
+        // Global config with a hasconfig:remote.*.url includeIf.
+        let global_cfg = tmp.path().join("gitconfig");
+        {
+            let mut f = std::fs::File::create(&global_cfg).expect("create global");
+            writeln!(f, "[user]\n\tname = Test").expect("write user");
+            writeln!(
+                f,
+                "[includeIf \"hasconfig:remote.*.url:git@github.com:ddoghq/**\"]\n\tpath = {}",
+                included.display()
+            )
+            .expect("write includeIf");
+        }
+
+        // A repo with a matching remote so hasconfig: fires.
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir repo");
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        Command::new("git")
+            .args(["remote", "add", "origin", "git@github.com:ddoghq/some-repo"])
+            .current_dir(&repo)
+            .status()
+            .expect("git remote add");
+
+        let paths =
+            git::read_paths_in(&repo, Some(&global_cfg)).expect("git config with hasconfig");
+
+        let included_str = included.to_str().expect("utf8");
+        assert!(
+            paths.files.iter().any(|p| p == included_str),
+            "hasconfig:remote includeIf target missing from files; got {:?}",
             paths.files
         );
     }

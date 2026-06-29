@@ -387,18 +387,6 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
         ));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if tool_sandbox_runtime.is_some()
-        && !loaded_secrets.is_empty()
-        && tool_sandbox_initial_shim.is_none()
-    {
-        return Err(NonoError::ConfigParse(
-            "tool-sandbox brokered credentials require the initial command to run through an tool-sandbox shim; \
-             direct exec bypass cannot resolve broker tokens"
-                .to_string(),
-        ));
-    }
-
     apply_pre_fork_sandbox(
         strategy,
         &caps,
