@@ -195,7 +195,12 @@ impl ProxyCredentialCaptureBackend {
                 name.clone(),
                 ResolvedCredentialCaptureEntry {
                     command_path,
-                    args: entry.command.iter().skip(1).cloned().collect(),
+                    args: entry
+                        .command
+                        .iter()
+                        .skip(1)
+                        .map(|a| crate::policy::expand_env_vars(a))
+                        .collect(),
                     timeout: Duration::from_secs(entry.timeout_secs.unwrap_or(5)),
                     ttl: Duration::from_secs(
                         entry.cache_ttl_secs.or(entry.ttl_secs).unwrap_or(900),
@@ -1108,6 +1113,8 @@ fn redacted_stderr(stderr: &[u8], policy: &nono::ScrubPolicy) -> Option<String> 
 }
 
 fn resolve_capture_command(command: &str) -> Result<PathBuf> {
+    let expanded = crate::policy::expand_env_vars(command);
+    let command = expanded.as_str();
     let path = PathBuf::from(command);
     if path.is_absolute() {
         return validate_capture_command_path(path);
