@@ -60,6 +60,7 @@ jobs:
           set -euo pipefail
 
           # Resolve the project number from its title.
+          # shellcheck disable=SC2016  # $org/$number/$cursor are GraphQL variables, not shell variables
           project_number=$(gh api graphql -f query='
             query($org: String!) {
               organization(login: $org) {
@@ -74,6 +75,7 @@ jobs:
           fi
           echo "Reconciling project #$project_number ($PROJECT_TITLE)"
 
+          # shellcheck disable=SC2016  # $org/$number/$cursor are GraphQL variables, not shell variables
           query='
             query($org: String!, $number: Int!, $cursor: String) {
               organization(login: $org) {
@@ -142,6 +144,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # shellcheck disable=SC2016  # $org/$number/$cursor are GraphQL variables, not shell variables
           project_number=$(gh api graphql -f query='
             query($org: String!) {
               organization(login: $org) {
@@ -156,6 +159,7 @@ jobs:
           fi
           echo "Grooming Backlog of project #$project_number ($PROJECT_TITLE)"
 
+          # shellcheck disable=SC2016  # $org/$number/$cursor are GraphQL variables, not shell variables
           query='
             query($org: String!, $number: Int!, $cursor: String) {
               organization(login: $org) {
