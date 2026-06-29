@@ -307,6 +307,10 @@ fn build_launch_options(args: &ProxyArgs) -> Result<ProxyLaunchOptions> {
         None
     };
 
+    // Enable HTTP/2 to upstreams when requested via the CLI flag or the
+    // profile's `network.allow_http2`, mirroring the sandboxed `run` path.
+    let enable_h2 = args.allow_http2 || network.map(|n| n.allow_http2).unwrap_or(false);
+
     Ok(ProxyLaunchOptions {
         domain_filter,
         endpoint_filter,
@@ -316,6 +320,7 @@ fn build_launch_options(args: &ProxyArgs) -> Result<ProxyLaunchOptions> {
         command_policies,
         credential_capture,
         session_id: crate::session::generate_session_id(),
+        enable_h2,
         ..ProxyLaunchOptions::default()
     })
 }
@@ -489,6 +494,44 @@ mod tests {
         assert!(opts.command_policies.is_none());
         // A session id is always minted so the capture backend can scope caches.
         assert!(!opts.session_id.is_empty());
+    }
+
+    #[test]
+    fn enable_h2_defaults_off() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env = cleared_env();
+        let args = parse_args(&[]);
+        let opts = build_launch_options(&args).expect("empty args are valid");
+        assert!(!opts.enable_h2);
+    }
+
+    #[test]
+    fn allow_http2_flag_enables_h2() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env = cleared_env();
+        let args = parse_args(&["--allow-http2"]);
+        let opts = build_launch_options(&args).expect("flag-only args are valid");
+        assert!(opts.enable_h2);
+    }
+
+    #[test]
+    fn profile_allow_http2_enables_h2() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env = cleared_env();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let profile_path = dir.path().join("h2.json");
+        std::fs::write(
+            &profile_path,
+            r#"{
+                "meta": { "name": "h2-test" },
+                "network": { "allow_http2": true }
+            }"#,
+        )
+        .expect("write profile");
+
+        let args = parse_args(&["--profile", profile_path.to_str().expect("valid utf8")]);
+        let opts = build_launch_options(&args).expect("profile with allow_http2 is valid");
+        assert!(opts.enable_h2);
     }
 
     #[test]
