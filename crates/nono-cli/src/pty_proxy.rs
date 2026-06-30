@@ -136,6 +136,33 @@ enum MasterProxyOutcome {
     Retry,
 }
 
+/// Tracks how far the teardown drain has matched a cursor-position reply
+/// (`ESC [ <params> R`). `step` returns `false` at the terminator or the first
+/// byte that cannot belong to a reply, so type-ahead is left for the shell
+/// rather than scanned for a stray `R`.
+#[derive(Clone, Copy)]
+enum CprReplyParse {
+    NeedEsc,
+    NeedBracket,
+    InParams,
+}
+
+impl CprReplyParse {
+    /// Feed one byte; returns `true` while more reply bytes may follow, `false`
+    /// once the reply ends (`R`) or the byte breaks the grammar.
+    fn step(&mut self, byte: u8) -> bool {
+        match (*self, byte) {
+            (Self::NeedEsc, 0x1b) => *self = Self::NeedBracket,
+            (Self::NeedBracket, b'[') => *self = Self::InParams,
+            // Parameter bytes (`<row>;<col>`) keep the reply going.
+            (Self::InParams, b'0'..=b'9' | b';') => {}
+            // `R` terminator, or any byte that cannot belong to a reply: stop.
+            _ => return false,
+        }
+        true
+    }
+}
+
 impl AttachedClient {
     fn terminal(read_fd: RawFd, write_fd: RawFd) -> Self {
         Self::Terminal { read_fd, write_fd }
@@ -1816,18 +1843,15 @@ fn drain_terminal_output(fd: RawFd) {
 /// lands only after the child is gone, so nothing consumes it and it gets
 /// pasted into the next shell prompt (e.g. `3;1R`).
 ///
-/// Reads the input queue one byte at a time, up to `max_wait`, stopping as soon
-/// as the reply's `R` terminator is consumed. This is preferable to a single
-/// `tcflush`: `poll` wakes as soon as the first byte (the `ESC`) is readable, so
-/// on a link where the reply arrives fragmented (e.g. across packets over SSH) a
-/// flush would clear the head while the tail is still in transit and the tail
-/// would then leak to the shell. Re-polling for each byte waits out the whole
-/// sequence instead. Stopping at `R` also leaves any genuine type-ahead queued
-/// behind the reply for the shell, rather than discarding it.
+/// Reads one byte at a time up to `max_wait`, matching the CPR grammar and
+/// stopping at the terminator or the first byte that cannot belong to a reply —
+/// so queued type-ahead (which fails the grammar) is left for the shell rather
+/// than scanned for a stray `R`. Byte-at-a-time polling (not a single
+/// `tcflush`) lets a reply that arrives fragmented over a slow link be waited
+/// out without leaking its tail.
 ///
 /// MUST run while the terminal is still in raw mode, so the reply — which has no
-/// trailing newline — is readable. No-op when `fd` is not a terminal, so
-/// non-interactive runs pay no cost.
+/// trailing newline — is readable. No-op when `fd` is not a terminal.
 fn discard_late_terminal_input(fd: RawFd, max_wait: Duration) {
     // SAFETY: `isatty` only inspects the borrowed fd and does not take ownership.
     if unsafe { libc::isatty(fd) } != 1 {
@@ -1838,6 +1862,7 @@ fn discard_late_terminal_input(fd: RawFd, max_wait: Duration) {
     drain_terminal_output(fd);
 
     let deadline = Instant::now() + max_wait;
+    let mut parse = CprReplyParse::NeedEsc;
     loop {
         let remaining = match deadline.checked_duration_since(Instant::now()) {
             Some(d) if !d.is_zero() => d,
@@ -1861,10 +1886,10 @@ fn discard_late_terminal_input(fd: RawFd, max_wait: Duration) {
         // SAFETY: reads a single byte into a stack buffer we own; `fd` is live.
         let n = unsafe { libc::read(fd, byte.as_mut_ptr().cast::<libc::c_void>(), 1) };
         match n {
-            // Cursor-position reply terminator: the full sequence is consumed.
-            1 if byte[0] == b'R' => break,
-            // An earlier byte of the reply (ESC, `[`, digits, `;`): keep reading.
-            1 => continue,
+            // Keep reading while the byte extends a reply; stop once it is fully
+            // drained or the byte is type-ahead (leaving the rest for the shell).
+            1 if parse.step(byte[0]) => continue,
+            1 => break,
             // EOF: nothing left to read.
             0 => break,
             // Negative: retry on EINTR, otherwise give up.
@@ -2546,10 +2571,10 @@ fn run_attach_loop(
 mod tests {
     use super::{
         ATTACH_HANDSHAKE_MAGIC, ATTACH_REQUEST_ATTACH, ATTACH_SCREEN_ENTER_ESCAPE,
-        AltScreenTracker, AttachedClient, DEFAULT_DETACH_SEQUENCE, ERASE_NATIVE_SCROLLBACK,
-        PtyProxy, ReadFdOutcome, ScreenState, TERMINAL_RESTORE_NORMAL, decode_attach_handshake,
-        discard_late_terminal_input, encode_attach_request_frame, read_fd_once,
-        select_attach_replay_bytes, terminal_restore_escape, write_all_fd,
+        AltScreenTracker, AttachedClient, CprReplyParse, DEFAULT_DETACH_SEQUENCE,
+        ERASE_NATIVE_SCROLLBACK, PtyProxy, ReadFdOutcome, ScreenState, TERMINAL_RESTORE_NORMAL,
+        decode_attach_handshake, discard_late_terminal_input, encode_attach_request_frame,
+        read_fd_once, select_attach_replay_bytes, terminal_restore_escape, write_all_fd,
     };
     use nix::libc;
     use nix::pty::{OpenptyResult, Winsize, openpty};
@@ -2648,6 +2673,46 @@ mod tests {
             pending, 0,
             "fragmented reply should have been fully consumed"
         );
+    }
+
+    #[test]
+    fn discard_late_terminal_input_preserves_type_ahead_with_no_reply() {
+        let OpenptyResult { master, slave } = raw_mode_pty();
+
+        // No reply pending, only type-ahead. Grammar matching bails on the first
+        // non-reply byte rather than scanning ahead for a stray `R`.
+        nix::unistd::write(&master, b"xRy").expect("write type-ahead");
+
+        discard_late_terminal_input(slave.as_raw_fd(), Duration::from_millis(500));
+
+        let mut buf = [0u8; 8];
+        let n = nix::unistd::read(&slave, &mut buf).expect("read leftover");
+        assert_eq!(&buf[..n], b"Ry", "non-reply type-ahead must be preserved");
+    }
+
+    /// Feed `queue` through the grammar exactly as the drain loop does and
+    /// return how many bytes it consumes — lets the grammar be tested PTY-free.
+    fn bytes_consumed_by_drain(queue: &[u8]) -> usize {
+        let mut parse = CprReplyParse::NeedEsc;
+        let mut consumed = 0;
+        for &byte in queue {
+            consumed += 1;
+            if !parse.step(byte) {
+                break;
+            }
+        }
+        consumed
+    }
+
+    #[test]
+    fn cpr_grammar_stops_at_reply_end_or_type_ahead() {
+        // A well-formed reply is consumed through `R`; bytes after it remain.
+        assert_eq!(bytes_consumed_by_drain(b"\x1b[3;1R"), 6);
+        assert_eq!(bytes_consumed_by_drain(b"\x1b[12;240Rls\n"), 9);
+        // Type-ahead is not scanned for a stray `R`: matching stops at the first
+        // byte that cannot belong to a reply.
+        assert_eq!(bytes_consumed_by_drain(b"xRy"), 1);
+        assert_eq!(bytes_consumed_by_drain(b"\x1b[3Xrest"), 4);
     }
 
     fn build_test_proxy_with_master(master: OwnedFd, sequence: &[u8]) -> PtyProxy {
