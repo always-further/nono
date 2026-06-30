@@ -26,18 +26,22 @@ use rand::RngExt;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
-/// Hook used by [`TokenBroker::with_store_and_reader`] to inspect claude's
-/// own `Claude Code-credentials` keychain entry at hydrate time. Returns
-/// the access-token field from the entry (typically a `nono_<hex>` nonce
-/// or a `sk-ant-…` real token), or `None` if the entry is missing /
-/// unreadable / lacks the field.
+/// Hook used by [`TokenBroker::with_store_and_reader`] at hydrate time to
+/// answer one question: is the user still logged in to Claude? It reports
+/// whether Claude's credential entry *exists* (in the keychain or the
+/// credentials file) — checking presence only, never reading the protected
+/// contents, so it does not trigger a macOS keychain prompt.
 ///
-/// Production callers pass the real reader from
-/// [`super::broker_store::current_claude_access_token`]. Tests pass a
-/// closure returning a known value so the orphan-GC paths are exercised
+/// `false` means logged out (no entry anywhere) → the persisted record is an
+/// orphan and is cleared, honouring "logout means the tokens are gone".
+/// `true` means keep the record (subject to the independent retention TTL
+/// enforced by the store on load).
+///
+/// Production callers pass [`super::broker_store::claude_is_logged_in`]. Tests
+/// pass a closure returning a known bool so the orphan-GC paths are exercised
 /// without touching the user's keychain.
 #[cfg(target_os = "macos")]
-pub(crate) type ClaudeAccessTokenReader = Box<dyn Fn() -> Option<String>>;
+pub(crate) type ClaudeLoginPresenceReader = Box<dyn Fn() -> bool>;
 
 /// A shared, thread-safe token broker that can be held by both the proxy
 /// runtime and the tool-sandbox runtime.
@@ -113,7 +117,7 @@ impl TokenBroker {
     /// `Claude Code-credentials` reader.
     #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn with_store(store: Arc<dyn BrokerStore>) -> nono::Result<Self> {
-        Self::with_store_and_reader(store, Box::new(|| None))
+        Self::with_store_and_reader(store, Box::new(|| true))
     }
 
     #[cfg(target_os = "macos")]
@@ -122,29 +126,29 @@ impl TokenBroker {
     /// orphaned records.
     ///
     /// On startup:
-    /// 1. Load the persisted record. If empty, return an empty broker.
-    /// 2. Read claude's own `Claude Code-credentials` access token.
-    /// 3. If it matches the stored `access_nonce`, the record is live —
-    ///    hydrate the in-memory map and set `current_pair`.
-    /// 4. Otherwise (entry missing, holds a real `sk-ant-…` token, or a
-    ///    different nonce), the record is stale — clear it and return an
-    ///    empty broker. The next `/login` capture creates a fresh record.
+    /// 1. Load the persisted record. If empty (none, or cleared by the store's
+    ///    retention TTL), return an empty broker.
+    /// 2. Ask whether the user is still logged in to Claude, via a presence
+    ///    check on Claude's credential entry — see [`ClaudeLoginPresenceReader`]
+    ///    (existence only; no contents read, no keychain prompt).
+    /// 3. If logged in, hydrate the in-memory map and set `current_pair`.
+    /// 4. If logged out (no entry anywhere), the record is an orphan — clear it
+    ///    and return an empty broker. The next `/login` capture creates a fresh
+    ///    record.
     ///
     /// Rationale: when the user runs `/logout` inside claude, the
     /// `Claude Code-credentials` entry is wiped but our persisted record
     /// still holds the real refresh token. Without this GC the broker
     /// would keep hydrating dead tokens for as long as Anthropic considers
     /// them valid (~1 year), violating the user's "logout means tokens are
-    /// gone" mental model.
+    /// gone" mental model. Independently, the store bounds retention with a
+    /// TTL (see `broker_store::BROKER_RECORD_MAX_AGE_SECS`) so a forgotten
+    /// session's tokens are dropped even if the entry lingers.
     ///
-    /// Returns an error only if the store's `load` itself fails — read
-    /// failures from `claude_access_token_reader` are treated as "entry
-    /// missing" (the GC-stale path), the conservative choice: better to
-    /// drop a live record and force a re-`/login` than to leak a real
-    /// token because we couldn't tell.
+    /// Returns an error only if the store's `load` itself fails.
     pub(crate) fn with_store_and_reader(
         store: Arc<dyn BrokerStore>,
-        claude_access_token_reader: ClaudeAccessTokenReader,
+        claude_login_present: ClaudeLoginPresenceReader,
     ) -> nono::Result<Self> {
         let mut broker = Self {
             map: std::collections::HashMap::new(),
@@ -157,14 +161,10 @@ impl TokenBroker {
             return Ok(broker);
         };
 
-        let claude_access = claude_access_token_reader();
-        let live = matches!(claude_access.as_deref(), Some(t) if t == record.access_nonce);
-
-        if !live {
+        if !claude_login_present() {
             tracing::info!(
-                "OAuth broker persisted record does not match Claude Code-credentials \
-                 entry (claude_access_present={}); clearing stale record",
-                claude_access.is_some()
+                "OAuth broker: Claude has no credential entry (logged out); \
+                 clearing orphaned record"
             );
             if let Err(e) = store.clear() {
                 tracing::warn!(
@@ -938,10 +938,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn with_store_hydrates_when_claude_keychain_matches() {
+    fn with_store_hydrates_when_logged_in() {
         // resolve_nonce only resolves well-formed `nono_<64hex>` nonces, so
-        // the persisted nonces must be the real shape (unlike the fork's
-        // looser map-lookup resolve).
+        // the persisted nonces must be the real shape.
         let access_nonce = format!("nono_{}", "a".repeat(64));
         let refresh_nonce = format!("nono_{}", "b".repeat(64));
         let preloaded = PersistedRecord {
@@ -951,9 +950,10 @@ mod tests {
             refresh_token: Zeroizing::new("real_refresh".to_string()),
         };
         let store = Arc::new(MemoryBrokerStore::preload(preloaded));
-        let access_for_reader = access_nonce.clone();
-        let matching: ClaudeAccessTokenReader = Box::new(move || Some(access_for_reader.clone()));
-        let broker = TokenBroker::with_store_and_reader(store.clone(), matching).expect("hydrate");
+        // Logged in (a credential entry is present) → hydrate, regardless of
+        // which account/nonce it holds (existence-only check).
+        let logged_in: ClaudeLoginPresenceReader = Box::new(|| true);
+        let broker = TokenBroker::with_store_and_reader(store.clone(), logged_in).expect("hydrate");
 
         assert_eq!(
             broker
@@ -974,7 +974,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn with_store_clears_orphan_when_claude_keychain_missing() {
+    fn with_store_clears_orphan_when_logged_out() {
         let preloaded = PersistedRecord {
             access_nonce: "nono_orphan_access".to_string(),
             refresh_nonce: "nono_orphan_refresh".to_string(),
@@ -982,33 +982,14 @@ mod tests {
             refresh_token: Zeroizing::new("real_orphan_refresh".to_string()),
         };
         let store = Arc::new(MemoryBrokerStore::preload(preloaded));
-        let empty: ClaudeAccessTokenReader = Box::new(|| None);
-        let broker = TokenBroker::with_store_and_reader(store.clone(), empty).expect("GC path");
+        // Logged out (no credential entry anywhere) → clear the orphan.
+        let logged_out: ClaudeLoginPresenceReader = Box::new(|| false);
+        let broker =
+            TokenBroker::with_store_and_reader(store.clone(), logged_out).expect("GC path");
 
         assert!(store.current().is_none(), "orphan record must be cleared");
         assert!(broker.resolve_nonce("nono_orphan_access", "any").is_none());
         assert!(broker.resolve_nonce("nono_orphan_refresh", "any").is_none());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn with_store_clears_orphan_when_claude_keychain_holds_real_token() {
-        let preloaded = PersistedRecord {
-            access_nonce: "nono_orphan_access".to_string(),
-            refresh_nonce: "nono_orphan_refresh".to_string(),
-            access_token: Zeroizing::new("real_orphan_access".to_string()),
-            refresh_token: Zeroizing::new("real_orphan_refresh".to_string()),
-        };
-        let store = Arc::new(MemoryBrokerStore::preload(preloaded));
-        let real_token: ClaudeAccessTokenReader =
-            Box::new(|| Some("sk-ant-oat01-fresh-real-token".to_string()));
-        let broker = TokenBroker::with_store_and_reader(store.clone(), real_token).expect("GC");
-
-        assert!(
-            store.current().is_none(),
-            "stale record cleared when claude holds a real token"
-        );
-        assert!(broker.resolve_nonce("nono_orphan_access", "any").is_none());
     }
 
     #[cfg(target_os = "macos")]
@@ -1061,9 +1042,8 @@ mod tests {
             refresh_token: Zeroizing::new("real_old_refresh".to_string()),
         };
         let store = Arc::new(MemoryBrokerStore::preload(preloaded));
-        let access_for_reader = access_nonce.clone();
-        let matching: ClaudeAccessTokenReader = Box::new(move || Some(access_for_reader.clone()));
-        let mut broker = TokenBroker::with_store_and_reader(store, matching).expect("hydrate");
+        let logged_in: ClaudeLoginPresenceReader = Box::new(|| true);
+        let mut broker = TokenBroker::with_store_and_reader(store, logged_in).expect("hydrate");
         assert!(broker.resolve_nonce(&access_nonce, "any").is_some());
 
         let _ = broker.capture_oauth_pair(

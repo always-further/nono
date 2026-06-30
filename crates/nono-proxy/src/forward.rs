@@ -114,13 +114,11 @@ where
     let status = match upstream.scheme {
         UpstreamScheme::Https => {
             let mut tls_stream = open_https_upstream(&upstream).await?;
-            write_request(&mut tls_stream, request_bytes, body).await?;
-            stream_response(&mut tls_stream, inbound, response_hook).await?
+            write_then_stream(&mut tls_stream, request_bytes, body, inbound, response_hook).await?
         }
         UpstreamScheme::Http => {
             let mut tcp_stream = open_http_upstream(&upstream).await?;
-            write_request(&mut tcp_stream, request_bytes, body).await?;
-            stream_response(&mut tcp_stream, inbound, response_hook).await?
+            write_then_stream(&mut tcp_stream, request_bytes, body, inbound, response_hook).await?
         }
     };
 
@@ -243,6 +241,58 @@ where
     stream.flush().await?;
     Ok(())
 }
+
+/// Write the request upstream, then stream the response back.
+///
+/// A write-side failure is **not** fatal on its own: when an upstream rejects a
+/// request (e.g. `401 Unauthorized` for an expired bearer token, or `413`) it
+/// commonly sends the error response and closes the socket *before* it has read
+/// the whole request body, which surfaces here as `EPIPE`/`Broken pipe` on the
+/// write. If we bailed on that error we would discard the very response the
+/// client needs to see — and for OAuth that 401 is exactly what triggers the
+/// client's token refresh. So we always attempt to read the upstream response;
+/// only if there is no readable response do we surface the write error.
+async fn write_then_stream<U, I>(
+    upstream: &mut U,
+    request: &[u8],
+    body: &[u8],
+    inbound: &mut I,
+    response_hook: Option<ResponseBodyRewriter<'_>>,
+) -> Result<u16>
+where
+    U: AsyncRead + AsyncWrite + Unpin,
+    I: AsyncWrite + Unpin,
+{
+    let write_result = write_request(upstream, request, body).await;
+    match stream_response(upstream, inbound, response_hook).await {
+        Ok(status) => match write_result {
+            Ok(()) => Ok(status),
+            // The write failed but the upstream still returned a parseable
+            // response — relay it (the 401-then-close case). A bare
+            // `NO_RESPONSE_STATUS` means nothing parseable came back, so the
+            // write failure is the real error and must surface.
+            Err(write_err) if status == NO_RESPONSE_STATUS => Err(write_err),
+            Err(write_err) => {
+                debug!(
+                    "upstream closed during request write but returned a response \
+                     (status {status}): {write_err}"
+                );
+                Ok(status)
+            }
+        },
+        // No readable response: surface the earlier write failure if there was
+        // one, otherwise the read error.
+        Err(read_err) => {
+            write_result?;
+            Err(read_err)
+        }
+    }
+}
+
+/// Status returned by [`stream_response`] when the upstream sent nothing
+/// parseable (no bytes, or an unparseable first line). Matches the default in
+/// [`stream_response_passthrough`] and [`parse_response_status`].
+const NO_RESPONSE_STATUS: u16 = 502;
 
 /// Stream the upstream response back to the inbound sink.
 ///
@@ -622,5 +672,95 @@ mod tests {
         assert_eq!(decode_chunked_body(b"ZZZ\r\nbad\r\n"), None);
         assert_eq!(decode_chunked_body(b"5\r\nhel"), None);
         assert_eq!(decode_chunked_body(b""), None);
+    }
+
+    // --- write-side close must not discard the upstream response ---
+
+    /// Mock upstream that always fails writes with `BrokenPipe` (modelling a
+    /// server that rejected the request and closed before reading the whole
+    /// body) but serves `response` then EOF on reads.
+    struct RejectingUpstream {
+        response: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl AsyncWrite for RejectingUpstream {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncRead for RejectingUpstream {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.response).poll_read(cx, buf)
+        }
+    }
+
+    #[tokio::test]
+    async fn write_then_stream_relays_response_despite_write_epipe() {
+        // The upstream rejects the body write (EPIPE) but sends a 401. The
+        // client must still receive that 401 — otherwise the OAuth refresh it
+        // would trigger never happens.
+        let mut upstream = RejectingUpstream {
+            response: std::io::Cursor::new(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            ),
+        };
+        let mut inbound: Vec<u8> = Vec::new();
+        let status = write_then_stream(
+            &mut upstream,
+            b"POST /v1/messages HTTP/1.1\r\nConnection: close\r\n\r\n",
+            b"a very large body the upstream never finished reading",
+            &mut inbound,
+            None,
+        )
+        .await
+        .expect("a readable 401 response must not be reported as a forwarding failure");
+        assert_eq!(status, 401);
+        assert!(
+            String::from_utf8_lossy(&inbound).contains("401 Unauthorized"),
+            "client must receive the upstream 401: {inbound:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_then_stream_surfaces_write_error_when_no_response() {
+        // Write fails AND the upstream sent nothing → the write error is the
+        // real failure and must propagate.
+        let mut upstream = RejectingUpstream {
+            response: std::io::Cursor::new(Vec::new()),
+        };
+        let mut inbound: Vec<u8> = Vec::new();
+        let result = write_then_stream(
+            &mut upstream,
+            b"POST / HTTP/1.1\r\n\r\n",
+            b"body",
+            &mut inbound,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "no response + write failure must surface as an error"
+        );
     }
 }

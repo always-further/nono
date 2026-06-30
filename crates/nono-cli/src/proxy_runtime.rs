@@ -2053,11 +2053,11 @@ pub(crate) fn build_shared_broker(
 
     #[cfg(target_os = "macos")]
     if has_oauth_capture {
-        use crate::tool_sandbox::broker_store::{KeystoreBrokerStore, current_claude_access_token};
+        use crate::tool_sandbox::broker_store::{KeystoreBrokerStore, claude_is_logged_in};
         let store = std::sync::Arc::new(KeystoreBrokerStore::default_for_claude_oauth());
         match crate::tool_sandbox::token_broker::TokenBroker::with_store_and_reader(
             store,
-            Box::new(current_claude_access_token),
+            Box::new(claude_is_logged_in),
         ) {
             Ok(broker) => return std::sync::Arc::new(std::sync::Mutex::new(broker)),
             Err(e) => {

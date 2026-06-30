@@ -1036,20 +1036,17 @@ where
     // request reaches the upstream OAuth server. Unresolvable nonces are
     // forwarded unchanged (the upstream rejects with an auth error, which is
     // the correct fail-closed behavior: no real credential is leaked).
-    if oauth_capture_active {
-        if let (Some(consumer), Some(resolver)) =
+    if oauth_capture_active
+        && let (Some(consumer), Some(resolver)) =
             (nonce_consumer.as_deref(), ctx.nonce_resolver.as_deref())
-        {
-            if let Some(rewritten) =
-                crate::oauth_rewrite::resolve_nonces_in_oauth_request_body(&body, consumer, resolver)
-            {
-                debug!(
-                    "oauth-capture (h1): resolved nonce(s) in refresh request body for {}",
-                    ctx.host
-                );
-                body = rewritten;
-            }
-        }
+        && let Some(rewritten) =
+            crate::oauth_rewrite::resolve_nonces_in_oauth_request_body(&body, consumer, resolver)
+    {
+        debug!(
+            "oauth-capture (h1): resolved nonce(s) in refresh request body for {}",
+            ctx.host
+        );
+        body = rewritten;
     }
 
     for (name, value) in &filtered_headers {

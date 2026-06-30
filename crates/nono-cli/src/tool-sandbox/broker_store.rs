@@ -142,6 +142,45 @@ struct PersistedJson {
     refresh_token: String,
     #[serde(default)]
     nono_path: Option<String>,
+    /// Unix seconds when this record was last written (capture or refresh
+    /// rotation). Enforces the retention TTL — see [`BROKER_RECORD_MAX_AGE_SECS`]
+    /// and [`record_is_expired`]. `None` on records written before this field
+    /// existed; treated as not-yet-expired so an upgrade doesn't force re-login.
+    #[serde(default)]
+    saved_at_secs: Option<u64>,
+}
+
+/// Hard cap on how long the broker retains the real OAuth tokens after the
+/// last capture or refresh, independent of whether Claude is still logged in.
+///
+/// Anthropic's token endpoint does not expose the refresh token's own expiry
+/// (the response carries only the *access* token's `expires_in`, ~1h, and the
+/// refresh token is opaque), so we anchor the TTL on the moment we last
+/// observed token activity. Every successful refresh re-captures and re-stamps
+/// the record, so an actively-used session never expires here; an idle or
+/// forgotten session is bounded to this window, after which the stored real
+/// refresh token is deleted and the next launch requires a fresh `/login`.
+const BROKER_RECORD_MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
+
+/// Returns whether a record stamped at `saved_at_secs` has exceeded the
+/// retention TTL as of `now_secs`. A missing stamp (legacy record) or a
+/// `now` earlier than the stamp (clock skew) is treated as not expired —
+/// fail toward keeping a usable session rather than a spurious re-login.
+fn record_is_expired(saved_at_secs: Option<u64>, now_secs: u64, max_age_secs: u64) -> bool {
+    match saved_at_secs {
+        Some(saved) => now_secs.saturating_sub(saved) > max_age_secs,
+        None => false,
+    }
+}
+
+/// Current wall-clock time in Unix seconds, or `None` if the clock is before
+/// the epoch (in which case callers skip the TTL check rather than guess).
+#[cfg(target_os = "macos")]
+fn now_unix_secs() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 impl PersistedJson {
@@ -152,6 +191,10 @@ impl PersistedJson {
             access_token: record.access_token.as_str().to_string(),
             refresh_token: record.refresh_token.as_str().to_string(),
             nono_path: Some(nono_exe.to_string_lossy().into_owned()),
+            #[cfg(target_os = "macos")]
+            saved_at_secs: now_unix_secs(),
+            #[cfg(not(target_os = "macos"))]
+            saved_at_secs: None,
         }
     }
 
@@ -174,12 +217,26 @@ impl PersistedJson {
 #[cfg(target_os = "macos")]
 mod macos_ffi {
     use core_foundation_sys::array::CFArrayRef;
-    use core_foundation_sys::base::OSStatus;
+    use core_foundation_sys::base::{CFTypeRef, OSStatus};
+    use core_foundation_sys::dictionary::CFDictionaryRef;
     use core_foundation_sys::string::CFStringRef;
     use security_framework_sys::base::SecAccessRef;
 
     /// Opaque CF type for a trusted-application reference.
     pub type SecTrustedApplicationRef = *mut std::ffi::c_void;
+
+    unsafe extern "C" {
+        /// Search the keychain. With a query that requests attributes only
+        /// (never `kSecReturnData`), this returns item existence/metadata
+        /// *without* an ACL authorization prompt — the caller is not reading
+        /// the protected secret. Returns `errSecSuccess` if a match exists,
+        /// `errSecItemNotFound` otherwise.
+        pub fn SecItemCopyMatching(query: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
+
+        /// `kSecMatchLimit` value selecting at most one match. Not re-exported
+        /// by `security-framework-sys` 2.17, so declared here.
+        pub static kSecMatchLimitOne: CFStringRef;
+    }
 
     unsafe extern "C" {
         /// Creates a `SecTrustedApplicationRef` for the binary at `path`.
@@ -501,65 +558,91 @@ fn delete_broker_entry_in_process(service: &str, account: &str) {
 /// conservative choice: better to drop a live record than to leak a
 /// real token because we couldn't tell.
 #[cfg(target_os = "macos")]
-pub(crate) fn current_claude_access_token() -> Option<String> {
-    // Claude Code stores its OAuth credentials in either the macOS keychain
-    // (`Claude Code-credentials`) or, on some installs, a file at
-    // `~/.claude/.credentials.json`. Check both so the orphan-GC cross-
-    // reference works regardless of which backend this install uses — without
-    // the file fallback, a file-based install always looks "logged out" to the
-    // broker, so the persisted record is wrongly cleared and cross-session
-    // resume never resolves the nonce (→ "401 Invalid bearer token").
-    claude_access_token_from_keychain().or_else(claude_access_token_from_file)
+pub(crate) fn claude_is_logged_in() -> bool {
+    // Detect logout by *presence* of Claude's credential entry, not its
+    // contents. Reading the contents (the nonce/token) is ACL-gated and pops a
+    // macOS password prompt on every session; an existence query reads only
+    // metadata and never prompts. The broker only needs to know "did the user
+    // log out" (entry gone) to honour the logout-means-tokens-gone invariant —
+    // it does not need the token value. Retention is otherwise bounded by the
+    // record's own TTL (see `record_is_expired`).
+    //
+    // Claude Code stores credentials in the macOS keychain
+    // (`Claude Code-credentials`) and, on some installs, a file at
+    // `~/.claude/.credentials.json`; its keychain account name has varied
+    // across versions ("unknown", the OS username, "claude-code-user"). Treat
+    // the user as logged in if *any* of those exists.
+    claude_keychain_entry_exists() || claude_credentials_file_exists()
 }
 
 #[cfg(target_os = "macos")]
-fn claude_access_token_from_keychain() -> Option<String> {
-    use security_framework::os::macos::passwords::find_generic_password;
-
-    let service = claude_credentials_service_name()?;
-
-    // Claude Code writes its `Claude Code-credentials` entry under account
-    // "unknown" (its default when it has no user identity) on current
-    // versions, and historically under the OS username. Try both — using the
-    // wrong account silently misses the entry, which makes hydration think
-    // the user is logged out and wrongly clears the persisted record.
+fn claude_keychain_entry_exists() -> bool {
+    let Some(service) = claude_credentials_service_name() else {
+        return false;
+    };
     let user = std::env::var("USER").unwrap_or_default();
     let candidates = ["unknown", user.as_str(), "claude-code-user"];
-    for account in candidates {
-        if account.is_empty() {
-            continue;
-        }
-        if let Ok((password_bytes, _item)) = find_generic_password(None, &service, account)
-            && let Ok(raw) = std::str::from_utf8(password_bytes.as_ref())
-            && let Some(token) = claude_access_token_from_envelope(raw)
-        {
-            return Some(token);
-        }
-    }
-    None
+    candidates
+        .iter()
+        .any(|account| !account.is_empty() && keychain_generic_password_exists(&service, account))
 }
 
 #[cfg(target_os = "macos")]
-fn claude_access_token_from_file() -> Option<String> {
+fn claude_credentials_file_exists() -> bool {
     let dir = if let Some(custom) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         std::path::PathBuf::from(custom)
     } else {
-        std::path::PathBuf::from(std::env::var_os("HOME")?).join(".claude")
+        match std::env::var_os("HOME") {
+            Some(home) => std::path::PathBuf::from(home).join(".claude"),
+            None => return false,
+        }
     };
-    let raw = std::fs::read_to_string(dir.join(".credentials.json")).ok()?;
-    claude_access_token_from_envelope(&raw)
+    dir.join(".credentials.json").is_file()
 }
 
-/// Extract `claudeAiOauth.accessToken` from a Claude credentials JSON
-/// envelope (same shape in the keychain entry and the credentials file).
+/// Return whether a generic-password item exists for `service`/`account`,
+/// reading metadata only so macOS does not prompt for ACL authorization.
 #[cfg(target_os = "macos")]
-fn claude_access_token_from_envelope(raw: &str) -> Option<String> {
-    let envelope: serde_json::Value = serde_json::from_str(raw).ok()?;
-    envelope
-        .get("claudeAiOauth")?
-        .get("accessToken")?
-        .as_str()
-        .map(str::to_owned)
+fn keychain_generic_password_exists(service: &str, account: &str) -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFMutableDictionary;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::base::{CFRelease, CFTypeRef};
+    use security_framework_sys::base::errSecSuccess;
+    use security_framework_sys::item::{
+        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecMatchLimit,
+        kSecReturnAttributes,
+    };
+
+    let class_key = unsafe { CFString::wrap_under_get_rule(kSecClass) };
+    let class_val = unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword) };
+    let svc_key = unsafe { CFString::wrap_under_get_rule(kSecAttrService) };
+    let svc_val = CFString::from(service);
+    let acct_key = unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) };
+    let acct_val = CFString::from(account);
+    let limit_key = unsafe { CFString::wrap_under_get_rule(kSecMatchLimit) };
+    let limit_val = unsafe { CFString::wrap_under_get_rule(macos_ffi::kSecMatchLimitOne) };
+    // Request attributes (not data) so the query never touches the protected
+    // secret and therefore never prompts.
+    let return_key = unsafe { CFString::wrap_under_get_rule(kSecReturnAttributes) };
+    let return_val = CFBoolean::true_value();
+
+    let mut dict = CFMutableDictionary::from_CFType_pairs(&[]);
+    dict.add(&class_key.as_CFTypeRef(), &class_val.as_CFTypeRef());
+    dict.add(&svc_key.as_CFTypeRef(), &svc_val.as_CFTypeRef());
+    dict.add(&acct_key.as_CFTypeRef(), &acct_val.as_CFTypeRef());
+    dict.add(&limit_key.as_CFTypeRef(), &limit_val.as_CFTypeRef());
+    dict.add(&return_key.as_CFTypeRef(), &return_val.as_CFTypeRef());
+
+    let mut result: CFTypeRef = std::ptr::null();
+    // SAFETY: `dict` is a valid CFDictionaryRef; `result` is a valid out-pointer.
+    let status = unsafe { macos_ffi::SecItemCopyMatching(dict.as_concrete_TypeRef(), &mut result) };
+    if !result.is_null() {
+        // SAFETY: a non-null result is a Copy-rule CF object we must release.
+        unsafe { CFRelease(result) };
+    }
+    status == errSecSuccess
 }
 
 /// Derive the macOS keychain service name claude uses for its OAuth
@@ -680,6 +763,20 @@ impl BrokerStore for KeystoreBrokerStore {
             tracing::info!(
                 "nono binary path changed ({stored_path} → {}); deleting stale broker entry",
                 exe_path.display()
+            );
+            delete_broker_entry_in_process(&self.service, &self.account);
+            return Ok(None);
+        }
+
+        // Retention TTL: delete and ignore a record older than the max age,
+        // bounding how long the real refresh token survives an idle session.
+        if let Some(now) = now_unix_secs()
+            && record_is_expired(parsed.saved_at_secs, now, BROKER_RECORD_MAX_AGE_SECS)
+        {
+            tracing::info!(
+                "broker record at {}/{} exceeded retention TTL; deleting",
+                self.service,
+                self.account
             );
             delete_broker_entry_in_process(&self.service, &self.account);
             return Ok(None);
@@ -846,16 +943,18 @@ mod tests {
     // ── Locked-keychain detection ────────────────────────────────────────
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn claude_access_token_from_envelope_extracts_field() {
-        let raw = r#"{"claudeAiOauth":{"accessToken":"nono_abc","refreshToken":"nono_def"}}"#;
-        assert_eq!(
-            claude_access_token_from_envelope(raw).as_deref(),
-            Some("nono_abc")
-        );
-        // Missing field / malformed → None (treated as "logged out").
-        assert_eq!(claude_access_token_from_envelope(r#"{"other":1}"#), None);
-        assert_eq!(claude_access_token_from_envelope("not json"), None);
+    fn record_is_expired_respects_ttl_and_edge_cases() {
+        let max = 100u64;
+        // Within TTL → not expired.
+        assert!(!record_is_expired(Some(1_000), 1_050, max));
+        // Exactly at TTL boundary → not yet expired (strict >).
+        assert!(!record_is_expired(Some(1_000), 1_100, max));
+        // Past TTL → expired.
+        assert!(record_is_expired(Some(1_000), 1_101, max));
+        // Legacy record without a stamp → never expired (don't force re-login).
+        assert!(!record_is_expired(None, u64::MAX, max));
+        // Clock skew (now < saved) → not expired.
+        assert!(!record_is_expired(Some(2_000), 1_000, max));
     }
 
     #[test]

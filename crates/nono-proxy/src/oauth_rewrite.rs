@@ -247,9 +247,7 @@ pub fn resolve_nonces_in_oauth_request_body(
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return None;
     };
-    let Some(obj) = value.as_object_mut() else {
-        return None;
-    };
+    let obj = value.as_object_mut()?;
 
     let mut substituted = 0u32;
     for field in ["refresh_token", "access_token"] {
@@ -257,9 +255,9 @@ pub fn resolve_nonces_in_oauth_request_body(
             Some(s) => s.to_string(),
             None => continue,
         };
-        if let Some(resolved) =
-            crate::tls_intercept::handle::resolve_nonce_in_header_value(&current, consumer, resolver)
-        {
+        if let Some(resolved) = crate::tls_intercept::handle::resolve_nonce_in_header_value(
+            &current, consumer, resolver,
+        ) {
             obj.insert(field.to_string(), serde_json::Value::String(resolved));
             substituted += 1;
         }
@@ -307,8 +305,7 @@ mod request_tests {
         let body = format!(
             r#"{{"grant_type":"refresh_token","refresh_token":"{nonce}","client_id":"app"}}"#
         );
-        let result =
-            resolve_nonces_in_oauth_request_body(body.as_bytes(), "proxy.svc", &resolver);
+        let result = resolve_nonces_in_oauth_request_body(body.as_bytes(), "proxy.svc", &resolver);
         assert!(result.is_some(), "expected nonce to be resolved");
         let out = result.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -340,8 +337,7 @@ mod request_tests {
         };
         let body = format!(r#"{{"refresh_token":"{nonce}"}}"#);
         assert!(
-            resolve_nonces_in_oauth_request_body(body.as_bytes(), "proxy.svc", &resolver)
-                .is_none(),
+            resolve_nonces_in_oauth_request_body(body.as_bytes(), "proxy.svc", &resolver).is_none(),
             "unknown nonce → no rewrite, forward as-is"
         );
     }
@@ -386,11 +382,9 @@ mod request_tests {
             access_nonce: access_nonce.clone(),
             refresh_nonce: refresh_nonce.clone(),
         };
-        let body = format!(
-            r#"{{"access_token":"{access_nonce}","refresh_token":"{refresh_nonce}"}}"#
-        );
-        let result =
-            resolve_nonces_in_oauth_request_body(body.as_bytes(), "proxy.svc", &resolver);
+        let body =
+            format!(r#"{{"access_token":"{access_nonce}","refresh_token":"{refresh_nonce}"}}"#);
+        let result = resolve_nonces_in_oauth_request_body(body.as_bytes(), "proxy.svc", &resolver);
         assert!(result.is_some());
         let out = result.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
