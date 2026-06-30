@@ -7,12 +7,19 @@
 //! sandbox persists nonces (e.g. to `Claude Code-credentials`); the proxy
 //! swaps them back to the real tokens on egress.
 //!
-//! **Fail-closed = pass-through.** Every failure mode (body isn't JSON, has
-//! no token fields, or can't be re-serialised) returns a pass-through
-//! outcome so the caller forwards the *original* body unchanged. The only
-//! thing that ever leaves this module is either an untouched body or one
-//! whose real tokens have been replaced by nonces — never a partially
-//! mangled body, and never a real token when a nonce was expected.
+//! **Fail closed.** The sandboxed client must never receive a real OAuth
+//! token. We therefore forward the upstream's *original* body only when we
+//! have positively parsed it as a JSON object and confirmed it carries no
+//! string `access_token` / `refresh_token` field
+//! ([`OauthRewriteOutcome::PassThroughSafe`] — e.g. an
+//! `{"error":"invalid_grant"}` reply). In every other case — the body isn't
+//! JSON, isn't a JSON object, or re-serialisation failed after substitution
+//! — we cannot prove the body is credential-free, so we return
+//! [`OauthRewriteOutcome::FailClosed`] and the caller discards the upstream
+//! response rather than risk leaking a real token. The only body that ever
+//! reaches the client is one verified credential-free or one whose real
+//! tokens have been replaced by nonces — never a partially mangled body, and
+//! never a real token when a nonce was expected.
 
 use crate::token::OauthCaptureResolver;
 use bytes::Bytes;
@@ -21,11 +28,16 @@ use zeroize::Zeroizing;
 /// Outcome of [`rewrite_oauth_json_body`].
 #[derive(Debug)]
 pub enum OauthRewriteOutcome {
-    /// Body did not parse as JSON. Forward original unchanged.
-    NotJson,
-    /// Body parsed but carried no `access_token` / `refresh_token` string
-    /// fields (or re-serialisation failed). Forward original unchanged.
-    NoTokenFields,
+    /// Body parsed as a JSON object and was verified to carry no string
+    /// `access_token` / `refresh_token` field, so it cannot leak a real
+    /// credential. Safe to forward the original body unchanged (e.g. an
+    /// `{"error":"invalid_grant"}` reply keeps `/login` working).
+    PassThroughSafe,
+    /// The body could not be proven credential-free: it isn't JSON, isn't a
+    /// JSON object, or re-serialisation failed after substitution. The caller
+    /// MUST NOT forward the original body — it may carry a real token. Fail
+    /// closed.
+    FailClosed,
     /// Tokens were substituted with nonces. Forward `bytes` with rebuilt
     /// framing. `substituted` is the count (1 or 2) for audit logging.
     Rewritten { bytes: Bytes, substituted: u32 },
@@ -40,10 +52,14 @@ pub fn rewrite_oauth_json_body(
     capture: &dyn OauthCaptureResolver,
 ) -> OauthRewriteOutcome {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return OauthRewriteOutcome::NotJson;
+        // Not JSON: we cannot inspect it for tokens, so we must not forward it.
+        return OauthRewriteOutcome::FailClosed;
     };
     let Some(obj) = value.as_object_mut() else {
-        return OauthRewriteOutcome::NoTokenFields;
+        // JSON but not an object (e.g. an array or scalar). A real token
+        // endpoint always returns an object; an anomalous shape we cannot
+        // introspect must fail closed rather than pass through verbatim.
+        return OauthRewriteOutcome::FailClosed;
     };
 
     // Extract the string token fields (non-string values are ignored).
@@ -89,7 +105,9 @@ pub fn rewrite_oauth_json_body(
     };
 
     if substituted == 0 {
-        return OauthRewriteOutcome::NoTokenFields;
+        // Parsed as an object with no string token fields: verified
+        // credential-free, so forwarding the original body cannot leak.
+        return OauthRewriteOutcome::PassThroughSafe;
     }
 
     match serde_json::to_vec(&value) {
@@ -98,8 +116,10 @@ pub fn rewrite_oauth_json_body(
             substituted,
         },
         // Re-serialisation should never fail for a value we just parsed, but
-        // if it does, pass through rather than emit a half-built body.
-        Err(_) => OauthRewriteOutcome::NoTokenFields,
+        // if it does we must fail closed: the original body still holds the
+        // real tokens we already handed to the broker, so passing it through
+        // would leak them to the client.
+        Err(_) => OauthRewriteOutcome::FailClosed,
     }
 }
 
@@ -187,39 +207,43 @@ mod tests {
     }
 
     #[test]
-    fn non_json_passes_through() {
+    fn non_json_fails_closed() {
+        // A body we cannot parse may hide a real token → never forward it.
         let cap = StubCapture::new();
         assert!(matches!(
             rewrite_oauth_json_body(b"not json at all", &cap),
-            OauthRewriteOutcome::NotJson
+            OauthRewriteOutcome::FailClosed
         ));
     }
 
     #[test]
-    fn json_without_token_fields_passes_through() {
+    fn json_without_token_fields_is_pass_through_safe() {
+        // Parsed object, no token fields → verified credential-free.
         let cap = StubCapture::new();
         assert!(matches!(
             rewrite_oauth_json_body(br#"{"error":"invalid_grant"}"#, &cap),
-            OauthRewriteOutcome::NoTokenFields
+            OauthRewriteOutcome::PassThroughSafe
         ));
     }
 
     #[test]
-    fn non_object_json_passes_through() {
+    fn non_object_json_fails_closed() {
+        // JSON but not an object: we can't introspect it for tokens.
         let cap = StubCapture::new();
         assert!(matches!(
             rewrite_oauth_json_body(br#"["access_token","x"]"#, &cap),
-            OauthRewriteOutcome::NoTokenFields
+            OauthRewriteOutcome::FailClosed
         ));
     }
 
     #[test]
-    fn non_string_token_field_ignored() {
-        // access_token present but not a string → treated as absent.
+    fn non_string_token_field_is_pass_through_safe() {
+        // access_token present but not a string → treated as absent, and the
+        // object is otherwise verified credential-free.
         let cap = StubCapture::new();
         assert!(matches!(
             rewrite_oauth_json_body(br#"{"access_token":12345}"#, &cap),
-            OauthRewriteOutcome::NoTokenFields
+            OauthRewriteOutcome::PassThroughSafe
         ));
     }
 }

@@ -601,8 +601,11 @@ async fn send_h2_response_with_body(
 
 /// Buffer the upstream OAuth token response, swap real `access_token` /
 /// `refresh_token` JSON fields for broker nonces, and relay the rewritten body
-/// to the client. Fail-closed = pass-through: any non-rewrite outcome forwards
-/// the original headers + body unchanged (see [`crate::oauth_rewrite`]).
+/// to the client. Fails closed: the original body is forwarded only when the
+/// rewriter has verified it carries no real credential
+/// ([`OauthRewriteOutcome::PassThroughSafe`]); anything unverifiable yields a
+/// synthesized credential-free error so a real token never reaches the client
+/// (see [`crate::oauth_rewrite`]).
 async fn capture_and_rewrite_oauth_response(
     status: http::StatusCode,
     resp_headers: HeaderMap,
@@ -631,11 +634,36 @@ async fn capture_and_rewrite_oauth_response(
             headers.remove(http::header::CONTENT_ENCODING);
             send_h2_response_with_body(respond, status, headers, bytes).await
         }
-        OauthRewriteOutcome::NotJson | OauthRewriteOutcome::NoTokenFields => {
-            debug!("h2 oauth-capture: no token fields to rewrite; forwarding unchanged");
+        OauthRewriteOutcome::PassThroughSafe => {
+            debug!("h2 oauth-capture: verified credential-free; forwarding unchanged");
             send_h2_response_with_body(respond, status, resp_headers, Bytes::from(buffered)).await
         }
+        OauthRewriteOutcome::FailClosed => {
+            warn!(
+                "h2 oauth-capture: token response not verifiable as credential-free; \
+                 failing closed"
+            );
+            send_h2_fail_closed(respond).await
+        }
     }
+}
+
+/// Emit a credential-free fail-closed response on the HTTP/2 capture path.
+/// The upstream body (which may carry a real token) is discarded; the client
+/// receives a `502` with a token-free JSON error instead.
+async fn send_h2_fail_closed(respond: &mut h2::server::SendResponse<Bytes>) -> Result<()> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    send_h2_response_with_body(
+        respond,
+        http::StatusCode::BAD_GATEWAY,
+        headers,
+        Bytes::from_static(crate::forward::FAIL_CLOSED_BODY.as_bytes()),
+    )
+    .await
 }
 
 /// Send a simple h2 error response (no body).

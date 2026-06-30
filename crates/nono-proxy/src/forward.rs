@@ -27,7 +27,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Timeout for upstream TCP connect (matches the historical reverse-proxy value).
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -68,19 +68,54 @@ pub struct UpstreamSpec<'a> {
     pub tls_connector: &'a TlsConnector,
 }
 
+/// What a [`ResponseBodyRewriter`] decides to do with a buffered response.
+///
+/// OAuth capture must never relay a real token to the sandboxed client, so
+/// the rewriter chooses explicitly between rewriting, forwarding verbatim,
+/// and failing closed — there is no implicit "forward on error" path.
+pub enum ResponseRewrite {
+    /// Replace the body with these bytes: forward rebuilt headers
+    /// (Content-Length replaced; Transfer-Encoding / Content-Encoding
+    /// dropped) followed by the new body.
+    Replace(Vec<u8>),
+    /// Forward the original upstream response unchanged. The rewriter must
+    /// only return this when it has verified the body carries no credential.
+    PassThrough,
+    /// The body could not be verified credential-free. Discard the upstream
+    /// response entirely and emit a synthesized, credential-free error
+    /// instead, so a real token can never reach the client.
+    FailClosed,
+}
+
 /// A response-body rewriter for OAuth-capture routes.
 ///
 /// When passed to [`forward_request`], it switches the response path from
 /// chunk-by-chunk streaming to buffer-the-whole-response: the closure is
-/// invoked on the body bytes (chunked transfer decoded first), and:
-/// - `Some(new_body)` → forward rebuilt headers (Content-Length replaced;
-///   Transfer-Encoding / Content-Encoding dropped) + the new body.
-/// - `None` → forward the original response unchanged (pass-through-on-error
-///   — body wasn't JSON, no token fields, etc.).
+/// invoked on the body bytes (chunked transfer decoded first) and returns a
+/// [`ResponseRewrite`] decision.
 ///
 /// Pass `None` at the call site to keep the historical streaming behaviour
 /// for non-capture routes.
-pub type ResponseBodyRewriter<'a> = Box<dyn FnOnce(&[u8]) -> Option<Vec<u8>> + Send + 'a>;
+pub type ResponseBodyRewriter<'a> = Box<dyn FnOnce(&[u8]) -> ResponseRewrite + Send + 'a>;
+
+/// Status reported when an OAuth-capture response is refused (fail closed).
+const FAIL_CLOSED_STATUS: u16 = 502;
+
+/// Body emitted when an OAuth-capture response cannot be verified
+/// credential-free. Contains no real token; the client's login fails cleanly
+/// rather than receiving a leaked credential. Shared with the HTTP/2 capture
+/// path ([`crate::tls_intercept::h2_forward`]) so both speak the same error.
+pub(crate) const FAIL_CLOSED_BODY: &str = r#"{"error":"nono_capture_failed","error_description":"nono refused to forward an OAuth token response it could not verify as credential-free"}"#;
+
+/// Build the canned fail-closed HTTP/1.1 response (headers + body).
+fn fail_closed_response() -> Vec<u8> {
+    format!(
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        FAIL_CLOSED_BODY.len(),
+        FAIL_CLOSED_BODY
+    )
+    .into_bytes()
+}
 
 /// Audit-emission context.
 pub struct AuditCtx<'a> {
@@ -347,12 +382,18 @@ where
     Ok(status_code)
 }
 
-/// Buffer the full upstream response, hand the body to `rewriter`, and — if it
-/// returns `Some(new_body)` — rebuild framing with the new Content-Length
-/// (dropping Transfer-Encoding / Content-Encoding, since we now hold plaintext
-/// rewritten bytes). On any framing-parse failure or a `None` from the
-/// rewriter, the original bytes are forwarded unchanged (pass-through-on-error
-/// preserves `/login` even when the body isn't what we expected). Used only by
+/// Buffer the full upstream response, hand the body to `rewriter`, and act on
+/// its [`ResponseRewrite`] decision:
+/// - `Replace(new_body)` → rebuild framing with the new Content-Length
+///   (dropping Transfer-Encoding / Content-Encoding, since we now hold
+///   plaintext rewritten bytes) and forward the new body.
+/// - `PassThrough` → forward the original bytes unchanged.
+/// - `FailClosed` → discard the upstream response and emit a credential-free
+///   error.
+///
+/// If the response framing itself can't be parsed (no header/body separator),
+/// we also fail closed: this path is used only by OAuth-capture routes, where
+/// an unparseable token response must never be relayed verbatim. Used only by
 /// OAuth-capture routes, whose token endpoint returns a small, non-streaming
 /// JSON body.
 async fn stream_response_buffered<U, I>(
@@ -379,10 +420,10 @@ where
         .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2));
 
     let Some(body_start) = header_end else {
-        debug!("response-hook: no header/body separator; forwarding unchanged");
-        inbound.write_all(&raw).await?;
+        warn!("response-hook: no header/body separator; failing closed");
+        inbound.write_all(&fail_closed_response()).await?;
         inbound.flush().await?;
-        return Ok(status_code);
+        return Ok(FAIL_CLOSED_STATUS);
     };
 
     let header_bytes = &raw[..body_start];
@@ -408,11 +449,20 @@ where
         body_bytes
     };
 
-    let Some(new_body) = rewriter(body_for_rewriter) else {
-        debug!("response-hook: rewriter returned None; forwarding unchanged");
-        inbound.write_all(&raw).await?;
-        inbound.flush().await?;
-        return Ok(status_code);
+    let new_body = match rewriter(body_for_rewriter) {
+        ResponseRewrite::Replace(new_body) => new_body,
+        ResponseRewrite::PassThrough => {
+            debug!("response-hook: pass-through (verified credential-free)");
+            inbound.write_all(&raw).await?;
+            inbound.flush().await?;
+            return Ok(status_code);
+        }
+        ResponseRewrite::FailClosed => {
+            warn!("response-hook: fail-closed; refusing to forward unverifiable response");
+            inbound.write_all(&fail_closed_response()).await?;
+            inbound.flush().await?;
+            return Ok(FAIL_CLOSED_STATUS);
+        }
     };
 
     // Rebuild headers: drop Content-Length / Transfer-Encoding /
@@ -557,7 +607,7 @@ mod tests {
         let payload =
             b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello";
         let rewriter: ResponseBodyRewriter<'_> =
-            Box::new(|_body| Some(b"REWRITTEN-BODY!".to_vec())); // 15 bytes
+            Box::new(|_body| ResponseRewrite::Replace(b"REWRITTEN-BODY!".to_vec())); // 15 bytes
         let out = run_buffered(payload, rewriter).await;
         assert!(out.contains("Content-Length: 15\r\n"), "new CL: {out:?}");
         assert!(
@@ -572,11 +622,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffered_forwards_unchanged_when_rewriter_returns_none() {
+    async fn buffered_forwards_unchanged_on_pass_through() {
         let payload = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-        let rewriter: ResponseBodyRewriter<'_> = Box::new(|_| None);
+        let rewriter: ResponseBodyRewriter<'_> = Box::new(|_| ResponseRewrite::PassThrough);
         let out = run_buffered(payload, rewriter).await;
         assert_eq!(out, String::from_utf8_lossy(payload));
+    }
+
+    #[tokio::test]
+    async fn buffered_fails_closed_discards_original_body() {
+        // The defining guarantee: when the rewriter fails closed, the original
+        // upstream body (which may carry a real token) must NOT be forwarded.
+        let payload = b"HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\n{\"access_token\":\"REAL!\"}";
+        let rewriter: ResponseBodyRewriter<'_> = Box::new(|_| ResponseRewrite::FailClosed);
+        let out = run_buffered(payload, rewriter).await;
+        assert!(
+            !out.contains("REAL!"),
+            "real token must never reach the client: {out:?}"
+        );
+        assert!(
+            out.contains("502 Bad Gateway"),
+            "fail-closed status: {out:?}"
+        );
+        assert!(
+            out.contains("nono_capture_failed"),
+            "credential-free error body: {out:?}"
+        );
     }
 
     #[tokio::test]
@@ -584,7 +655,7 @@ mod tests {
         // Chunked + gzip headers must be dropped once we hold rewritten bytes.
         let payload = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         let rewriter: ResponseBodyRewriter<'_> =
-            Box::new(|_| Some(b"plaintext-json-here!".to_vec()));
+            Box::new(|_| ResponseRewrite::Replace(b"plaintext-json-here!".to_vec()));
         let out = run_buffered(payload, rewriter).await;
         assert!(out.contains("Content-Length: 20"), "CL added: {out:?}");
         assert!(
@@ -598,14 +669,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffered_forwards_unchanged_on_missing_header_separator() {
-        let payload = b"HTTP/1.1 200 OK no separator here";
-        let rewriter: ResponseBodyRewriter<'_> = Box::new(|_| Some(b"x".to_vec()));
+    async fn buffered_fails_closed_on_missing_header_separator() {
+        // No header/body split → we can't parse framing → fail closed rather
+        // than relay a potentially token-bearing body verbatim.
+        let payload = b"HTTP/1.1 200 OK no separator access_token here";
+        let rewriter: ResponseBodyRewriter<'_> =
+            Box::new(|_| ResponseRewrite::Replace(b"x".to_vec()));
         let out = run_buffered(payload, rewriter).await;
-        assert_eq!(
-            out,
-            String::from_utf8_lossy(payload),
-            "no split → unchanged"
+        assert!(out.contains("502 Bad Gateway"), "fail-closed: {out:?}");
+        assert!(out.contains("nono_capture_failed"), "error body: {out:?}");
+        assert!(
+            !out.contains("no separator access_token"),
+            "original bytes must not be forwarded: {out:?}"
         );
     }
 
@@ -620,7 +695,7 @@ mod tests {
                 "decoded JSON, got: {s:?}"
             );
             assert!(!s.contains("1a\r\n"), "chunk framing must be stripped");
-            Some(b"{\"access_token\":\"nono_x\"}".to_vec())
+            ResponseRewrite::Replace(b"{\"access_token\":\"nono_x\"}".to_vec())
         });
         let out = run_buffered(payload, rewriter).await;
         assert!(out.contains("nono_x"), "rewritten: {out:?}");
@@ -635,7 +710,7 @@ mod tests {
                 body.starts_with(b"ZZZ"),
                 "raw body passed through on decode fail"
             );
-            None
+            ResponseRewrite::PassThrough
         });
         let out = run_buffered(payload, rewriter).await;
         assert_eq!(out, String::from_utf8_lossy(payload));

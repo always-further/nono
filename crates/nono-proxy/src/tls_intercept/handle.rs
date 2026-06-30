@@ -1108,23 +1108,40 @@ where
     };
 
     // OAuth-capture response rewrite: buffer the token response and swap real
-    // access/refresh tokens for broker nonces. Pass-through-on-error keeps
-    // `/login` working if the body isn't the expected JSON.
+    // access/refresh tokens for broker nonces. Fails closed — the original
+    // upstream body is forwarded only when the rewriter has verified it
+    // carries no real credential; anything unverifiable is discarded and a
+    // credential-free error is returned instead, so a real token can never
+    // reach the sandboxed client.
     let response_hook: Option<forward::ResponseBodyRewriter<'_>> = if oauth_capture_active {
         ctx.nonce_resolver.as_ref().map(|resolver| {
             let resolver = Arc::clone(resolver);
             let host = ctx.host.to_string();
             let hook: forward::ResponseBodyRewriter<'_> = Box::new(move |body: &[u8]| {
-                let capture = resolver.oauth_capture()?;
+                use crate::oauth_rewrite::OauthRewriteOutcome;
+                use forward::ResponseRewrite;
+                let Some(capture) = resolver.oauth_capture() else {
+                    // Capture was active but no capture resolver is wired:
+                    // we cannot swap tokens for nonces, so we must not relay
+                    // the real-token response.
+                    warn!("oauth-capture (h1): no capture resolver; failing closed for {host}");
+                    return ResponseRewrite::FailClosed;
+                };
                 match crate::oauth_rewrite::rewrite_oauth_json_body(body, capture) {
-                    crate::oauth_rewrite::OauthRewriteOutcome::Rewritten { bytes, substituted } => {
+                    OauthRewriteOutcome::Rewritten { bytes, substituted } => {
                         debug!(
                             "oauth-capture (h1): substituted {substituted} token field(s) for {host}"
                         );
-                        Some(bytes.to_vec())
+                        ResponseRewrite::Replace(bytes.to_vec())
                     }
-                    crate::oauth_rewrite::OauthRewriteOutcome::NotJson
-                    | crate::oauth_rewrite::OauthRewriteOutcome::NoTokenFields => None,
+                    OauthRewriteOutcome::PassThroughSafe => ResponseRewrite::PassThrough,
+                    OauthRewriteOutcome::FailClosed => {
+                        warn!(
+                            "oauth-capture (h1): token response not verifiable as \
+                             credential-free; failing closed for {host}"
+                        );
+                        ResponseRewrite::FailClosed
+                    }
                 }
             });
             hook
