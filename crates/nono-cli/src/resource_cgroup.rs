@@ -772,10 +772,20 @@ mod tests {
             Some(base.as_path()),
             "leaf must be a child of the delegated base"
         );
-        // memory.max knob actually took (controller delegated, knob written). A
-        // page-multiple value is echoed back verbatim by the kernel.
-        let max = std::fs::read_to_string(leaf_path.join("memory.max")).expect("read memory.max");
-        assert_eq!(max.trim(), (64u64 * 1024 * 1024).to_string());
+        // All three knobs actually took (controller delegated, knobs written),
+        // read straight back from the kernel:
+        let knob = |name: &str| {
+            std::fs::read_to_string(leaf_path.join(name))
+                .unwrap_or_else(|e| panic!("read {name}: {e}"))
+                .trim()
+                .to_string()
+        };
+        // A page-multiple value is echoed back verbatim.
+        assert_eq!(knob("memory.max"), (64u64 * 1024 * 1024).to_string());
+        // Swap forbidden (host-config-independent, unlike memory.swap.current).
+        assert_eq!(knob("memory.swap.max"), "0");
+        // Whole-leaf OOM kill enabled.
+        assert_eq!(knob("memory.oom.group"), "1");
 
         drop(leaf); // teardown: rmdir
         assert!(

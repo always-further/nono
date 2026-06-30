@@ -157,6 +157,14 @@ fn resource_limits_unsupported_platform() -> nono::NonoError {
     )
 }
 
+/// True only for the exit code a whole-sandbox OOM kill produces (128 + SIGKILL =
+/// 137). Gating the memory-cap diagnostic on this keeps a clean exit, an ordinary
+/// crash, or a different signal from borrowing the "out of memory" story.
+#[cfg(target_os = "linux")]
+const fn is_oom_sigkill_exit(exit_code: i32) -> bool {
+    exit_code == 128 + nix::libc::SIGKILL
+}
+
 fn should_open_supervised_pty(
     detached_start: bool,
     stdin_is_terminal: bool,
@@ -352,13 +360,10 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         // Returning `true` suppresses the generic "killed by SIGKILL" footer.
         #[cfg(target_os = "linux")]
         let on_exit_diag_fn = |code: i32| -> bool {
-            // Only explain the kernel's exit code for a whole-sandbox OOM kill
-            // (128 + SIGKILL = 137). Bailing on any other code stops an unrelated
-            // failure from getting a spurious "killed by the kernel" story (or its
-            // real footer suppressed) just because one descendant was OOM-reaped
-            // earlier.
-            const OOM_SIGKILL_EXIT: i32 = 128 + nix::libc::SIGKILL;
-            if code != OOM_SIGKILL_EXIT {
+            // Only explain a whole-sandbox OOM kill (exit 137). Any other code —
+            // a clean exit, an ordinary crash (e.g. SIGSEGV -> 139), a SIGTERM ->
+            // 143 — gets the normal footer, not a spurious "out of memory" story.
+            if !is_oom_sigkill_exit(code) {
                 return false;
             }
             cgroup_leaf
@@ -428,6 +433,31 @@ mod tests {
         let err = super::resource_limits_unsupported_platform();
         assert!(matches!(err, nono::NonoError::UnsupportedPlatform(_)));
         assert!(err.to_string().contains("only enforced on Linux"));
+    }
+
+    /// The memory-cap diagnostic fires only on exit 137 (the whole-sandbox OOM
+    /// kill). Pins that a clean exit, an ordinary crash (SIGSEGV -> 139), or a
+    /// SIGTERM (-> 143) is NOT mistaken for an out-of-memory kill. (The other half
+    /// of the gate — a watchdog-timeout SIGKILL, also 137, suppressed via
+    /// !killed_by_timeout — lives in exec_strategy and is covered by review.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn only_exit_137_is_treated_as_an_oom_kill() {
+        use super::is_oom_sigkill_exit;
+        assert!(is_oom_sigkill_exit(137), "128 + SIGKILL(9) = 137");
+        assert!(!is_oom_sigkill_exit(0), "clean exit is not an OOM kill");
+        assert!(
+            !is_oom_sigkill_exit(1),
+            "ordinary failure is not an OOM kill"
+        );
+        assert!(
+            !is_oom_sigkill_exit(139),
+            "SIGSEGV crash (128+11) is not an OOM kill"
+        );
+        assert!(
+            !is_oom_sigkill_exit(143),
+            "SIGTERM (128+15) is not an OOM kill"
+        );
     }
 
     #[test]

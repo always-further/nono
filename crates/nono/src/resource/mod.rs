@@ -140,8 +140,12 @@ mod tests {
 
     #[test]
     fn parse_size_decimal_units() {
+        // All four 1000-based tiers, paired with their 1024-based twins (covered in
+        // parse_size_binary_units) so a swapped multiplier on any tier is caught.
         assert_eq!(parse_size("1KB").unwrap(), 1000);
         assert_eq!(parse_size("1MB").unwrap(), 1_000_000);
+        assert_eq!(parse_size("1GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_size("1TB").unwrap(), 1_000_000_000_000);
     }
 
     #[test]
@@ -164,6 +168,23 @@ mod tests {
     #[test]
     fn parse_size_rejects_overflow() {
         assert!(parse_size("99999999999999999999T").is_err());
+    }
+
+    #[test]
+    fn parse_size_rejection_messages_name_the_cause() {
+        // Each rejection names its specific cause, so the CLI can guide the user
+        // rather than emit a generic "bad size". Pins the message routing so a
+        // future edit can't accidentally collapse them into one error.
+        let msg = |s: &str| parse_size(s).unwrap_err().to_string();
+        assert!(msg("").contains("cannot be empty"));
+        assert!(msg("abc").contains("missing numeric value"));
+        assert!(msg("12x").contains("unknown unit"));
+        assert!(msg("0").contains("greater than zero"));
+        // A numeric part too large for u64 fails at integer parse...
+        assert!(msg("99999999999999999999").contains("not a valid integer"));
+        // ...whereas a value that fits but overflows once scaled by the unit
+        // reports the byte-count overflow (checked_mul path).
+        assert!(msg("18014398509481984K").contains("overflows"));
     }
 
     #[test]
@@ -232,6 +253,14 @@ mod tests {
             18_446_744_073_709_551_u64 * 1000
         );
         assert!(parse_size("18446744073709552KB").is_err());
+
+        // M / Mi / MiB multiplier = 1024^2 = 1048576.
+        // u64::MAX / 1048576 = 17592186044415.
+        assert_eq!(
+            parse_size("17592186044415M").unwrap(),
+            17_592_186_044_415_u64 * 1024_u64.pow(2)
+        );
+        assert!(parse_size("17592186044416M").is_err());
 
         // T / Ti / TiB multiplier = 1024^4 = 1099511627776.
         // u64::MAX / 1099511627776 = 16777215.
