@@ -996,10 +996,11 @@ where
     let strip_header = cred.map(|c| c.proxy_header_name.as_str()).unwrap_or("");
     let filtered_headers = reverse::filter_headers(&req.header_bytes, strip_header);
     let content_length = reverse::extract_content_length(&req.header_bytes);
-    let body = match reverse::read_request_body(tls_stream, content_length, &req.buffered).await? {
-        Some(b) => b,
-        None => return Ok(()),
-    };
+    let mut body =
+        match reverse::read_request_body(tls_stream, content_length, &req.buffered).await? {
+            Some(b) => b,
+            None => return Ok(()),
+        };
 
     // --- Build upstream request bytes ---
     let upstream_authority = reverse::format_host_header(UpstreamScheme::Https, ctx.host, ctx.port);
@@ -1012,11 +1013,52 @@ where
     }
     let injected_header_names = reverse::injected_credential_header_names(cred);
     let nonce_consumer = service.map(|s| format!("proxy.{s}"));
+
+    // OAuth-capture detection (HTTP/1.1 path): this route declares match
+    // patterns, the inbound path matches one, and a capture-capable resolver
+    // is wired. When active we force identity request encoding (below) and
+    // rewrite the token response (the `response_hook` passed to forward).
+    let oauth_capture_active = route
+        .and_then(|r| r.oauth_capture_match.as_ref())
+        .is_some_and(|oc| {
+            let p = req.path.split('?').next().unwrap_or(req.path.as_str());
+            p == oc.token_url_match || p == oc.refresh_url_match
+        })
+        && ctx
+            .nonce_resolver
+            .as_deref()
+            .and_then(|r| r.oauth_capture())
+            .is_some();
+
+    // Resolve broker nonces in the request body for token refresh requests.
+    // When the agent sends a refresh, `refresh_token` in the JSON body is a
+    // nono_<hex> nonce that must be swapped for the real token before the
+    // request reaches the upstream OAuth server. Unresolvable nonces are
+    // forwarded unchanged (the upstream rejects with an auth error, which is
+    // the correct fail-closed behavior: no real credential is leaked).
+    if oauth_capture_active
+        && let (Some(consumer), Some(resolver)) =
+            (nonce_consumer.as_deref(), ctx.nonce_resolver.as_deref())
+        && let Some(rewritten) =
+            crate::oauth_rewrite::resolve_nonces_in_oauth_request_body(&body, consumer, resolver)
+    {
+        debug!(
+            "oauth-capture (h1): resolved nonce(s) in refresh request body for {}",
+            ctx.host
+        );
+        body = rewritten;
+    }
+
     for (name, value) in &filtered_headers {
         if injected_header_names
             .iter()
             .any(|header| name.eq_ignore_ascii_case(header))
         {
+            continue;
+        }
+        // For OAuth capture, drop accept-encoding so the upstream returns
+        // plaintext JSON the rewriter can parse.
+        if oauth_capture_active && name.eq_ignore_ascii_case("accept-encoding") {
             continue;
         }
         let resolved_value = nonce_consumer
@@ -1064,12 +1106,57 @@ where
         method: &req.method,
         path: &req.path,
     };
+
+    // OAuth-capture response rewrite: buffer the token response and swap real
+    // access/refresh tokens for broker nonces. Fails closed — the original
+    // upstream body is forwarded only when the rewriter has verified it
+    // carries no real credential; anything unverifiable is discarded and a
+    // credential-free error is returned instead, so a real token can never
+    // reach the sandboxed client.
+    let response_hook: Option<forward::ResponseBodyRewriter<'_>> = if oauth_capture_active {
+        ctx.nonce_resolver.as_ref().map(|resolver| {
+            let resolver = Arc::clone(resolver);
+            let host = ctx.host.to_string();
+            let hook: forward::ResponseBodyRewriter<'_> = Box::new(move |body: &[u8]| {
+                use crate::oauth_rewrite::OauthRewriteOutcome;
+                use forward::ResponseRewrite;
+                let Some(capture) = resolver.oauth_capture() else {
+                    // Capture was active but no capture resolver is wired:
+                    // we cannot swap tokens for nonces, so we must not relay
+                    // the real-token response.
+                    warn!("oauth-capture (h1): no capture resolver; failing closed for {host}");
+                    return ResponseRewrite::FailClosed;
+                };
+                match crate::oauth_rewrite::rewrite_oauth_json_body(body, capture) {
+                    OauthRewriteOutcome::Rewritten { bytes, substituted } => {
+                        debug!(
+                            "oauth-capture (h1): substituted {substituted} token field(s) for {host}"
+                        );
+                        ResponseRewrite::Replace(bytes.to_vec())
+                    }
+                    OauthRewriteOutcome::PassThroughSafe => ResponseRewrite::PassThrough,
+                    OauthRewriteOutcome::FailClosed => {
+                        warn!(
+                            "oauth-capture (h1): token response not verifiable as \
+                             credential-free; failing closed for {host}"
+                        );
+                        ResponseRewrite::FailClosed
+                    }
+                }
+            });
+            hook
+        })
+    } else {
+        None
+    };
+
     if let Err(e) = forward::forward_request(
         tls_stream,
         request.as_bytes(),
         &body,
         upstream_spec,
         audit_ctx,
+        response_hook,
     )
     .await
     {
@@ -1335,6 +1422,7 @@ mod tests {
             oauth2: None,
             aws_auth: None,
             endpoint_policy: None,
+            oauth_capture: None,
         }
     }
 

@@ -3,8 +3,8 @@ use crate::audit_integrity::{
     CommandPolicyStdioStreamAudit,
 };
 use crate::command_policy::{
-    CommandPoliciesConfig, CommandSandboxConfig, InterceptActionConfig, ResolvedCommandBinaries,
-    ResolvedCommandBinary, has_explicit_self_invocation_entry,
+    CaptureFormat, CommandPoliciesConfig, CommandSandboxConfig, InterceptActionConfig,
+    ResolvedCommandBinaries, ResolvedCommandBinary, has_explicit_self_invocation_entry,
 };
 use crate::tool_sandbox::credentials::{ResolvedCredential, resolve_credentials};
 use crate::tool_sandbox::env::{
@@ -351,7 +351,12 @@ impl PreparedToolSandboxRuntime {
     }
 
     /// Grants Seatbelt capabilities for shim dir execution, socket access,
-    /// and metadata-only cwd traversal so getcwd() works inside the sandbox.
+    /// and metadata-only traversal of the working-directory ancestor chain.
+    ///
+    /// Note: `file-read-metadata` is not sufficient for `getcwd(3)`, which also
+    /// needs `file-read-data` on the directory (and parent) to reconstruct the
+    /// path when the kernel vnode cache is cold. The shim therefore tolerates a
+    /// `getcwd` failure by falling back to `$PWD` (see [`resolve_shim_cwd`]).
     pub(crate) fn grant_outer_caps(&self, caps: &mut CapabilitySet) -> Result<()> {
         caps.add_fs(FsCapability::new_dir(
             &self.inner.shim_dir,
@@ -568,6 +573,44 @@ fn current_exe_is_tool_sandbox_shim() -> bool {
     exe.starts_with(shim_dir)
 }
 
+/// Determine the shim's working directory, reported to the supervisor so the
+/// brokered child starts in the same place.
+///
+/// `getcwd(3)` is the authoritative source, but under macOS Seatbelt it is a
+/// mediated operation: when the agent's working directory was granted only
+/// `file-read-metadata` (see [`add_macos_cwd_metadata_rules`]) — and not
+/// `file-read-data` on the directory and its parent that `getcwd`'s reconstruct
+/// path requires — the call fails with `EPERM`. That is the common case for a
+/// tool-sandbox command (e.g. an OAuth keychain `capture` via `security`)
+/// invoked from a project directory the profile did not grant read access to.
+///
+/// On that failure, fall back to the shell-maintained `$PWD`. This does not
+/// weaken the sandbox: `cwd` is only the directory the brokered child is started
+/// in. The child's actual access is governed by its command-policy sandbox, not
+/// by the path reported here, so an agent that spoofs `$PWD` gains nothing it
+/// could not already reach. We accept `$PWD` only when it is absolute.
+fn resolve_shim_cwd() -> Result<PathBuf> {
+    select_shim_cwd(
+        std::env::current_dir(),
+        std::env::var_os("PWD").map(PathBuf::from),
+    )
+}
+
+/// Pure cwd-selection policy for [`resolve_shim_cwd`], factored out so the
+/// `getcwd`-failure fallback is testable without mutating process state.
+fn select_shim_cwd(getcwd: std::io::Result<PathBuf>, pwd_env: Option<PathBuf>) -> Result<PathBuf> {
+    match getcwd {
+        Ok(cwd) => Ok(cwd),
+        Err(getcwd_err) => match pwd_env {
+            Some(pwd) if pwd.is_absolute() => Ok(pwd),
+            _ => Err(NonoError::SandboxInit(format!(
+                "tool-sandbox shim cwd failed: {getcwd_err}; \
+                 grant read access to the working directory or set an absolute $PWD"
+            ))),
+        },
+    }
+}
+
 fn run_shim() -> Result<()> {
     let socket_path = std::env::var_os(TOOL_SANDBOX_SOCKET_ENV)
         .map(PathBuf::from)
@@ -593,10 +636,7 @@ fn run_shim() -> Result<()> {
             e
         })
         .collect::<Vec<_>>();
-    let cwd = std::env::current_dir()
-        .map_err(|e| NonoError::SandboxInit(format!("tool-sandbox shim cwd failed: {e}")))?
-        .into_os_string()
-        .into_vec();
+    let cwd = resolve_shim_cwd()?.into_os_string().into_vec();
 
     let request = ToolSandboxShimRequest {
         command,
@@ -1362,7 +1402,11 @@ fn handle_shim_stream_inner(
     }
 
     // ── Capture ──────────────────────────────────────────────────────────
-    if matches!(intercept_action, InterceptActionConfig::Capture) {
+    if let InterceptActionConfig::Capture {
+        format,
+        secret_paths,
+    } = intercept_action
+    {
         let active = state.active_count.fetch_add(1, Ordering::SeqCst);
         if active >= MAX_ACTIVE_TOOL_SANDBOX_CHILDREN {
             state.active_count.fetch_sub(1, Ordering::SeqCst);
@@ -1395,7 +1439,18 @@ fn handle_shim_stream_inner(
                             "tool-sandbox token broker lock poisoned".to_string(),
                         )
                     })?;
-                    broker.scan_and_reissue(&raw_output)
+                    match format {
+                        None => broker.scan_and_reissue(&raw_output),
+                        Some(CaptureFormat::Json) => {
+                            use crate::tool_sandbox::token_broker::JsonCaptureOutcome;
+                            match broker.rewrite_json_secrets(&raw_output, secret_paths) {
+                                JsonCaptureOutcome::Rewritten(bytes) => bytes,
+                                // Fail-closed: return the sandbox-safe message,
+                                // never the raw stdout that holds the secret.
+                                JsonCaptureOutcome::FailClosed(msg) => msg.into_bytes(),
+                            }
+                        }
+                    }
                 };
                 if captured.len() > MAX_CAPTURE_STDOUT {
                     return Err(NonoError::SandboxInit(
@@ -5080,5 +5135,39 @@ mod tests {
         );
         let dangerous_policy = policy_with_env(None, dangerous);
         assert!(apply_environment_set_vars(&mut vec![], &dangerous_policy).is_err());
+    }
+
+    #[test]
+    fn select_shim_cwd_prefers_getcwd() {
+        // When getcwd succeeds it is authoritative; $PWD is ignored.
+        let chosen = select_shim_cwd(
+            Ok(PathBuf::from("/real/cwd")),
+            Some(PathBuf::from("/stale/pwd")),
+        )
+        .expect("getcwd success");
+        assert_eq!(chosen, PathBuf::from("/real/cwd"));
+    }
+
+    #[test]
+    fn select_shim_cwd_falls_back_to_absolute_pwd_on_getcwd_eperm() {
+        // The reproduced failure: Seatbelt denies getcwd under a metadata-only
+        // cwd grant. An absolute $PWD rescues the shim.
+        let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
+        let chosen = select_shim_cwd(Err(eperm), Some(PathBuf::from("/project/dir")))
+            .expect("absolute $PWD fallback");
+        assert_eq!(chosen, PathBuf::from("/project/dir"));
+    }
+
+    #[test]
+    fn select_shim_cwd_rejects_relative_pwd() {
+        // A relative $PWD is untrustworthy; surface the original getcwd error.
+        let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
+        assert!(select_shim_cwd(Err(eperm), Some(PathBuf::from("relative/dir"))).is_err());
+    }
+
+    #[test]
+    fn select_shim_cwd_errors_when_no_pwd() {
+        let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
+        assert!(select_shim_cwd(Err(eperm), None).is_err());
     }
 }

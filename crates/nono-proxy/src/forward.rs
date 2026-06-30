@@ -27,7 +27,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Timeout for upstream TCP connect (matches the historical reverse-proxy value).
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -68,6 +68,55 @@ pub struct UpstreamSpec<'a> {
     pub tls_connector: &'a TlsConnector,
 }
 
+/// What a [`ResponseBodyRewriter`] decides to do with a buffered response.
+///
+/// OAuth capture must never relay a real token to the sandboxed client, so
+/// the rewriter chooses explicitly between rewriting, forwarding verbatim,
+/// and failing closed — there is no implicit "forward on error" path.
+pub enum ResponseRewrite {
+    /// Replace the body with these bytes: forward rebuilt headers
+    /// (Content-Length replaced; Transfer-Encoding / Content-Encoding
+    /// dropped) followed by the new body.
+    Replace(Vec<u8>),
+    /// Forward the original upstream response unchanged. The rewriter must
+    /// only return this when it has verified the body carries no credential.
+    PassThrough,
+    /// The body could not be verified credential-free. Discard the upstream
+    /// response entirely and emit a synthesized, credential-free error
+    /// instead, so a real token can never reach the client.
+    FailClosed,
+}
+
+/// A response-body rewriter for OAuth-capture routes.
+///
+/// When passed to [`forward_request`], it switches the response path from
+/// chunk-by-chunk streaming to buffer-the-whole-response: the closure is
+/// invoked on the body bytes (chunked transfer decoded first) and returns a
+/// [`ResponseRewrite`] decision.
+///
+/// Pass `None` at the call site to keep the historical streaming behaviour
+/// for non-capture routes.
+pub type ResponseBodyRewriter<'a> = Box<dyn FnOnce(&[u8]) -> ResponseRewrite + Send + 'a>;
+
+/// Status reported when an OAuth-capture response is refused (fail closed).
+const FAIL_CLOSED_STATUS: u16 = 502;
+
+/// Body emitted when an OAuth-capture response cannot be verified
+/// credential-free. Contains no real token; the client's login fails cleanly
+/// rather than receiving a leaked credential. Shared with the HTTP/2 capture
+/// path ([`crate::tls_intercept::h2_forward`]) so both speak the same error.
+pub(crate) const FAIL_CLOSED_BODY: &str = r#"{"error":"nono_capture_failed","error_description":"nono refused to forward an OAuth token response it could not verify as credential-free"}"#;
+
+/// Build the canned fail-closed HTTP/1.1 response (headers + body).
+fn fail_closed_response() -> Vec<u8> {
+    format!(
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        FAIL_CLOSED_BODY.len(),
+        FAIL_CLOSED_BODY
+    )
+    .into_bytes()
+}
+
 /// Audit-emission context.
 pub struct AuditCtx<'a> {
     pub log: Option<&'a audit::SharedAuditLog>,
@@ -92,6 +141,7 @@ pub async fn forward_request<S>(
     body: &[u8],
     upstream: UpstreamSpec<'_>,
     audit: AuditCtx<'_>,
+    response_hook: Option<ResponseBodyRewriter<'_>>,
 ) -> Result<u16>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -99,13 +149,11 @@ where
     let status = match upstream.scheme {
         UpstreamScheme::Https => {
             let mut tls_stream = open_https_upstream(&upstream).await?;
-            write_request(&mut tls_stream, request_bytes, body).await?;
-            stream_response(&mut tls_stream, inbound).await?
+            write_then_stream(&mut tls_stream, request_bytes, body, inbound, response_hook).await?
         }
         UpstreamScheme::Http => {
             let mut tcp_stream = open_http_upstream(&upstream).await?;
-            write_request(&mut tcp_stream, request_bytes, body).await?;
-            stream_response(&mut tcp_stream, inbound).await?
+            write_then_stream(&mut tcp_stream, request_bytes, body, inbound, response_hook).await?
         }
     };
 
@@ -229,12 +277,81 @@ where
     Ok(())
 }
 
+/// Write the request upstream, then stream the response back.
+///
+/// A write-side failure is **not** fatal on its own: when an upstream rejects a
+/// request (e.g. `401 Unauthorized` for an expired bearer token, or `413`) it
+/// commonly sends the error response and closes the socket *before* it has read
+/// the whole request body, which surfaces here as `EPIPE`/`Broken pipe` on the
+/// write. If we bailed on that error we would discard the very response the
+/// client needs to see — and for OAuth that 401 is exactly what triggers the
+/// client's token refresh. So we always attempt to read the upstream response;
+/// only if there is no readable response do we surface the write error.
+async fn write_then_stream<U, I>(
+    upstream: &mut U,
+    request: &[u8],
+    body: &[u8],
+    inbound: &mut I,
+    response_hook: Option<ResponseBodyRewriter<'_>>,
+) -> Result<u16>
+where
+    U: AsyncRead + AsyncWrite + Unpin,
+    I: AsyncWrite + Unpin,
+{
+    let write_result = write_request(upstream, request, body).await;
+    match stream_response(upstream, inbound, response_hook).await {
+        Ok(status) => match write_result {
+            Ok(()) => Ok(status),
+            // The write failed but the upstream still returned a parseable
+            // response — relay it (the 401-then-close case). A bare
+            // `NO_RESPONSE_STATUS` means nothing parseable came back, so the
+            // write failure is the real error and must surface.
+            Err(write_err) if status == NO_RESPONSE_STATUS => Err(write_err),
+            Err(write_err) => {
+                debug!(
+                    "upstream closed during request write but returned a response \
+                     (status {status}): {write_err}"
+                );
+                Ok(status)
+            }
+        },
+        // No readable response: surface the earlier write failure if there was
+        // one, otherwise the read error.
+        Err(read_err) => {
+            write_result?;
+            Err(read_err)
+        }
+    }
+}
+
+/// Status returned by [`stream_response`] when the upstream sent nothing
+/// parseable (no bytes, or an unparseable first line). Matches the default in
+/// [`stream_response_passthrough`] and [`parse_response_status`].
+const NO_RESPONSE_STATUS: u16 = 502;
+
 /// Stream the upstream response back to the inbound sink.
 ///
 /// Returns the HTTP status code parsed from the first chunk. Streams
 /// chunked / SSE / HTTP-streaming bodies transparently because we never
 /// buffer the body — each upstream read is mirrored to the inbound write.
-async fn stream_response<U, I>(upstream: &mut U, inbound: &mut I) -> Result<u16>
+async fn stream_response<U, I>(
+    upstream: &mut U,
+    inbound: &mut I,
+    response_hook: Option<ResponseBodyRewriter<'_>>,
+) -> Result<u16>
+where
+    U: AsyncRead + AsyncWrite + Unpin,
+    I: AsyncWrite + Unpin,
+{
+    match response_hook {
+        None => stream_response_passthrough(upstream, inbound).await,
+        Some(rewriter) => stream_response_buffered(upstream, inbound, rewriter).await,
+    }
+}
+
+/// Historical chunk-by-chunk pass-through (no buffering). Used for every
+/// non-OAuth-capture route, preserving streaming/SSE/gRPC behaviour.
+async fn stream_response_passthrough<U, I>(upstream: &mut U, inbound: &mut I) -> Result<u16>
 where
     U: AsyncRead + AsyncWrite + Unpin,
     I: AsyncWrite + Unpin,
@@ -263,6 +380,169 @@ where
     }
 
     Ok(status_code)
+}
+
+/// Buffer the full upstream response, hand the body to `rewriter`, and act on
+/// its [`ResponseRewrite`] decision:
+/// - `Replace(new_body)` → rebuild framing with the new Content-Length
+///   (dropping Transfer-Encoding / Content-Encoding, since we now hold
+///   plaintext rewritten bytes) and forward the new body.
+/// - `PassThrough` → forward the original bytes unchanged.
+/// - `FailClosed` → discard the upstream response and emit a credential-free
+///   error.
+///
+/// If the response framing itself can't be parsed (no header/body separator),
+/// we also fail closed: this path is used only by OAuth-capture routes, where
+/// an unparseable token response must never be relayed verbatim. Used only by
+/// OAuth-capture routes, whose token endpoint returns a small, non-streaming
+/// JSON body.
+async fn stream_response_buffered<U, I>(
+    upstream: &mut U,
+    inbound: &mut I,
+    rewriter: ResponseBodyRewriter<'_>,
+) -> Result<u16>
+where
+    U: AsyncRead + AsyncWrite + Unpin,
+    I: AsyncWrite + Unpin,
+{
+    let mut raw = Vec::new();
+    if let Err(e) = upstream.read_to_end(&mut raw).await {
+        debug!("Upstream read error while buffering for rewriter: {}", e);
+        // Forward whatever we managed to read.
+    }
+    let status_code = parse_response_status(&raw);
+
+    // Locate the header/body split. Tolerate a lone-LF separator.
+    let header_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2));
+
+    let Some(body_start) = header_end else {
+        warn!("response-hook: no header/body separator; failing closed");
+        inbound.write_all(&fail_closed_response()).await?;
+        inbound.flush().await?;
+        return Ok(FAIL_CLOSED_STATUS);
+    };
+
+    let header_bytes = &raw[..body_start];
+    let body_bytes = &raw[body_start..];
+
+    // Decode chunked transfer encoding before invoking the rewriter, so it
+    // sees plaintext JSON rather than `<hex>\r\n{...}\r\n0\r\n\r\n`. On a
+    // malformed chunked body, fall back to the raw bytes (the rewriter will
+    // just decline if they aren't sensible JSON).
+    let decoded_body_owned;
+    let body_for_rewriter: &[u8] = if has_chunked_transfer_encoding(header_bytes) {
+        match decode_chunked_body(body_bytes) {
+            Some(decoded) => {
+                decoded_body_owned = decoded;
+                &decoded_body_owned
+            }
+            None => {
+                debug!("response-hook: chunked decode failed; passing raw body to rewriter");
+                body_bytes
+            }
+        }
+    } else {
+        body_bytes
+    };
+
+    let new_body = match rewriter(body_for_rewriter) {
+        ResponseRewrite::Replace(new_body) => new_body,
+        ResponseRewrite::PassThrough => {
+            debug!("response-hook: pass-through (verified credential-free)");
+            inbound.write_all(&raw).await?;
+            inbound.flush().await?;
+            return Ok(status_code);
+        }
+        ResponseRewrite::FailClosed => {
+            warn!("response-hook: fail-closed; refusing to forward unverifiable response");
+            inbound.write_all(&fail_closed_response()).await?;
+            inbound.flush().await?;
+            return Ok(FAIL_CLOSED_STATUS);
+        }
+    };
+
+    // Rebuild headers: drop Content-Length / Transfer-Encoding /
+    // Content-Encoding, then append the correct Content-Length + terminator.
+    let header_str = std::str::from_utf8(header_bytes).unwrap_or("");
+    let mut rebuilt = String::with_capacity(header_bytes.len() + 32);
+    for line in header_str.split("\r\n") {
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("content-length:")
+            || lower.starts_with("transfer-encoding:")
+            || lower.starts_with("content-encoding:")
+        {
+            continue;
+        }
+        rebuilt.push_str(line);
+        rebuilt.push_str("\r\n");
+    }
+    rebuilt.push_str(&format!("Content-Length: {}\r\n\r\n", new_body.len()));
+
+    inbound.write_all(rebuilt.as_bytes()).await?;
+    inbound.write_all(&new_body).await?;
+    inbound.flush().await?;
+    Ok(status_code)
+}
+
+/// Return true if the response headers declare `Transfer-Encoding: chunked`
+/// (case-insensitive; comma-lists like `gzip, chunked` are split per RFC 7230).
+fn has_chunked_transfer_encoding(header_bytes: &[u8]) -> bool {
+    let Ok(header_str) = std::str::from_utf8(header_bytes) else {
+        return false;
+    };
+    header_str.split("\r\n").any(|line| {
+        let lower = line.to_ascii_lowercase();
+        if let Some(value) = lower.strip_prefix("transfer-encoding:") {
+            value.split(',').any(|token| token.trim() == "chunked")
+        } else {
+            false
+        }
+    })
+}
+
+/// Decode an HTTP/1.1 chunked-transfer-encoded body. Returns `None` on any
+/// malformation (bad hex size, truncated chunk) so callers can pass-through
+/// the original bytes. Chunk extensions are accepted and ignored; trailers
+/// after the 0-size chunk are dropped (the body is what the rewriter cares
+/// about, and the rebuilt response drops Transfer-Encoding anyway).
+fn decode_chunked_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(body.len());
+    let mut pos: usize = 0;
+    loop {
+        let rest = body.get(pos..)?;
+        let line_end = rest.iter().position(|&b| b == b'\n')?;
+        let line_end_abs = pos.checked_add(line_end)?;
+        let raw_line = body.get(pos..line_end_abs)?;
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        let line_str = std::str::from_utf8(line).ok()?;
+        let size_str = line_str.split(';').next()?.trim();
+        let size = usize::from_str_radix(size_str, 16).ok()?;
+
+        pos = line_end_abs.checked_add(1)?;
+
+        if size == 0 {
+            return Some(decoded);
+        }
+
+        let chunk_end = pos.checked_add(size)?;
+        let chunk = body.get(pos..chunk_end)?;
+        decoded.extend_from_slice(chunk);
+        pos = chunk_end;
+
+        if body.get(pos) == Some(&b'\r') {
+            pos = pos.checked_add(1)?;
+        }
+        if body.get(pos) == Some(&b'\n') {
+            pos = pos.checked_add(1)?;
+        }
+    }
 }
 
 /// Parse HTTP status code from the first response chunk.
@@ -305,5 +585,257 @@ mod tests {
         assert_eq!(parse_response_status(b""), 502);
         assert_eq!(parse_response_status(b"garbage"), 502);
         assert_eq!(parse_response_status(b"NOT-HTTP 200 OK"), 502);
+    }
+
+    // --- buffered response-rewrite path ---
+
+    /// Run `stream_response_buffered` against an in-memory upstream that yields
+    /// `payload` then EOF, returning the bytes written to the inbound sink.
+    async fn run_buffered(payload: &[u8], rewriter: ResponseBodyRewriter<'_>) -> String {
+        let (mut up_w, mut up_r) = tokio::io::duplex(payload.len() + 64);
+        up_w.write_all(payload).await.unwrap();
+        drop(up_w); // signal EOF to the reader
+        let mut inbound: Vec<u8> = Vec::new();
+        stream_response_buffered(&mut up_r, &mut inbound, rewriter)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&inbound).into_owned()
+    }
+
+    #[tokio::test]
+    async fn buffered_replaces_body_and_rewrites_content_length() {
+        let payload =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello";
+        let rewriter: ResponseBodyRewriter<'_> =
+            Box::new(|_body| ResponseRewrite::Replace(b"REWRITTEN-BODY!".to_vec())); // 15 bytes
+        let out = run_buffered(payload, rewriter).await;
+        assert!(out.contains("Content-Length: 15\r\n"), "new CL: {out:?}");
+        assert!(
+            !out.contains("Content-Length: 5\r\n"),
+            "old CL dropped: {out:?}"
+        );
+        assert!(out.ends_with("REWRITTEN-BODY!"), "new body: {out:?}");
+        assert!(
+            out.contains("Content-Type: text/plain"),
+            "other headers kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_forwards_unchanged_on_pass_through() {
+        let payload = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let rewriter: ResponseBodyRewriter<'_> = Box::new(|_| ResponseRewrite::PassThrough);
+        let out = run_buffered(payload, rewriter).await;
+        assert_eq!(out, String::from_utf8_lossy(payload));
+    }
+
+    #[tokio::test]
+    async fn buffered_fails_closed_discards_original_body() {
+        // The defining guarantee: when the rewriter fails closed, the original
+        // upstream body (which may carry a real token) must NOT be forwarded.
+        let payload = b"HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\n{\"access_token\":\"REAL!\"}";
+        let rewriter: ResponseBodyRewriter<'_> = Box::new(|_| ResponseRewrite::FailClosed);
+        let out = run_buffered(payload, rewriter).await;
+        assert!(
+            !out.contains("REAL!"),
+            "real token must never reach the client: {out:?}"
+        );
+        assert!(
+            out.contains("502 Bad Gateway"),
+            "fail-closed status: {out:?}"
+        );
+        assert!(
+            out.contains("nono_capture_failed"),
+            "credential-free error body: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_strips_transfer_and_content_encoding() {
+        // Chunked + gzip headers must be dropped once we hold rewritten bytes.
+        let payload = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let rewriter: ResponseBodyRewriter<'_> =
+            Box::new(|_| ResponseRewrite::Replace(b"plaintext-json-here!".to_vec()));
+        let out = run_buffered(payload, rewriter).await;
+        assert!(out.contains("Content-Length: 20"), "CL added: {out:?}");
+        assert!(
+            !out.to_ascii_lowercase().contains("transfer-encoding"),
+            "TE dropped"
+        );
+        assert!(
+            !out.to_ascii_lowercase().contains("content-encoding"),
+            "CE dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_fails_closed_on_missing_header_separator() {
+        // No header/body split → we can't parse framing → fail closed rather
+        // than relay a potentially token-bearing body verbatim.
+        let payload = b"HTTP/1.1 200 OK no separator access_token here";
+        let rewriter: ResponseBodyRewriter<'_> =
+            Box::new(|_| ResponseRewrite::Replace(b"x".to_vec()));
+        let out = run_buffered(payload, rewriter).await;
+        assert!(out.contains("502 Bad Gateway"), "fail-closed: {out:?}");
+        assert!(out.contains("nono_capture_failed"), "error body: {out:?}");
+        assert!(
+            !out.contains("no separator access_token"),
+            "original bytes must not be forwarded: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_decodes_chunked_body_before_rewriter() {
+        // The rewriter must see decoded JSON, not the chunk framing.
+        let payload = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1a\r\n{\"access_token\":\"REAL!!\"}\r\n0\r\n\r\n";
+        let rewriter: ResponseBodyRewriter<'_> = Box::new(|body| {
+            let s = std::str::from_utf8(body).unwrap();
+            assert!(
+                s.starts_with("{\"access_token\""),
+                "decoded JSON, got: {s:?}"
+            );
+            assert!(!s.contains("1a\r\n"), "chunk framing must be stripped");
+            ResponseRewrite::Replace(b"{\"access_token\":\"nono_x\"}".to_vec())
+        });
+        let out = run_buffered(payload, rewriter).await;
+        assert!(out.contains("nono_x"), "rewritten: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn buffered_passes_raw_body_when_chunked_decode_fails() {
+        // Malformed chunk size ("ZZZ") → decode None → raw body to rewriter.
+        let payload = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\nbad\r\n";
+        let rewriter: ResponseBodyRewriter<'_> = Box::new(|body| {
+            assert!(
+                body.starts_with(b"ZZZ"),
+                "raw body passed through on decode fail"
+            );
+            ResponseRewrite::PassThrough
+        });
+        let out = run_buffered(payload, rewriter).await;
+        assert_eq!(out, String::from_utf8_lossy(payload));
+    }
+
+    #[test]
+    fn has_chunked_transfer_encoding_detects_token() {
+        assert!(has_chunked_transfer_encoding(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        ));
+        assert!(has_chunked_transfer_encoding(
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: Chunked\r\n\r\n"
+        ));
+        assert!(has_chunked_transfer_encoding(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"
+        ));
+        assert!(!has_chunked_transfer_encoding(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn decode_chunked_body_roundtrips_and_rejects_malformed() {
+        assert_eq!(
+            decode_chunked_body(b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"),
+            Some(b"hello world".to_vec())
+        );
+        // Chunk extensions accepted and ignored.
+        assert_eq!(
+            decode_chunked_body(b"5;ext=1\r\nhello\r\n0\r\n\r\n"),
+            Some(b"hello".to_vec())
+        );
+        // Malformed / truncated → None.
+        assert_eq!(decode_chunked_body(b"ZZZ\r\nbad\r\n"), None);
+        assert_eq!(decode_chunked_body(b"5\r\nhel"), None);
+        assert_eq!(decode_chunked_body(b""), None);
+    }
+
+    // --- write-side close must not discard the upstream response ---
+
+    /// Mock upstream that always fails writes with `BrokenPipe` (modelling a
+    /// server that rejected the request and closed before reading the whole
+    /// body) but serves `response` then EOF on reads.
+    struct RejectingUpstream {
+        response: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl AsyncWrite for RejectingUpstream {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncRead for RejectingUpstream {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.response).poll_read(cx, buf)
+        }
+    }
+
+    #[tokio::test]
+    async fn write_then_stream_relays_response_despite_write_epipe() {
+        // The upstream rejects the body write (EPIPE) but sends a 401. The
+        // client must still receive that 401 — otherwise the OAuth refresh it
+        // would trigger never happens.
+        let mut upstream = RejectingUpstream {
+            response: std::io::Cursor::new(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            ),
+        };
+        let mut inbound: Vec<u8> = Vec::new();
+        let status = write_then_stream(
+            &mut upstream,
+            b"POST /v1/messages HTTP/1.1\r\nConnection: close\r\n\r\n",
+            b"a very large body the upstream never finished reading",
+            &mut inbound,
+            None,
+        )
+        .await
+        .expect("a readable 401 response must not be reported as a forwarding failure");
+        assert_eq!(status, 401);
+        assert!(
+            String::from_utf8_lossy(&inbound).contains("401 Unauthorized"),
+            "client must receive the upstream 401: {inbound:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_then_stream_surfaces_write_error_when_no_response() {
+        // Write fails AND the upstream sent nothing → the write error is the
+        // real failure and must propagate.
+        let mut upstream = RejectingUpstream {
+            response: std::io::Cursor::new(Vec::new()),
+        };
+        let mut inbound: Vec<u8> = Vec::new();
+        let result = write_then_stream(
+            &mut upstream,
+            b"POST / HTTP/1.1\r\n\r\n",
+            b"body",
+            &mut inbound,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "no response + write failure must surface as an error"
+        );
     }
 }

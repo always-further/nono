@@ -687,14 +687,22 @@ fn prepare_profile_with_options(
             .map(|profile| profile.diagnostics.suppress_system_services.clone())
             .unwrap_or_default(),
         allowed_env_vars: loaded_profile.as_ref().and_then(|profile| {
-            profile.environment.as_ref().map(|env_config| {
+            profile.environment.as_ref().and_then(|env_config| {
+                // An empty `allow_vars` means "no allow-list" (pass all vars
+                // except those denied), not "allow nothing". Returning `Some([])`
+                // here would make the downstream filter strip every non-injected
+                // var — including HOME — because an empty pattern set matches
+                // nothing. Mirror `deny_vars` and collapse empty to `None`.
+                if env_config.allow_vars.is_empty() {
+                    return None;
+                }
                 if let Some(err) = crate::exec_strategy::validate_env_var_patterns(
                     &env_config.allow_vars,
                     "allow_vars",
                 ) {
                     eprintln!("Warning: {}", err);
                 }
-                env_config.allow_vars.clone()
+                Some(env_config.allow_vars.clone())
             })
         }),
         denied_env_vars: loaded_profile.as_ref().and_then(|profile| {
@@ -1493,6 +1501,53 @@ mod tests {
                     profile.filesystem.allow.clone(),
                 )
             })
+        );
+    }
+
+    /// Helper: write `profile_json` to a temp dir and resolve its
+    /// `allowed_env_vars`/`denied_env_vars` via `prepare_profile`.
+    fn resolved_env_vars(profile_json: &str) -> (Option<Vec<String>>, Option<Vec<String>>) {
+        let workdir = tempdir().expect("tempdir");
+        let profile_path = workdir.path().join("p.json");
+        fs::write(&profile_path, profile_json).expect("write profile");
+        let args = SandboxArgs {
+            profile: Some(profile_path.to_string_lossy().into_owned()),
+            ..SandboxArgs::default()
+        };
+        let prepared = prepare_profile(&args, true, workdir.path()).expect("prepare_profile");
+        (prepared.allowed_env_vars, prepared.denied_env_vars)
+    }
+
+    #[test]
+    fn empty_allow_vars_with_deny_vars_does_not_become_an_allow_list() {
+        // Regression: an `environment` block with only `deny_vars` (empty
+        // `allow_vars`) must resolve to `allowed_env_vars: None`, i.e. "pass all
+        // except denied". `Some([])` would strip every non-injected var
+        // (including HOME), breaking any sandboxed program that needs it.
+        let (allowed, denied) = resolved_env_vars(
+            r#"{
+                "extends": "default",
+                "meta": { "name": "deny-only" },
+                "environment": { "deny_vars": ["ANTHROPIC_API_KEY"] }
+            }"#,
+        );
+        assert_eq!(allowed, None, "empty allow_vars must be None, not Some([])");
+        assert_eq!(denied, Some(vec!["ANTHROPIC_API_KEY".to_string()]));
+    }
+
+    #[test]
+    fn non_empty_allow_vars_resolves_to_allow_list() {
+        let (allowed, _denied) = resolved_env_vars(
+            r#"{
+                "extends": "default",
+                "meta": { "name": "allow-list" },
+                "environment": { "allow_vars": ["PATH", "HOME"] }
+            }"#,
+        );
+        assert_eq!(
+            allowed,
+            Some(vec!["PATH".to_string(), "HOME".to_string()]),
+            "a non-empty allow_vars must be honoured as an allow-list"
         );
     }
 }
