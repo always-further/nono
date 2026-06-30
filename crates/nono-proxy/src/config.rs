@@ -59,6 +59,21 @@ pub struct ProxyConfig {
     #[serde(default = "default_require_auth")]
     pub require_auth: bool,
 
+    /// Make `Proxy-Authorization` validation fatal on the transparent CONNECT
+    /// path (returns `407 Proxy Authentication Required` instead of tunnelling).
+    ///
+    /// Defaults to `false`, which preserves the lenient CONNECT behaviour the
+    /// sandboxed `nono run`/`shell`/`wrap` path relies on: Node.js undici does
+    /// not echo URL-userinfo credentials as `Proxy-Authorization` on CONNECT,
+    /// and the sandbox itself is the trust boundary there.
+    ///
+    /// Set `true` only by the standalone `nono proxy` command (unless
+    /// `--no-auth`), where the session token — not an OS sandbox — is the auth
+    /// boundary for the external tools pointed at the proxy. Has no effect when
+    /// `require_auth` is `false`.
+    #[serde(default)]
+    pub strict_connect_auth: bool,
+
     /// Optional caller-supplied auth password used in place of a freshly
     /// generated random session token.
     ///
@@ -193,6 +208,7 @@ impl Default for ProxyConfig {
             allowed_hosts: Vec::new(),
             strict_filter: false,
             require_auth: default_require_auth(),
+            strict_connect_auth: false,
             session_token: None,
             routes: Vec::new(),
             external_proxy: None,

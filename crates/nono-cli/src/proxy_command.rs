@@ -42,6 +42,11 @@ pub(crate) fn run_proxy(args: ProxyArgs, silent: bool) -> Result<()> {
     proxy_config.bind_port = args.port;
     proxy_config.require_auth = !args.no_auth;
 
+    // Standalone mode: the session token is the auth boundary (no OS sandbox
+    // behind it), so an unauthenticated CONNECT must be rejected with 407
+    // rather than tunnelled. Off under `--no-auth`, where there is no token.
+    proxy_config.strict_connect_auth = !args.no_auth;
+
     // Connection ceiling is configurable only on the standalone proxy, where
     // the caller points their own (possibly highly parallel) tooling at it.
     // The sandboxed paths keep the built-in default.

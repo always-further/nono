@@ -914,6 +914,18 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
 
     // Dispatch by method
     if first_line.starts_with("CONNECT ") {
+        // Resolve how the transparent CONNECT path treats Proxy-Authorization.
+        // Strict (407 on failure) only for standalone `nono proxy` with auth
+        // on; lenient (validate-but-tunnel) for the sandboxed paths; disabled
+        // under `--no-auth`. See [`connect::ConnectAuthMode`].
+        let connect_auth_mode = if !state.config.require_auth {
+            connect::ConnectAuthMode::Disabled
+        } else if state.config.strict_connect_auth {
+            connect::ConnectAuthMode::Strict
+        } else {
+            connect::ConnectAuthMode::Lenient
+        };
+
         // CONNECT requests targeting a configured route's upstream get
         // special handling. There are three sub-cases:
         //
@@ -1237,7 +1249,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                 &state.filter,
                 &state.session_token,
                 &header_bytes,
-                state.config.require_auth,
+                connect_auth_mode,
                 Some(&state.audit_log),
             )
             .await
@@ -1248,7 +1260,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                 &state.filter,
                 &state.session_token,
                 &header_bytes,
-                state.config.require_auth,
+                connect_auth_mode,
                 Some(&state.audit_log),
             )
             .await
@@ -1467,6 +1479,70 @@ mod tests {
         assert!(
             status.contains("407"),
             "with auth required an unauthenticated reverse request must be challenged, got: {status:?}"
+        );
+        handle.shutdown();
+    }
+
+    /// Send an unauthenticated `CONNECT host:443` through the proxy at `port`
+    /// and return the status line the proxy wrote back.
+    async fn unauthenticated_connect_request(port: u16, host: &str) -> String {
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        client
+            .write_all(
+                format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let n = client.read(&mut buf).await.unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n])
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_strict_connect_auth_rejects_unauthenticated_connect() {
+        // Standalone `nono proxy` sets strict_connect_auth: an unauthenticated
+        // CONNECT must be answered with 407 *before* any DNS/filter/upstream
+        // handling, rather than tunnelled (which would otherwise surface as a
+        // 502 once the upstream connect fails).
+        let config = ProxyConfig {
+            allowed_hosts: vec!["nonexistent.invalid".to_string()],
+            require_auth: true,
+            strict_connect_auth: true,
+            ..Default::default()
+        };
+        let handle = start(config).await.unwrap();
+        let status = unauthenticated_connect_request(handle.port, "nonexistent.invalid").await;
+        assert!(
+            status.contains("407"),
+            "strict CONNECT auth must challenge an unauthenticated CONNECT, got: {status:?}"
+        );
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_lenient_connect_auth_tunnels_unauthenticated_connect() {
+        // Sandboxed run/shell/wrap path (strict_connect_auth == false): an
+        // unauthenticated CONNECT is *not* rejected with 407 — it proceeds to
+        // host filtering / upstream connect (undici compat). The unresolvable
+        // host then yields a 502, proving the request was never short-circuited
+        // at the auth gate.
+        let config = ProxyConfig {
+            allowed_hosts: vec!["nonexistent.invalid".to_string()],
+            require_auth: true,
+            strict_connect_auth: false,
+            ..Default::default()
+        };
+        let handle = start(config).await.unwrap();
+        let status = unauthenticated_connect_request(handle.port, "nonexistent.invalid").await;
+        assert!(
+            !status.contains("407"),
+            "lenient CONNECT auth must not challenge with 407, got: {status:?}"
         );
         handle.shutdown();
     }
