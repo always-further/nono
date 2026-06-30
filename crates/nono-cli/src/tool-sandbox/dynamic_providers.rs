@@ -41,6 +41,14 @@ pub(super) mod git {
     ///
     /// `core.hooksPath` is the only directory-typed expansion today;
     /// every other path-valued knob points at a single file.
+    ///
+    /// `files` includes both the config files git actually read in the current
+    /// context and the declared targets of every `include.path` and
+    /// `includeIf.*.path` directive in trusted scopes, regardless of whether
+    /// the condition currently fires. An `includeIf` whose condition is false
+    /// right now (e.g. `hasconfig:remote.*.url` against a repo that has no
+    /// matching remote yet) contributes its target to `files` so that a later
+    /// git operation that makes the condition fire can still read it.
     #[derive(Debug, Default, PartialEq, Eq)]
     pub(super) struct GitConfigPaths {
         pub files: Vec<String>,
@@ -97,6 +105,109 @@ pub(super) mod git {
     /// process is not inside a git repository.
     pub(crate) fn read_common_dir() -> Result<Vec<String>> {
         run_common_dir(git_toplevel().as_deref())
+    }
+
+    /// Return the main worktree root (parent of `@git:common-dir`).
+    ///
+    /// In a regular repo: `@git:common-dir` = `.git` → parent = `.` (repo root).
+    /// In a linked worktree: `@git:common-dir` = `/abs/main/.git` → parent = `/abs/main`.
+    ///
+    /// Use this token in `fs_read`/`fs_write` to grant git access to the main
+    /// repo root when the sandbox `--workdir` is a linked worktree.
+    ///
+    /// Returns an empty list when git is absent, the command fails, or the
+    /// process is not inside a git repository.
+    pub(crate) fn read_main_worktree() -> Result<Vec<String>> {
+        run_main_worktree(None)
+    }
+
+    fn run_main_worktree(cwd: Option<&Path>) -> Result<Vec<String>> {
+        Ok(run_common_dir(cwd)?
+            .into_iter()
+            .filter_map(|p| {
+                Path::new(&p)
+                    .parent()
+                    .and_then(|parent| parent.to_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .collect())
+    }
+
+    /// Test seam: run the main-worktree provider from a specific directory.
+    #[cfg(test)]
+    pub(super) fn read_main_worktree_in(cwd: &Path) -> Result<Vec<String>> {
+        run_main_worktree(Some(cwd))
+    }
+
+    /// Return the absolute path of the current git checkout root
+    /// (`git rev-parse --show-toplevel`).
+    ///
+    /// In both a regular repo and a linked worktree this is the toplevel of the
+    /// *current* checkout, not the main worktree. Use this in `fs_read`/`fs_write`
+    /// to grant access to the checkout root with a resolved absolute path.
+    ///
+    /// Returns an empty list when git is absent, the command fails, or the
+    /// process is not inside a git repository.
+    pub(crate) fn read_toplevel() -> Result<Vec<String>> {
+        run_toplevel(None)
+    }
+
+    /// Return the parent directory of the current git checkout root.
+    ///
+    /// Used for `git worktree add ../sibling`: the new worktree is created
+    /// adjacent to the current checkout, so its parent directory must be
+    /// writable.
+    ///
+    /// Returns an empty list when git is absent, the command fails, or the
+    /// process is not inside a git repository.
+    pub(crate) fn read_toplevel_parent() -> Result<Vec<String>> {
+        run_toplevel_parent(None)
+    }
+
+    fn run_toplevel(cwd: Option<&Path>) -> Result<Vec<String>> {
+        let mut cmd = Command::new("git");
+        cmd.args(["rev-parse", "--show-toplevel"]);
+        if let Some(d) = cwd {
+            cmd.current_dir(d);
+        }
+        let output = match cmd.output() {
+            Ok(o) if o.status.success() => o,
+            _ => return Ok(vec![]),
+        };
+        let path = std::str::from_utf8(&output.stdout)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if path.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(vec![path])
+    }
+
+    fn run_toplevel_parent(cwd: Option<&Path>) -> Result<Vec<String>> {
+        Ok(run_toplevel(cwd)?
+            .into_iter()
+            .filter_map(|p| {
+                Path::new(&p)
+                    .parent()
+                    .and_then(|parent| parent.to_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .collect())
+    }
+
+    /// Test seam: run the toplevel provider from a specific directory.
+    #[cfg(test)]
+    pub(super) fn read_toplevel_in(cwd: &Path) -> Result<Vec<String>> {
+        run_toplevel(Some(cwd))
+    }
+
+    /// Test seam: run the toplevel-parent provider from a specific directory.
+    #[cfg(test)]
+    pub(super) fn read_toplevel_parent_in(cwd: &Path) -> Result<Vec<String>> {
+        run_toplevel_parent(Some(cwd))
     }
 
     fn run_common_dir(cwd: Option<&Path>) -> Result<Vec<String>> {
@@ -216,8 +327,25 @@ pub(super) mod git {
             {
                 out.dirs.push(value.to_string());
             }
+
+            // `include.path` / `includeIf.*.path` targets are folded into
+            // `files` regardless of whether their condition fires, so a
+            // not-yet-matching conditional include is still grantable.
+            if is_include_path_key(&key_lower) && files_seen.insert(value.to_string()) {
+                out.files.push(value.to_string());
+            }
         }
         out
+    }
+
+    /// True for the keys that declare a git config include target:
+    /// the unconditional `include.path` and any `includeIf.<condition>.path`.
+    ///
+    /// `key_lower` must already be lowercased, matching the form produced by
+    /// [`parse_paths_from_stdout`].
+    pub(super) fn is_include_path_key(key_lower: &str) -> bool {
+        key_lower == "include.path"
+            || (key_lower.starts_with("includeif.") && key_lower.ends_with(".path"))
     }
 }
 
@@ -231,6 +359,9 @@ fn dispatch_token(provider: &str, query: &str) -> Result<Vec<String>> {
             "config-files" => git::read_files(),
             "hooks-path" => git::read_hooks_path(),
             "common-dir" => git::read_common_dir(),
+            "worktree" => git::read_main_worktree(),
+            "toplevel" => git::read_toplevel(),
+            "toplevel-parent" => git::read_toplevel_parent(),
             other => Err(NonoError::ProfileParse(format!(
                 "unknown git provider query '{other}'"
             ))),
@@ -266,6 +397,12 @@ mod tests {
         );
         assert_eq!(parse_token("@git:hooks-path"), Some(("git", "hooks-path")));
         assert_eq!(parse_token("@git:common-dir"), Some(("git", "common-dir")));
+        assert_eq!(parse_token("@git:worktree"), Some(("git", "worktree")));
+        assert_eq!(parse_token("@git:toplevel"), Some(("git", "toplevel")));
+        assert_eq!(
+            parse_token("@git:toplevel-parent"),
+            Some(("git", "toplevel-parent"))
+        );
     }
 
     #[test]
@@ -368,6 +505,91 @@ system\tfile:/etc/gitconfig\tcommit.template=/etc/git-template
                 "untrusted-scope path leaked: {leaked} in {out:?}",
             );
         }
+    }
+
+    #[test]
+    fn parse_paths_from_stdout_extracts_include_and_includeif_targets() {
+        let stdout = "\
+global\tfile:/home/u/.gitconfig\tinclude.path=~/.gitconfig-common
+global\tfile:/home/u/.gitconfig\tincludeif.hasconfig:remote.*.url:git@github.com:ddoghq/**.path=~/.gitconfig-ddoghq
+global\tfile:/home/u/.gitconfig\tincludeif.gitdir:~/work/.path=/home/u/.gitconfig-work
+global\tfile:/home/u/.gitconfig\tuser.name=Alice
+";
+        let out = git::parse_paths_from_stdout(stdout);
+        assert!(
+            out.files.contains(&"~/.gitconfig-common".to_string()),
+            "include.path target missing from files: {:?}",
+            out.files
+        );
+        assert!(
+            out.files.contains(&"~/.gitconfig-ddoghq".to_string()),
+            "hasconfig includeIf target missing from files: {:?}",
+            out.files
+        );
+        assert!(
+            out.files.contains(&"/home/u/.gitconfig-work".to_string()),
+            "gitdir includeIf target missing from files: {:?}",
+            out.files
+        );
+    }
+
+    #[test]
+    fn parse_paths_from_stdout_drops_include_targets_in_untrusted_scopes() {
+        let stdout = "\
+local\tfile:/repo/.git/config\tinclude.path=/etc/evil-include
+worktree\tfile:/repo/.git/config.worktree\tincludeif.gitdir:/**.path=/etc/evil-worktree
+";
+        let out = git::parse_paths_from_stdout(stdout);
+        for leaked in ["/etc/evil-include", "/etc/evil-worktree"] {
+            assert!(
+                !out.files.iter().any(|p| p == leaked),
+                "untrusted-scope include target leaked into files: {leaked:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn git_read_files_includes_non_firing_includeif_target() {
+        // An includeIf whose condition does not fire in the current context
+        // must still be in files, because a later git operation may make it
+        // fire. The target file need not even exist for the directive to be
+        // listed by `git config --list`.
+        use std::io::Write;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("gitconfig-ddoghq");
+        let global_cfg = tmp.path().join("gitconfig");
+        {
+            let mut f = std::fs::File::create(&global_cfg).expect("create global");
+            writeln!(f, "[user]\n\tname = Test").expect("write user");
+            writeln!(
+                f,
+                "[includeIf \"hasconfig:remote.*.url:git@github.com:ddoghq/**\"]\n\tpath = {}",
+                target.display()
+            )
+            .expect("write includeIf");
+        }
+
+        // No matching repo is supplied, so the hasconfig: condition cannot fire.
+        let paths = git::read_paths_with_global(&global_cfg).expect("git config");
+
+        let target_str = target.to_str().expect("utf8");
+        assert!(
+            paths.files.iter().any(|p| p == target_str),
+            "non-firing includeIf target missing from files; got {:?}",
+            paths.files
+        );
+    }
+
+    #[test]
+    fn is_include_path_key_matches_include_and_includeif_only() {
+        assert!(git::is_include_path_key("include.path"));
+        assert!(git::is_include_path_key(
+            "includeif.hasconfig:remote.*.url:git@github.com:ddoghq/**.path"
+        ));
+        assert!(git::is_include_path_key("includeif.gitdir:~/work/.path"));
+        assert!(!git::is_include_path_key("core.attributesfile"));
+        assert!(!git::is_include_path_key("include.somethingelse"));
+        assert!(!git::is_include_path_key("user.name"));
     }
 
     #[test]
@@ -626,6 +848,201 @@ global\tfile:/home/u/.gitconfig\tuser.name=Alice
     fn git_read_common_dir_returns_empty_outside_git_repo() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let result = git::read_common_dir_in(tmp.path()).expect("read_common_dir");
+        assert!(
+            result.is_empty(),
+            "expected empty outside repo, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn git_read_main_worktree_returns_empty_in_regular_repo() {
+        use std::process::Command;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir repo");
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+
+        // In a regular repo, git rev-parse --git-common-dir returns ".git".
+        // Path::new(".git").parent() yields an empty path, which we filter out.
+        // The token is a no-op for regular repos; $GIT_ROOT already covers the root.
+        let result = git::read_main_worktree_in(&repo).expect("read_main_worktree");
+        assert!(
+            result.is_empty(),
+            "expected empty for regular repo (no-op), got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn git_read_main_worktree_returns_main_repo_root_in_linked_worktree() {
+        use std::process::Command;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir repo");
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("git commit");
+
+        let wt = tmp.path().join("worktree");
+        Command::new("git")
+            .args(["worktree", "add", wt.to_str().expect("utf8")])
+            .current_dir(&repo)
+            .status()
+            .expect("git worktree add");
+
+        let result = git::read_main_worktree_in(&wt).expect("read_main_worktree in worktree");
+        assert_eq!(result.len(), 1, "expected one entry, got {:?}", result);
+        let main_root = std::path::Path::new(&result[0]);
+        assert!(
+            main_root.is_absolute(),
+            "expected absolute path in linked worktree, got {:?}",
+            result
+        );
+        assert_eq!(
+            main_root.canonicalize().expect("canonicalize"),
+            repo.canonicalize().expect("canonicalize repo"),
+            "main worktree root should be the main repo directory"
+        );
+    }
+
+    #[test]
+    fn git_read_main_worktree_returns_empty_outside_git_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = git::read_main_worktree_in(tmp.path()).expect("read_main_worktree");
+        assert!(
+            result.is_empty(),
+            "expected empty outside repo, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn git_read_toplevel_returns_absolute_path_in_regular_repo() {
+        use std::process::Command;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir repo");
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+
+        let result = git::read_toplevel_in(&repo).expect("read_toplevel");
+        assert_eq!(result.len(), 1, "expected one entry, got {:?}", result);
+        let toplevel = std::path::Path::new(&result[0]);
+        assert!(
+            toplevel.is_absolute(),
+            "expected absolute path, got {:?}",
+            result
+        );
+        assert_eq!(
+            toplevel.canonicalize().expect("canonicalize"),
+            repo.canonicalize().expect("canonicalize repo"),
+        );
+    }
+
+    #[test]
+    fn git_read_toplevel_returns_worktree_root_in_linked_worktree() {
+        use std::process::Command;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir repo");
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("git commit");
+        let wt = tmp.path().join("worktree");
+        Command::new("git")
+            .args(["worktree", "add", wt.to_str().expect("utf8")])
+            .current_dir(&repo)
+            .status()
+            .expect("git worktree add");
+
+        // In a linked worktree, --show-toplevel returns the worktree dir, not the main repo.
+        let result = git::read_toplevel_in(&wt).expect("read_toplevel in worktree");
+        assert_eq!(result.len(), 1, "expected one entry, got {:?}", result);
+        assert_eq!(
+            std::path::Path::new(&result[0])
+                .canonicalize()
+                .expect("canonicalize"),
+            wt.canonicalize().expect("canonicalize wt"),
+        );
+    }
+
+    #[test]
+    fn git_read_toplevel_returns_empty_outside_git_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = git::read_toplevel_in(tmp.path()).expect("read_toplevel");
+        assert!(
+            result.is_empty(),
+            "expected empty outside repo, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn git_read_toplevel_parent_returns_parent_of_repo_root() {
+        use std::process::Command;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir repo");
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+
+        let result = git::read_toplevel_parent_in(&repo).expect("read_toplevel_parent");
+        assert_eq!(result.len(), 1, "expected one entry, got {:?}", result);
+        assert_eq!(
+            std::path::Path::new(&result[0])
+                .canonicalize()
+                .expect("canonicalize"),
+            tmp.path().canonicalize().expect("canonicalize tmp"),
+        );
+    }
+
+    #[test]
+    fn git_read_toplevel_parent_returns_empty_outside_git_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = git::read_toplevel_parent_in(tmp.path()).expect("read_toplevel_parent");
         assert!(
             result.is_empty(),
             "expected empty outside repo, got {:?}",
