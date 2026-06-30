@@ -238,11 +238,14 @@ Settings are loaded from `--profile` and extended/overridden by explicit flags, 
 | `--no-auth` | Disable session-token auth — accept every request on the bind address. Loopback only. |
 | `--pass <PASSWORD>` | Pin the proxy credential to a fixed value instead of a random token. Reads `NONO_PROXY_PASS`. |
 | `--profile <NAME_OR_PATH>` | Load network/credential settings from a profile. |
+| `--max-connections <N>` | Maximum concurrent client connections (`0` = unlimited, default `256`). Raise for highly parallel clients such as `docker pull`. Reads `NONO_PROXY_MAX_CONNECTIONS`. |
 | `--network-profile <PROFILE>` | Enable a named network profile (e.g. `developer`). |
 | `--allow-domain <DOMAIN_OR_URL>` | Add a domain (or path-scoped URL) to the allowlist (repeatable). |
 | `--credential <SERVICE>` | Inject credentials for a service via the reverse proxy (repeatable). |
+| `--allow-endpoint <SERVICE:METHOD:PATH>` | Restrict a credential service to specific HTTP method+path patterns (repeatable). See [Endpoint Filtering](#endpoint-filtering). |
 | `--upstream-proxy <HOST:PORT>` | Chain outbound traffic through an upstream proxy. |
 | `--upstream-bypass <DOMAIN>` | Route these domains direct instead of through the upstream proxy (requires `--upstream-proxy`). |
+| `--allow-http2` | Negotiate HTTP/2 with upstreams that support it (ALPN). Off by default. See [HTTP/2 Support](#http2-support---allow-http2). |
 | `--proxy-ca-validity <DAYS>` | Proxy CA certificate validity in days (1–365). Conflicts with `--proxy-ca-cert`. |
 | `--trust-proxy-ca` | Add the proxy CA to the macOS user trust store (macOS only). |
 | `--proxy-ca-cert <PEM_FILE>` | Sign intercepted TLS with this existing CA certificate (PEM) instead of a fresh per-session CA. Requires `--proxy-ca-key`. Reads `NONO_PROXY_CA_CERT`. |
@@ -440,6 +443,8 @@ By default, the proxy uses HTTP/1.1 with keep-alive connection pooling for all u
 ```bash
 nono run --profile claude-code --allow-http2 -- claude
 ```
+
+It can also be set in a profile with `network.allow_http2`, which both `nono run` and `nono proxy` honor.
 
 When enabled:
 
