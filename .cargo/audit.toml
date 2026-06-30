@@ -14,4 +14,7 @@
 ignore = [
     "RUSTSEC-2026-0044", # AWS-LC X.509 CN/name-constraints bypass
     "RUSTSEC-2026-0048", # AWS-LC CRL distribution point scope check bypass
+    "RUSTSEC-2026-0173", # proc-macro-error2 unmaintained; compile-time only, not linked
+                         # Pulled in transitively via spiffe -> jiff -> defmt -> defmt-macros.
+                         # No runtime exposure. Revisit if a maintained alternative is adopted upstream.
 ]

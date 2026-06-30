@@ -63,6 +63,15 @@ rustls-native-certs = "0.8"
 # directly to set not_before/not_after.
 time = { version = "0.3", default-features = false, features = ["std"] }
 
+# SPIFFE Workload API client for X.509-SVID mTLS and JWT-SVID bearer auth.
+# Aliased to avoid colliding with any future `spiffe` naming in the workspace.
+# Features: x509-source (streaming SVID rotation) + jwt-source (JWT fetch/refresh).
+spiffe-workload = { package = "spiffe", version = "0.16", features = ["x509-source", "jwt-source"] }
+# Direct deps used in spiffe.rs (also transitive from spiffe-workload but must
+# be declared directly when accessed in our own code).
+arc-swap = "1"
+tokio-util = "0.7"
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { version = "1", features = ["test-util", "rt-multi-thread", "macros"] }
