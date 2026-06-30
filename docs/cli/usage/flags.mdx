@@ -179,6 +179,14 @@ Compare against an existing profile to show only missing paths.
 nono learn --profile always-further/opencode -- opencode
 ```
 
+### `--extends`
+
+Compose the selected `--profile` with an additional base profile for this comparison. Repeatable; bases are applied left-to-right before any `extends` already declared by the selected profile. Requires `--profile`.
+
+```bash
+nono learn --profile my-agent --extends linux-host-compat -- my-agent
+```
+
 ### `--json`
 
 Output discovered paths as a JSON fragment suitable for a profile.
@@ -807,6 +815,19 @@ nono run --profile always-further/claude -- claude
 nono run -p openclaw -- openclaw gateway
 ```
 
+#### `--extends`
+
+Extend the selected profile with an additional base profile for one invocation. Repeatable; bases are merged left-to-right, then any `extends` already in the selected profile is resolved, and the selected profile remains the final override layer.
+
+```bash
+nono run --profile my-agent \
+  --extends linux-host-compat \
+  --extends extra-git \
+  -- my-agent
+```
+
+This is equivalent to temporarily prepending those bases to the profile JSON's `extends` field. It requires `--profile` and conflicts with `--config`. Inherited filesystem and network grants can widen sandbox permissions, so treat each base profile as explicit policy input.
+
 #### `--workdir`
 
 Working directory for `$WORKDIR` expansion in profiles (defaults to current directory).
@@ -1356,6 +1377,7 @@ Available context flags:
 - `--block-net` - Block network access
 - `--allow-net` - Force unrestricted network access for this run
 - `--profile`, `-p` - Use a named profile
+- `--extends` - Add repeatable base profiles to the selected profile for this query (requires `--profile`)
 - `--workdir` - Working directory for `$WORKDIR` expansion
 
 ## `nono trust` Options

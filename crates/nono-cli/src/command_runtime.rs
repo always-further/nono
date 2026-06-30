@@ -81,7 +81,10 @@ pub(crate) fn run_sandbox(mut run_args: RunArgs, silent: bool) -> Result<()> {
 
     // Load profile once and reuse for binary resolution and command_args.
     let loaded_profile = match run_args.sandbox.profile.as_ref() {
-        Some(name) => Some((name.clone(), profile::load_profile(name)?)),
+        Some(name) => Some((
+            name.clone(),
+            profile::load_profile_with_extends(name, &run_args.sandbox.extends)?,
+        )),
         None => None,
     };
 
