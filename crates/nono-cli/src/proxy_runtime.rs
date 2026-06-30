@@ -2504,6 +2504,12 @@ mod tests {
         CommandCredentialGrantPolicyConfig, CommandPolicyConfig, EndpointRuleConfig,
     };
 
+    // Shared across all tests that replace the process-wide STDIN_FILENO. A per-test
+    // `static` mutex would not serialize tests against each other, letting them stomp
+    // on the same fd concurrently (causing dup() failures and capture timeouts).
+    #[cfg(unix)]
+    static STDIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[cfg(unix)]
     #[test]
     fn set_intercept_ca_dir_permissions_fails_closed() -> Result<()> {
@@ -3546,7 +3552,6 @@ mod tests {
         use nix::libc;
 
         // Serialize stdin manipulation across concurrent test threads.
-        static STDIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = STDIN_LOCK
             .lock()
             .map_err(|e| NonoError::SandboxInit(format!("stdin lock poisoned: {e}")))?;
@@ -3628,7 +3633,6 @@ mod tests {
     fn capture_helper_with_interaction_stdin_true_inherits_terminal_stdin() -> Result<()> {
         use nix::libc;
 
-        static STDIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = STDIN_LOCK
             .lock()
             .map_err(|e| NonoError::SandboxInit(format!("stdin lock poisoned: {e}")))?;
