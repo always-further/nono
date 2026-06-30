@@ -144,7 +144,7 @@ impl CgroupLeaf {
             .open(&procs_path)
             .map_err(|e| {
                 resource_err(format!(
-                    "failed to open {} for self-attach ({e})",
+                    "failed to open {} for self-attach: {e}",
                     procs_path.display()
                 ))
             })?;
@@ -432,7 +432,7 @@ fn parse_delegated_base(proc_self_cgroup: &str, uid: u32) -> Result<PathBuf> {
 fn ensure_controllers_delegated(base: &Path, limits: &ResourceLimits) -> Result<()> {
     let subtree_path = base.join("cgroup.subtree_control");
     let subtree = fs::read_to_string(&subtree_path)
-        .map_err(|e| resource_err(format!("cannot read {} ({e})", subtree_path.display())))?;
+        .map_err(|e| resource_err(format!("cannot read {}: {e}", subtree_path.display())))?;
     let controller_enabled = |c: &str| subtree.split_whitespace().any(|w| w == c);
 
     if limits.memory_bytes.is_some() && !controller_enabled("memory") {

@@ -312,9 +312,8 @@ pub(crate) fn execute_supervised_runtime(ctx: SupervisedRuntimeContext<'_>) -> R
         .resource_limits()
         .is_some_and(|limits| !limits.is_empty())
     {
-        return Err(nono::NonoError::SandboxInit(
-            "resource: resource limits are only enforced on Linux (cgroup v2) in this build"
-                .to_string(),
+        return Err(nono::NonoError::UnsupportedPlatform(
+            "resource limits are only enforced on Linux (cgroup v2) in this build".to_string(),
         ));
     }
 

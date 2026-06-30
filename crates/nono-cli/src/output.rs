@@ -3,8 +3,12 @@
 //! All colors are drawn from the active theme via `theme::current()`.
 
 use crate::command_display::format_command_line;
+#[cfg(target_os = "linux")]
+use crate::resource_cgroup::OomReport;
 use crate::theme::{self, Rgb, badge, fg};
 use colored::Colorize;
+#[cfg(target_os = "linux")]
+use nono::resource::format_bytes;
 use nono::{AccessMode, CapabilitySet, NetworkMode, NonoError, Result};
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, IsTerminal, Write};
@@ -662,7 +666,7 @@ pub fn print_diagnostic_footer(footer: &str) {
 /// so the run looks like it died for no reason. We name the limit, the peak the
 /// tree reached, and how to relax it. Suppressed under `--silent`.
 #[cfg(target_os = "linux")]
-pub fn print_oom_diagnostic(report: &crate::resource_cgroup::OomReport, silent: bool) {
+pub fn print_oom_diagnostic(report: &OomReport, silent: bool) {
     if silent {
         return;
     }
@@ -689,10 +693,10 @@ pub fn print_oom_diagnostic(report: &crate::resource_cgroup::OomReport, silent: 
 
     let limit = report
         .limit_bytes
-        .map_or_else(|| "unset".to_string(), nono::resource::format_bytes);
+        .map_or_else(|| "unset".to_string(), format_bytes);
     lines.push(row("limit (--memory):", &limit));
     if let Some(peak) = report.peak_bytes {
-        lines.push(row("peak memory:", &nono::resource::format_bytes(peak)));
+        lines.push(row("peak memory:", &format_bytes(peak)));
     }
     lines.push(row(
         "OOM kills:",
