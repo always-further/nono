@@ -411,9 +411,9 @@ Defines supervisor-side commands that produce credentials for `cmd://` custom cr
 | `cache_ttl_secs`   | integer         | no       | `900`   | In-memory cache TTL, 0–3600 seconds. `0` disables caching. |
 | `ttl_secs`         | integer         | no       | `900`   | Older alias for `cache_ttl_secs`. Do not set both fields. |
 | `cache_path_regex` | string          | no       | host    | Regex evaluated against the request path. Capture group 1 becomes the cache scope; otherwise the full match is used. |
-| `stdin`            | string          | no       | `null`  | `null` closes stdin; `request_json` writes request metadata JSON to stdin. |
+| `stdin`            | string          | no       | `null`  | `null` closes stdin (unless `interaction.stdin` is `true`); `request_json` writes request metadata JSON to stdin. |
 | `output`           | string/object   | no       | `text`  | `text` captures stdout as one credential. `{"format":"json","allow_headers":[...]}` captures multiple headers. |
-| `interaction`      | object          | no       | none    | Explicit opt-in for capture commands that need inherited stdio or browser opening. |
+| `interaction`      | object          | no       | none    | Explicit opt-in for capture commands that need inherited stderr, inherited stdin, or browser opening. |
 
 Capture commands run with `NONO_SESSION_ID`, `NONO_REQUEST_HOST`, `NONO_REQUEST_PATH`, `NONO_REQUEST_METHOD`, `NONO_CACHE_SCOPE`, `NONO_CAPTURE_CREDENTIAL`, and `NONO_CAPTURE_ROUTE` set. Proxy environment variables are removed to avoid recursively using the same proxy route while capturing the credential.
 
@@ -506,7 +506,7 @@ Controls which environment variables are passed to the sandboxed process. When `
 
 | Field         | Type            | Default | Description |
 |---------------|-----------------|---------|-------------|
-| `allow_vars`  | array of string | `[]`    | Allow-list of environment variable names. Supports exact names (`"PATH"`) and prefix patterns ending with `*` (`"AWS_*"` matches `AWS_REGION`, `AWS_SECRET_ACCESS_KEY`, etc.). The `*` wildcard is only valid as a trailing suffix. When the `environment` section is omitted entirely, all variables are allowed. When present with an empty array, no inherited variables are passed (only nono-injected credentials). Nono-injected credentials always bypass this list. |
+| `allow_vars`  | array of string | absent  | Allow-list of environment variable names. Supports exact names (`"PATH"`) and prefix patterns ending with `*` (`"AWS_*"` matches `AWS_REGION`, `AWS_SECRET_ACCESS_KEY`, etc.). The `*` wildcard is only valid as a trailing suffix. When omitted (or when the `environment` section is absent entirely), all variables pass through. When explicitly set to `[]`, no inherited variables are passed (only nono-injected credentials). When non-empty, only matching variables pass. Nono-injected credentials always bypass this list. |
 | `deny_vars`   | array of string | `[]`    | Deny-list of environment variable names stripped from the child. Same pattern syntax as `allow_vars` (exact names and trailing `*`). Denied vars are stripped even if they also match `allow_vars`. |
 | `set_vars`    | object (string→string) | `{}` | Static environment variables injected after allow/deny filtering and before credential injection (injected credentials win on conflict). Values support the same expansion as profile paths (`$HOME`, `~`, `$WORKDIR`, `$TMPDIR`, `$XDG_*`, `$NONO_CONFIG`, `$NONO_PACKAGES`); keys are not expanded. `PATH` and any `NONO_*` key are reserved and rejected at load time. Unlike inherited host vars, keys here are NOT subject to the dangerous-variable blocklist (`LD_PRELOAD`, `NODE_OPTIONS`, …) — setting one is an explicit operator decision. |
 
