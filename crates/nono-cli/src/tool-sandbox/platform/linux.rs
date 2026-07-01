@@ -20,8 +20,8 @@ use crate::tool_sandbox::protocol::{
     StdioStreamLimitSpec, TOOL_SANDBOX_LAUNCH_SPEC_ENV, TOOL_SANDBOX_SHIM_DIR_ENV,
     TOOL_SANDBOX_SOCKET_ENV, TOOL_SANDBOX_URL_IO_TIMEOUT, ToolSandboxChildLaunchSpec,
     ToolSandboxOpenUrlRequest, ToolSandboxOpenUrlResponse, ToolSandboxShimRequest,
-    ToolSandboxShimResponse, UnixSocketGrantSpec, read_frame, recv_stdio_fds, send_stdio_fds,
-    validate_ipc_request, write_frame, write_response,
+    ToolSandboxShimResponse, UnixSocketGrantSpec, read_frame, recv_frame_ack, recv_stdio_fds,
+    send_frame_ack, send_stdio_fds, validate_ipc_request, write_frame, write_response,
 };
 use landlock::{
     AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
@@ -777,6 +777,7 @@ fn run_shim() -> Result<()> {
     let start_send = std::time::Instant::now();
     send_shim_identity_fd(&stream, &shim_exe)?;
     write_frame(&mut stream, &request)?;
+    recv_frame_ack(&mut stream)?;
     send_stdio_fds(&stream)?;
     tool_sandbox_profile_log!(
         "shim:send_request: {:?} (entry-to-request: {:?})",
@@ -1211,6 +1212,7 @@ fn handle_shim_stream_inner(
     let peer_pid = peer_credentials(stream.as_raw_fd())?.pid;
     let shim_fd = recv_fd_via_socket(stream.as_raw_fd())?;
     let request: ToolSandboxShimRequest = read_frame(stream)?;
+    send_frame_ack(stream)?;
     validate_ipc_request(&request)?;
     let auth = authenticate_shim(peer_pid, shim_fd, &request.command, state)?;
     let stdio = recv_stdio_fds(stream)?;
@@ -3227,19 +3229,19 @@ fn add_policy_fs(
     policy_root: &Path,
 ) -> Result<()> {
     use super::dynamic_providers::expand_dynamic_tokens;
-    for entry in &expand_dynamic_tokens(&policy.fs_read)? {
+    for entry in &expand_dynamic_tokens(&policy.fs_read, Some(policy_root))? {
         let path = resolve_policy_path(entry, policy_root)?;
         add_optional_dir(caps, path, AccessMode::Read)?;
     }
-    for entry in &expand_dynamic_tokens(&policy.fs_write)? {
+    for entry in &expand_dynamic_tokens(&policy.fs_write, Some(policy_root))? {
         let path = resolve_policy_path(entry, policy_root)?;
         add_optional_dir(caps, path, AccessMode::ReadWrite)?;
     }
-    for entry in &expand_dynamic_tokens(&policy.fs_read_file)? {
+    for entry in &expand_dynamic_tokens(&policy.fs_read_file, Some(policy_root))? {
         let path = resolve_policy_path(entry, policy_root)?;
         add_optional_read_file(caps, path)?;
     }
-    for entry in &expand_dynamic_tokens(&policy.fs_write_file)? {
+    for entry in &expand_dynamic_tokens(&policy.fs_write_file, Some(policy_root))? {
         let path = resolve_policy_path(entry, policy_root)?;
         caps.add_fs(FsCapability::new_file(path, AccessMode::ReadWrite)?);
     }
