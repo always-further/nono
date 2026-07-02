@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 /// `NonoError::TrustVerification` if signature verification fails.
 /// Load a trust policy from `path`, returning `None` if the file exists but
 /// lacks the nono predicate field (i.e. is a foreign JSON file).
-fn load_nono_policy(path: &Path) -> Result<Option<TrustPolicy>> {
+pub(crate) fn load_nono_policy(path: &Path) -> Result<Option<TrustPolicy>> {
     let content = std::fs::read_to_string(path).map_err(nono::NonoError::Io)?;
 
     // Check for the predicate field before attempting full deserialization.
@@ -55,12 +55,15 @@ fn load_nono_policy(path: &Path) -> Result<Option<TrustPolicy>> {
             return Ok(None);
         }
         Some(p) if p != nono::trust::TRUST_POLICY_PREDICATE => {
+            // Strip control characters before printing — the predicate comes
+            // from an untrusted file and could contain terminal escape sequences.
+            let safe = p.chars().filter(|c| !c.is_control()).collect::<String>();
             eprintln!(
                 "  {}",
                 format!(
                     "Warning: {} has an unrecognised predicate '{}' — skipping. Expected '{}'.",
                     path.display(),
-                    p,
+                    safe,
                     nono::trust::TRUST_POLICY_PREDICATE
                 )
                 .yellow()

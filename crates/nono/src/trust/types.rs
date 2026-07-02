@@ -99,12 +99,20 @@ impl TrustPolicy {
     /// Maximum number of publishers.
     const MAX_PUBLISHERS: usize = 1_000;
 
-    /// Validate structural bounds of the policy.
+    /// Validate the predicate and structural bounds of the policy.
     ///
     /// # Errors
     ///
-    /// Returns `NonoError::TrustPolicy` if collection sizes exceed safe bounds.
+    /// Returns `NonoError::TrustPolicy` if the predicate is present but
+    /// unrecognised, or if collection sizes exceed safe bounds.
     pub fn validate_version(&self) -> Result<()> {
+        if let Some(predicate) = &self.predicate
+            && predicate != TRUST_POLICY_PREDICATE
+        {
+            return Err(NonoError::TrustPolicy(format!(
+                "unrecognised trust policy predicate '{predicate}' (expected '{TRUST_POLICY_PREDICATE}')"
+            )));
+        }
         if self.blocklist.digests.len() > Self::MAX_BLOCKLIST_ENTRIES {
             return Err(NonoError::TrustPolicy(format!(
                 "blocklist has {} entries (max {})",
