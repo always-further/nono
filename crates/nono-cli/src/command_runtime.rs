@@ -75,6 +75,56 @@ fn resolve_profile_binary(
     Some(binary.clone())
 }
 
+/// Strip `unsafe_macos_seatbelt_rules` — top-level and nested inside
+/// command/`from`/intercept sandboxes — unless the profile is user-authored
+/// (user override or file-path profile). Raw Seatbelt rules are as powerful
+/// as an arbitrary `binary` override (they can grant anything, including
+/// `(allow default)`), so pack/registry/built-in profiles are not trusted to
+/// set them. Mirrors `resolve_profile_binary`.
+///
+/// Structured sandbox overrides (fs/network/credentials) are left untouched
+/// for all profiles; only raw Seatbelt S-expressions are gated.
+pub(crate) fn strip_untrusted_unsafe_seatbelt_rules(
+    profile_name: &str,
+    profile: &mut profile::Profile,
+    command_policies: Option<&mut crate::command_policy::CommandPoliciesConfig>,
+    silent: bool,
+) {
+    let is_user_profile =
+        profile::is_user_override(profile_name) || profile::is_file_path_ref(profile_name);
+    if is_user_profile {
+        return;
+    }
+
+    if !profile.unsafe_macos_seatbelt_rules.is_empty() {
+        if !silent {
+            warn!(
+                "Profile '{profile_name}' sets {} raw Seatbelt rule(s) via unsafe_macos_seatbelt_rules but is not a user profile; ignoring",
+                profile.unsafe_macos_seatbelt_rules.len()
+            );
+        }
+        profile.unsafe_macos_seatbelt_rules.clear();
+    }
+
+    if let Some(command_policies) = command_policies {
+        let locations = crate::command_policy::nested_unsafe_seatbelt_rules(command_policies);
+        if !locations.is_empty() {
+            if !silent {
+                for location in locations
+                    .iter()
+                    .map(|(location, _rule)| location)
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    warn!(
+                        "Profile '{profile_name}' sets raw Seatbelt rule(s) at {location} but is not a user profile; ignoring",
+                    );
+                }
+            }
+            crate::command_policy::clear_unsafe_seatbelt_rules(command_policies);
+        }
+    }
+}
+
 /// Resolve the program to execute: if the profile specifies a `binary` field
 /// (and is a user profile), use it. If the CLI also provides a trailing
 /// command, warn that the profile binary takes precedence.
@@ -389,5 +439,104 @@ mod tests {
         // silently-dropped enforcement request and must be allowed.
         let caps = CapabilitySet::new().with_resource_limits(ResourceLimits::default());
         assert!(reject_resource_limits_under_wrap(&caps).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod strip_untrusted_unsafe_seatbelt_rules_tests {
+    use super::strip_untrusted_unsafe_seatbelt_rules;
+    use crate::command_policy::{CommandPoliciesConfig, CommandPolicyConfig, CommandSandboxConfig};
+    use crate::profile;
+
+    // `is_file_path_ref` is pure string logic (no filesystem access), so a
+    // name ending in `.json` is treated as a trusted, user-authored profile
+    // reference without needing to touch `XDG_CONFIG_HOME`.
+    const TRUSTED_NAME: &str = "./scratch-profile.json";
+    const UNTRUSTED_NAME: &str = "hardened";
+
+    #[test]
+    fn strips_top_level_rules_for_untrusted_profile() {
+        let mut profile = profile::Profile {
+            unsafe_macos_seatbelt_rules: vec!["(allow default)".to_string()],
+            ..profile::Profile::default()
+        };
+
+        strip_untrusted_unsafe_seatbelt_rules(UNTRUSTED_NAME, &mut profile, None, true);
+
+        assert!(profile.unsafe_macos_seatbelt_rules.is_empty());
+    }
+
+    #[test]
+    fn retains_top_level_rules_for_trusted_profile() {
+        let mut profile = profile::Profile {
+            unsafe_macos_seatbelt_rules: vec!["(allow default)".to_string()],
+            ..profile::Profile::default()
+        };
+
+        strip_untrusted_unsafe_seatbelt_rules(TRUSTED_NAME, &mut profile, None, true);
+
+        assert_eq!(
+            profile.unsafe_macos_seatbelt_rules,
+            vec!["(allow default)".to_string()]
+        );
+    }
+
+    #[test]
+    fn strips_nested_command_sandbox_rules_for_untrusted_profile() {
+        let mut profile = profile::Profile::default();
+        let mut policies = CommandPoliciesConfig::default();
+        policies.commands.insert(
+            "git".to_string(),
+            CommandPolicyConfig {
+                sandbox: Some(CommandSandboxConfig {
+                    unsafe_macos_seatbelt_rules: vec!["(allow iokit-open)".to_string()],
+                    fs_read: vec!["/tmp".to_string()],
+                    ..CommandSandboxConfig::default()
+                }),
+                ..CommandPolicyConfig::default()
+            },
+        );
+
+        strip_untrusted_unsafe_seatbelt_rules(
+            UNTRUSTED_NAME,
+            &mut profile,
+            Some(&mut policies),
+            true,
+        );
+
+        let sandbox = policies.commands["git"].sandbox.as_ref().expect("sandbox");
+        assert!(sandbox.unsafe_macos_seatbelt_rules.is_empty());
+        // Structured overrides are not gated by provenance — only raw
+        // Seatbelt rules are.
+        assert_eq!(sandbox.fs_read, vec!["/tmp".to_string()]);
+    }
+
+    #[test]
+    fn retains_nested_command_sandbox_rules_for_trusted_profile() {
+        let mut profile = profile::Profile::default();
+        let mut policies = CommandPoliciesConfig::default();
+        policies.commands.insert(
+            "git".to_string(),
+            CommandPolicyConfig {
+                sandbox: Some(CommandSandboxConfig {
+                    unsafe_macos_seatbelt_rules: vec!["(allow iokit-open)".to_string()],
+                    ..CommandSandboxConfig::default()
+                }),
+                ..CommandPolicyConfig::default()
+            },
+        );
+
+        strip_untrusted_unsafe_seatbelt_rules(
+            TRUSTED_NAME,
+            &mut profile,
+            Some(&mut policies),
+            true,
+        );
+
+        let sandbox = policies.commands["git"].sandbox.as_ref().expect("sandbox");
+        assert_eq!(
+            sandbox.unsafe_macos_seatbelt_rules,
+            vec!["(allow iokit-open)".to_string()]
+        );
     }
 }

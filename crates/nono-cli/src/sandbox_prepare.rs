@@ -1303,8 +1303,8 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
 
     let prepared_profile = prepare_profile(args, silent, &workdir)?;
     let crate::profile_runtime::PreparedProfile {
-        loaded_profile,
-        command_policies,
+        mut loaded_profile,
+        mut command_policies,
         capability_elevation,
         #[cfg(target_os = "linux")]
         wsl2_proxy_policy,
@@ -1337,6 +1337,21 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
         denied_env_vars: profile_denied_env_vars,
         set_vars: profile_set_vars,
     } = prepared_profile;
+
+    // Raw Seatbelt rules (`unsafe_macos_seatbelt_rules`) are as powerful as
+    // an arbitrary `binary` override, so honour them only for user-authored
+    // profiles — same trust boundary as `resolve_profile_binary`. Strip them
+    // (top-level and nested in command/from/intercept sandboxes) for
+    // pack/registry/built-in profiles before they can reach emission.
+    if let (Some(profile_name), Some(profile)) = (args.profile.as_deref(), loaded_profile.as_mut())
+    {
+        crate::command_runtime::strip_untrusted_unsafe_seatbelt_rules(
+            profile_name,
+            profile,
+            command_policies.as_mut(),
+            silent,
+        );
+    }
 
     let session_hooks = loaded_profile
         .as_ref()
